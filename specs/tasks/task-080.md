@@ -5,11 +5,11 @@ depends_on:
   - task-069
   - task-070
   - task-065
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §31 Integration Tests"
   - "explorer-implementation.md §32 Visual Tests"
-commits: []
+commits: ["659f64e8e32cc4317f9b3b78f39b58c3561d1d3e"]
 ---
 
 ## Spec Excerpt
@@ -78,3 +78,32 @@ commits: []
 ## Agent Instructions
 
 Read `crates/gyre-server/src/explorer_ws.rs` for the WebSocket protocol implementation. Check `crates/gyre-server/tests/` for existing integration test patterns. For visual tests, check if Playwright or a similar tool is already configured in `web/` (look at `web/package.json` and `web/playwright.config.*`). The `web/test-results/` directory already exists (from git status), suggesting visual testing may be partially set up. For the LLM-dependent tests (agent query generation, self-check loop), use the `GYRE_EXPLORER_SDK=0` fallback path or implement a mock LLM response for deterministic testing.
+
+## Shipped
+
+**Status: implemented — all four §31 integration-test scenarios and all four §32 visual-test scenarios have real, passing tests.**
+
+### §31 Integration Tests (crates/gyre-server/tests/explorer_ws_integration.rs)
+
+- **WebSocket session lifecycle** — `explorer_ws_full_session_lifecycle`: connect, `list_views` protocol exchange, a full message turn (thinking status → streamed text done=true → view_query → ready), then a clean client Close frame with the server confirmed closing the socket (Close reply or stream end, never a 5s hang).
+- **Agent generates valid ViewQuery from a question** — `explorer_ws_agent_generates_view_query_from_question`: seeds real graph nodes (Space, TaskPort, Workspace, Tenant, RepoStore) into the graph store, asks "What would break if I change Space?" over the no-LLM fallback path, and asserts the emitted query is a `focus` scope on node `Space` (extracted from the question and validated against actual graph nodes) that deserializes against the ViewQuery grammar.
+- **Self-check loop catches and fixes overly broad groups** — `explorer_ws_self_check_loop_refines_broad_groups`: a `ScriptedLlmFactory` (test-local `LlmPort` impl with a shared call counter) wires `AppState.llm` so the native agent path runs deterministically. Seeded 25 `node_N` graph nodes make the scripted broad group (`nodes: ["node"]`, substring-matches 25 > 20 threshold) trigger the dry-run "too broad" warning. Asserts: `refining` status observed, exactly 2 LLM calls (one refinement round), and exactly one view_query reaching the client — the refined one. Mutation-checked: setting `MAX_REFINEMENT_TURNS = 0` fails the test, so the pass is attributable to the real refinement loop, not fixture drift.
+- **Saved view round-trip** — WS save→list→load was already covered (`explorer_ws_save_and_load_view`); added `explorer_rest_saved_view_round_trip` for the REST half: `POST /api/v1/repos/:id/views` (201) → list contains it → `GET /views/:view_id` returns name/description and exactly-equal query JSON (the render round-trip input) → `DELETE` → 404 on re-load.
+
+### §32 Visual Tests (web/tests/e2e/explorer-visual.spec.js)
+
+The Playwright suite (deterministic mock graph + forced-webfont environment, baselines committed in `-snapshots/`) already covered all four spec scenarios from task-065: semantic zoom at three levels, view-query rendering (groups/callouts/narrative + annotation bar), filter subsets via the query editor, and blast-radius interactive mode (tiered coloring + node click). Added `filter_preset_buttons_show_correct_subsets`, which clicks the **real toolbar preset buttons** (Endpoints/Types) as the spec's implementation plan describes, with new baselines `filter-preset-endpoints.png` / `filter-preset-types.png`. Verified the All/Endpoints/Types states render pixel-distinct screenshots (not just below the 2% diff threshold), so a preset that stops applying its filter fails the test.
+
+### Test evidence
+
+- `cargo test -p gyre-server --test explorer_ws_integration`: **13 passed, 0 failed** (9 pre-existing + 4 new); evidence: `/tmp/stage/review-evidence/explorer-ws-integration-final.log`.
+- `cd web && npm test` (vitest): **64 files, 1626 passed, 41 skipped, 0 failed**.
+- Playwright `explorer-visual`: all 16 tests pass; evidence: `/tmp/stage/review-evidence/preset-retest4.log` (new preset test) and the suite logs. Mutation checks: breaking the `types` preset dimming is caught by `canvas-filters.test.js` (unit), and the pixel-distinct baselines catch a preset that applies no filter.
+
+### Sandbox restrictions (for remote verification, not code defects)
+
+- This sandbox blocks chromium's multi-process sandbox and `/dev/shm`; the visual suite ran locally only with temporary launch args (`--no-sandbox --disable-gpu --single-process --disable-dev-shm-usage`, config reverted before commit). Under `--single-process`, contexts accumulate and the browser crashes after ~8 contexts, so the full 16-test suite was verified test-by-test (each passes individually) rather than in one process. Exact-head GitHub checks with a normal browser remain mandatory.
+- No LLM credentials in the sandbox: the agent-generation test uses the production no-LLM fallback path; the self-check test uses a scripted in-process `LlmPort` (no network, no mocks of the protocol under test — the WS protocol, dry-run, and refinement loop are the real production code paths).
+
+Independent review, deterministic gates, and GitHub CI on the exact head remain required before merge.
+
