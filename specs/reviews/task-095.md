@@ -126,3 +126,109 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+
+## Round 8 — review of the verification-repair candidate (`0958a6b8`, base `86a98a29`)
+
+Review target: candidate `0958a6b8` = the Round-7-approved tree `3a96c34e` (see the
+Round-7 checkpoint record; its full hunk-level review of the 39-file product diff
+applies verbatim) + merge of base `86a98a29` (`16dec792`) + scripts-only repair
+`7a0bd1db` + docs/process commits (`bed2793e`, `0958a6b8`). This round was triggered
+by the deterministic verification gate failing on the exemption freeze
+(`git_http.rs:1499` read as a new entry after merge drift renumbered the legacy
+`1495` entry).
+
+### Structure verification
+
+- **Product code unchanged since Round 7's approval:** `git diff 3a96c34e 16dec792`
+  restricted to every task-095-owned product file (merge_processor, gate_executor,
+  api/recovery, policy_engine, git2_ops, merge_request, abac_middleware) is EMPTY —
+  the base merge brought only base-side changes. `git diff 16dec792 0958a6b8 --
+  crates/ web/` is EMPTY: the repair round changed no Rust or web code, exactly as
+  the shipped notes claim.
+- **The repair is legitimate, not exemption-laundering.** The deleted entry
+  (`git_http.rs:1499`/`1495`, "ws_id fallback for push event emission") was dead
+  debt at both refs: the matcher flags NO site in `git_http.rs` at HEAD (verified
+  with both the candidate script, count 4, and the base script, count 5, run at its
+  original path — both PASS on this tree), and at base `86a98a29` line 1495 is
+  `classify_spec_change(...)`, not a fallback. The actual push-event emission site
+  resolves `ws_id` via `match state.repos.find_by_id(...)` with skip-and-log on
+  lookup failure (`git_http.rs:1533`), the compliant task-097 F3 pattern. Lowering
+  `FROZEN_EXEMPTION_COUNT` 5 → 4 follows the exemption file's own instructions.
+- **Mutation probe (check still enforces after the count lowering):** a scratch
+  violation file (`let ws_id = ....unwrap_or("default")`) under `crates/` makes
+  `check-fabricated-scope-defaults.sh` FAIL with the site correctly identified
+  (exit 1); removing it restores PASS; tree left clean
+  (`/tmp/stage/review-evidence/mutation-probe-*.txt`).
+- **Freeze-gate replication:** the dev-check exemption-freeze set difference was
+  replicated over ALL 35 `scripts/*-exemptions.txt` files, base `86a98a29` vs
+  candidate: **zero added entries anywhere**; only removals (the dead git_http
+  entry; the two fixed `api/recovery.rs` fail-open sites; the two fixed
+  `merge_processor.rs` inert-enforcement sites)
+  (`freeze-gate-replication.txt`).
+
+### Test evidence — executed in THIS sandbox (crates.io egress available here,
+unlike the worker's runtime; supersedes the recorded sandbox limitation)
+
+- `cargo test -p gyre-server --lib` (full): **1332 passed, 0 failed**.
+- `cargo test -p gyre-server --lib merge_processor`: **56 passed, 0 failed**
+  (includes `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`,
+  `atomic_group_skips_non_mergeable_member_and_rolls_back`,
+  `revert_breaker_accumulates_across_resubmitted_mrs`,
+  `merge_time_abac_deny_fails_entry_and_blocks_merge`,
+  `post_merge_gates_run_against_head_sha_tree`, pause/resume and circuit-breaker
+  tests).
+- `cargo test -p gyre-server --lib policy_engine`: **22 passed, 0 failed**
+  (Round-6 attested/unattested arms).
+- `cargo test -p gyre-server --lib api::recovery`: **6 passed, 0 failed**
+  (incl. `repo_status_main_green_fails_closed_when_head_unresolvable`).
+- `cargo test -p gyre-adapters`: **352 passed, 0 failed, 12 ignored** (incl. the
+  four real-git `revert_commit` tests: restores parent tree, non-tip preserves
+  later merges, conflict leaves branch untouched, rejects root commit).
+- `cargo test -p gyre-cli` / `-p gyre-domain` / `-p gyre-ports` / `-p gyre-common`:
+  **129+1 / 400+8 / 0 / 111 passed, 0 failed** — every crate the candidate diff
+  touches.
+- `cargo fmt --check` on gyre-server/adapters/domain: clean.
+- 20 mechanical invariant scripts (arch, abac-route-registry,
+  dead-message-kinds, migration-versions, byte-slice-truncation,
+  fail-open-ref-resolution, inert-enforcement, task-commit-attribution,
+  mem-port-contracts, scope-literal-defaults, forged-scope-fields,
+  forwarded-header-trust, unbounded-external-http, mcp-write-tools,
+  abac-exempt-handlers, migration-sql-portability, lossy-secret-conversion,
+  relative-path-defaults, in-memory-state-stores, fabricated-scope-defaults):
+  **all PASS** at HEAD (`check-scripts-head.txt`).
+
+### Non-blocking observations (recorded, none contradicts §6 or an acceptance
+criterion; carried from Round 7 unless noted)
+
+1. **Stale docstring** on `evaluate_attestation_abac` (`merge_processor.rs:2743`):
+   prose still says "Audit-only — result is logged" while both call sites
+   (`:1596`, `:1637`) fail the queue entry on Deny (enforcement verified real at
+   HEAD). One-line doc fix.
+2. **Shipped-notes drift:** the notes say repair commit `7a0bd1db` was "appended
+   to `commits:`", but the final process commit `0958a6b8` swapped it for
+   `44a8187f` (the task-labeled web/dist regen commit that arrived with the base
+   merge and requires attribution; `7a0bd1db` is scripts-only, outside the
+   attribution check's product-surface scope). The frontmatter state is correct
+   and matches the controller's assignment; only the notes sentence is stale.
+3. **Review-record gap (this file):** Rounds 4–7 records were lost in the
+   worker-lease-expiry checkpoint recovery — they exist only in dangling
+   checkpoint commits (e.g. `d9736f5a`), not in branch ancestry. This Round 8
+   record, plus the byte-identity verification against `3a96c34e`, closes the gap
+   for this candidate; remote verification should still fetch the Round-7
+   checkpoint for the full hunk-level record.
+4. **Migration sequence hygiene:** `000056` is used by three migrations with
+   distinct dates (`merge_commit_sha`, `spec_assertion_results`,
+   `meta_spec_approved_content_hash`); Diesel versions differ so all run and
+   `check-migration-versions.sh` passes. Two of the three arrived from base.
+
+### Verdict
+
+**Approved.** The candidate is the Round-7-approved §6 implementation, byte-for-byte
+on every product file, plus a verified-legitimate scripts-only exemption-freeze
+repair that hides no violation (mutation-probed) and docs commits. Every acceptance
+criterion is backed by real production code and now by test suites actually executed
+on the exact candidate SHA in this environment — all green, including the real-git
+revert semantics and fail-closed health signal. Remaining remote-verification scope
+(`cargo test --all` workspace-wide incl. integration targets, all-target Clippy,
+`web && npm ci && npm run build`) — unchanged by this round since no Rust or web
+source changed after `16dec792`.
