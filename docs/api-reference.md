@@ -221,6 +221,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
+| `POST` | `/api/v1/admin/impersonate` | **Admin only** — request to impersonate a user: `{target_user_id}` → `201 {request_id, expires_at}`. The one-time approval code is delivered to the **target user** only (Inbox notification + WS push), never to the requesting admin. Constraints: target must not be an Admin (prohibited), not the caller, max one active session per admin (identity-security.md §Impersonation) |
+| `POST` | `/api/v1/admin/impersonate/{request_id}/approve` | **Target user** (any role; per-handler authorization: caller must be the request's target) — approve with `{approval_code}` → `201 {impersonation_token, expires_at, session_id}`. The token is a short-lived EdDSA JWT (`sub` = target, `impersonator_id` = acting admin, TTL from `GYRE_IMPERSONATION_TTL`, default 900 s); all calls with it are audited as the impersonator acting as the target |
+| `POST` | `/api/v1/admin/impersonate/{request_id}/deny` | **Target user** — explicitly deny the pending impersonation request |
+| `DELETE` | `/api/v1/admin/impersonate/{request_id}` | **Admin only** (must be the impersonating admin) — end the session; revokes the token immediately and emits `ImpersonationEnded` with `duration_secs`/`actions_taken` |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
 | `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events — requires authentication |

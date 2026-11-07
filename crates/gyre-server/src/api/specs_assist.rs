@@ -1656,6 +1656,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = SpecSaveRequest {
             spec_path: "specs/system/conflict.md".to_string(),

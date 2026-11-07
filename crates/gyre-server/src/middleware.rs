@@ -295,6 +295,7 @@ mod tests {
             ws_connections: base.ws_connections.clone(),
             ws_connection_counter: base.ws_connection_counter.clone(),
             ws_connection_workspaces: base.ws_connection_workspaces.clone(),
+            ws_connection_users: base.ws_connection_users.clone(),
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),

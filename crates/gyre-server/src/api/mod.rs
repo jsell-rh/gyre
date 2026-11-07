@@ -22,6 +22,7 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod impersonation;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -75,6 +76,9 @@ use compute::{
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
+use impersonation::{
+    approve_impersonation, deny_impersonation, end_impersonation, request_impersonation,
+};
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
@@ -473,6 +477,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        // Admin user impersonation (identity-security.md §Impersonation).
+        // Approve/deny are called by the TARGET user (any role) and are
+        // ABAC-exempt with per-handler authorization — see
+        // api/impersonation.rs and abac_middleware.rs.
+        .route("/api/v1/admin/impersonate", post(request_impersonation))
+        .route(
+            "/api/v1/admin/impersonate/:request_id/approve",
+            post(approve_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id/deny",
+            post(deny_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id",
+            delete(end_impersonation),
+        )
         .route(
             "/api/v1/admin/agents/:id/kill",
             post(admin::admin_kill_agent),

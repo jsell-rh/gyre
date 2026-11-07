@@ -323,6 +323,20 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                // Admin user impersonation (identity-security.md §Impersonation).
+                // Request/end are admin-only (`admin` resource →
+                // builtin-admin-only-deny rejects non-Admin roles); the
+                // handlers additionally verify the Admin role and a real
+                // user identity. Approve/deny are ABAC-exempt: the TARGET
+                // user must call them and may hold any role (a ReadOnly
+                // target must still be able to consent or refuse);
+                // authorization is per-handler — the caller's verified
+                // user id must equal the request's target user, plus the
+                // one-time approval code on approve.
+                RouteResourceMapping::api("/api/v1/admin/impersonate", "admin", None),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/approve"),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/deny"),
+                RouteResourceMapping::api("/api/v1/admin/impersonate/:request_id", "admin", None),
                 // NEW-27 fix: all /api/v1/admin/* routes use resource_type="admin" so that
                 // builtin-admin-only-deny (priority 850) rejects non-Admin callers.
                 // Previously, kill/reassign used "agent" and compute-targets used
@@ -843,6 +857,27 @@ pub async fn abac_middleware(
     // next request with no cache invalidation needed (TASK-077 review note).
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
+
+    // Identity-security.md §Impersonation: every API call made with an
+    // impersonation token is attributed to the impersonator in the audit
+    // trail and counted in the session's actions_taken. Fire-and-forget so
+    // the audit write never blocks the request.
+    if let Some(imp) = auth.impersonation.clone() {
+        let audit_state = state.clone();
+        let method_str = method.to_string();
+        let pattern_clone = pattern.clone();
+        let allowed = result.effect == PolicyEffect::Allow;
+        tokio::spawn(async move {
+            crate::impersonation::record_impersonated_action(
+                &audit_state,
+                &imp,
+                &method_str,
+                &pattern_clone,
+                allowed,
+            )
+            .await;
+        });
+    }
 
     // Record decision to audit log.
     let decision = policy_engine::build_decision(

@@ -282,6 +282,110 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
+    /// Mint an impersonation JWT (identity-security.md §Impersonation).
+    ///
+    /// `sub` is the **target** user (so permissions match theirs) while
+    /// `impersonator_id` always names the acting admin. Short TTL enforced
+    /// at validation time with zero leeway (both mint and validate use the
+    /// same server clock, so no skew allowance is needed).
+    pub fn mint_impersonation(
+        &self,
+        target_user_id: &str,
+        impersonator_id: &str,
+        session_id: &str,
+        tenant_id: &str,
+        issuer: &str,
+        ttl_secs: u64,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = ImpersonationJwtClaims {
+            sub: target_user_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "impersonation".to_string(),
+            impersonating: true,
+            impersonator_id: impersonator_id.to_string(),
+            target_user_id: target_user_id.to_string(),
+            session_id: session_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Validate an impersonation JWT, returning its claims on success.
+    ///
+    /// Zero leeway on `exp`: the TTL is the hard impersonation budget.
+    /// Returns `Err` for any token that is not a valid impersonation JWT
+    /// (including agent JWTs, which lack the `impersonating` claim —
+    /// callers use the claim to decide whether the token applies to this
+    /// path at all; see `validate_impersonation_opt`).
+    pub fn validate_impersonation(
+        &self,
+        token: &str,
+        expected_issuer: &str,
+    ) -> Result<ImpersonationJwtClaims, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&[expected_issuer]);
+        validation.validate_aud = false;
+        // Self-minted token, same clock: expiry is exact, no skew allowance.
+        validation.leeway = 0;
+        jsonwebtoken::decode::<ImpersonationJwtClaims>(token, &self.decoding_key, &validation)
+            .map(|td| td.claims)
+            .map_err(|e| format!("impersonation JWT validation: {e}"))
+    }
+
+    /// Validate a token as an impersonation JWT, returning `None` when the
+    /// token is well-formed and signature-valid but is NOT an impersonation
+    /// token (no `impersonating: true` claim) so the caller can fall through
+    /// to the next link of the auth chain.
+    pub fn validate_impersonation_opt(
+        &self,
+        token: &str,
+        expected_issuer: &str,
+    ) -> Option<ImpersonationJwtClaims> {
+        let claims = self.validate_impersonation(token, expected_issuer).ok()?;
+        if claims.impersonating {
+            Some(claims)
+        } else {
+            None
+        }
+    }
+}
+
+/// Claims embedded in impersonation JWTs minted by Gyre
+/// (identity-security.md §Impersonation).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImpersonationJwtClaims {
+    /// Subject — the **target** (impersonated) user's id. Permissions are
+    /// resolved against the target; attribution always uses
+    /// `impersonator_id`.
+    pub sub: String,
+    /// Issuer — the server's base URL.
+    pub iss: String,
+    /// Issued-at (Unix epoch seconds).
+    pub iat: u64,
+    /// Expiry (Unix epoch seconds). Short-lived by design.
+    pub exp: u64,
+    /// Always "impersonation" for impersonation JWTs.
+    pub scope: String,
+    /// Always true on impersonation JWTs; distinguishes them from agent JWTs.
+    pub impersonating: bool,
+    /// User id of the admin acting as the target.
+    pub impersonator_id: String,
+    /// User id of the impersonated user (mirrors `sub`).
+    pub target_user_id: String,
+    /// Impersonation session id — the revocation key. Ending the session
+    /// invalidates the token before `exp`.
+    pub session_id: String,
+    /// Tenant scope resolved at approval time.
+    pub tenant_id: String,
 }
 
 // -- Security helpers ---------------------------------------------------------
@@ -296,6 +400,25 @@ pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
 pub(crate) fn hash_api_key(key: &str) -> String {
     let result = sha2::Sha256::digest(key.as_bytes());
     result.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Impersonation context attached to an `AuthenticatedAgent` resolved from
+/// an impersonation JWT (identity-security.md §Impersonation).
+///
+/// The principal (`agent_id` / `user_id` / `roles`) is the **target** user so
+/// permissions match theirs, while `impersonator_id` names the admin who is
+/// actually acting. Every audit record written for the request must be
+/// attributed to the impersonator.
+#[derive(Debug, Clone)]
+pub struct ImpersonationContext {
+    /// User id of the admin who requested the impersonation.
+    pub impersonator_id: Id,
+    /// Display name of the impersonator (for audit attribution strings).
+    pub impersonator_name: String,
+    /// User id of the impersonated (target) user — equals `user_id`.
+    pub target_user_id: Id,
+    /// Impersonation session id (kv `impersonation_sessions` key).
+    pub session_id: String,
 }
 
 /// Resolved principal injected by the auth extractor.
@@ -316,6 +439,11 @@ pub struct AuthenticatedAgent {
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
+    /// Present when the caller authenticated with an impersonation JWT:
+    /// the principal is the target user, this field names the acting admin.
+    /// Identity-security.md §Impersonation requires every action taken with
+    /// this token to be attributed to the impersonator in the audit trail.
+    pub impersonation: Option<ImpersonationContext>,
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -512,7 +640,33 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 tenant_id: "default".to_string(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
+                impersonation: None,
             });
+        }
+
+        // 1.5. Impersonation JWT (identity-security.md §Impersonation).
+        //     Cryptographically validated EdDSA token minted at approval
+        //     time; the session record must still be active, so ending a
+        //     session revokes its token before `exp`. Non-impersonation
+        //     tokens fall through to the next link of the chain.
+        if token.starts_with("ey") {
+            if let Some(claims) = state
+                .agent_signing_key
+                .validate_impersonation_opt(token, &state.base_url)
+            {
+                return match crate::impersonation::resolve_impersonation_auth(&claims, state).await
+                {
+                    Some(mut auth) => {
+                        auth.deprecated_token_auth = deprecated_token_auth;
+                        Ok(auth)
+                    }
+                    None => Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Impersonation session is not active",
+                    )
+                        .into_response()),
+                };
+            }
         }
 
         // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
@@ -550,6 +704,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     tenant_id: "default".to_string(),
                     jwt_claims,
                     deprecated_token_auth,
+                    impersonation: None,
                 });
             }
         }
@@ -583,6 +738,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     tenant_id: "default".to_string(),
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
+                    impersonation: None,
                 });
             }
         }
@@ -624,7 +780,21 @@ pub async fn authenticate_token(
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         });
+    }
+
+    // 1.5. Impersonation JWT (identity-security.md §Impersonation).
+    if token.starts_with("ey") {
+        if let Some(claims) = state
+            .agent_signing_key
+            .validate_impersonation_opt(token, &state.base_url)
+        {
+            return match crate::impersonation::resolve_impersonation_auth(&claims, state).await {
+                Some(auth) => Ok(auth),
+                None => Err("Impersonation session is not active"),
+            };
+        }
     }
 
     // 2. Per-agent tokens.
@@ -654,6 +824,7 @@ pub async fn authenticate_token(
                 tenant_id: "default".to_string(),
                 jwt_claims,
                 deprecated_token_auth: false,
+                impersonation: None,
             });
         }
     }
@@ -678,6 +849,7 @@ pub async fn authenticate_token(
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
                 deprecated_token_auth: false,
+                impersonation: None,
             });
         }
     }
@@ -791,6 +963,7 @@ async fn validate_jwt(
         tenant_id,
         jwt_claims: raw_claims,
         deprecated_token_auth: false,
+        impersonation: None,
     })
 }
 
@@ -1001,6 +1174,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         tenant_id: "default".to_string(),
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
+        impersonation: None,
     })
 }
 
@@ -1198,6 +1372,66 @@ mod tests {
 
     use super::{test_helpers::*, AuthenticatedAgent, WsTicketStore};
     use gyre_domain::UserRole;
+
+    #[test]
+    fn impersonation_jwt_round_trip_and_expiry() {
+        let key = super::AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+
+        let token = key
+            .mint_impersonation("target-1", "admin-1", "sess-1", "default", issuer, 900)
+            .unwrap();
+        let claims = key
+            .validate_impersonation_opt(&token, issuer)
+            .expect("fresh impersonation JWT must validate");
+        assert!(claims.impersonating);
+        assert_eq!(claims.sub, "target-1");
+        assert_eq!(claims.impersonator_id, "admin-1");
+        assert_eq!(claims.target_user_id, "target-1");
+        assert_eq!(claims.session_id, "sess-1");
+        assert_eq!(claims.scope, "impersonation");
+
+        // Wrong issuer rejected.
+        assert!(key
+            .validate_impersonation_opt(&token, "http://evil.example")
+            .is_none());
+
+        // A token whose `exp` is in the past is rejected with zero leeway
+        // (auto-expiry is exact — mint and validate share the server clock).
+        let backdated = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let claims = super::ImpersonationJwtClaims {
+                sub: "target-1".to_string(),
+                iss: issuer.to_string(),
+                iat: now - 3600,
+                exp: now - 1,
+                scope: "impersonation".to_string(),
+                impersonating: true,
+                impersonator_id: "admin-1".to_string(),
+                target_user_id: "target-1".to_string(),
+                session_id: "sess-1".to_string(),
+                tenant_id: "default".to_string(),
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.kid = Some(key.kid.clone());
+            jsonwebtoken::encode(&header, &claims, &key.encoding_key).unwrap()
+        };
+        assert!(
+            key.validate_impersonation_opt(&backdated, issuer).is_none(),
+            "expired impersonation JWT must be rejected (leeway 0)"
+        );
+
+        // Agent JWTs are NOT impersonation tokens (no `impersonating`
+        // claim) — validate_impersonation_opt must return None so the auth
+        // chain falls through to the agent-token path.
+        let agent_jwt = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .unwrap();
+        assert!(key.validate_impersonation_opt(&agent_jwt, issuer).is_none());
+    }
 
     async fn authenticated_handler(
         AuthenticatedAgent { agent_id, .. }: AuthenticatedAgent,
@@ -2102,6 +2336,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let ticket = store.issue(auth);
         assert!(!ticket.is_empty());
@@ -2131,6 +2366,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let ticket = store.issue(auth);
         // Ticket is a UUID, not a Bearer token or API key

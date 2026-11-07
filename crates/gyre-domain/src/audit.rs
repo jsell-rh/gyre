@@ -15,6 +15,10 @@ pub enum AuditEventType {
     ContainerCrashed,
     ContainerOom,
     ContainerNetworkBlocked,
+    // Impersonation lifecycle (identity-security.md §Impersonation,
+    // observability.md §Audit Event Types)
+    ImpersonationStarted,
+    ImpersonationEnded,
     Custom(String),
 }
 
@@ -30,6 +34,8 @@ impl AuditEventType {
             Self::ContainerCrashed => "container_crashed".to_string(),
             Self::ContainerOom => "container_oom".to_string(),
             Self::ContainerNetworkBlocked => "container_network_blocked".to_string(),
+            Self::ImpersonationStarted => "impersonation_started".to_string(),
+            Self::ImpersonationEnded => "impersonation_ended".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -46,6 +52,8 @@ impl AuditEventType {
             "container_crashed" => Self::ContainerCrashed,
             "container_oom" => Self::ContainerOom,
             "container_network_blocked" => Self::ContainerNetworkBlocked,
+            "impersonation_started" => Self::ImpersonationStarted,
+            "impersonation_ended" => Self::ImpersonationEnded,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -159,6 +167,8 @@ mod tests {
             AuditEventType::ContainerCrashed,
             AuditEventType::ContainerOom,
             AuditEventType::ContainerNetworkBlocked,
+            AuditEventType::ImpersonationStarted,
+            AuditEventType::ImpersonationEnded,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {

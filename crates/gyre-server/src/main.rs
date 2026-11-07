@@ -79,6 +79,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Impersonation TTL expiry sweep (identity-security.md §Impersonation) —
+    // ends sessions past their TTL, emitting ImpersonationEnded.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "impersonation_expiry".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
