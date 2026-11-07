@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "6131513c4a6972daa827ec025741cd4d70a0c790"]
 ---
 
 ## Spec Excerpt
@@ -159,9 +159,11 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
 requires. Implementation commits are in the frontmatter. Rounds 1-4 closed
-the F1-F7 and round-3 review findings (task history); this round (5)
-repaired review finding `80ce5b90` — a candidate-introduced test
-regression the round-4 record had misreported as pre-existing.
+the F1-F7 and round-3 review findings; round 5 repaired the
+`80ce5b90` test regression (ws.rs fabricated-workspace fallback and
+merge-broken presence fixtures); this round (6) repaired the review finding
+that candidate-changed lines violated the repo's changed-lines rustfmt
+gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files).
 
 ### Behavior
 
@@ -173,83 +175,59 @@ regression the round-4 record had misreported as pre-existing.
   personas created and pre-approved, spec registry init, default gates,
   repo orchestrator spawn, summary with IDs, API key (shown once) and
   URLs. A failing step reports completed steps and a resume hint.
-- Server pieces from prior rounds: `POST /api/v1/users` (admin-only,
-  mints an authenticating API key, binds the admin to the tenant —
-  migration `000056_user_tenant_id`, fail-closed API-key auth), persona
-  attachment persisted on the agent row (migration `000057`), spawn wire
-  without duplicate keys, first-run spec-ledger push with `--force`, mem
-  adapter enforcing the SQLite uniqueness constraints, truthful
-  orchestrator launch status, starter kit (5 files, never overwrites,
-  requires `--repo-path`), dev mode flag rejection and token precedence,
-  Protocol Injection decomposed to task-101 per the round-1 F2 scope
-  note.
-- Round-5 fix (finding `80ce5b90`): the ws.rs ActivityEvent/ActivityQuery
-  handlers no longer fabricate a `default-{tenant_id}` workspace id for
-  subscription-less clients. Since `emit_telemetry` resolves the tenant
-  scope from the workspace record and skips unresolvable ids (task-099
-  F1), that fabricated id never resolved and the legacy activity path
-  silently dropped events. `tenant_default_workspace()` now resolves the
-  caller's tenant's earliest-created workspace via
-  `WorkspaceRepository::list_by_tenant` (skip-and-log when the tenant has
-  no workspaces — the check-fabricated-scope-defaults pattern); the
-  ActivityQuery fallback resolves the same real workspace.
-- Round-5 fixture repair (merge-induced, same file): task-092's
-  `seed_api_key_user` created users via `User::new` (`tenant_id: None`),
-  which the fail-closed API-key auth rejects, so the four presence
-  rebroadcast tests failed with BrokenPipe at the merged head. The
-  fixture now binds users to the seeded workspace's tenant, matching
-  production user creation (`POST /api/v1/users` always binds the
-  caller's tenant).
+- Server pieces: `POST /api/v1/users` (admin-only, mints an
+  authenticating API key, binds the admin to the tenant — migration
+  `000056_user_tenant_id`, fail-closed API-key auth), persona attachment
+  persisted on the agent row (migration `000057`), spawn wire without
+  duplicate keys, first-run spec-ledger push with `--force`, mem adapter
+  enforcing the SQLite uniqueness constraints, truthful orchestrator
+  launch status, starter kit (5 files, never overwrites, requires
+  `--repo-path`), dev mode flag rejection and token precedence, Protocol
+  Injection decomposed to task-101 per the round-1 F2 scope note.
+- ws.rs Activity telemetry scoped to a real workspace
+  (`tenant_default_workspace()` via `WorkspaceRepository::list_by_tenant`,
+  skip-and-log when unresolvable — the check-fabricated-scope-defaults
+  pattern), never a fabricated `default-{tenant}` id.
+- Round-6 fix (commit `6131513c`): purely mechanical rustfmt pass over
+  the 11 files whose changed lines failed the gate plus `client.rs`
+  (formatted as a child module of `main.rs`). No semantic changes; the
+  diff collapses the `tenant_default_workspace` signature (ws.rs),
+  reflows the stray `).await;` left by the emit_telemetry
+  sync-to-async change (mcp.rs), and reflows the remaining changed
+  lines to rustfmt defaults.
 
 ### Tests
 
-- Prior rounds: server handler tests for user creation (key
-  authenticates as new user, duplicate rejected, unknown role rejected),
-  orchestrator wire/persona/spawn-name tests (duplicate-key wire scanner,
-  missing/unapproved persona rejections, stopped-predecessor name
-  release), 11 CLI bootstrap tests (parse/flags, slug, gates, starter
-  kit, manifest shape, summary rendering, persona coverage).
-- Round 5: `ws_activity_event_emits_to_telemetry` now seeds a workspace
-  in the caller's tenant and asserts the event lands scoped to it
-  (tenant_id, kind, payload fields) — reintroducing the fabricated
-  `default-{tenant}` id fails this test because the emission is skipped.
-  New `ws_activity_event_without_tenant_workspace_skips_emission` pins
-  the skip-and-log contract. Presence fixtures repaired as above.
+- Server: user-creation handler tests (key authenticates as new user,
+  duplicate rejected, unknown role rejected), orchestrator
+  wire/persona/spawn-name tests, ws activity tests
+  (`ws_activity_event_emits_to_telemetry` scoped to the seeded
+  workspace, `ws_activity_event_without_tenant_workspace_skips_emission`
+  pinning skip-and-log), presence fixtures bound to the caller's tenant.
+- CLI: 11 bootstrap tests (parse/flags, slug, gates, starter kit,
+  manifest shape, summary rendering, persona coverage).
+- This round changed formatting only; suites re-run to confirm no
+  behavior drift: `cargo test -p gyre-server --lib ws::` — 82 passed,
+  0 failed; `cargo test -p gyre-cli` — 131 + 1 passed, 0 failed;
+  `cargo check -p gyre-server -p gyre-cli` — exit 0.
 
 ### Verification evidence
 
-- Evidence for this round under `/tmp/stage/review-evidence/` (source
-  SHAs, commands, exit codes, logs; see its README.md).
-- Correction of the round-4 record: the round-4 notes claimed the
-  `ws_activity_event_emits_to_telemetry` failure was pre-existing on the
-  incoming base. That was false for the assigned base/candidate pair —
-  the failure was introduced by the candidate's `emit_telemetry` gating
-  meeting the ws.rs fabricated-workspace fallback, and it failed at this
-  branch head too (reproduced pre-fix this round: exit 101, "telemetry
-  buffer should have at least one entry"; log
-  `ws-test-prefix-fail.log`).
-- Post-fix: `cargo test -p gyre-server --lib` — 1270 passed, 0 failed
-  (acceptance criterion "cargo test --all passes" met for the server
-  lib; the four merge-broken presence tests also green again).
-  `cargo test -p gyre-cli` — 131 + 1 passed. Full `ws::` module — 74
-  passed, 0 failed.
-- Mechanical gates at this head exit 0: arch,
-  fabricated-scope-defaults, scope-literal-defaults,
-  mem-port-contracts, inert-enforcement, no-em-dash (log
-  `checks.log`); migration-versions, dead-message-kinds, api-auth,
-  abac-route-registry, abac-exempt-handlers, mcp-write-tools,
-  conditional-test-guards, task-commit-attribution were green at round 4
-  and are unaffected by this round's ws.rs-only change.
+- Evidence under `/tmp/stage/review-evidence/` (source SHAs, commands,
+  exit codes, logs; see its README.md).
+- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the finding's
+  reproduction base) — exit 0, "changed lines clean (48 Rust files
+  checked)"; also exit 0 against `86a98a29` (HEAD^1, the base CI's fmt
+  job uses on merge — 32 files checked).
+- Pre-fix reproduction: exit 1, 11 files (log `rustfmt-diff-before.log`).
 - Pre-existing on the incoming head (not introduced here, unchanged):
-  `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs
-  ("this loop never actually loops", reproduced via `git stash`);
-  check-assertionless-tests exits 2 and check-cli-spec-parity exits 1 on
-  the spec_assist SSE display path (per round-4 stash reproduction).
-- Round-4's live e2e (dev first-run bootstrap with `--starter-kit` exit 0,
-  spec ledger populated, re-run reuse semantics, cross-tenant
-  `--admin-user jsell` run, failure paths exiting 1) was run against
-  round-4's head and is not re-run here: this round changed only the
-  ws.rs Activity telemetry scoping and test fixtures, none of which the
-  bootstrap REST orchestration exercises.
+  `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs,
+  check-assertionless-tests exit 2, check-cli-spec-parity exit 1 on the
+  spec_assist SSE display path (per round-4 stash reproduction).
+- Round-4's live e2e (dev first-run bootstrap with `--starter-kit`,
+  cross-tenant `--admin-user jsell`, failure paths) was run against
+  round-4's head; rounds 5-6 changed ws.rs test fixtures/scoping and
+  formatting only, none of which the bootstrap REST orchestration
+  exercises.
 - Full workspace suites, all-target Clippy, and GitHub CI remain with
   verification and publication.
