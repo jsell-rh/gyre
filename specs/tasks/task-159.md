@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: ["333030908ce0ff64b2810ea0003fc0e28598abf3", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95"]
 ---
 
 ## Spec Excerpt
@@ -48,12 +48,12 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 
 ## Acceptance Criteria
 
-- [x] Merge processor checks meta_spec_set_sha on MRs with attestations
-- [x] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
-- [x] Warning does not block merge by default
-- [x] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
-- [x] MRs without attestation skip the check gracefully
-- [x] Tests cover match, mismatch, hard-block, and no-attestation cases
+- [ ] Merge processor checks meta_spec_set_sha on MRs with attestations
+- [ ] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
+- [ ] Warning does not block merge by default
+- [ ] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
+- [ ] MRs without attestation skip the check gracefully
+- [ ] Tests cover match, mismatch, hard-block, and no-attestation cases
 
 ## Agent Instructions
 
@@ -118,20 +118,28 @@ MR detail view reads, so the graph cannot disagree with gate results.
   roundtrip / corrupt-fallback + API test (default warn-only, Developer
   PUT 403 with no state change, Admin PUT roundtrips, unknown workspace
   404).
-- `cargo test -p gyre-server --lib reconciliation` drift tests — 7 passed
-  (match / mismatch + §9 format round-trip / no-attestation / no-set /
-  empty-sha / foreign-output parse rejection) from the recovered
-  checkpoint.
+- `cargo test -p gyre-server --lib reconciliation::` — 24 passed
+  (drift match / mismatch + §9 format round-trip / no-attestation / no-set /
+  empty-sha / foreign-output parse rejection, plus the pre-existing
+  reconciliation suite).
 - `cargo test -p gyre-server --lib merge_processor` — 54 passed,
-  `merge_deps` — 13 passed (no regressions in the touched modules).
+  `merge_deps::` — 13 passed (no regressions in the touched modules).
 - `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed
-  (20 pre-existing + 5 new drift badge/tooltip/legend tests).
+  (20 pre-existing + 5 drift badge/tooltip/legend tests).
 - Mechanical checks green: check-arch, check-abac-route-registry,
   check-abac-exempt-handlers (88 handlers), check-scope-literal-defaults,
   check-in-memory-state-stores, check-forged-scope-fields.
 
-The backend, policy API, and drift evaluation shipped in recovered
-checkpoint 33303090 (assignment interrupted pre-completion); this round
-added the merge-processor-level behavior tests (warn/hard-block/match/
-no-attestation/idempotency), the merge-policy API test, the UI drift
-badge + tests, and the docs/coverage/task bookkeeping.
+### Round note (contract repair)
+
+The backend, policy API, drift evaluation, UI, and tests shipped in
+recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; an
+earlier round's completion notes were lost when the protected task text
+was modified (acceptance-criteria checkboxes), which the executor
+reverted. This round changed no production source (verified: zero diff
+between adffeb8c9 and HEAD for every touched file) and re-ran the full
+focused evidence set after the base merge 66a5fc679 — all counts
+reproduce exactly (5 / 4 / 24 / 54 / 13 / 25). Logs retained under
+`/tmp/stage/review-evidence/task-159-*.log`. The acceptance-criteria
+checkboxes are left unchecked in the task body per the assigned contract;
+the criteria themselves are satisfied by the shipped behavior above.
