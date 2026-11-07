@@ -197,3 +197,87 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+## Round 7 — independent re-review at rebased candidate f1efd346
+
+Round: 7. Assignment base `9bef21a4` → candidate `f1efd34679331e0253e25dbcedd803e2ea5419db`
+(recovered checkpoint `a293e299` + process commit recording the task's `commits:` list).
+Continued from an interrupted review (static-check evidence revalidated at the exact
+candidate; its test probe had died mid cold-compile and was re-run to completion).
+
+### Verdict: approved
+
+All §2 acceptance criteria are implemented in production code at the exact candidate,
+verified by direct source inspection of every hunk in `9bef21a4..f1efd346` plus the
+in-base feature surface (domain model, migration 000032, adapters, bootstrap seeding):
+
+- **Assembly** (`prompt_assembly.rs`): three bands in spec order, kind-ranked
+  (persona→principle→standard→process) with deterministic tiebreak, same-id dedup
+  keeping the required section, pinned versions resolved from immutable history,
+  unresolvable pins skipped with a warn, approval fail-closed in every band.
+- **Round-6 fixes present and regression-tested at this HEAD**:
+  `pending_required_meta_spec_excluded`, `pending_bound_meta_spec_skipped`,
+  `spec_bindings_require_membership_in_owning_workspace` (non-member Developer 403 /
+  agent token 403 / owning-workspace Developer 200), and
+  `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`
+  (shared binding store wired in both `lib.rs` production state and `test_state`).
+- **Registry write gate** (`check_scope_admin`): Global → tenant Admin; Workspace →
+  Owner/Admin membership of the entry's own workspace (global Admin passes); agent
+  tokens always 403; applied on create (caller-supplied scope), update/delete (loaded
+  entry's own scope). DELETE 409 while bindings reference the entry. Binding PUT
+  validates pin existence and cross-workspace meta-spec visibility.
+- **Delivery**: `GYRE_META_SPEC_PROMPT`/`GYRE_META_SPEC_SET_SHA` inserted into
+  `container_env` before `SpawnConfig` (flows to container and local-process targets);
+  runner prepends the block — child-process tests vs stubbed SDK pass 3/3.
+- **Attestation linkage verified**: prompt-set record keyed by `agent.id`;
+  `complete_agent` sets `mr.author_agent_id = agent.id` (spawn.rs:1247, covered by
+  `complete_mr_sets_author_agent_id`); merge processor loads the record by that key to
+  populate `meta_specs_used`. Spawn response `meta_spec_set_sha` derived from the real
+  assembled set (was hardcoded `None` at base).
+- **Bootstrap**: `seed_builtin_meta_specs` seeds the 9 spec'd entries (7 personas,
+  required `conventional-commits` principle, `test-coverage` standard), idempotent,
+  real SHA-256 hashes, Approved, invoked from main.rs.
+- **Routes**: flat `/api/v1/meta-specs*` + `/api/v1/specs/:path/meta-spec-bindings`,
+  ABAC resolver entries added, 4 legacy exemption lines REMOVED (net reduction),
+  docs/api-reference.md, e2e-flow.sh and web/src/lib/api.js aligned; no stale
+  `-registry` references remain in product surfaces.
+
+### Probes run at the exact candidate (evidence: /tmp/stage/review-evidence/)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- meta_spec prompt_assembly spawn mem::`
+  → **84 passed, 0 failed** (task116-focused-tests.out), including every regression
+  test named above plus injection-order/kind-order/dedup/pinned-content/scope tests.
+- `docker/gyre-agent: node --test agent-runner.test.mjs` → 3 pass / 0 fail
+  (task116-agent-runner-tests.out). `npm ci` timed out on sandbox network; the test
+  imports only node builtins and builds its own stubbed SDK, so no repo deps needed.
+- Static checks: arch, abac-route-registry, abac-exempt-handlers, mem-port-contracts,
+  migration-versions, task-commit-attribution, mcp-write-tools, dead-message-kinds,
+  byte-slice-truncation, fail-open-ref-resolution, fabricated-scope-defaults,
+  lossy-secret-conversion, scope-literal-defaults, inert-enforcement,
+  forwarded-header-trust, in-memory-state-stores, unbounded-external-http,
+  forged-scope-fields, migration-sql-portability → all OK
+  (task116-static-checks.md/.out).
+
+### Non-blocking observations (recorded, no action required)
+
+1. `check-relative-path-defaults.sh` reports 1 hit at spawn.rs:622 — PRE-EXISTING at
+   base (identical comment at base line 597; the candidate diff to spawn.rs contains
+   no `repos` line). Comment-only text; not a candidate defect.
+2. SSH compute target with `container_mode: true` drops all env vars
+   (spawn.rs:982 `env: HashMap::new()`) including `GYRE_META_SPEC_PROMPT` —
+   pre-existing M19.5 behavior at base (line 945) affecting every env var (auth token
+   included); out of task scope, already recorded in round 3.
+3. No Rust test exercises the middle delivery hop (spawn-time env insertion of
+   `GYRE_META_SPEC_PROMPT`, kv prompt-set record store, response `meta_spec_set_sha`).
+   Both ends are strongly tested (assembly unit tests; runner child-process tests) and
+   the glue was verified by inspection; a future regression in the glue would not be
+   caught by the current suite. Suggested follow-up: one env-dump-target spawn test in
+   the style of `spawn_delivers_scoped_secrets_across_all_scopes`.
+4. Registry GET listing is filter-driven rather than caller-scope-restricted —
+   pre-existing read model; the candidate strictly improved it (exemption entries
+   removed, routes now ABAC-resolved).
+5. `cargo test --all` and exact-head CI remain with the verification stage per
+   assignment constraints. Web vitest (`MetaSpecs.test.js`) was network-blocked here
+   (`npm ci` timeout); verifier should run `cd web && npm ci && npx vitest run
+   src/__tests__/MetaSpecs.test.js` — the web delta is URL-string alignment only and
+   that suite mocks `request`, so it does not assert these URLs.
