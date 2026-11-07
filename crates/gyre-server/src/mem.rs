@@ -3400,6 +3400,7 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
