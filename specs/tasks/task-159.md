@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "c17c22498be8465dbce34588a32aa8d49df3e0f1"]
 ---
 
 ## Spec Excerpt
@@ -122,24 +122,38 @@ MR detail view reads, so the graph cannot disagree with gate results.
   (drift match / mismatch + §9 format round-trip / no-attestation / no-set /
   empty-sha / foreign-output parse rejection, plus the pre-existing
   reconciliation suite).
-- `cargo test -p gyre-server --lib merge_processor` — 54 passed,
-  `merge_deps::` — 13 passed (no regressions in the touched modules).
+- `cargo test -p gyre-server --lib merge_processor` — 61 passed
+  (54 task-159 + 7 task-077 trust-gate tests merged in from the assigned
+  base), `merge_deps::` — 13 passed, `api::workspaces::` — 17 passed
+  (merge-policy API test + task-077 trust-transition tests from the base).
+- `cargo test -p gyre-server --lib` (full lib) — 1353 passed, 0 failed
+  (merge-correctness probe after combining base a884329d7 with the branch).
 - `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed
-  (20 pre-existing + 5 drift badge/tooltip/legend tests).
-- Mechanical checks green: check-arch, check-abac-route-registry,
-  check-abac-exempt-handlers (88 handlers), check-scope-literal-defaults,
-  check-in-memory-state-stores, check-forged-scope-fields.
+  (20 pre-existing + 5 drift badge/tooltip/legend tests); the merge touched
+  no web/ sources.
+- Mechanical checks green: check-inert-enforcement, check-arch,
+  check-abac-route-registry, check-abac-exempt-handlers (88 handlers),
+  check-scope-literal-defaults, check-in-memory-state-stores,
+  check-forged-scope-fields, check-migration-versions.
 
-### Round note (contract repair)
+### Round note (review repair + base merge)
 
 The backend, policy API, drift evaluation, UI, and tests shipped in
-recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; an
-earlier round's completion notes were lost when the protected task text
-was modified (acceptance-criteria checkboxes), which the executor
-reverted. This round changed no production source (verified: zero diff
-between adffeb8c9 and HEAD for every touched file) and re-ran the full
-focused evidence set after the base merge 66a5fc679 — all counts
-reproduce exactly (5 / 4 / 24 / 54 / 13 / 25). Logs retained under
-`/tmp/stage/review-evidence/task-159-*.log`. The acceptance-criteria
+recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad. This
+round resolved the merge with the newly assigned base a884329d7 (merge
+commit c17c22498): both conflicted test modules keep BOTH sides' suites —
+the task-159 drift/merge-policy tests and the base's task-077 trust-gate
+and trust-transition tests. The CI repair finding
+(scripts/check-inert-enforcement.sh exiting 1 on the candidate because the
+task-159 diff had shifted the exemption-pinned `evaluate_attestation_abac`
+sites at merge_processor.rs:1457/:1479 to :1608/:1630) is resolved by the
+base itself, not by new exemptions: the base restructured both call sites
+to bind their result (`let attestation_eval = evaluate_attestation_abac(
+...)` with a real Deny-effect branch) and deleted the two stale
+merge_processor exemption entries — the exemption count went DOWN, the
+F5 hazards are actually fixed. `bash scripts/check-inert-enforcement.sh`
+now exits 0 on the merged tree. Focused evidence re-run after the merge:
+5 / 4 / 61 / 13 / 24 / 17 / 1353 (lib full) / 25 (vitest) — logs retained
+under /tmp/stage/review-evidence/task-159-*.log. The acceptance-criteria
 checkboxes are left unchecked in the task body per the assigned contract;
 the criteria themselves are satisfied by the shipped behavior above.
