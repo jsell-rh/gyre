@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: ["010df9cd36dc3f81ae136173b522caaa7b3d4a84"]
+commits: ["010df9cd36dc3f81ae136173b522caaa7b3d4a84", "dce3f8d1bb6b595433cfb290e756f83311adb7a6"]
 ---
 
 ## Spec Excerpt
@@ -90,13 +90,12 @@ Read `specs/system/platform-model.md` §7 "MCP Integration" and "Admin API" sect
 
 ## Shipped
 
-Implemented on top of the task-097 `SecretRepository` port. The branch was
-recovered from an interrupted worker lease (checkpoint `d44ab767`, content-
-equal to the previously attributed `b569f988` + `794b018d`); a first repair
-round cleaned the recovered source for CI gates (`1d4a5837`); the final
-round (`d7640b55`) rebased the branch onto upstream main `1ae18d1c`
-(task-167/065/074) and re-verified every focused suite on the merged tree.
-No behavior was added beyond those repairs.
+Implemented on top of the task-097 `SecretRepository` port. The task-098
+source was recovered from an interrupted worker lease as checkpoint
+`010df9cd3` (behavior and prior gate/repair rounds described below); this
+round resolved the outstanding rebase onto the assignment base `4d6759a0b`
+(HSI Policies UI + meta-spec sweep) as merge commit `dce3f8d1b`. No
+behavior was added in the merge round.
 
 ### Behavior
 
@@ -132,58 +131,49 @@ No behavior was added beyond those repairs.
   Admin/Owner members of the owning workspace via `SecretExpiring`
   notifications, with duplicate suppression and 24h dismissal windows.
 
-### Cleanup round (`1d4a5837`)
+### Rebase-resolution round (`dce3f8d1b`)
 
-- Replaced `agent_secret_scope`'s 4-tuple return with a named
-  `AgentSecretScope` struct (unnamed-tuple-carrier baseline held at 3).
-- Dropped three needless `&Secret` reborrows in `run_once` (clippy
-  `needless_borrow` on new-file lines — inside CI clippy-diff scope).
-- rustfmt on task-added lines (CI check-rustfmt-diff scope).
-- `caller-scope:ok` annotation on `notify_workspace_admins` (the
-  `workspace_id` is the secret's own governing workspace, not a
-  caller-propagated scope).
-- Re-pointed 7 pre-existing conditional-test-guard exemption line numbers
-  shifted by the new Secrets tab tests (same guards, zero new entries).
+All conflicts were additive both-sides features and were resolved by
+keeping both sides:
 
-### Rebase repair round (`d7640b55`)
-
-- Merged upstream main `1ae18d1c` (task-167 merge dependencies, task-065
-  ExplorerCanvas, task-074 LSP call graph) into the task branch. Conflicts
-  were confined to committed `web/dist` build artifacts (rename/rename on
-  the content-hashed elk bundle, `index.html` asset references); neither
-  side's dist matches the merged web source (ours: secrets admin UI;
-  theirs: explorer rework), so `web/dist` was regenerated with a fresh
-  vite build (`npm ci` + `npm run build`) from the merged `web/src`:
-  `index-DiVi7Qms.js`, `elk.bundled-WuiJDajw.js`, `index-CVMI06-z.css`.
-  CI rebuilds web from source in every workflow, so the committed dist is
-  only the local `SKIP_WEB_BUILD=1` fallback.
-- Only shared-file Rust change was `mcp.rs` with disjoint-region edits
-  (upstream `detect_lineage_deps` signature vs task-098 `secrets://`
-  resources); the merged crate compiles and the full filtered mcp+secret
-  suite passes. Adapters/CLI secret code is byte-identical to the
-  pre-merge verified state (no file in those crates was touched by both
-  sides).
+- `jobs.rs` / `main.rs`: both the task-098 `secret_rotation_check` job and
+  the upstream `meta_spec_conformance_sweep` job are registered and
+  spawned.
+- `WorkspaceSettings.svelte`: `TAB_IDS` merged to 9 tabs — upstream
+  `policies` tab alongside the task-098 `secrets` tab; both panels and
+  their locale keys verified present in the merged tree.
+- `WorkspaceSettings.test.js`: the "renders all tabs" count corrected
+  from 8 to 9 — a semantic conflict the textual merge missed (the merged
+  label list already asserted both `Policies` and `Secrets`, so the stale
+  count would fail on the correct component).
+- `conditional-test-guard-exemptions.txt`: re-pointed the two pre-existing
+  WorkspaceSettings guard entries to their merge-shifted line numbers
+  (same guards, zero new entries).
+- `web/dist`: left as the executor-restored assignment-base state
+  (byte-identical to `4d6759a0b`); final integration rebuilds and
+  publishes those assets remotely.
 
 ### Test evidence
 
-All suites below re-run green on the merged tree at `d7640b55`
-(pre-merge rounds ran the same suites green at `1d4a5837`):
+All suites below run green on the merged tree at `dce3f8d1b`
+(probe logs under `/tmp/stage/review-evidence/`, prefixed `repair-`):
 
-- `cargo test -p gyre-server --lib -- mcp secret` — 102 passed / 0 failed
+- `cargo check -p gyre-server` — clean (SKIP_WEB_BUILD=1, committed dist)
+- `cargo check -p gyre-adapters -p gyre-cli --tests` — clean
+- `cargo test -p gyre-server --lib -- mcp secret` — 104 passed / 0 failed
   (api::secrets CRUD lifecycle, admin-only, cross-tenant rejection;
   secret_rotation expiry/dedup; mcp incl. `secrets://names` cascade
   names-only, `secrets://status` expiry reporting, no-agent-scope error
   path; abac secrets_routes_are_admin_only)
+- `cargo test -p gyre-server --lib -- jobs` — 11/11 (covers the
+  conflicted `jobs.rs` registration path)
 - `cargo test -p gyre-adapters secret` — 17/17 (encryption at rest, wrong
   key/tamper failures, cascade resolution, finer-scope override, expiry
   exclusion, tenant isolation)
 - `cargo test -p gyre-cli --bin gyre secret` — 6/6 (arg parsing incl.
   unknown-scope rejection)
-- `cargo check -p gyre-adapters -p gyre-cli --tests` — clean on the
-  merged tree
-- `npm test` in `web/` — 64 files, 1635 passed / 41 skipped, exit 0
-  (includes SecretsPanel 9/9 and Workspace/Tenant/RepoSettings suites,
-  152/152 when run focused, plus the merged upstream explorer suites)
+- vitest focused settings suites (WorkspaceSettings, TenantSettings,
+  RepoSettings, SecretsPanel) — 4 files, 170 passed / 0 failed
 - Mechanical gates on the merged tree: check-arch,
   check-abac-route-registry, check-mcp-write-tools,
   check-migration-versions, check-dead-message-kinds,
@@ -193,16 +183,14 @@ All suites below re-run green on the merged tree at `d7640b55`
   check-scope-literal-defaults, check-fabricated-scope-defaults,
   check-lossy-secret-conversion, check-inert-enforcement,
   check-relative-path-defaults, check-forwarded-header-trust,
-  check-forged-scope-fields, check-task-commit-attribution — all pass.
+  check-forged-scope-fields, check-task-commit-attribution,
+  check-abac-exempt-handlers, check-migration-sql-portability,
+  check-non-atomic-creation, check-warn-continue-creation,
+  check-unwritten-store-fields — all pass.
   check-unnamed-tuple-carriers reports the same 3 pre-existing hits as
-  BOTH merge parents (otlp_receiver.rs:238, mem.rs ConvMap,
-  git_http.rs accumulate_chain_constraints — exemptions already stale
-  before this round, check not CI-wired); the merge adds zero new
-  carriers.
-- Probe logs: /tmp/stage/review-evidence/ (vitest-full.log,
-  vitest-settings-suites.log, cargo-server-mcp-secret.log,
-  cargo-adapters-secret.log, cargo-cli-secret.log,
-  cargo-check-adapters-cli.log, per-gate check logs).
+  both merge parents (otlp_receiver.rs:238, mem.rs ConvMap,
+  git_http.rs accumulate_chain_constraints; check not CI-wired); the
+  merge adds zero new carriers.
 
 Full workspace suites, all-target Clippy, and GitHub CI are left to the
 verification stage per assignment scope.
