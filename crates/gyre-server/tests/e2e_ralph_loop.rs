@@ -75,6 +75,11 @@ async fn full_ralph_loop_via_gyre() {
             "tenant_id": "default",
             "name": "E2E Workspace",
             "slug": ws_slug,
+            // The Ralph loop is autonomous end-to-end: the merge queue must
+            // merge the agent's MR without human approval, so the workspace
+            // must not be under the default Supervised trust level (which
+            // seeds `trust:require-human-mr-review` and holds the merge).
+            "trust_level": "Autonomous",
         }))
         .send()
         .await
