@@ -22,67 +22,43 @@ From `ui-layout.md` §2:
 
 > Closing the panel (Esc or ✕) closes the panel, main content returns to full-width.
 
-## Shipped
+## Current State
 
-The shortcut implementation shipped with the explorer-canvas branch
-(`ExplorerView.svelte` `onWindowKeydown`, wired via
-`<svelte:window onkeydown>`). This assignment closed the missing
-acceptance criterion "Test verifies shortcut behavior" with
-`web/src/__tests__/ExplorerViewShortcuts.test.js` (commit `91abab172`),
-which renders the full ExplorerView tree and exercises the real event
-wiring.
+**Implemented.** All acceptance criteria met:
+- `ExplorerView.svelte` line 1026: `<svelte:window onkeydown={onWindowKeydown}>` global listener
+- Lines 892-899: Escape cascade clears `activeViewQuery = null`
+- Lines 901-910: `/` key focuses `.chat-input` element
+- Line 890: `isTyping` check prevents shortcuts when input/textarea focused
+- `ExplorerCanvas.svelte` also has Cmd+K (global search), Tab/Shift+Tab (node cycling), Enter (select in search)
 
-### Behavior
+## Implementation Plan
 
-- **Escape cascade** (`ExplorerView.svelte` `onWindowKeydown`): closes
-  the spec editor first, then the query editor, then the detail panel,
-  then clears `activeViewQuery` — the same state that trace mode ("Trace
-  from here") is an instance of (an interactive view query with
-  `_trace: true`), so Escape exits trace mode.
-- **`/`** focuses the `.chat-input` chat input with `preventDefault()`
-  so no "/" is typed; falls back to the concept search input when the
-  chat is hidden.
-- **isTyping guard**: shortcuts are suppressed when the event target is
-  an INPUT/TEXTAREA/SELECT/contentEditable element.
-- `ExplorerCanvas.svelte` additionally handles Cmd+K (global search),
-  Tab/Shift+Tab (node cycling), and its own canvas-scoped Escape cascade
-  (search overlay → context menu → active query → breadcrumb → fit).
+1. In `ExplorerView.svelte`, add a `keydown` event listener (on `window` or the explorer container):
 
-### Test evidence
+   | Key | Action |
+   |---|---|
+   | `Escape` | Clear active view query; if detail panel is open, close it; if trace mode is active, exit trace mode |
+   | `/` | Focus the chat input in `ExplorerChat.svelte` (prevent default to avoid typing `/` in the input) |
+   | `?` | Show keyboard shortcut help overlay (optional, low priority) |
 
-`ExplorerViewShortcuts.test.js` (6 tests, all passing):
+2. Ensure shortcuts do NOT fire when:
+   - A text input/textarea is focused (check `document.activeElement` tagName)
+   - A modal is open
 
-- `/` focuses the chat input (after bringing the mocked WS session to
-  `ready` so the input is enabled) and `defaultPrevented` is true.
-- `/` while the concept search input is focused: no preventDefault, no
-  focus steal.
-- Escape clears the active view query set through the Risk heat map
-  toolbar button; the annotation disappears and the toolbar overlay flag
-  resets.
-- Escape exits trace mode: the manual query editor runs the exact query
-  object the "Trace from here" context action produces; the canvas draws
-  the numbered step badges (1/2 — asserted on the mocked canvas context
-  draw calls) while the trace is active, and after Escape the redraw
-  still draws node labels but no step badges. The cascade is also
-  verified: the first Escape closes only the query editor.
-- Escape closes the detail panel opened through the canvas-scoped
-  search flow (canvas `/` → search → result click → detail panel).
-- Escape inside a text input does not clear the active view query.
+3. In `ExplorerChat.svelte`, expose a `focus()` method or use a bindable ref that `ExplorerView` can call when `/` is pressed.
 
-Mutation checks (see `/tmp/stage/review-evidence/task-038-mutation-checks.txt`):
-removing the `activeViewQuery`/`detailNode` Escape branches, disabling
-the `/` handler, and dropping the isTyping guard each fail the
-corresponding test(s). Explorer-surface regression: 313 tests across 7
-explorer test files pass.
+4. In `ExplorerCanvas.svelte`, expose a `clearQuery()` method or accept an `onClearQuery` callback that `ExplorerView` triggers on Escape.
+
+5. Add test verifying shortcut behavior (mock keydown events, check focus state and query clearing).
 
 ## Acceptance Criteria
 
-- [x] Escape clears the active view query and returns canvas to default state
-- [x] Escape closes the detail panel if it's open
-- [x] Escape exits trace mode if active
-- [x] `/` focuses the chat input (without typing "/" into it)
-- [x] Shortcuts do not fire when a text input is focused
-- [x] Test verifies shortcut behavior
+- [ ] Escape clears the active view query and returns canvas to default state
+- [ ] Escape closes the detail panel if it's open
+- [ ] Escape exits trace mode if active
+- [ ] `/` focuses the chat input (without typing "/" into it)
+- [ ] Shortcuts do not fire when a text input is focused
+- [ ] Test verifies shortcut behavior
 
 ## Agent Instructions
 
@@ -96,6 +72,57 @@ When working on this task:
 
 ## Git Commits
 
-- `91abab172` — test(task-038): verify explorer keyboard shortcuts
-  (implementation itself shipped with the explorer-canvas branch prior to
-  task decomposition)
+Implemented as part of the explorer-canvas branch prior to task decomposition.
+
+## Shipped
+
+The shortcut implementation shipped with the explorer-canvas branch
+(`ExplorerView.svelte` `onWindowKeydown`, wired via
+`<svelte:window onkeydown>`). This assignment closed the missing
+acceptance criterion "Test verifies shortcut behavior" with
+`web/src/__tests__/ExplorerViewShortcuts.test.js` (commit `91abab172`),
+which renders the full ExplorerView tree and exercises the real event
+wiring. No production code changed in this round; the executor-restored
+task contract is preserved and only this progress record and the
+frontmatter bookkeeping were updated.
+
+### Behavior
+
+- **Escape cascade** (`ExplorerView.svelte` `onWindowKeydown`): closes
+  the spec editor first, then the query editor, then the detail panel,
+  then clears `activeViewQuery` — trace mode ("Trace from here") is an
+  interactive view query with `_trace: true`, so Escape exits it.
+- **`/`** focuses the `.chat-input` chat input with `preventDefault()`
+  so no "/" is typed; falls back to the concept search input when the
+  chat is hidden.
+- **isTyping guard**: shortcuts are suppressed when the event target is
+  an INPUT/TEXTAREA/SELECT/contentEditable element.
+- `ExplorerCanvas.svelte` additionally handles Cmd+K (global search),
+  Tab/Shift+Tab (node cycling), and its own canvas-scoped Escape cascade
+  (search overlay → context menu → active query → breadcrumb → fit).
+
+### Test evidence
+
+Focused probe on this branch (head `62fd7a20b`, after the assigned base
+merge): `npx vitest run src/__tests__/ExplorerViewShortcuts.test.js` —
+6/6 tests pass, exit 0 (saved under
+`/tmp/stage/review-evidence/task-038-focused-test.txt`). The suite
+renders the full ExplorerView tree (graph load, ExplorerCanvas with
+mocked canvas context, ExplorerChat with mocked WebSocket):
+
+- `/` focuses the chat input (mocked WS session brought to `ready` so
+  the input is enabled) and `defaultPrevented` is true.
+- `/` while the concept search input is focused: no preventDefault, no
+  focus steal.
+- Escape clears the active view query set through the Risk heat map
+  toolbar button; the annotation disappears and the toolbar overlay
+  flag resets.
+- Escape exits trace mode: the manual query editor runs the exact query
+  object the "Trace from here" context action produces; the canvas draws
+  the numbered step badges (1/2, asserted on mocked canvas draw calls)
+  while the trace is active, and after Escape node labels still redraw
+  but no step badges. Cascade verified: the first Escape closes only the
+  query editor.
+- Escape closes the detail panel opened through the canvas-scoped
+  search flow (canvas `/` → search → result click → detail panel).
+- Escape inside a text input does not clear the active view query.
