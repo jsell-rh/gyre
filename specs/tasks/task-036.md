@@ -60,12 +60,12 @@ From §Phase 4: Polish:
 
 ## Acceptance Criteria
 
-- [x] Chat displays text progressively as `done: false` chunks arrive
-- [x] "Thinking..." indicator appears when status is "thinking"
-- [x] "Refining query..." indicator appears when status is "refining"
-- [x] Indicators hide when status is "ready" or text starts arriving
-- [x] Final message is correct after all chunks are received
-- [x] Component test verifies streaming and status behavior
+- [ ] Chat displays text progressively as `done: false` chunks arrive
+- [ ] "Thinking..." indicator appears when status is "thinking"
+- [ ] "Refining query..." indicator appears when status is "refining"
+- [ ] Indicators hide when status is "ready" or text starts arriving
+- [ ] Final message is correct after all chunks are received
+- [ ] Component test verifies streaming and status behavior
 
 ## Agent Instructions
 
@@ -79,61 +79,48 @@ When working on this task:
 
 ## Git Commits
 
-- `d988af762` — feat(task-036): component tests for chat streaming & status indicators
-
-Earlier behavior shipped on the explorer-canvas branch prior to task
-decomposition; this assignment added the missing verification layer.
+Implemented as part of the explorer-canvas branch prior to task decomposition.
 
 ## Shipped
 
-### Behavior (pre-existing on this branch, verified this assignment)
+### Behavior (pre-existing on this branch, re-verified this round)
 
-- **Frontend streaming** (`web/src/lib/ExplorerChat.svelte`): the
-  `case 'text'` handler accumulates `done:false` chunks into a Svelte 5
-  `$state` buffer (`streamingText`), renders it live via
-  `renderMarkdown(streamingText)` in a `.chat-message.streaming` bubble,
-  and finalizes the full concatenated text as an assistant message on
-  `done:true`. A 65s no-chunk timeout and disconnect handlers finalize
-  orphaned streams; a `thinking`/`refining` status arriving mid-stream
-  finalizes the partial text as a visually distinct `(thinking)` message
-  instead of dropping it.
+- **Frontend streaming** (`web/src/lib/ExplorerChat.svelte`): the `case 'text'`
+  handler accumulates `done:false` chunks into a Svelte 5 `$state` buffer
+  (`streamingText`), rendered live via `renderMarkdown(streamingText)` in a
+  `.chat-message.streaming` bubble; `done:true` finalizes the concatenated
+  text as an assistant message. A 65s no-chunk timeout finalizes orphaned
+  streams; a `thinking`/`refining` status arriving mid-stream preserves the
+  partial text as a visually distinct `(thinking)` message instead of
+  dropping it.
 - **Status indicators** (`ExplorerChat.svelte`): `.thinking-indicator`
   (role=status, animated dots) renders for `thinking`/`refining` while no
-  streaming text is on screen, labeled "Thinking..." / "Refining
-  query..."; it hides on `ready` or once text chunks start arriving (the
-  streaming bubble replaces it).
-- **Backend token streaming** (`crates/gyre-server/src/explorer_ws.rs`):
-  LLM responses are forwarded in ~60-char clause-boundary chunks as
-  `{"type":"text","done":false}` frames with an 8ms inter-chunk delay,
-  closed by a `done:true` frame.
+  streaming text is on screen, labeled "Thinking..." / "Refining query..."
+  respectively; hidden on `ready` and while streaming text is displayed.
+- **Backend streaming** (`crates/gyre-server/src/explorer_ws.rs`): the LLM
+  response is forwarded in token chunks as `{"type":"text","done":false}`
+  frames with a final `done:true` frame, per the §WebSocket Protocol spec.
 
-### What this assignment added
+### Verification layer (commit d988af762)
 
-The prior "component test" coverage in `ExplorerChat.test.js` replicated
-the handler logic inside the test file (mirrored logic — it stayed green
-if the component itself broke), so acceptance criterion 6 was not
-actually satisfied. Added
-`web/src/__tests__/ExplorerChat-streaming.test.js`: mounts the **real**
-`ExplorerChat` component with a controllable `MockWebSocket`, completes
-the ticket handshake, and pushes the spec's server→client frames through
-the component's real `onmessage` path, asserting on rendered DOM:
+`web/src/__tests__/ExplorerChat-streaming.test.js` mounts the real
+ExplorerChat component with a controllable WebSocket mock and drives the
+spec wire frames through the component's actual `handleMessage` path,
+asserting on the rendered DOM: progressive rendering across `done:false`
+chunks, trailing chunk delivered with `done:true`, indicator labels for
+`thinking`/`refining`, hiding on `ready`/streaming text, mid-stream turn
+preservation, and the user-message round trip. 6/6 pass at the current head
+(merge `228f0b479`); sibling suite `ExplorerChat.test.js` 108/108.
+Mutation-verified this round: breaking chunk accumulation fails 2 tests
+(exit 1); forcing the indicator render condition false fails 4 tests
+(exit 1). Evidence: `/tmp/stage/review-evidence/task-036/`.
 
-1. Progressive rendering across `done:false` chunks + finalization on
-   `done:true` (including a trailing chunk delivered with the done frame)
-2. "Thinking..." → "Refining query..." indicator transitions, hidden on
-   `ready`
-3. Indicator hidden while streaming text is displayed
-4. Mid-stream `refining` finalizes partial text as a `(thinking)` message
-5. User round trip: typed message sent as `{"type":"message","text":...}`
-   over the socket and rendered as a user bubble
+### Contract-repair note (finding 832389b5…)
 
-### Test evidence
-
-- `npx vitest run src/__tests__/ExplorerChat-streaming.test.js` — 6/6
-  passed
-- `npx vitest run src/__tests__/ExplorerChat.test.js` — 108/108 passed
-  (no regression)
-- Mutation checks (component restored after each): replacing
-  `streamingText += chunk` with `streamingText = chunk` fails 2 tests;
-  disabling the indicator render condition fails 4 tests — the suite
-  kills real defects in the specced behavior
+The prior checkpoint flipped the Acceptance Criteria checkboxes to `[x]`
+and rewrote the `## Git Commits` section body — both are protected contract
+text (`scripts/dev-contract.py` excludes only `Shipped`, `Implementation
+Notes`, `Implementation Log`, `Review`). This round keeps the restored
+assigned contract byte-identical except the agent-owned fields: `progress`,
+`commits`, and this `## Shipped` section. The production fix (component
+tests, commit `d988af762`) is preserved intact at the head.
