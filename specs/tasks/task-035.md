@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §System Default Views"
 depends_on: []
 progress: complete
 coverage_sections: []
-commits: ["b0bb30824e81dd07705733f63ea7b8b3b152d91d"]
+commits: ["b0bb30824e81dd07705733f63ea7b8b3b152d91d", "7a032db37e02d03ff14cf4992887741abe29a1e0"]
 ---
 
 ## Spec Excerpt
