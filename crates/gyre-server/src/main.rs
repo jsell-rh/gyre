@@ -98,9 +98,15 @@ async fn main() -> Result<()> {
     info!(%addr, "listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        // Attach the socket peer address to every request so handlers can
+        // resolve forensic source IPs from the transport (task-102 F3,
+        // CWE-348) instead of trusting caller-controlled forwarded headers.
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     info!("gyre-server stopped");
     // _telemetry_guard drops here, flushing buffered OTel spans.
