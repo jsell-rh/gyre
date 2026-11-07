@@ -135,7 +135,7 @@ class CrashTest(unittest.TestCase):
         with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', side_effect=[[item], [], []]), patch.object(execution, 'remote', side_effect=subprocess.TimeoutExpired('capture', 30)), patch.object(execution, 'os', return_value=subprocess.CompletedProcess([], 0, '', '')) as delete:
             result, _, _ = cleanup(execution, self.store.task('task-001'))
         self.assertEqual(result['deleted'], 'pod')
-        delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
+        delete.assert_any_call('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
 
     def test_unstarted_error_is_purged_without_unreachable_capture(self):
@@ -313,6 +313,7 @@ class CrashTest(unittest.TestCase):
         workspace=Path(self.temp.name)/'workspace';root=workspace/'.gyre-agent-proof'
         root.mkdir(parents=True)
         helper=Path(__file__).with_name('pipeline-agent.py')
+        (workspace/'pipeline-agent.py').write_bytes(helper.read_bytes())
         marker=workspace/'running'
         job={'argv':[sys.executable,'-c',f'from pathlib import Path; import time; Path({str(marker)!r}).touch(); time.sleep(60)'],
              'cwd':str(workspace),'timeout':60}
@@ -329,7 +330,7 @@ class CrashTest(unittest.TestCase):
         item={'name':'orphan','phase':'Ready','labels':{'gyre.dev/pipeline':self.store.setting('owner')}}
         def remote(name,*args,**kwargs):
             if args[0]=='python3':
-                code=args[-1].replace('/sandbox/workspace',str(workspace)).replace('/tmp/stage/step.exit.process.json',str(workspace/'missing.json'))
+                code=args[-1].replace('/sandbox/workspace',str(workspace)).replace('/tmp/stage',str(workspace))
                 return subprocess.run([sys.executable,'-c',code],check=True,capture_output=True,text=True)
             return subprocess.CompletedProcess([],0,'bounded log','')
         def capture(*args,**kwargs):

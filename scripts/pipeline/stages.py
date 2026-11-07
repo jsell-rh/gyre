@@ -542,7 +542,10 @@ def cleanup(execution, task):
         # Only implementers own source to salvage. Reviews and exact-tree
         # verification must not spend minutes indexing generated build output.
         # Stop durable agent supervisors before capturing an implementer's index.
-        code = """import json,os,pathlib,signal,time
+        code = """import json,os,pathlib,signal,time,subprocess,sys
+for root in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):
+ if root.is_dir() and (root/'identity.json').exists():
+  subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(root)],check=True,timeout=12)
 pairs=[pathlib.Path('/tmp/stage/step.exit.process.json')]
 pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/identity.json'))
 pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/child.json'))
@@ -564,7 +567,9 @@ for p in pairs:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
             if old_work and old_work['stage']=='implement':
-                execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+                execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)
+                stopped=execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+                if stopped.returncode:raise RuntimeError('owned agent tools did not quiesce; source capture skipped')
             raw = execution.remote(resource, 'tail', '-c', '1048576', '/tmp/stage/step.log', timeout=30, check=False)
             (old_directory / 'orphan.log').write_text(raw.stdout)
             if old_work and old_work['stage']=='implement':

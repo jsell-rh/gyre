@@ -25,7 +25,10 @@ class AgentTransportTest(TestCase):
         import os,signal
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);marker=root/'running'
-            (root/'command.json').write_text(json.dumps({'argv':[sys.executable,'-c',f'from pathlib import Path; import time; Path({str(marker)!r}).touch(); time.sleep(60)'],'cwd':directory,'timeout':60}))
+            code=f'from pathlib import Path; import subprocess,sys,time; p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"],start_new_session=True); Path({str(marker)!r}).write_text(str(p.pid)); time.sleep(60)'
+            (root/'command.json').write_text(json.dumps({'argv':[sys.executable,'-c',code],'cwd':directory,'timeout':60}))
+            neighbor=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])
+            self.addCleanup(lambda:(neighbor.kill(),neighbor.wait()))
             subprocess.run([sys.executable,str(SCRIPT),'launch',directory],check=True,capture_output=True)
             self.addCleanup(lambda:subprocess.run([sys.executable,str(SCRIPT),'cancel',directory],capture_output=True))
             deadline=time.monotonic()+5
@@ -33,11 +36,16 @@ class AgentTransportTest(TestCase):
             self.assertTrue(marker.exists())
             parent=json.loads((root/'identity.json').read_text())
             child=json.loads((root/'child.json').read_text())
+            pid=int(marker.read_text());fields=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+            detached={'pid':pid,'start':fields[19],'boot':child['boot']}
             os.kill(parent['pid'],signal.SIGKILL)
+            os.kill(child['pid'],signal.SIGKILL)
             subprocess.run([sys.executable,str(SCRIPT),'cancel',directory],check=True,capture_output=True,timeout=10)
             spec=importlib.util.spec_from_file_location('agent_identity',SCRIPT)
             agent=importlib.util.module_from_spec(spec);spec.loader.exec_module(agent)
             self.assertFalse(agent.alive(child))
+            self.assertFalse(agent.alive(detached))
+            self.assertIsNone(neighbor.poll())
 
     def test_launch_ack_loss_and_poll_failure_resume_exact_bytes_once(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -240,11 +240,18 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'pipeline-agent.py', 'job.json'):
         source = execution.directory / 'bundle' / name
-        if name == 'pipeline-artifacts.py' and not source.exists():
+        if name == 'pipeline-agent.py' or (name == 'pipeline-artifacts.py' and not source.exists()):
             source = ROOT / 'scripts' / name
         execution.os('sandbox', 'upload', sandbox, str(source), '/tmp/stage/' + name, '--no-git-ignore', timeout=120)
+    # Tools can outlive Pi in detached groups. No checkpoint may race a writer.
+    code="import pathlib,subprocess,sys\nfor p in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):\n if p.is_dir() and (p/'identity.json').exists(): subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(p)],check=True,timeout=12)"
+    stopped=execution.os('sandbox','exec','-n',sandbox,'--','python3','-c',code,timeout=60,check=False)
+    if stopped.returncode:
+        from .execution import Attention
+        error=Attention('Owned agent tools could not be stopped before checkpoint capture; no source receipt accepted')
+        error.category='sandbox_stopped';raise error
     result = execution.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/sandbox/workspace/checkout',
                           '--', 'python3', '/tmp/stage/pipeline-remote.py', 'finalize', '1' if success else '0',
                           timeout=300, check=False)

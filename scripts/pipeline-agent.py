@@ -25,6 +25,29 @@ def alive(value):
         return False
 
 
+def quiesce(root):
+    """Kill this invocation's detached/orphaned tools, without logging environments."""
+    marker=b'GYRE_AGENT_COMMAND='+os.fsencode(root.resolve())
+    boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    deadline=time.monotonic()+5
+    while time.monotonic()<deadline:
+        active=[]
+        for proc in Path('/proc').glob('[0-9]*'):
+            try:
+                fields=(proc/'stat').read_text().rsplit(')',1)[1].split()
+                value={'pid':int(proc.name),'start':fields[19],'boot':boot}
+                if marker not in (proc/'environ').read_bytes().split(b'\0'):continue
+                if alive(value):active.append(value)
+            except (OSError,ValueError):continue
+        if not active:return
+        for value in active:
+            try:
+                if alive(value):os.kill(value['pid'],signal.SIGKILL)
+            except ProcessLookupError:pass
+        time.sleep(.02)
+    raise RuntimeError('owned detached tools did not quiesce')
+
+
 def read_chunk(root,name,offset):
     path=root/name
     if not path.exists():return '',offset
@@ -114,41 +137,58 @@ def main():
             child=None
             def stop(*_):
                 if child and child.poll() is None:
-                    try:os.killpg(child.pid,signal.SIGKILL)
+                    try:os.killpg(child.pid,signal.SIGTERM)
                     except ProcessLookupError:pass
-                    child.wait(timeout=5)
+                    try:child.wait(timeout=1)
+                    except subprocess.TimeoutExpired:pass
+                quiesce(root)
+                if child:child.wait(timeout=5)
                 atomic(result,{'exit_code':130})
                 raise SystemExit(130)
             signal.signal(signal.SIGTERM,stop)
             try:
                 job=json.loads((root/'command.json').read_text())
                 with (root/'stdout').open('ab',buffering=0) as out,(root/'stderr').open('ab',buffering=0) as err:
-                    child=subprocess.Popen(job['argv'],cwd=job['cwd'],stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True)
+                    child=subprocess.Popen(job['argv'],cwd=job['cwd'],env={**os.environ,'GYRE_AGENT_COMMAND':str(root.resolve())},stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True)
                     try:
                         fields=Path(f'/proc/{child.pid}/stat').read_text().rsplit(')',1)[1].split()
                         atomic(root/'child.json',{'pid':child.pid,'start':fields[19],'boot':Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
                     except Exception:
-                        os.killpg(child.pid,signal.SIGKILL);child.wait()
+                        quiesce(root);child.wait()
                         raise
                     try:code=child.wait(timeout=job['timeout'])
                     except subprocess.TimeoutExpired:
-                        os.killpg(child.pid,signal.SIGKILL);child.wait();code=124
+                        quiesce(root);child.wait();code=124
+                quiesce(root)
                 atomic(result,{'exit_code':128-code if code<0 else code})
             except Exception as exc:
                 atomic(result,{'exit_code':74,'error_kind':type(exc).__name__})
         return
     if args.operation=='cancel':
         child=root/'child.json'
+        # Give Pi's own SIGTERM handler a chance to stop its tracked tool groups.
+        children=[json.loads(child.read_text())] if child.exists() else []
+        if not children and identity.exists():
+            parent=json.loads(identity.read_text())
+            if alive(parent):
+                try:pids=Path(f"/proc/{parent['pid']}/task/{parent['pid']}/children").read_text().split()
+                except FileNotFoundError:pids=[]
+                for pid in pids:
+                    try:
+                        fields=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+                        children.append({'pid':int(pid),'start':fields[19],'boot':parent['boot']})
+                    except FileNotFoundError:pass
+        for value in children:
+            try:
+                if alive(value):os.killpg(value['pid'],signal.SIGTERM)
+            except ProcessLookupError:pass
+        time.sleep(.1)
         if identity.exists():
             value=json.loads(identity.read_text())
             try:
                 if alive(value):os.kill(value['pid'],signal.SIGTERM)
             except ProcessLookupError:pass
-        if child.exists():
-            value=json.loads(child.read_text())
-            try:
-                if alive(value):os.killpg(value['pid'],signal.SIGKILL)
-            except ProcessLookupError:pass
+        quiesce(root)
         deadline=time.monotonic()+5
         while time.monotonic()<deadline:
             active=[p for p in (identity,child) if p.exists() and alive(json.loads(p.read_text()))]
