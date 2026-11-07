@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "796c800da477a8cd45aeb60ca9ec7665a11938b8"]
 ---
 
 ## Authority and Scope
@@ -114,43 +114,36 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (merge-continuation round at merge commit `9c41bce0`,
-checkpoint `937a0409` merged onto assigned base `1d9547de` by the executor
-via 'ort' auto-merge, zero conflicts; evidence:
-`/tmp/stage/review-evidence/task-083-merge-1d9547de.txt`):
+Verification (current round, verification-repair of the Clippy finding at
+head `796c800d` on merge `27151498f`, assigned base `a884329d`):
 
-- Why this round exists: the previous attempt aborted at the pipeline's own
-  pre-flight (GitHub API connectivity check failed: transport error,
-  deadline elapsed) — infrastructure, not a code defect; the agent never
-  started and a source checkpoint was taken. This round verified the
-  checkpointed source merged onto the new assigned base is sound.
-- Source overlap between the task branch and the base merge: none — the task
-  branch changes `api/graph.rs`, `mcp.rs`, `docs/ui.md`, and `web/src`
-  navigation components; the base brings only `explorer_ws.rs`,
-  `llm_helpers.rs` (task-070), and `specs/tasks/task-070.md` on the source
-  side. Conflict-marker scan across `web/src`, `crates`, `specs`, `docs`:
-  no matches. `web/dist` was not rebuilt this round (assignment
-  instruction); final integration rebuilds it remotely.
-- Focused probes on the merged tree: the 18 navigation- and Inbox-related
-  test files (Inbox, api, BidirectionalNav, ScopeTransitions, NoSidebar,
-  CrossWorkspaceHome, WorkspaceHome ×5, WorkspaceDrawerSectionNav,
-  RepoMode ×2, ExplorerViewScope, ExplorerViewDrillUrl, Briefing, AppShell)
-  → **337 passed / 0 failed** (41 pre-existing skips). Merge-integrity
-  probes: `scripts/check-abac-route-registry.sh` → OK, and
-  `scripts/check-mcp-write-tools.sh` → OK (8 write-capable tools gated).
-  Compile probe: `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean.
-- Prior rounds' evidence (review fixes F1–F3 at head `2ff2e596`, full
-  frontend suite 1598 passed / 0 failed, cargo `api::graph::tests` 28,
-  `briefing` 24, `graph_integration` 37, all 0 failed; earlier rebase
-  rounds `38134ff8` onto base `5df14f344` and `1077f081` onto base
-  `9bef21a4`, each with a 266/0 focused navigation probe and clean dist
-  rebuild) covers the task-side source merged here; this round's diff is
-  only the base merge. Full suites, architecture checks, all-target
-  Clippy, and exact-head GitHub CI remain owned by verification and
-  publication. This sandbox now reports TCP listener support and an
-  installed chromium headless shell (`/tmp/stage/capabilities.json`), a
-  change from prior rounds' errno 95; Playwright e2e was not run here (it
-  needs a built, seeded server and stays with verification).
+- The prior verification sandbox failed its checks script with exactly one
+  hard finding: `crates/gyre-server/src/api/graph.rs:2462:
+  unused_must_use` — the `briefing_ask_repo_scope_abac_denied_returns_403`
+  test discarded the `anyhow::Result` returned by `seed_builtin_policies`
+  via `block_in_place`. Everything else in that log (architecture/ABAC/mem
+  lints, cargo check, vite build) passed; the remaining output lines are
+  pre-existing Svelte build warnings, present on main as well.
+- Fix: commit `796c800d` expects the seed result inside the closure
+  (`.expect("seed built-in ABAC policies")`), matching the established
+  pattern in `api/release.rs`, so a failed policy seed fails the test
+  loudly instead of being silently discarded.
+- Probes (evidence retained under `/tmp/stage/review-evidence/`):
+  `python3 scripts/check-clippy-diff.py a884329d` → **changed lines clean**
+  (2 Rust files, 1094 pre-existing warnings outside changes) — the exact
+  gate that failed; `python3 scripts/check-rustfmt-diff.py HEAD^1` →
+  clean; `cargo test -p gyre-server --lib
+  briefing_ask_repo_scope_abac_denied_returns_403` → **1 passed / 0
+  failed** (seed succeeds, 403 assertion holds). The remaining
+  `unused Result` at `tests/search_wiring.rs:124` is pre-existing on main
+  and outside this task's changed files.
+- Earlier-round evidence still applies to the unchanged task-side source:
+  focused navigation probes 337 passed / 0 failed on the prior merge
+  round, full frontend suite 1598 passed / 0 failed, cargo
+  `api::graph::tests` 28, `briefing` 24, `graph_integration` 37, all 0
+  failed. Full suites, all-target Clippy, and exact-head GitHub CI remain
+  owned by verification and publication; `web/dist` was not rebuilt here
+  (final integration rebuilds it remotely).
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
