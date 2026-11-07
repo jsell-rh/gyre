@@ -4,9 +4,14 @@
  * Covers:
  *   - Renders without throwing
  *   - Page header shows workspace name + back button
- *   - 6 tabs are rendered with correct labels
+ *   - 8 tabs are rendered with correct labels
  *   - General tab renders name (display-only), compute target selector
- *   - Trust & Policies tab renders trust level cards (4 levels)
+ *   - Trust Level tab renders trust level cards (4 levels)
+ *   - Trust Level tab renders implied trust: policy summary (HSI §2a, task-084)
+ *   - Trust Level tab "View all policies" cross-link switches to Policies tab
+ *   - Policies tab groups policies by prefix, shows trust origin badge + banner (HSI §2a)
+ *   - Policies tab "Change trust level" cross-link switches back to Trust Level tab
+ *   - Immutable policies greyed out with tooltip
  *   - Trust & Policies tab renders drift policy toggles
  *   - Teams tab shows member table headers
  *   - Budget tab renders when budget data available
@@ -87,13 +92,14 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 8 tabs', () => {
+  it('renders all 9 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(8);
+    expect(tabs.length).toBe(9);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
-    expect(labels).toContain('Trust & Policies');
+    expect(labels).toContain('Trust Level');
+    expect(labels).toContain('Policies');
     expect(labels).toContain('Teams');
     expect(labels).toContain('Budget');
     expect(labels).toContain('Compute');
@@ -167,7 +173,7 @@ describe('WorkspaceSettings', () => {
     });
   });
 
-  describe('Trust & Policies tab', () => {
+  describe('Trust Level tab', () => {
     async function openTrustTab(container) {
       await fireEvent.click(container.querySelector('#ws-tab-trust'));
     }
@@ -238,6 +244,231 @@ describe('WorkspaceSettings', () => {
       expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', expect.objectContaining({
         meta_spec_policy: expect.any(Object),
       }));
+    });
+
+    // ── Implied policies summary (HSI §2a, task-084) ──────────────────
+
+    it('shows read-only implied policy summary below the radio buttons', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTrustTab(container);
+      const summary = container.querySelector('[data-testid="trust-implied-policies"]');
+      expect(summary).toBeTruthy();
+      // Below the radio group in DOM order
+      const radios = container.querySelector('.trust-grid');
+      expect(radios.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // Guided (current selection) implies no trust: policies
+      expect(container.querySelector('[data-testid="implied-policy-empty"]')).toBeTruthy();
+    });
+
+    it('selecting Supervised shows the implied trust: policy with name, effect, and target', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTrustTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="trust-card-supervised"] input[type="radio"]'));
+      const rows = container.querySelectorAll('[data-testid="implied-policy-row"]');
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain('trust:require-human-mr-review');
+      expect(rows[0].textContent).toContain('Deny');
+      expect(rows[0].textContent).toContain('merge by system');
+    });
+
+    it('switching from Guided to Supervised shows a "Will add" diff', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTrustTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="trust-card-supervised"] input[type="radio"]'));
+      const add = container.querySelector('[data-testid="preset-diff-add"]');
+      expect(add).toBeTruthy();
+      expect(add.textContent).toContain('Will add');
+      expect(add.textContent).toContain('trust:require-human-mr-review');
+      expect(container.querySelector('[data-testid="preset-diff-remove"]')).toBeNull();
+    });
+
+    it('switching from Supervised to Guided shows a "Will remove" diff', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: { ...mockWorkspace, trust_level: 'Supervised' } } });
+      await openTrustTab(container);
+      // Supervised is selected by default — implied policy listed
+      expect(container.querySelectorAll('[data-testid="implied-policy-row"]').length).toBe(1);
+      await fireEvent.click(container.querySelector('[data-testid="trust-card-guided"] input[type="radio"]'));
+      const remove = container.querySelector('[data-testid="preset-diff-remove"]');
+      expect(remove).toBeTruthy();
+      expect(remove.textContent).toContain('Will remove');
+      expect(remove.textContent).toContain('trust:require-human-mr-review');
+      expect(container.querySelector('[data-testid="preset-diff-add"]')).toBeNull();
+    });
+
+    it('no diff shown when selection equals persisted level', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTrustTab(container);
+      expect(container.querySelector('[data-testid="trust-preset-diff"]')).toBeNull();
+    });
+
+    it('"View all policies" link switches to the Policies tab within the Admin view', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTrustTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="view-all-policies-link"]'));
+      expect(container.querySelector('[data-testid="policies-tab"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="trust-tab"]')).toBeNull();
+      // Still the same settings view — no navigation change
+      expect(container.querySelector('[data-testid="workspace-settings"]')).toBeTruthy();
+    });
+  });
+
+  describe('Policies tab (HSI §2a)', () => {
+    const mockPolicies = [
+      {
+        id: 'p-builtin',
+        name: 'builtin:require-human-spec-approval',
+        description: 'Spec approval is always human',
+        effect: 'deny',
+        immutable: true,
+        built_in: true,
+        actions: ['approve'],
+        resource_types: ['spec'],
+      },
+      {
+        id: 'p-trust',
+        name: 'trust:require-human-mr-review',
+        description: 'Block autonomous merge',
+        effect: 'deny',
+        immutable: false,
+        built_in: false,
+        actions: ['merge'],
+        resource_types: ['mr'],
+      },
+      {
+        id: 'p-user',
+        name: 'allow-deploy',
+        description: 'Deployers may deploy',
+        effect: 'allow',
+        immutable: false,
+        built_in: false,
+        actions: ['deploy'],
+        resource_types: ['repo'],
+      },
+    ];
+
+    async function openPoliciesTab(container) {
+      await fireEvent.click(container.querySelector('#ws-tab-policies'));
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    it('shows policies panel', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      expect(container.querySelector('[data-testid="policies-tab"]')).toBeTruthy();
+    });
+
+    it('queries workspace policies from the API', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      expect(api.workspaceAbacPolicies).toHaveBeenCalledWith('ws-1');
+    });
+
+    it('groups policies by prefix: builtin:, trust:, user-created', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const builtin = container.querySelector('[data-testid="policy-group-builtin"]');
+      const trust = container.querySelector('[data-testid="policy-group-trust"]');
+      const user = container.querySelector('[data-testid="policy-group-user"]');
+      expect(builtin).toBeTruthy();
+      expect(builtin.textContent).toContain('builtin:require-human-spec-approval');
+      expect(trust).toBeTruthy();
+      expect(trust.textContent).toContain('trust:require-human-mr-review');
+      expect(user).toBeTruthy();
+      expect(user.textContent).toContain('allow-deploy');
+    });
+
+    it('trust: policies show a "From: {level}" badge derived from the current trust level', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const badge = container.querySelector('[data-testid="trust-origin-badge"]');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toContain('From: Guided');
+    });
+
+    it('shows the preset-managed banner when trust level is not Custom', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const banner = container.querySelector('[data-testid="trust-banner-preset"]');
+      expect(banner).toBeTruthy();
+      expect(banner.textContent).toContain('Trust level: Guided');
+      expect(banner.textContent).toContain('preset-managed');
+      expect(banner.textContent).toContain('Switch to Custom to edit');
+      expect(container.querySelector('[data-testid="trust-banner-custom"]')).toBeNull();
+    });
+
+    it('shows the Custom banner when trust level is Custom', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: { ...mockWorkspace, trust_level: 'Custom' } } });
+      await openPoliciesTab(container);
+      const banner = container.querySelector('[data-testid="trust-banner-custom"]');
+      expect(banner).toBeTruthy();
+      expect(banner.textContent).toContain('Custom trust — full policy editor enabled');
+      expect(container.querySelector('[data-testid="trust-banner-preset"]')).toBeNull();
+    });
+
+    it('immutable policies are greyed out with the cannot-remove tooltip and disabled delete', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const builtinRow = container.querySelector('[data-testid="policy-group-builtin"] .policy-row');
+      expect(builtinRow.classList.contains('policy-locked')).toBe(true);
+      expect(builtinRow.getAttribute('title')).toBe('This policy cannot be removed or overridden.');
+      const deleteBtn = builtinRow.querySelector('[data-testid="delete-abac-policy-btn"]');
+      expect(deleteBtn.disabled).toBe(true);
+    });
+
+    it('trust: policy delete is disabled while preset-managed (non-Custom trust)', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const trustRow = container.querySelector('[data-testid="policy-group-trust"] .policy-row');
+      expect(trustRow.classList.contains('policy-locked')).toBe(true);
+      expect(trustRow.getAttribute('title')).toContain('switch to Custom to edit');
+      const deleteBtn = trustRow.querySelector('[data-testid="delete-abac-policy-btn"]');
+      expect(deleteBtn.disabled).toBe(true);
+    });
+
+    it('trust: policy delete is enabled under Custom trust (transition preserves trust policies)', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: { ...mockWorkspace, trust_level: 'Custom' } } });
+      await openPoliciesTab(container);
+      const trustRow = container.querySelector('[data-testid="policy-group-trust"] .policy-row');
+      expect(trustRow.classList.contains('policy-locked')).toBe(false);
+      const deleteBtn = trustRow.querySelector('[data-testid="delete-abac-policy-btn"]');
+      expect(deleteBtn.disabled).toBe(false);
+    });
+
+    it('user-created policy delete is enabled', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const userRow = container.querySelector('[data-testid="policy-group-user"] .policy-row');
+      expect(userRow.classList.contains('policy-locked')).toBe(false);
+      const deleteBtn = userRow.querySelector('[data-testid="delete-abac-policy-btn"]');
+      expect(deleteBtn.disabled).toBe(false);
+    });
+
+    it('"Change trust level" link switches back to the Trust Level tab', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="change-trust-level-link"]'));
+      expect(container.querySelector('[data-testid="trust-tab"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="policies-tab"]')).toBeNull();
+      expect(container.querySelector('[data-testid="workspace-settings"]')).toBeTruthy();
+    });
+
+    it('policy rows show name, effect, and target', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue(mockPolicies);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      const trustRow = container.querySelector('[data-testid="policy-group-trust"] .policy-row');
+      expect(trustRow.textContent).toContain('trust:require-human-mr-review');
+      expect(trustRow.textContent).toContain('deny');
+      expect(trustRow.textContent).toContain('merge on mr');
     });
   });
 

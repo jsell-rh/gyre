@@ -17,7 +17,7 @@
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'teams', 'budget', 'compute', 'llm', 'secrets', 'audit'];
+  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'compute', 'llm', 'secrets', 'audit'];
   let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
@@ -38,12 +38,89 @@
     desc: $t(`workspace_settings.trust.${id.toLowerCase()}_desc`),
   })));
   let trustLevel = $state(workspace?.trust_level ?? 'Autonomous');
+  // The level as persisted server-side. Kept separately from the form
+  // selection so the Policies tab banner and the preset diff (HSI §2a)
+  // reflect saved state, and refreshed from the PUT response on save.
+  let persistedTrustLevel = $state(workspace?.trust_level ?? 'Autonomous');
   let trustSaving = $state(false);
   let trustSaved = $state(false);
 
-  // ABAC policies
+  // Trust preset policy definitions — UI mirror of
+  // `gyre-domain/src/policy.rs::trust_policies_for_level` (task-077).
+  // Used for the read-only "implied policies" summary on the Trust Level
+  // tab (HSI §2a): what the selected preset creates / would create.
+  // The Policies tab shows the *actual* policy set from the API.
+  const TRUST_PRESET_POLICIES = {
+    Supervised: [
+      { name: 'trust:require-human-mr-review', effect: 'Deny', target: 'merge by system' },
+    ],
+    Guided: [],    // relies on built-in policies only
+    Autonomous: [], // built-in immutable spec approval covers the remaining constraint
+    Custom: [],    // user manages ABAC directly via the Policies tab
+  };
+
+  // Policies implied by the currently selected (form) trust level.
+  let selectedPresetPolicies = $derived(TRUST_PRESET_POLICIES[trustLevel] ?? []);
+  // Policies implied by the persisted trust level.
+  let currentPresetPolicies = $derived(TRUST_PRESET_POLICIES[persistedTrustLevel] ?? []);
+  // Diff between persisted level and form selection: what a save would
+  // add/remove in the workspace's `trust:` policy set.
+  let presetDiff = $derived.by(() => {
+    if (trustLevel === persistedTrustLevel) return null;
+    const selectedNames = new Set(selectedPresetPolicies.map(p => p.name));
+    const currentNames = new Set(currentPresetPolicies.map(p => p.name));
+    return {
+      add: selectedPresetPolicies.filter(p => !currentNames.has(p.name)),
+      remove: currentPresetPolicies.filter(p => !selectedNames.has(p.name)),
+    };
+  });
+
+  // ABAC policies (Policies tab)
   let abacPolicies = $state([]);
   let policiesLoading = $state(false);
+
+  // Group policies by origin prefix (HSI §2a): `builtin:`, `trust:`,
+  // user-created (no reserved prefix). `built_in`/`builtin:` → builtin;
+  // `trust:` → preset-managed; everything else → user-created.
+  let policyGroups = $derived.by(() => {
+    const groups = { builtin: [], trust: [], user: [] };
+    for (const p of abacPolicies) {
+      const name = p.name ?? '';
+      if (name.startsWith('trust:')) groups.trust.push(p);
+      else if (name.startsWith('builtin:') || p.built_in === true) groups.builtin.push(p);
+      else groups.user.push(p);
+    }
+    return groups;
+  });
+
+  let isCustomTrust = $derived(persistedTrustLevel === 'Custom');
+
+  // Human-readable target for a policy row: actions on resource types.
+  function policyTarget(p) {
+    const actions = Array.isArray(p.actions) && p.actions.length ? p.actions.join(', ') : '*';
+    const rts = Array.isArray(p.resource_types) && p.resource_types.length ? p.resource_types.join(', ') : '*';
+    return `${actions} on ${rts}`;
+  }
+
+  // A policy is locked (delete disabled, greyed out) when the server would
+  // reject the delete (built_in / immutable) or when it is preset-managed by
+  // a non-Custom trust level (HSI §2a: "Switch to Custom to edit").
+  function isPolicyLocked(p) {
+    const name = p.name ?? '';
+    return (
+      p.built_in === true ||
+      p.immutable === true ||
+      name.startsWith('builtin:') ||
+      (name.startsWith('trust:') && !isCustomTrust)
+    );
+  }
+
+  function policyLockTooltip(p) {
+    if (p.immutable === true || (p.name ?? '').startsWith('builtin:') || p.built_in === true) {
+      return $t('workspace_settings.policies.immutable_tooltip');
+    }
+    return $t('workspace_settings.policies.preset_managed_tooltip');
+  }
 
   // MetaSpec drift policy
   let warnOnDrift = $state(workspace?.meta_spec_policy?.warn_on_drift ?? true);
@@ -55,6 +132,7 @@
     if (workspace) {
       defaultComputeTarget = workspace.default_compute_target ?? '';
       trustLevel = workspace.trust_level ?? 'Autonomous';
+      persistedTrustLevel = workspace.trust_level ?? 'Autonomous';
       warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
       blockOnDrift = workspace.meta_spec_policy?.block_on_drift ?? false;
       driftTolerance = workspace.meta_spec_policy?.drift_tolerance ?? 0;
@@ -250,7 +328,7 @@
     if (activeTab === 'general' || activeTab === 'compute') {
       if (untrack(() => computeTargets.length === 0 && !computeLoading)) loadComputeTargets();
     }
-    if (activeTab === 'trust') {
+    if (activeTab === 'trust' || activeTab === 'policies') {
       if (untrack(() => abacPolicies.length === 0 && !policiesLoading)) loadAbacPolicies(wsId);
     }
     if (activeTab === 'teams') {
@@ -389,11 +467,23 @@
     if (!workspace?.id) return;
     trustSaving = true;
     try {
-      await api.updateWorkspace(workspace.id, { trust_level: trustLevel });
+      const updated = await api.updateWorkspace(workspace.id, { trust_level: trustLevel });
+      // Track the persisted level from the server response so the Policies
+      // tab banner / preset diff reflect the saved state immediately.
+      persistedTrustLevel = updated?.trust_level ?? trustLevel;
+      // The preset transition rewrote the `trust:` policy set server-side —
+      // drop the cached list so the Policies tab reloads real data.
+      abacPolicies = [];
       trustSaved = true;
       setTimeout(() => { trustSaved = false; }, 2000);
     } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_trust')); }
     finally { trustSaving = false; }
+  }
+
+  // Cross-link tab switch (HSI §2a): stays within the Admin view — a tab
+  // switch, not a navigation change.
+  function gotoSettingsTab(id) {
+    activeTab = id;
   }
 
   async function saveDriftPolicy() {
@@ -532,7 +622,7 @@
         </div>
       </div>
 
-    <!-- Trust & Policies tab -->
+    <!-- Trust Level tab -->
     {:else if activeTab === 'trust'}
       <div class="settings-section" data-testid="trust-tab">
         <h2 class="section-title">{$t('workspace_settings.trust.title')}</h2>
@@ -574,37 +664,53 @@
           </div>
         </div>
 
-        <!-- ABAC Policies -->
-        <div class="sub-section">
-          <h3 class="sub-title">{$t('workspace_settings.trust.abac_title')}</h3>
-          {#if policiesLoading}
-            <p class="loading-text">{$t('workspace_settings.trust.abac_loading')}</p>
-          {:else if abacPolicies.length === 0}
-            <p class="empty-text">{$t('workspace_settings.trust.abac_empty')}</p>
+        <!-- Implied trust: policies (read-only summary, HSI §2a) -->
+        <div class="sub-section" data-testid="trust-implied-policies">
+          <h3 class="sub-title">{$t('workspace_settings.trust.implied_title', { values: { level: $t(`workspace_settings.trust.${trustLevel.toLowerCase()}`) } })}</h3>
+          <p class="sub-desc">{$t('workspace_settings.trust.implied_desc')}</p>
+
+          {#if selectedPresetPolicies.length === 0}
+            <p class="empty-text" data-testid="implied-policy-empty">
+              {#if trustLevel === 'Custom'}
+                {$t('workspace_settings.trust.implied_custom')}
+              {:else}
+                {$t('workspace_settings.trust.implied_none')}
+              {/if}
+            </p>
           {:else}
-            <div class="policy-list" data-testid="abac-policy-list">
-              {#each abacPolicies as policy}
-                <div class="policy-row">
-                  <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
-                  <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">
-                    {policy.effect ?? 'allow'}
-                  </span>
-                  {#if policy.description}
-                    <span class="policy-desc">{policy.description}</span>
-                  {/if}
-                  <button
-                    class="policy-delete-btn"
-                    onclick={() => deleteAbacPolicy(policy.id)}
-                    disabled={deletingPolicyId === policy.id}
-                    aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
-                    data-testid="delete-abac-policy-btn"
-                  >
-                    {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
-                  </button>
-                </div>
+            <ul class="implied-policy-list">
+              {#each selectedPresetPolicies as p (p.name)}
+                <li class="implied-policy-row" data-testid="implied-policy-row">
+                  <span class="policy-name">{p.name}</span>
+                  <span class="policy-effect policy-effect-{p.effect.toLowerCase()}">{p.effect}</span>
+                  <span class="implied-policy-target">{p.target}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          {#if presetDiff}
+            <div class="preset-diff" data-testid="trust-preset-diff">
+              {#each presetDiff.add as p (p.name)}
+                <p class="diff-line diff-add" data-testid="preset-diff-add">
+                  {$t('workspace_settings.trust.will_add')}: {p.name} — {p.effect} {p.target}
+                </p>
+              {/each}
+              {#each presetDiff.remove as p (p.name)}
+                <p class="diff-line diff-remove" data-testid="preset-diff-remove">
+                  {$t('workspace_settings.trust.will_remove')}: {p.name} — {p.effect} {p.target}
+                </p>
               {/each}
             </div>
           {/if}
+
+          <button
+            class="link-btn"
+            onclick={() => gotoSettingsTab('policies')}
+            data-testid="view-all-policies-link"
+          >
+            {$t('workspace_settings.trust.view_all_policies')}
+          </button>
         </div>
 
         <!-- MetaSpec Drift Policy -->
@@ -655,6 +761,133 @@
             </button>
           </div>
         </div>
+      </div>
+
+    <!-- Policies tab (ABAC editor, HSI §2a) -->
+    {:else if activeTab === 'policies'}
+      <div class="settings-section" data-testid="policies-tab">
+        <h2 class="section-title">{$t('workspace_settings.policies.title')}</h2>
+
+        <!-- Trust origin banner (HSI §2a) -->
+        <div
+          class="policy-banner"
+          class:policy-banner-custom={isCustomTrust}
+          data-testid="trust-origin-banner"
+        >
+          {#if isCustomTrust}
+            <span class="policy-banner-text" data-testid="trust-banner-custom">
+              {$t('workspace_settings.policies.banner_custom')}
+            </span>
+          {:else}
+            <span class="policy-banner-text" data-testid="trust-banner-preset">
+              {$t('workspace_settings.policies.banner_preset', { values: { level: persistedTrustLevel } })}
+            </span>
+          {/if}
+          <button
+            class="link-btn"
+            onclick={() => gotoSettingsTab('trust')}
+            data-testid="change-trust-level-link"
+          >
+            {$t('workspace_settings.policies.change_trust')}
+          </button>
+        </div>
+
+        {#if policiesLoading}
+          <p class="loading-text">{$t('workspace_settings.policies.loading')}</p>
+        {:else if abacPolicies.length === 0}
+          <p class="empty-text">{$t('workspace_settings.policies.empty')}</p>
+        {:else}
+          <!-- Built-in policies -->
+          {#if policyGroups.builtin.length > 0}
+            <div class="sub-section" data-testid="policy-group-builtin">
+              <h3 class="sub-title">{$t('workspace_settings.policies.group_builtin')} ({policyGroups.builtin.length})</h3>
+              <div class="policy-list">
+                {#each policyGroups.builtin as policy (policy.id)}
+                  <div class="policy-row policy-locked" title={policyLockTooltip(policy)}>
+                    <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
+                    <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">{policy.effect ?? 'allow'}</span>
+                    <span class="policy-target">{policyTarget(policy)}</span>
+                    {#if policy.description}
+                      <span class="policy-desc">{policy.description}</span>
+                    {/if}
+                    <button
+                      class="policy-delete-btn"
+                      onclick={() => deleteAbacPolicy(policy.id)}
+                      disabled
+                      aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
+                      data-testid="delete-abac-policy-btn"
+                    >
+                      {$t('common.delete')}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <!-- Trust preset policies -->
+          {#if policyGroups.trust.length > 0}
+            <div class="sub-section" data-testid="policy-group-trust">
+              <h3 class="sub-title">{$t('workspace_settings.policies.group_trust')} ({policyGroups.trust.length})</h3>
+              <div class="policy-list">
+                {#each policyGroups.trust as policy (policy.id)}
+                  <div
+                    class="policy-row"
+                    class:policy-locked={isPolicyLocked(policy)}
+                    title={isPolicyLocked(policy) ? policyLockTooltip(policy) : undefined}
+                  >
+                    <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
+                    <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">{policy.effect ?? 'allow'}</span>
+                    <span class="policy-target">{policyTarget(policy)}</span>
+                    <span class="policy-origin-badge" data-testid="trust-origin-badge">
+                      {$t('workspace_settings.policies.from_badge', { values: { level: persistedTrustLevel } })}
+                    </span>
+                    {#if policy.description}
+                      <span class="policy-desc">{policy.description}</span>
+                    {/if}
+                    <button
+                      class="policy-delete-btn"
+                      onclick={() => deleteAbacPolicy(policy.id)}
+                      disabled={isPolicyLocked(policy) || deletingPolicyId === policy.id}
+                      aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
+                      data-testid="delete-abac-policy-btn"
+                    >
+                      {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <!-- User-created policies -->
+          {#if policyGroups.user.length > 0}
+            <div class="sub-section" data-testid="policy-group-user">
+              <h3 class="sub-title">{$t('workspace_settings.policies.group_user')} ({policyGroups.user.length})</h3>
+              <div class="policy-list">
+                {#each policyGroups.user as policy (policy.id)}
+                  <div class="policy-row">
+                    <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
+                    <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">{policy.effect ?? 'allow'}</span>
+                    <span class="policy-target">{policyTarget(policy)}</span>
+                    {#if policy.description}
+                      <span class="policy-desc">{policy.description}</span>
+                    {/if}
+                    <button
+                      class="policy-delete-btn"
+                      onclick={() => deleteAbacPolicy(policy.id)}
+                      disabled={deletingPolicyId === policy.id}
+                      aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
+                      data-testid="delete-abac-policy-btn"
+                    >
+                      {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/if}
       </div>
 
     <!-- Teams tab -->
@@ -1323,6 +1556,105 @@
 
   .policy-delete-btn:disabled { opacity: 0.6; cursor: not-allowed; }
   .policy-delete-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* ── Implied policies summary (Trust Level tab, HSI §2a) ────────── */
+  .implied-policy-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .implied-policy-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .implied-policy-target {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .preset-diff {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    margin-top: var(--space-3);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius);
+  }
+
+  .diff-line {
+    margin: 0;
+    font-size: var(--text-xs);
+  }
+
+  .diff-add { color: var(--color-success); }
+  .diff-remove { color: var(--color-danger); }
+
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-top: var(--space-3);
+    color: var(--color-primary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .link-btn:hover { text-decoration: none; }
+  .link-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* ── Policies tab (HSI §2a) ────────────────────────────────────── */
+  .policy-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
+    background: color-mix(in srgb, var(--color-primary) 8%, var(--color-surface-elevated));
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+  }
+
+  .policy-banner-custom {
+    background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface-elevated));
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+  }
+
+  .policy-banner-text { color: var(--color-text); }
+
+  .policy-target {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .policy-origin-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    color: var(--color-primary);
+    white-space: nowrap;
+  }
+
+  .policy-locked { opacity: 0.6; }
 
   /* ── Toggle group ─────────────────────────────────────────────────── */
   .toggle-group {

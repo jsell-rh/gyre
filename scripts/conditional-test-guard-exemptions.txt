@@ -17,5 +17,5 @@ web/src/__tests__/SearchBar.test.js:277
 web/src/__tests__/SearchBar.test.js:283
 web/src/__tests__/SearchBar.test.js:329
 web/src/__tests__/SpecDetailCanvas.test.js:194
-web/src/__tests__/WorkspaceSettings.test.js:273
-web/src/__tests__/WorkspaceSettings.test.js:448
+web/src/__tests__/WorkspaceSettings.test.js:504
+web/src/__tests__/WorkspaceSettings.test.js:679

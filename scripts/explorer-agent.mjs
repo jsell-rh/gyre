@@ -53,23 +53,22 @@ if (canvas_state?.active_lens) {
 
 const userMessage = canvasContext ? `[Canvas: ${canvasContext}]\n\n${question}` : question;
 
-// Build conversation history as structured multi-turn messages.
-// The SDK's query() accepts a `messages` array of {role, content} objects for
-// multi-turn conversations. We pass prior history as alternating user/assistant
-// messages and append the current question as the final user message.
-// History content is JSON-encoded within the prompt to avoid injection risks
-// (no XML escaping needed — JSON strings are naturally safe).
-let historyMessages = [];
+// Build conversation history as a transcript prefix.
+// The SDK's query() accepts a single `prompt` (string or AsyncIterable of user
+// messages) — it has NO multi-turn `messages` parameter, so prior turns are
+// embedded as a transcript block in the prompt. (Passing a `messages` key is
+// silently ignored by the SDK, which dropped history entirely.)
+let historyBlock = '';
 if (history?.length) {
+  const lines = [];
   for (const msg of history) {
-    // Normalize role to 'user' or 'assistant' (the only roles the SDK accepts)
-    const role = msg.role === 'assistant' ? 'assistant' : 'user';
-    historyMessages.push({ role, content: msg.content });
+    // Normalize role label (the transcript only has user/assistant turns)
+    const role = msg.role === 'assistant' ? 'Assistant' : 'User';
+    lines.push(`${role}: ${msg.content}`);
   }
+  historyBlock = `<conversation_history>\n${lines.join('\n\n')}\n</conversation_history>\n\n`;
 }
-// Append the current user question as the final message
-historyMessages.push({ role: 'user', content: userMessage });
-const fullPrompt = userMessage;
+const fullPrompt = `${historyBlock}${userMessage}`;
 
 console.log(JSON.stringify({ type: 'status', status: 'thinking' }));
 
@@ -106,44 +105,26 @@ const options = {
   // Bypass permission prompts — this is a headless subprocess, not interactive.
   permissionMode: 'bypassPermissions',
   allowDangerouslySkipPermissions: true,
-  // Budget: MAX_TOOL_TURNS=5 + MAX_REFINEMENT_TURNS=3 = 8 hard cap.
-  // Tool-turn vs refinement-turn tracking is done in the output stream below.
+  // Per-invocation turn budget. The server-side self-check loop (spec §11)
+  // re-invokes this script for refinement rounds and caps those separately
+  // at MAX_REFINEMENT_TURNS (3); this cap bounds the agent's internal
+  // tool-use loop within a single invocation.
   maxTurns: 8,
   // Disable session persistence — this is a one-shot subprocess.
   persistSession: false,
 };
 
-// Turn budget constants per spec
-const MAX_TOOL_TURNS = 5;
-const MAX_REFINEMENT_TURNS = 3;
-
 try {
   let fullText = '';
   // Track what we've already streamed to avoid duplicating content
   let streamedLength = 0;
-  // Separate turn counters: tool turns (with tool_use blocks) vs refinement turns (text-only)
-  let toolTurns = 0;
-  let refinementTurns = 0;
 
-  for await (const message of query({ prompt: fullPrompt, options, messages: historyMessages })) {
+  for await (const message of query({ prompt: fullPrompt, options })) {
     switch (message.type) {
       case 'assistant': {
         // Complete assistant message with content blocks.
         // Extract text content and emit any not-yet-streamed portions.
         if (message.message?.content) {
-          const hasToolUse = message.message.content.some((b) => b.type === 'tool_use');
-          if (hasToolUse) {
-            toolTurns++;
-            if (toolTurns > MAX_TOOL_TURNS) {
-              console.error(`[budget] tool turn limit exceeded (${toolTurns}/${MAX_TOOL_TURNS})`);
-            }
-          } else {
-            refinementTurns++;
-            if (refinementTurns > MAX_REFINEMENT_TURNS) {
-              console.error(`[budget] refinement turn limit exceeded (${refinementTurns}/${MAX_REFINEMENT_TURNS})`);
-            }
-          }
-
           for (const block of message.message.content) {
             if (block.type === 'text') {
               fullText += block.text;
@@ -208,60 +189,11 @@ try {
       if (cleanText) {
         console.log(JSON.stringify({ type: 'text', content: cleanText, done: true }));
       }
-
-      // Self-check: call graph_query_dryrun via MCP HTTP to validate the query.
-      // The SDK agent already had the MCP tool available and may have used it
-      // during its run, but we do a server-mediated check here as a safety net
-      // so warnings surface to the frontend even if the agent skipped dry-run.
-      let warnings = [];
-      try {
-        const dryRunBody = {
-          jsonrpc: '2.0',
-          id: 'selfcheck-1',
-          method: 'tools/call',
-          params: {
-            name: 'graph_query_dryrun',
-            arguments: { repo_id, query: viewQuery },
-          },
-        };
-        const dryRunRes = await fetch(mcpUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(dryRunBody),
-        });
-        if (dryRunRes.ok) {
-          const dryRunJson = await dryRunRes.json();
-          // The MCP response wraps tool output in result.content[].text
-          const resultContent = dryRunJson?.result?.content;
-          if (Array.isArray(resultContent)) {
-            for (const block of resultContent) {
-              if (block.type === 'text' && block.text) {
-                try {
-                  const parsed = JSON.parse(block.text);
-                  if (parsed.warnings?.length) {
-                    warnings = parsed.warnings;
-                  }
-                } catch { /* not JSON, skip */ }
-              }
-            }
-          }
-        }
-      } catch (dryRunErr) {
-        console.error(`[self-check] dry-run failed: ${dryRunErr.message}`);
-      }
-
-      if (warnings.length) {
-        console.error(`[self-check] view_query warnings: ${warnings.join('; ')}`);
-      }
-
-      console.log(JSON.stringify({
-        type: 'view_query',
-        query: viewQuery,
-        ...(warnings.length ? { warnings } : {}),
-      }));
+      // Emit the extracted view query. The SERVER runs the authoritative
+      // dry-run self-check (spec §11) on this query — extracting, dry-running,
+      // and re-invoking this script with refinement feedback (max 3 rounds) —
+      // so no dry-run is performed here.
+      console.log(JSON.stringify({ type: 'view_query', query: viewQuery }));
     } catch (_parseErr) {
       // view_query JSON was malformed; send the raw text
       console.log(JSON.stringify({ type: 'text', content: fullText, done: true }));
