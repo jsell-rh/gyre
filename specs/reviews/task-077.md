@@ -50,3 +50,33 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R24 (final)
+
+**Reviewer:** Independent review (candidate `fde1cde5a7343969f12fedcf16a418e28dd7ba24`, base `1d9547de`)
+
+### Prior-findings repair verification
+
+- **Round-23 F1/F2 (e2e_ralph_loop + git_integration red under the F5 supervised-trust hold):** fixed by commit `09d52669` — both test workspaces now created with `trust_level: "Autonomous"`, restoring the intended autonomous-merge expectation without weakening production enforcement (test-fixture change only; the trust hold itself is untouched). Verified: `--test e2e_ralph_loop` 1 passed; `--test git_integration` 16 passed, 1 pre-existing ignored.
+- **Round-7 lineage test 401 (missed auth header after `AuthenticatedAgent` added to `transition_mr_status`):** fixed — full `--lib` suite green (1321 passed / 0 failed), including `api::merge_requests`.
+
+### Independent verification (evidence: /tmp/stage/review-evidence/)
+
+- **Acceptance criteria:** all verified — `TrustLevel` enum (4 variants, strict `parse` for API input, `from_db_str` fallback for stored rows); workspace `trust_level` default Supervised (migration 000050) + `immutable` on policies (migration 000028, both pre-existing at base, unchanged); `trust_policies_for_level` presets with field-level unit tests (F8); atomic trust transitions via a real diesel `conn.transaction` in both SQLite and Postgres adapters (workspace upsert + trust-policy delete + reseed in one txn); 409 on transition failure (tested via the mem fail hook, with rollback assertions); immutable-Deny-first evaluation in `policy_engine::evaluate` with the adversarial test `immutable_deny_blocks_even_when_high_priority_allow_matches`; `builtin:require-human-spec-approval` seeded immutable at priority 999 with fail-closed seeding; policy CRUD rejects `trust:`/`builtin:` prefixes on create AND update (400); strict `trust_level` parse (400 on typo — closes the trust-downgrade-via-typo hole); Custom transition directions both tested (F7).
+- **F5 enforcement is real:** merge processor evaluates ABAC with the specced service identity (subject.type "system", subject.id "merge-processor"), holds on explicit Deny with requeue (not failure), human-approval escape `mr.status == Approved` protected by a 403 on Agent-role callers setting "approved", atomic-group and selection-loop coverage, workspace-scope policy filtering, and the pipeline catch-all default-deny correctly excluded (otherwise Guided/Autonomous would be unrepresentable). F9 fail-closed on policy/workspace store read failures.
+- **Mutation probe (test meaningfulness):** disabling `supervised_trust_hold` in production code fails 3 of 4 supervised merge tests ("supervised trust Deny must hold the merge — MR stays Open", left: Merged) — the tests kill the mutation; they are not self-confirming. Source restored byte-identical afterward (git status clean).
+- **Suites:** gyre-domain 408/0; gyre-server --lib 1321/0; all six touched integration suites pass; gyre-adapters/cli/common/ports pass; `cargo fmt --check` clean per touched package.
+- **Mechanical invariants:** all 18 check scripts PASS (arch, ABAC route registry, exempt handlers, MCP write tools, migration versions, dead message kinds, mem port contracts, byte-slice, relative paths, fail-open refs, fabricated scopes, lossy secrets, inert enforcement, scope literals, in-memory stores, forwarded headers, unbounded HTTP, non-atomic creation, task-commit attribution). Exemption files only shrank — the two fail-open ref-resolution entries were removed with real fail-closed fixes in recovery.rs, and the task-owned inert-enforcement/warn-continue/relative-path entries were removed with the F5/F6 fixes.
+- **Scripts rewrite** (`check-non-atomic-creation.sh` awk→python3): semantics preserved (function-scoped, 2+ distinct repos, transaction/`apply_trust_transition` wrapper detection), fixing a gawk-only `match()` that aborted on mawk hosts — a gate-hardening change, not a weakening.
+
+### Notes (non-blocking)
+
+- `TrustLevel` lives in `gyre-domain` (alongside the `Workspace` entity), not `gyre-common` as the implementation plan's step 1 literally suggested — placement predates this candidate (present at base), is hexagonally correct, and satisfies the criterion's substance; 23 prior rounds accepted it.
+- The §12 notification-granularity gradient ("Every state change / Failures and approvals / Exceptions only") is not in this task's acceptance criteria and is tracked by other coverage rows (HSI row 43 Action Types; ui-navigation row 7, where trust-level priority filtering in the workspace-home Decisions section is noted implemented).
+- `selection_trust_hold`'s same-repo assumption for atomic groups mirrors the pre-existing `merge_atomic_group` invariant (base code).
+
+### Verdict
+
+approved — the task contract is satisfied by real, enforced, tested production behavior; all prior review findings are repaired and independently verified.
