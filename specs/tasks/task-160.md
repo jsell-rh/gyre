@@ -1,13 +1,13 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-depends_on: [task-236]
+depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "696ebfb083e30eb992856c36a11aff9a570edd4a", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
 ---
 
 ## Spec Excerpt
@@ -61,121 +61,65 @@ Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (E
 ## Shipped
 
 **Scripts (all three exist, executable, usage-commented, wired pre-commit + CI
-blocking — no `|| true`):**
+blocking):**
 
 - `scripts/check-hierarchy.sh` — awk state machine over every domain `.rs`
   file; fails on `Option<...>` hierarchy fields AND on deletion of a required
   field (a deleted edge re-opens the same bypass). Env-gated per spec §2
   (`GYRE_CHECK_HIERARCHY`; enabled by default, `=0` to bypass).
 - `scripts/check-tenant-filter.sh` — POSIX-awk scan of read query methods in
-  `src/sqlite` + `src/postgres` (the real pg dir — the stale `src/pg` path bug
-  is fixed); tenant-column tables derived from the migrations themselves
-  (CREATE/ALTER/DROP/RENAME, `_new` normalization) rather than hand-maintained;
+  `src/sqlite` + `src/postgres` (the real pg dir); tenant-column tables
+  derived from the migrations themselves rather than hand-maintained;
   documented SKIP_LIST for the structurally-isolated adapters (spec §3);
   tenant-less tables reported as non-failing backlog.
 - `scripts/check-api-auth.sh` — three checks: ABAC middleware chain on the
   api router, per-handler auth extractors on non-ABAC mutating routes, and
   route↔`RouteResourceMapping` cross-reference (delegated to the owning
-  frozen-baseline `check-abac-route-registry.sh`, folded into this exit code).
+  frozen-baseline `check-abac-route-registry.sh`, folded into this exit
+  code).
 
-**Enabling repairs** (shipped with the scripts so they pass clean, not by
-exemption): unfiltered tenant reads fixed in sqlite+postgres
+**Enabling repairs** shipped with the scripts so they pass clean, not by
+exemption: unfiltered tenant reads fixed in sqlite+postgres
 compute_target/merge_request/notification/repository/saved_view/workspace;
-activity/analytics record-conversions stamped the storage's real tenant
-until upstream 75ada1c4 removed the ActivityPort entirely (superseded by
-SearchPort); six dead scope-literal-defaults exemption entries deleted
-(18→12); `tenant_isolation.rs` integration test (2 tests) proves
-cross-tenant invisibility end-to-end.
+`tenant_isolation.rs` integration test proves cross-tenant invisibility
+end-to-end. `b82af6b4` (round 8) additionally binds both
+`evaluate_attestation_abac` results in `merge_processor.rs` and appends them
+to the policy decision audit trail via `record_abac_decision`, so no
+inert-enforcement exemption entries remain for that file.
 
-### Round 8 — verification-finding repair at HEAD b82af6b4 (repair of
-checks.sh exit 1 on candidate b2935f0c, base 0e889626)
+### Current round — requirements-changed repair on the retained checkpoint
 
-The controller verification run failed on exactly two findings, both rooted
-in the round-7 exemption re-pin: the verifier's exemption freeze counts the
-re-pinned `merge_processor.rs:1455/1477` entries as NEW exemptions relative
-to base 0e889626 (which pins 1457/1479), and its upstream overlay runs
-`check-inert-enforcement` with the BASE exemption file, so the drifted sites
-are flagged inert. A line-number re-pin can never survive that verifier.
+The task contract was re-issued (`depends_on: []`) and an upstream merge
+(`4d6759a0`, task-084) was resolved on top of the retained checkpoint
+`a8769d5`:
 
-- **Real fix, no exemptions (b82af6b4):** both `evaluate_attestation_abac`
-  call sites in `merge_processor.rs` now bind the `EvalResult` and append a
-  `PolicyDecision` via the new `record_abac_decision` helper — the same
-  `state.policies.record_decision` audit trail the ABAC middleware writes
-  for every HTTP request, so merge-time evaluations are queryable via
-  `list_decisions` instead of living only in log output. Subject = MR
-  author, falling back to the `merge-processor` system identity HSI §2
-  assigns to merge-time ABAC; the append is best-effort (warn on failure,
-  never gates a merge). Both file exemption entries are DELETED — the file
-  is now a strict subset of base's, so the freeze passes under either merge
-  orientation, and the check passes under the overlay because there are no
-  inert sites left to exempt. Merge-gating enforcement semantics remain
-  owned by the task-077 revision round (specs/reviews/task-077.md F5).
-- **Test:** new
-  `merge_attestation_abac_decision_recorded_in_audit_trail` proves the
-  decisions land in `list_decisions` with the right
-  subject/resource/action/effect fields and the author→merge-processor
-  fallback. `cargo test -p gyre-server --lib merge_processor`: 50 passed /
-  0 failed.
-- **Mutation kill:** reverting a call site to the discarded-call shape →
-  `check-inert-enforcement` exit 1 naming the site (no exemption left to
-  catch it); restored → exit 0. Exemption-freeze simulation (working tree
-  vs base 0e889626 across all `scripts/*-exemptions.txt`): no added
-  entries.
-- **Gates at b82af6b4 (all exit 0):** check-inert-enforcement,
-  check-stale-enforcement-mode, check-fabricated-scope-defaults,
-  check-scope-literal-defaults, check-hierarchy, check-tenant-filter
-  (109/0), check-api-auth, check-arch, check-rustfmt-diff vs 0e889626 (31
-  Rust files), check-clippy-diff vs 0e889626 (1127 existing warnings
-  outside changes), check-task-commit-attribution (after adding b82af6b4
-  to this file's frontmatter).
+- **Merge resolution** — attestation-ABAC call sites kept on the
+  task-160 `record_abac_decision` consumption (not upstream's audit-only
+  warn); the upstream trust-gate functions
+  (`evaluate_merge_abac`/`supervised_trust_hold`/`selection_trust_hold`)
+  required by upstream's callers were kept alongside; the
+  inert-enforcement exemption file kept its HEAD form (no
+  merge_processor entries).
+- **Semantic repair (`9dc6ffd47`)** — upstream's new `reconciliation.rs`
+  called `emit_event` with `Option<Id>` under a signature that fabricated
+  `tenant_id: "default"`; all seven call sites adapted to the branch's
+  scoped `Id` signature, and the unscoped `None`+`Broadcast` fallback is
+  now skip-and-log per the fabricated-scope-defaults invariant.
 
-### Round 7 — verification-finding repair at HEAD b297d1b2 (evidence:
-`/tmp/stage/review-evidence/task-160-round7/`)
+### Test evidence
 
-This round repaired the three failures from the controller verification run
-(`checks.sh` exit 1 on candidate 3cc3cdf9) and resolved the assigned merge:
+- `cargo test -p gyre-server --lib
+  merge_attestation_abac_decision_recorded_in_audit_trail` — 1 passed.
+- `cargo test -p gyre-server --lib supervised_trust` —
+  `supervised_trust_holds_atomic_group_members` passed (union resolution
+  compiles and behaves).
+- `cargo test -p gyre-server --lib reconciliation` — 21 passed.
+- `cargo check -p gyre-server --tests` — clean.
+- All three task scripts exit 0 on the merged tree;\  `check-hierarchy.sh` proven to exit 1 when
+  `Task.workspace_id: Option<Id>` is introduced (negative probe, file
+  restored). `check-inert-enforcement`, `check-fabricated-scope-defaults`,
+  and `check-scope-literal-defaults` also exit 0.
+- Evidence retained at `/tmp/stage/review-evidence/task-160-merge-resolution.md`.
 
-- **Merge resolution (c3bf8bc5):** base 75ada1c4 deleted the activity
-  adapters (`ActivityPort` replaced by `SearchPort`); accepted the upstream
-  deletion — nothing in the merged tree references the old adapters, and the
-  new sqlite/postgres `search.rs` adapters derive tenant from the workspace
-  scope row (empty-string sentinel on unknown workspace, never a fabricated
-  "default"). `check-tenant-filter.sh` adapts automatically: 111 → 109 read
-  methods on tenant-column tables, 0 violations.
-- **rustfmt:** `mem.rs:3223` test-helper one-liner exceeded the line budget;
-  split per rustfmt. `check-rustfmt-diff.py 75ada1c4` now clean (31 Rust
-  files); direct `rustfmt --check` on both edited files clean.
-- **Fabricated scope default (real fix, exemption deleted):** the
-  spec-rejected notification fanout in `api/specs.rs` derived `tenant_id`
-  from `entry.repo_id.as_deref().unwrap_or("default")` — a fabricated scope
-  from the wrong field entirely. Now resolves the tenant from the
-  workspace's real scope row and skips the fanout with a warning on lookup
-  failure, mirroring `emit_reconciliation_completed`. Exemption entry
-  deleted and `FROZEN_EXEMPTION_COUNT` lowered 5→4.
-- **Inert-enforcement line drift (re-pin only):** the two task-077-owned
-  `evaluate_attestation_abac` exemption sites in `merge_processor.rs`
-  shifted 1457/1479 → 1455/1477 by the base merge. Re-pinned the same two
-  sites — no entry added or removed; the enforcement fix itself stays owned
-  by the task-077 revision round.
-- **Gates at b297d1b2 (all exit 0):** check-hierarchy, check-tenant-filter
-  (109/0), check-api-auth, check-arch, check-fabricated-scope-defaults,
-  check-inert-enforcement, check-scope-literal-defaults,
-  check-rustfmt-diff vs 75ada1c4, check-task-commit-attribution (after
-  adding b297d1b2 to this file's frontmatter).
-- **Focused tests:** `cargo test -p gyre-adapters --test tenant_isolation`
-  2 passed / 0 failed (re-run: the merge replaced the activity adapters this
-  test guards); `cargo test -p gyre-server --test api_integration
-  spec_approvals` 1 passed / 0 failed; `cargo check -p gyre-server` clean
-  (5m09s). Run records in the evidence dir.
-- **Mutation kills** (isolated worktree, restored after each, worktree
-  removed): re-introducing the `unwrap_or("default")` fallback →
-  fabricated-scope check exit 1 naming `specs.rs:963`; restoring the mem.rs
-  one-liner → rustfmt-diff exit 1 naming `mem.rs:3223`; removing the
-  re-pinned inert-enforcement exemption lines → check exit 1 naming
-  `merge_processor.rs:1455/1477`. Post-restore sanity all green.
-
-Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
-F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
-complete in round 4). Round 5–6 verification records are preserved in this
-file's git history (HEADs 8d2ae409 and earlier: fa6e6952, aa68bbba/72bd51d1,
-c4f1df9d, afd7379d).
+Full workspace suites, architecture checks, all-target Clippy, and GitHub CI
+are owned by verification and publication.
