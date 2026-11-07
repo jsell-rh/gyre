@@ -57,6 +57,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // Reset the jsdom URL so subTab deep-link tests do not leak state.
+  window.history.replaceState(null, '', '/');
 });
 
 describe('ExplorerView scope branching', () => {
@@ -148,5 +150,36 @@ describe('Architecture sub-tab control (repo scope, ui-navigation.md §3)', () =
     expect(onArchSubTabChange).toHaveBeenCalledWith('briefing');
     await fireEvent.click(container.querySelector('[data-testid="arch-subtab-graph"]'));
     expect(onArchSubTabChange).toHaveBeenCalledWith('graph');
+  });
+
+  // Regression: the initial-read effect used to delete ?subTab from the URL
+  // after seeding the sub-tab, so a reload/copy of a deep-linked
+  // architecture?subTab=briefing URL silently reopened the Graph sub-tab.
+  // App's setRepoArchSubTab invariant requires the URL to keep matching the
+  // rendered sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing").
+  it('keeps the ?subTab deep-link param in the URL after the initial read', async () => {
+    window.history.replaceState(null, '', '/workspaces/ws-1/r/repo-1/architecture?subTab=briefing');
+    // App-mimicking onArchSubTabChange: setRepoArchSubTab mirrors the
+    // sub-tab into the ?subTab= URL param.
+    const onArchSubTabChange = vi.fn((sub) => {
+      if (sub === 'briefing') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('subTab', 'briefing');
+        window.history.replaceState(window.history.state, '', url.toString());
+      }
+    });
+    render(ExplorerView, {
+      props: {
+        scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+        onArchSubTabChange,
+      },
+    });
+    // The deep link seeds the Briefing sub-tab and is reported to the parent.
+    await waitFor(() => {
+      expect(onArchSubTabChange).toHaveBeenCalledWith('briefing');
+    });
+    // The URL still matches the rendered sub-tab, not stripped by the
+    // initial read, so reload/copy reopens Briefing.
+    expect(new URLSearchParams(window.location.search).get('subTab')).toBe('briefing');
   });
 });

@@ -758,16 +758,16 @@
 
   // Read initial Architecture sub-tab from URL params (set by goToRepoTab
   // context — same convention as the Code tab's subTab param).
+  // The param is intentionally NOT deleted after reading: App's
+  // setRepoArchSubTab keeps the ?subTab= URL param mirroring the rendered
+  // sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing"), so
+  // reload/copy of the current URL must keep opening the same sub-tab.
   $effect(() => {
     if (scopeType !== 'repo') return;
     const params = new URLSearchParams(window.location.search);
     const initialSubTab = params.get('subTab');
     if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
       setArchSubTab(initialSubTab);
-      // Clean up the URL params after reading
-      const url = new URL(window.location.href);
-      url.searchParams.delete('subTab');
-      window.history.replaceState(window.history.state, '', url.toString());
     }
   });
 
