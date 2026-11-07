@@ -79,11 +79,11 @@ pub struct LogCompressionReport {
     pub audit_bytes_before: u64,
     /// Compressed payload bytes of those rows after compression.
     pub audit_bytes_after: u64,
-    /// Agent log lines folded into cold segments.
+    /// Agent log lines newly folded into cold segments this run.
     pub agent_log_lines_compressed: u64,
-    /// Raw line bytes held before compression.
+    /// Raw frame bytes of those newly folded lines before compression.
     pub agent_log_bytes_before: u64,
-    /// Compressed segment bytes after compression.
+    /// Compressed bytes those newly folded lines occupy after folding.
     pub agent_log_bytes_after: u64,
 }
 
@@ -175,14 +175,21 @@ struct ColdSegment {
     max_ts: Option<u64>,
 }
 
-/// Counts from one agent-log compression pass.
+/// Counts from one agent-log compression pass. All fields count only
+/// the lines NEWLY folded in this pass (matching the audit-event half
+/// of the report, which counts only newly compressed rows) — lines
+/// already cold from an earlier pass are not re-counted, so a daily
+/// run that folds one line into a large segment reports one line, not
+/// the whole segment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentLogCompressionStats {
-    /// Lines folded into cold segments.
+    /// Lines folded into cold segments this pass.
     pub lines: u64,
-    /// Uncompressed line bytes before folding (whole rebuilt segments).
+    /// Raw frame-stream bytes of those newly folded lines before
+    /// compression (length prefix + UTF-8 bytes per line).
     pub bytes_before: u64,
-    /// Compressed segment bytes after folding.
+    /// Compressed bytes those newly folded lines occupy (the zstd size
+    /// of the segment built from just this pass's folded lines).
     pub bytes_after: u64,
 }
 
@@ -459,6 +466,8 @@ impl AgentLogBuffer {
     /// Already-cold lines stay compressed. Idempotent: lines that moved
     /// in an earlier pass are no longer hot, and only `[ts]`-prefixed
     /// (old) lines are ever folded — unprefixed lines always stay hot.
+    /// Stats count only the lines newly folded THIS pass (see
+    /// [`AgentLogCompressionStats`]).
     pub async fn compress_older_than(&self, cutoff: u64) -> Result<AgentLogCompressionStats> {
         let mut logs = self.inner.lock().await;
         let mut stats = AgentLogCompressionStats::default();
@@ -467,7 +476,12 @@ impl AgentLogBuffer {
             if !has_aged {
                 continue;
             }
-            let cold_lines = buf.cold_lines()?;
+            let folded: Vec<String> = buf
+                .hot
+                .iter()
+                .filter(|l| line_is_old(l, cutoff))
+                .cloned()
+                .collect();
             let recent: Vec<String> = buf
                 .hot
                 .iter()
@@ -475,12 +489,15 @@ impl AgentLogBuffer {
                 .cloned()
                 .collect();
 
-            let mut all = cold_lines;
-            all.extend(buf.hot.iter().filter(|l| line_is_old(l, cutoff)).cloned());
-            let (segment, raw_len) = build_cold(all)?;
-            stats.lines += segment.line_count as u64;
-            stats.bytes_before += raw_len as u64;
-            stats.bytes_after += segment.bytes.len() as u64;
+            let mut all = buf.cold_lines()?;
+            all.extend(folded.iter().cloned());
+            let (segment, _whole_raw_len) = build_cold(all)?;
+            // Byte totals are scoped to the newly folded lines, not the
+            // whole rebuilt segment (which re-holds already-cold lines).
+            let (folded_segment, folded_raw_len) = build_cold(folded)?;
+            stats.lines += folded_segment.line_count as u64;
+            stats.bytes_before += folded_raw_len as u64;
+            stats.bytes_after += folded_segment.bytes.len() as u64;
             buf.cold = Some(segment);
             buf.hot = recent;
         }
@@ -551,11 +568,14 @@ mod tests {
 
         let cutoff = t - 7 * DAY;
         let stats = buf.compress_older_than(cutoff).await.unwrap();
-        // Both old lines moved; the whole rebuilt segment counts.
+        // Both old lines are newly folded this pass (fresh buffer, no
+        // pre-existing cold segment), so all counts are scoped to them.
         assert_eq!(stats.lines, 2);
+        let folded = vec![old_a.clone(), old_b.clone()];
+        assert_eq!(stats.bytes_before, encode_frames(&folded).len() as u64);
         assert!(
             stats.bytes_before > stats.bytes_after,
-            "zstd must shrink the segment"
+            "zstd must shrink the folded lines"
         );
         // Real compression happened: the cold blob is not the raw frames.
         assert!(stats.bytes_after > 0);
@@ -582,7 +602,8 @@ mod tests {
         let buf = AgentLogBuffer::new();
         let t = now();
         let first = format!("[{}] old one", t - 10 * DAY);
-        seed(&buf, "agent-1", &[first.clone()]).await;
+        let first_pass = vec![first.clone()];
+        seed(&buf, "agent-1", &first_pass).await;
         buf.compress_older_than(t - 7 * DAY).await.unwrap();
 
         // A later line ages out in a second pass; the segment grows.
@@ -590,7 +611,15 @@ mod tests {
         let fresh = format!("[{}] fresh", t);
         seed(&buf, "agent-1", &[second.clone(), fresh.clone()]).await;
         let stats = buf.compress_older_than(t - 7 * DAY).await.unwrap();
-        assert_eq!(stats.lines, 2, "whole rebuilt segment counts");
+        // Only the NEWLY folded line counts — the line already cold from
+        // the first pass is not re-counted, and the byte totals are
+        // scoped to the new line's frames, not the whole rebuilt segment.
+        assert_eq!(stats.lines, 1, "only newly folded lines count");
+        let newly_folded = vec![second.clone()];
+        assert_eq!(
+            stats.bytes_before,
+            encode_frames(&newly_folded).len() as u64
+        );
         assert_eq!(
             buf.replay("agent-1").await.unwrap(),
             vec![first, second, fresh]
@@ -687,7 +716,7 @@ mod tests {
         let t = now();
         let old_ts = t - 10 * DAY;
         for i in 0..MAX_LINES_PER_AGENT {
-            buf.append("agent-1".to_string(), format!["[{}] cold line {}", old_ts, i])
+            buf.append("agent-1".to_string(), format!("[{}] cold line {}", old_ts, i))
                 .await;
         }
         buf.compress_older_than(t - 7 * DAY).await.unwrap();
