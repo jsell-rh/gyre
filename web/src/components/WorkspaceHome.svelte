@@ -5713,7 +5713,7 @@
     color: var(--color-text);
   }
 
-  .rules-version {
+  .rule-version {
     margin-left: auto;
     font-size: var(--text-xs);
     color: var(--color-text-muted);
