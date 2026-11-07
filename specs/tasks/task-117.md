@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["013a871a444b20079a21ea01843ddd36540b9222", "e5b481de02a551664a7bece73d7423fc0be6df30"]
 ---
 
 ## Spec Excerpt
@@ -118,12 +118,12 @@ Read `specs/system/agent-runtime.md` §3 (Compute Target Model) in its entirety.
 ## Shipped
 
 Implementation commits `02966511`...`2b26880` (merge repair `c79542d8`),
-review-repair commits `1fc4470b` and `d404a439`, the `6a9739e`/`722179f0`
-base merges (`976b339a`, `7e672231`), and the task-092 base merge
-`b30c8546` (web/dist rebuilt from merged sources) carry the work below.
-Evidence is saved under `/tmp/stage/review-evidence/` (source SHA,
-per-suite logs with exit codes, enforced-gate log, rustfmt/clippy diff
-checks, flake.lock verification methodology).
+review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
+(round 4), the `6a9739e`/`722179f0` base merges (`976b339a`,
+`7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
+from merged sources), and the round-4 base merge `a2bdf9a2` carry the
+work below. Evidence is saved under `/tmp/stage/review-evidence/`
+(per-round subdirectories; round 4 in `round4/`).
 
 ### Behavior
 
@@ -135,7 +135,12 @@ checks, flake.lock verification methodology).
   --detach` with the spec security defaults enforced at spawn time:
   `--network=none` (opt-in bridge via config), `--memory=2g`,
   `--pids-limit=512`, `--user=65534:65534`; worktree mounted as a volume;
-  runtime auto-detection (docker -> podman).
+  runtime auto-detection (docker -> podman). Since round 4 the argv
+  construction is factored into `ContainerTarget::docker_run_args`
+  (same pattern as `SshDockerTarget`) and `spawn_process` executes
+  exactly that vector, so the defaults are pinned by tests against
+  both the built argv and the argv the runtime binary actually
+  received (stub docker/podman spawn tests).
 - **SSH backend** — `SshDockerTarget` (`ssh.rs`) shells out to `ssh` with
   batch mode + bounded connect timeout and runs `docker run` on the remote
   host with the same security defaults; every remote argument is
@@ -230,31 +235,49 @@ Round 3 (`d404a439`, findings from review `00e38774`):
   full web vitest: 65 files, 1624 passed / 41 skipped) rather than taking
   either side's stale bundle.
 
+Round 4 (`e5b481de`, finding from review of `536c76ad`):
+
+- **Container security defaults were unpinned by executing tests** —
+  the `container.rs` `security_default_*` tests restated the
+  `unwrap_or(<default>)` fallbacks against struct fields (mirrored
+  logic), so the reviewer's mutation — replacing the four unconditional
+  security args in `spawn_process` with `if let Some(...)` guarded
+  versions, letting default-config containers spawn as root with host
+  networking — left every suite green. Fixed by (a) factoring the
+  `docker run` argv construction into `ContainerTarget::docker_run_args`
+  and spawning through it, (b) replacing the six mirrored tests with
+  real-vector assertions (defaults, structural flags, and overrides
+  with no-linger-on-default checks), and (c) two end-to-end tests that
+  drive the real `spawn_process` through stub `docker` and `podman`
+  binaries (PATH-scoped, serialized via a `PATH_LOCK`) and assert the
+  four flags on the argv the stub actually executed. Mutation-checked:
+  the reviewer's exact mutation now fails
+  `docker_run_args_enforce_security_defaults` and both stub tests
+  (transcript in `round4/mutation-check.log`, exit 101).
+
 ### Test evidence
 
-All logs with exit codes under `/tmp/stage/review-evidence/` (source
-`d404a439`):
+All logs with exit codes under `/tmp/stage/review-evidence/`
+(rounds 2–3 at source `d404a439`, round 4 in `round4/` at source
+`e5b481de`):
 
-- `cargo test -p gyre-server --lib api::spawn` -> **39 passed, 0 failed**
-  (round-3 addition: the k8s workingDir regression test; includes the 5
-  secret-delivery and 2 cross-tenant rejection tests from round 2).
-- `cargo test -p gyre-adapters compute --lib` -> **41 passed, 0 failed**
-  (4 ignored: daemon-required Docker/SSH integration tests; no docker,
-  podman, kubectl, or nix binary exists in this sandbox).
-- `cargo test -p gyre-server --lib compute_target` -> **24 passed**.
-- Web vitest on the merged sources (merge-resolution probe):
-  **1624 passed, 41 skipped, 0 failed** (65 files).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` -> clean;
-  `python3 scripts/check-clippy-diff.py HEAD^1` -> clean (changed lines).
-- Enforced static gates at `d404a439` (`enforced-gates.log`): arch,
-  hierarchy, abac-route-registry, abac-exempt-handlers, mcp-write-tools,
-  migration-versions, byte-slice-truncation, dead-message-kinds,
-  mem-port-contracts, in-memory-state-stores, migration-sql-portability,
+- Round 4 (`e5b481de`): `cargo test -p gyre-adapters compute --lib` ->
+  **39 passed, 0 failed** (4 ignored: daemon-required integration
+  tests; the six mirrored security tests were replaced by four
+  mutation-killing argv/stub tests); `cargo test -p gyre-server --lib
+  api::spawn` -> **39 passed, 0 failed**;
+  `check-rustfmt-diff.py`/`check-clippy-diff.py` vs `HEAD^1` -> clean.
+- Earlier rounds (`d404a439`): `cargo test -p gyre-server --lib
+  compute_target` -> **24 passed**; web vitest on the merged sources
+  -> **1624 passed, 41 skipped, 0 failed** (65 files); enforced static
+  gates all exit 0 (arch, hierarchy, abac-route-registry,
+  abac-exempt-handlers, mcp-write-tools, migration-versions,
+  byte-slice-truncation, dead-message-kinds, mem-port-contracts,
+  in-memory-state-stores, migration-sql-portability,
   relative-path-defaults, fail-open-ref-resolution,
   fabricated-scope-defaults, lossy-secret-conversion,
   scope-literal-defaults, inert-enforcement, forged-scope-fields,
   forwarded-header-trust, unbounded-external-http,
-  sandbox-sweep-artifacts — all exit 0; task-commit-attribution green
-  after the frontmatter update below; no new exemption entries.
+  sandbox-sweep-artifacts); no new exemption entries.
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
