@@ -6,8 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
-commits:
-  - 0766a167
+commits: ["0766a16799c0cd414080d98b0cad5f56e561e7ee"]
 ---
 
 ## Spec Excerpt
