@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "084040ecc21bf806644630f653fdbeccdd31749d"]
 ---
 
 ## Authority and Scope
@@ -82,7 +82,12 @@ is claimed here, per section, with the verifying evidence below.
   resolves the entity's repo, derives the owning workspace from
   `workspace_id`/repo lookup, switches `currentWorkspace` to it (error toast
   when the workspace is not in the caller's membership — no fabricated scope
-  identity), persists the selection, and reloads scoped data. The Specs
+  identity), persists the selection, and reloads scoped data — including
+  when the app was loaded directly at `/all` (bookmark, shared deep link,
+  refresh): `goToEntityDetail` resolves the owning workspace from the
+  membership list when no workspace is selected, and surfaces an error
+  toast when no owner can be determined (repair `084040ecc`, below). The
+  Specs
   stat-card counts derive from the same scoped list. Tenant settings
   (`/all/settings`) and tenant agent-rules stay admin-gated
   (`onSettings`/`onManageAgentRules` undefined for non-admins).
@@ -122,6 +127,24 @@ is claimed here, per section, with the verifying evidence below.
 
 ### Verification
 
+- `/all` page-load entry repair (`084040ecc`, closing the review finding
+  from the `9ab2a0e0` round): a full page load at `/all` leaves
+  `currentWorkspace` null, and `goToEntityDetail`'s old
+  `if (!currentWorkspace) return;` made every entity-item click in the
+  `/all` dashboard a silent no-op. The owner is now resolved from the
+  caller's membership (`data.workspace_id ?? entityRepo.workspace_id`,
+  falling back to the current selection only when the item carries no
+  owner); an undeterminable owner surfaces the existing
+  "Workspace not found for this item" error toast. Regression
+  `web/src/__tests__/CrossWorkspaceEntry.test.js` (real App + real
+  CrossWorkspaceHome at the page-load `/all` path): a decision-item click
+  attributed to ws-2/repo-2 navigates to
+  `/workspaces/billing/r/billing-svc/tasks/t-1` with `wsId`/`repoName`/
+  `repoTab`/`entityId` history state and the persisted workspace
+  selection, and an owner outside the caller's membership surfaces the
+  rendered error toast (`role=alert`), stays at `/all`, and persists no
+  scope identity. Mutation probe — restoring the original early return
+  fails both tests.
 - Specs-scope repair (`c38c8e003`, closing review finding `1d994c8f`):
   `list_specs` honors `?workspace_id=` (Rust test
   `list_specs_honors_workspace_id_scope`: ws-a sees its own + repo-scoped
