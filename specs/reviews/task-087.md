@@ -66,3 +66,42 @@ Independently re-checked each Round 1 finding against the current diff. All thre
 ## Verdict
 
 All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**
+
+## Round 3 — independent review (base 1d9547de → candidate d132816d)
+
+Reviewed the rebase-repair candidate (merge 520165e8 + rustfmt fix 115ed5ae + bookkeeping d5e481d1/d132816d) against base 1d9547de. The prior verification round's only real defect was the changed-lines rustfmt gate on `api/traces.rs`, `mem.rs`, `otlp_receiver.rs`.
+
+### Gates and checks (all run at the candidate)
+
+- `scripts/check-rustfmt-diff.py 1d9547de` — clean (4 Rust files), exit 0. The exact prior failure is fixed.
+- `check-abac-exempt-handlers.sh` OK (88 handlers) and `check-unwritten-store-fields.sh` OK — both task-087-owned exemption entries were **removed** (exemption files shrank, not grew); `check-task-commit-attribution.sh`, `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`, `check-forged-scope-fields.sh`, `check-byte-slice-truncation.sh` all OK.
+
+### Focused suites (all pass)
+
+gyre-common trace 8/8; gyre-server `api::traces` 6/6, `mem::trace` 9/9, `otlp_receiver` 10/10 (incl. `grpc_receiver_accepts_export` — the real tonic receiver bound a loopback listener and accepted a real export in this sandbox — and the new `resolve_graph_linkage_resolves_http_function_db_spans`), `gate_executor` 24/24 (9 trace_capture), `mcp_trace_resource` 3/3, `merging_mr_promotes_gate_trace` 1/1; gyre-adapters sqlite trace 7/7 (PascalCase `as_str` does not break persistence — rows read back via case-insensitive `parse()`); web `npm ci` + vitest DetailPanel/NodeDetailPanel 92/92.
+
+### Mutation probes (tests verified load-bearing)
+
+- Neutralizing the F1 tenant guard (`if false && workspace.tenant_id != auth.tenant_id`) makes `span_payload_forbids_cross_tenant_access` fail (200 ≠ 403) — real enforcement, hard test.
+- Reverting the F3 waterfall comparison to pre-fix lowercase-only makes the PascalCase regression test fail (1/92) — hard test.
+- Both experiments restored; working tree verified byte-identical to the candidate afterwards.
+
+### Independent confirmation of the repairs
+
+- F1: handler is `Path(span_id)` only (spec-exact route); span → trace → MR → workspace → tenant compare against token-derived `auth.tenant_id` (JWT claim, auth.rs:309-311) → 403; missing workspace 404 (fail-closed); route exempt in the resolver with per-handler auth as required.
+- F2: mem `store()` writes payload rows from raw summaries (sqlite `build_payload_blob` semantics mirrored: none+none → no row, empty side → None), cascades replacement, truncates stored summaries to 4KB on a char boundary (same idiom as sqlite/trace.rs:122-133); lock ordering store → permanent → payloads consistent (no deadlock).
+- F3: `as_str()` PascalCase matches the HSI §3a example (spec :499/:505); serde aliases + case-insensitive `parse` keep legacy lowercase rows loadable; REST and `trace://` MCP share `assemble_gate_trace`.
+- Lifecycle wiring present: `promote_to_attestation` on merge (merge_processor.rs:694,1518), `delete_by_mr` on close (api/repos.rs:325, api/merge_requests.rs:846, api/specs.rs:889).
+
+### Informational (non-blocking)
+
+- `get_span_payload` scans all MRs' traces to locate the containing trace (O(N) repo calls) — fine for an observational drill-down endpoint.
+- Cross-tenant span request returns 403 (existence oracle) rather than 404 — same house pattern as users.rs:354-357.
+- mem adapter does not enforce the SQLite 1MB payload-blob cap; the port declares no method-level cap constraint and mem is a non-durable stand-in.
+- The Shipped notes cite FlowCanvas/MoldableView/FlowRenderer span-status handling; those files were deleted by the upstream rebase — the consumers that exist (DetailPanel, ExplorerCanvas, NodeDetailPanel) are all fixed and tested. Stale doc reference only.
+
+Evidence: `/tmp/stage/review-evidence/task-087-round3.md` (commands, outputs, mutation probes).
+
+## Round 3 verdict
+
+All prior findings remain repaired with real, mutation-verified enforcement; the rustfmt gate failure is fixed; no new defects; exemption surface shrank. **Approved.**
