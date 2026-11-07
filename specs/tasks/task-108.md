@@ -68,16 +68,16 @@ From `observability.md` §Audit Event Types:
 
 ## Acceptance Criteria
 
-- [x] Admin can request impersonation via POST /api/v1/admin/impersonate
-- [x] Target user receives approval code
-- [x] Target user can approve/deny the impersonation
-- [x] Impersonation token issued with correct claims on approval
-- [x] Target user notified when impersonation starts
-- [x] Full audit trail: ImpersonationStarted/Ended events emitted
-- [x] All actions during impersonation attributed to impersonator in audit
-- [x] Impersonation auto-expires after TTL
-- [x] Only Admin role can impersonate
-- [x] `cargo test --all` passes (this round, focused: 9 impersonation tests, abac 30, auth 53, ws 82, notification 21, all green after the base merge)
+- [ ] Admin can request impersonation via POST /api/v1/admin/impersonate
+- [ ] Target user receives approval code
+- [ ] Target user can approve/deny the impersonation
+- [ ] Impersonation token issued with correct claims on approval
+- [ ] Target user notified when impersonation starts
+- [ ] Full audit trail: ImpersonationStarted/Ended events emitted
+- [ ] All actions during impersonation attributed to impersonator in audit
+- [ ] Impersonation auto-expires after TTL
+- [ ] Only Admin role can impersonate
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -85,7 +85,11 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. This round re-verified the production fix unchanged after the branch absorbed the new assignment base.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
+
+### This round (contract restoration after base merge)
+
+The branch absorbed the new assignment base `4d6759a0` (merge `00fedd04a`); the impersonation surface had **zero source drift** between the previously verified base `233664cf` and the new base (empty diff across `api/impersonation.rs`, `impersonation.rs`, `auth.rs`, `abac_middleware.rs`, `api/mod.rs`, `ws.rs`, `gyre-domain/src`). The production fix is preserved unchanged. Focused re-verification on the merged head: `cargo test -p gyre-server --lib api::impersonation` — 9/9 green (full flow with notification + audit start, only-target-with-code approval, hashed-at-rest code, authorization constraints, session end revocation, expiry sweep, action attribution/counting, non-impersonator end rejection, notification round-trip); `auth::` 37/37 green; `abac` 30/30 green. Evidence: `/tmp/stage/review-evidence/task-108-focused-tests.txt`. Full workspace suites, architecture checks, all-target Clippy, and GitHub CI are owned by the verification stage.
 
 ### Flow (intent -> signed mandate -> receipt)
 
@@ -117,8 +121,3 @@ EdDSA JWT with `sub` = target user (permissions match), `impersonator_id`/`targe
 - Impersonating another Admin is prohibited -- `UserRole` has no SuperAdmin variant, so the plan's "requires SuperAdmin **or is prohibited**" resolves to prohibited.
 - Max one active session per admin (409); no requesting/approving/denying while impersonated (prevents privilege chaining); cannot impersonate yourself.
 - `impersonation_expiry` background job (30 s interval, registered in the job registry and spawned from main) ends expired sessions and marks stale pending requests; JWT expiry is enforced at validation time regardless of the sweep.
-
-### Verification (this round)
-
-- The branch merged the new assignment base `233664cf` (task-087 trace-capture work) in `d1d31b8b`; the merge touched only trace/OTLP/mem-store files and left every impersonation source file unchanged (verified via `git diff` between the pre-merge checkpoint and HEAD scoped to `crates/`).
-- Focused probes after the merge, all exit 0: `cargo test -p gyre-server --lib api::impersonation` (9 passed), `abac` (30), `auth` (53), `ws::` (82), `notification` (21). Mechanical checks on the task's surface all pass: `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`. Evidence saved under `/tmp/stage/review-evidence/task-108-round-verify.log`.
