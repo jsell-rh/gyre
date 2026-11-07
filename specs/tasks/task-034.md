@@ -2,7 +2,7 @@
 title: "Explorer Agent Self-Check Dry-Run Loop"
 spec_ref: "explorer-implementation.md §Self-Check Loop"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections: []
 commits: ["eff64e31dd1d0b3fccb66d7ace299e7f32e42bbe"]
 ---
