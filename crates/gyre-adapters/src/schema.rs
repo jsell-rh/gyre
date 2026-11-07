@@ -871,6 +871,7 @@ diesel::table! {
         approval_status -> Text,
         approved_by -> Nullable<Text>,
         approved_at -> Nullable<BigInt>,
+        approved_content_hash -> Nullable<Text>,
         created_by -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,

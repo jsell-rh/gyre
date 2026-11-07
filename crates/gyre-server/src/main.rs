@@ -1,8 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
-    abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
-    procfs_monitor, register_default_compute_target, seed_builtin_meta_specs, siem,
-    spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
+    abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
+    merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
+    siem, spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
     spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
@@ -42,6 +42,10 @@ async fn main() -> Result<()> {
 
     let state = build_state(&auth_token, &base_url, jwt_config);
 
+    // Materialize the default Tenant entity before any tenant-scoped seeding
+    // (hierarchy-enforcement.md §1 Bootstrap Behavior).
+    bootstrap_default_tenant(&state).await;
+
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
     abac_middleware::init_resolver();
     abac_middleware::seed_builtin_policies(&state).await;
@@ -64,6 +68,14 @@ async fn main() -> Result<()> {
     jobs::spawn_job(
         Arc::clone(&state.job_registry),
         "retention_cleanup".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Meta-spec conformance sweep (meta-spec-reconciliation.md §10) — daily by
+    // default, configurable via GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_conformance_sweep".to_string(),
         Arc::clone(&state),
     );
 
