@@ -156,15 +156,26 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore
+### Re-verification after contract restore (round 2)
 
-The checkout restored the assigned task document; the production fix
-(commits 0766a167, a112eda20, 89fa5633) survived the base merge intact —
-all 7 feature files and the coverage-matrix row 23 (implemented) are
-present at HEAD, and `web/` sources are untouched by the merge. Fresh
-focused probes on this branch: `npx vitest run` on the three lens test
-files — 189/189 passed; `cargo test -p gyre-server --lib api::gates` —
-7 passed (incl. `list_spec_approvals_includes_rejection_fields`).
-Logs retained under /tmp/stage/review-evidence (task090-lens-tests.log,
-task090-gates-tests.log). No production code changes were needed this
-round; only this task document was re-recorded.
+The executor again restored the assigned task document (assigned base
+36620aed) and staged a base merge into this branch. Resolved this round:
+
+- **Merge resolution only, no production code changes.** The single
+  conflict was the HSI coverage-matrix summary line; the merged matrix
+  keeps both genuine completions — row 14 "2a. Policies ↔ Trust Level
+  Integration" (task-084, completed in the assignment base) and row 23
+  "Three Lenses" (task-090, this task) — so the summary line now reads
+  18/35 (20 n/a, 0 not-started, 17 task-assigned, 11 implemented,
+  7 verified), matching the actual merged row statuses.
+- **Production fix intact at HEAD:** all lens feature files
+  (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
+  gates.rs rejection fields) are present and untouched by this round.
+- **Fresh focused probes on this branch:** `npx vitest run` on the three
+  lens test files — 189/189 passed;
+  `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
+  `list_spec_approvals_includes_rejection_fields`). Logs retained under
+  /tmp/stage/review-evidence (task090-lens-tests.log,
+  task090-gates-tests.log).
+- This task document was re-recorded (progress ready-for-review,
+  acceptance boxes re-checked, this Shipped section restored).
