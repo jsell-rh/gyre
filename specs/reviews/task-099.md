@@ -43,3 +43,32 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 8 (rebase-resolution review of c61b884af)
+
+Candidate: `c61b884af` = merge `30c30ca8` (base `4d6759a0` into the branch, three conflicts resolved) + two `specs/tasks/task-099.md` frontmatter process commits. Verdict: **approved**.
+
+### Rebase resolution (this round's subject)
+
+- `git diff 30c30ca8^1 30c30ca8 -- crates/gyre-cli/` is empty: the merge kept the branch's bootstrap implementation (main.rs, bootstrap.rs, client.rs) exactly; the base contributed no competing CLI code, so the conflict resolution in main.rs is the minimal correct one.
+- `inert-enforcement-exemptions.txt` dropped both sides' entries; both fix sets verified present in the merged tree: `merge_processor.rs:1544/1576` bind and branch on `evaluate_attestation_abac` results (base's task-077 revision), and `api/orchestrator.rs` contains zero `validate_persona` occurrences (branch's task-099 revision). `check-inert-enforcement.sh` exits 0 — the resolution is minimal, no unexempted violation, no stale entry needed.
+- `relative-path-defaults-exemptions.txt` dropped the branch's `spawn.rs:600` entry; the merged spawn.rs (base's task-077 F6 rewrite) contains no `"./` literal. `check-relative-path-defaults.sh` exits 0.
+
+### Independent verification of the task contract
+
+- **Live e2e, dev mode** (real server from the merged tree, in-memory DB, temp repos dir): `gyre bootstrap --dev --repo gyre-demo --repo-path … --starter-kit` — health check, tenant `dev`, workspace `default`, repo, 4 personas pre-approved, starter kit written (all 5 files on disk, committed, force-pushed), **"Spec manifest registered - 1 spec(s)"** (the F4/F5 fix is real server state, not a print), 3 gates detected from Cargo.toml + check-arch.sh, orchestrator spawn with truthful launch-failure reporting (F3 fix observed live: no agent binary in the sandbox, reported as launch_failed + auto-restart guidance, never "running"), summary with all IDs and URLs, exit 0.
+- **Live e2e, admin flow**: `--tenant "Acme Corp" --admin-user jsell` — tenant created, admin + API key minted, config saved to `~/.gyre/config`, all subsequent steps succeeded authenticating as the new admin via its key; full re-run resumes (reuse by slug/name, saved-credential reuse, persona skip, AlreadyLive orchestrator kept), exit 0. Failure paths: server down → exit 1; `--dev --tenant` → rejected; missing `--tenant` → rejected.
+- **Suites** (`/tmp/stage/bin/cargo`, focused): gyre-cli 131+1; server lib **1363 passed, 0 failed** (full lib suite); api::users 11; api::orchestrator 11; ws:: 83; merge_processor 60. `cargo check`/`build` exit 0.
+- **Check scripts** all exit 0 on the merged tree: arch, abac-route-registry, abac-exempt-handlers, mem-port-contracts, migration-versions, fabricated-scope-defaults, scope-literal-defaults, forged-scope-fields, unbounded-external-http, task-commit-attribution, inert-enforcement, relative-path-defaults. `check-rustfmt-diff.py` exits 0 against both the assigned base and `HEAD^1`.
+- **Pre-existing failures reproduced identically on the assigned base** (throwaway worktree of `4d6759a0`): `check-assertionless-tests` exit 2 and `check-cli-spec-parity` exit 1 (spec_assist display, main.rs:1235) — base-side, not candidate regressions.
+- **Round-1 F1–F7 fixes re-verified in code**: tenant binding at creation with fail-closed API-key auth (auth.rs:610-635) and full-router key test; persona resolution through `state.personas` scope chain with Approved required and `agent.persona_id` persisted (migrations 000056/000057); truthful launch status; real push+sync with schema-valid starter manifest (`approval: {mode: human_only}`); `--starter-kit` requires `--repo-path`.
+
+### Non-blocking observations
+
+- `create_user` validates `req.tenant_id` for existence but not against the caller's tenant. Not an escalation under the platform's standing privilege model: any `UserRole::Admin` holder already matches the M34 priority-900 allow-all policy (`subject.global_role` derives from `roles.first()`), so the endpoint grants nothing beyond what Admin already has; consistent with the round-1 F1 fix scope.
+- Three migration dirs share sequence number 000056 (`spec_assertion_results`, `user_tenant_id`, `meta_spec_approved_content_hash`) — pre-existing pattern on both parents; Diesel versions (full date-prefixed prefix) are distinct and `check-migration-versions.sh` exits 0.
+- Orchestrator process launch fails in the review sandbox (no agent command binary) — environmental, and the truthful-reporting path is the shipped behavior.
+
+Evidence: `/tmp/stage/review-evidence/` (README.md with per-probe logs, commands, exit codes).
+
+— Reviewer, 2026-11-07
