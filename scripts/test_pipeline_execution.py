@@ -288,6 +288,26 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(updates, {})
         self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
 
+    def test_cleanup_purges_non_implementers_without_indexing_their_checkout(self):
+        for stage in ('review','verify'):
+            self.store.reserve('finished-'+stage,self.work,self.claim['token'],'sandbox',10)
+        self.store.retry(self.work,self.claim['token'],{'message':'interrupted'},delay=0)
+        for stage in ('review','verify'):
+            with self.subTest(stage=stage):
+                resource='finished-'+stage
+                self.store.db.execute('UPDATE work SET stage=? WHERE id=?',(stage,self.work))
+                ident=self.store.enqueue('cleanup','task-001','g',{'resource':resource})
+                execution=Execution(self.store,self.store.claim('cleanup','cleaner',ident=ident))
+                item={'name':resource,'phase':'Ready','labels':{'gyre.dev/pipeline':self.store.setting('owner')}}
+                with patch.object(execution,'login'),patch('pipeline.stages.gateway.inventory',side_effect=[[item],[],[]]),patch.object(execution,'remote',return_value=subprocess.CompletedProcess([],0,'bounded log','')) as remote,patch.object(execution,'command',side_effect=AssertionError('non-implementer must not capture source')),patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')) as operations:
+                    _,updates,_=cleanup(execution,self.store.task('task-001'))
+                self.assertEqual(updates,{})
+                self.assertEqual(remote.call_count,1)
+                self.assertIn('tail',remote.call_args.args)
+                operations.assert_called_once_with('sandbox','delete',resource,timeout=180,check=False)
+                self.assertEqual(self.store.db.execute('SELECT state FROM resources WHERE name=?',(resource,)).fetchone()[0],'absent')
+                self.store.finish(ident,execution.claim['token'],{}, {})
+
     def test_cleanup_captures_but_never_promotes_explicitly_fenced_source(self):
         self.store.reserve('fenced-pod', self.work, self.claim['token'], 'sandbox', 1)
         self.store.resource_state('fenced-pod', 'absent')
