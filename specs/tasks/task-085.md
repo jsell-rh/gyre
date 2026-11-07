@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §2 Trust Suggestions"
-commits: []
+commits: ["dfdd6cdeb"]
 ---
 
 ## Spec Excerpt
