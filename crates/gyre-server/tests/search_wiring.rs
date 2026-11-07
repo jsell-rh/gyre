@@ -197,7 +197,9 @@ async fn sqlite_url_wires_fts5_search_port() {
     assert!(other_tenant.is_empty(), "cross-tenant leak at the port");
 
     // ── Router-level: real API surface over the same wired port ───────────
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app = build_router(Arc::clone(&state));
 
     // Real task-create callsite indexes into the same backend, scoped to the
@@ -272,7 +274,9 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     let _guard = ENV_LOCK.lock().await;
     let (_dir, _url) = sqlite_url();
     let state = build_state(TOKEN, "http://localhost:3000", None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
 
     // Two workspaces in the caller's tenant, each with documents matching
     // "needle"; ws-a additionally splits its docs across two repos.
