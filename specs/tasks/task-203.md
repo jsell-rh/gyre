@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "790b031dde07c45674902680b69ca91e59133b8f"]
 ---
 
 ## Spec Excerpt
@@ -72,7 +72,7 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is now access-scoped end to end (search.md §Access Scoping), continuing the interrupted checkpoint `a18e6e25` on the merged tree (`5f280a5f`).
+Search is access-scoped end to end (search.md §Access Scoping), continuing the interrupted checkpoint `a18e6e25` on the merged tree, plus the verification repair `790b031d`.
 
 ### Behavior
 
@@ -93,3 +93,7 @@ Fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web code touched), v
 - `bash scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-abac-route-registry.sh` — all exit 0.
 
 Full workspace suites, all-target Clippy, and GitHub CI are deferred to verification per assignment scope.
+
+### Verification repair (`790b031d`)
+
+Durable finding `3f2e4f62`: the verification sandbox failed to compile the `search_wiring` test binary — `E0015: cannot call non-const associated function tokio::sync::Mutex::<()>::new in statics` — because `static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(())` depends on `Mutex::new` being `const fn`, which does not hold on the verification toolchain's tokio build. Fixed by initializing the env-var lock through `std::sync::LazyLock` (the pattern already used by `crates/gyre-adapters/src/call_graph.rs`), so no const call sits in the static initializer; test logic unchanged. Everything else in that verification run passed (arch lints, ABAC registry, mem port contracts, web build); the svelte a11y/unused-CSS output in the log tail is warnings-only. Post-fix probes in this sandbox, `SKIP_WEB_BUILD=1` via `/tmp/stage/bin/cargo` (notes in `/tmp/stage/review-evidence/task-203-e0015-repair.md`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `rustfmt --check` on the changed file — clean.
