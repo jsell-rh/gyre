@@ -154,27 +154,27 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore (round 8)
+### Re-verification after contract restore (round 9)
 
 The executor again restored the assigned task document (repair id
-c463b1a7715e4cd39e7616f08fd8515f, assigned base 2badce49, candidate head
-dd472421) — this is the eighth such restore; each round the only
+3cea1d6e8be34c9497a018d370d462ad, assigned base 2badce49, candidate head
+f5920927) — this is the ninth such restore; each round the only
 working-tree delta is the task document itself. Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
   gates.rs rejection fields) is intact at HEAD from product-surface commit
-  0766a167, which is an ancestor of this branch head (via merge 4d2635b).
-  The only drift to ExplorerCanvas since that commit is an unrelated
-  span-status robustness fix from another task; lens rendering is unchanged.
+  0766a167, which is an ancestor of this branch head. Lens rendering is
+  unchanged since that commit.
 - **Fresh focused probes on this branch after `npm ci`:**
-  `npx vitest run` on the three lens test files — 189/189 passed
-  (task090-vitest-lenses-r8.log, exit 0);
-  `cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r8.log, exit 0). Logs retained under
-  /tmp/stage/review-evidence with exit codes.
+  `npx vitest run` on the three lens test files — 36/36 passed
+  (lens-rendering 27, ExplorerCanvas.evaluative-lens 4, ExplorerViewLensUrl 5;
+  task090-vitest-lenses-r9.log, exit 0); `ExplorerCanvas.test.js` —
+  157/157 passed (task090-vitest-explorercanvas-r9.log, exit 0);
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
+  (task090-cargo-gates-r9.log, exit 0; no web/dist churn). Logs retained
+  under /tmp/stage/review-evidence with exit codes.
 - Frontmatter re-verified (progress ready-for-review, acceptance boxes
   checked, product-surface commit 0766a167 attributed;
-  scripts/check-task-commit-attribution.sh passes); the working tree is
-  clean — the web/dist churn produced by the cargo build was restored to
-  HEAD, not committed.
+  scripts/check-task-commit-attribution.sh passes against the restored
+  record); the working tree is clean apart from this task document.
