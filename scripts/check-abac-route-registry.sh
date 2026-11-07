@@ -28,7 +28,7 @@
 # 088e7048, converting a hard CI failure into a silent grandfather. The
 # count must never rise; it must shrink as routes are moved into the
 # resolver (delete the entry when you register a route).
-FROZEN_EXEMPTION_COUNT=53
+FROZEN_EXEMPTION_COUNT=52
 FROZEN_DUPLICATE_COUNT=22
 
 #

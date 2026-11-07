@@ -136,6 +136,12 @@ pub struct MetaSpec {
     pub approval_status: MetaSpecApprovalStatus,
     pub approved_by: Option<String>,
     pub approved_at: Option<u64>,
+    /// Content hash (`content_hash` value) covered by the current approval.
+    /// Set when the spec transitions to Approved; used by the §6
+    /// reconciliation trigger to distinguish approving changed content
+    /// (trigger) from re-approving unchanged content (no-op). Never
+    /// derived from the caller.
+    pub approved_content_hash: Option<String>,
     pub created_by: String,
     pub created_at: u64,
     pub updated_at: u64,

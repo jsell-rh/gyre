@@ -24,7 +24,7 @@
 # Exemptions are legacy debt in
 # scripts/fail-open-ref-resolution-exemptions.txt (path:line form,
 # frozen count). Fix by making the site fail closed; never add entries.
-FROZEN_EXEMPTION_COUNT=2
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 
