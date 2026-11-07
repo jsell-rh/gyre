@@ -411,7 +411,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_summary",
-                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.",
+                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats, and call_graph metrics (call_edges_pass1, call_edges_pass2, call_graph_complete — whether semantic call extraction (Pass 2) has completed, per lsp-call-graph.md §8).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -422,7 +422,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_query_dryrun",
-                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Use this to validate queries before sending to the frontend.",
+                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Warns 'Call graph incomplete — blast radius may be underreported' when the query traverses calls edges before semantic call extraction (Pass 2) has completed. Use this to validate queries before sending to the frontend.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1013,7 +1013,7 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_update_task(state: &AppState, args: &Value) -> Value {
+async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> Value {
     let id_str = match require_str(args, "id") {
         Ok(s) => s.to_string(),
         Err(_) => return tool_error("missing required field: id"),
@@ -1052,7 +1052,25 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
     }
     task.updated_at = now_secs();
     match state.tasks.update(&task).await {
-        Ok(()) => tool_result(format!("Updated task {id_str}")),
+        Ok(()) => {
+            // meta-spec-reconciliation.md §11: ReconciliationCompleted /
+            // MetaSpecDriftResolved fire when the last open reconciliation /
+            // drift-review task for a workspace reaches terminal status.
+            if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled)
+                && task.labels.iter().any(|l| {
+                    l == crate::reconciliation::RECONCILIATION_LABEL
+                        || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+                })
+            {
+                crate::reconciliation::maybe_emit_reconciliation_completed(
+                    state,
+                    &task.workspace_id,
+                )
+                .await;
+                crate::reconciliation::maybe_emit_drift_resolved(state, &task.workspace_id).await;
+            }
+            tool_result(format!("Updated task {id_str}"))
+        }
         Err(e) => tool_error(format!("Failed to update task: {e}")),
     }
 }
@@ -2130,7 +2148,21 @@ async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
         Ok(e) => e,
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
-    let summary = gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
+    // lsp-call-graph.md §8: call graph completeness comes from the durable
+    // Pass 2 completion marker, not from edge counts (a toolchain-less run
+    // persists no edges and must not read as "complete").
+    let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+        state.kv_store.as_ref(),
+        &rid,
+        &nodes,
+    )
+    .await;
+    let summary = gyre_domain::view_query_resolver::compute_graph_summary(
+        &repo_id,
+        &nodes,
+        &edges,
+        call_graph_complete,
+    );
     tool_result(serde_json::to_string_pretty(&summary).unwrap_or_default())
 }
 
@@ -2159,7 +2191,20 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
 
-    let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
+    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
+        &query,
+        &nodes,
+        &edges,
+        selected,
+        Some(
+            crate::graph_extraction::call_graph_complete_for_repo(
+                state.kv_store.as_ref(),
+                &rid,
+                &nodes,
+            )
+            .await,
+        ),
+    );
     // §9: the dry-run tool response echoes the query alongside the preview
     // (`{"query": ..., "result": {...}}`); the `result` member carries the
     // §23 DryRunResult shape.
@@ -5300,6 +5345,240 @@ mod tests {
                 .iter()
                 .any(|w| w.as_str().unwrap().contains("Scope matched 0 nodes")),
             "empty scope must warn over MCP, got: {text}"
+        );
+    }
+
+    /// lsp-call-graph.md §7–8 (task-076): `graph_summary` must report
+    /// per-pass `Calls`-edge counts (Pass 2 edges carry the provenance
+    /// metadata tag) and call graph completeness from the durable Pass 2
+    /// marker in the KV store.
+    #[tokio::test]
+    async fn mcp_graph_summary_call_graph_metrics_tool_call() {
+        let state = test_state();
+        let t = graph_node("repo-t76", "test_foo", NodeType::Function);
+        let a = graph_node("repo-t76", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t76", "fn_b", NodeType::Function);
+        for n in [&t, &a, &b] {
+            state.graph_store.create_node(n.clone()).await.unwrap();
+        }
+        // Pass 1 (syntax) Calls edge: no metadata tag.
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: t.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        // Pass 2 (semantic) Calls edge: provenance tag.
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: b.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string()),
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        // No Pass 2 marker yet → call graph must read as incomplete.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 160,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t76" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(summary["call_graph"]["call_edges_pass1"], 1);
+        assert_eq!(summary["call_graph"]["call_edges_pass2"], 1);
+        assert_eq!(
+            summary["call_graph"]["call_graph_complete"], false,
+            "no Pass 2 marker → incomplete, got: {text}"
+        );
+
+        // Write a fresh Pass 2 completion marker (completed at/after the
+        // nodes' last_seen_at) → complete.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = gyre_common::CallGraphRunRecord {
+            completed_at: now,
+            duration_secs: 1.25,
+            edges_persisted: 1,
+            languages: vec![gyre_common::Language::Go],
+        };
+        state
+            .kv_store
+            .kv_set(
+                crate::graph_extraction::CALL_GRAPH_STATUS_NAMESPACE,
+                "repo-t76",
+                serde_json::to_string(&record).unwrap(),
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 161,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t76" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            summary["call_graph"]["call_graph_complete"], true,
+            "fresh Pass 2 marker → complete, got: {text}"
+        );
+        assert_eq!(summary["call_graph"]["call_edges_pass1"], 1);
+        assert_eq!(summary["call_graph"]["call_edges_pass2"], 1);
+    }
+
+    /// lsp-call-graph.md §8 (task-076): `graph_query_dryrun` must warn that
+    /// the blast radius may be underreported when a calls-traversing query
+    /// runs before Pass 2 (semantic extraction) has completed, and must not
+    /// warn once the completion marker is present.
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_call_graph_warning_tool_call() {
+        let state = test_state();
+        let a = graph_node("repo-t76", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t76", "fn_b", NodeType::Function);
+        state.graph_store.create_node(a.clone()).await.unwrap();
+        state.graph_store.create_node(b.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: b.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let blast_radius = json!({
+            "scope": {
+                "type": "focus",
+                "node": "fn_a",
+                "edges": ["calls"],
+                "direction": "incoming",
+                "depth": 5
+            }
+        });
+
+        // No marker → warning.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 162,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t76",
+                        "query": blast_radius
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            envelope["result"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Call graph incomplete")),
+            "calls query without Pass 2 marker must warn, got: {text}"
+        );
+
+        // Marker present and fresh → no warning.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = gyre_common::CallGraphRunRecord {
+            completed_at: now,
+            duration_secs: 0.5,
+            edges_persisted: 0,
+            languages: vec![],
+        };
+        state
+            .kv_store
+            .kv_set(
+                crate::graph_extraction::CALL_GRAPH_STATUS_NAMESPACE,
+                "repo-t76",
+                serde_json::to_string(&record).unwrap(),
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 163,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t76",
+                        "query": blast_radius
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            !envelope["result"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Call graph incomplete")),
+            "calls query with fresh Pass 2 marker must not warn, got: {text}"
         );
     }
 

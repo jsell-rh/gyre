@@ -20,7 +20,7 @@ pub use attestation::{
     GateAttestation, GateConstraint, InputContent, OutputConstraint, PersonaRef, ScopeConstraint,
     SignedInput, TrustAnchor, TrustAnchorType, VerificationResult,
 };
-pub use call_graph::{CallEdge, Language};
+pub use call_graph::{CallEdge, CallGraphRunRecord, Language, PASS2_EDGE_METADATA};
 pub use completion::{AgentCompletionSummary, Decision};
 pub use conversation::{ConversationProvenance, TurnCommitLink};
 pub use error::GyreError;
