@@ -412,9 +412,11 @@
    *  workspace than the current one (e.g. an item clicked in the /all view),
    *  switch currentWorkspace to the owning workspace first — the URL and every
    *  subsequent query must reflect the actual owning scope, not the scope the
-   *  user happened to be browsing. */
+   *  user happened to be browsing. currentWorkspace may be null (a full page
+   *  load at /all selects no workspace); the owning workspace is then resolved
+   *  from the caller's membership list, and an undeterminable owner surfaces
+   *  as an error rather than a silent no-op. */
   async function goToEntityDetail(entityType, entityId, data) {
-    if (!currentWorkspace) return;
     const d = data ?? {};
     // Capture the mode before the switch below (used in history state for
     // back-nav semantics: entity opened from workspace home returns there).
@@ -444,19 +446,24 @@
       } catch { /* best effort */ }
     }
 
-    // Enter the owning workspace when it differs from the current one (§10
-    // "opening an item must enter its actual owning scope"). The membership
-    // list is the source of truth — no fabricated scope identity.
+    // Enter the owning workspace (§10 "opening an item must enter its actual
+    // owning scope"). The membership list is the source of truth — no
+    // fabricated scope identity. When currentWorkspace is null (page load
+    // directly at /all) or the item lives in another workspace, resolve the
+    // owner from membership; if no owning workspace can be determined,
+    // surface an error instead of silently doing nothing.
     const ownerWsId = d.workspace_id ?? entityRepo?.workspace_id ?? null;
-    if (ownerWsId && ownerWsId !== currentWorkspace.id) {
-      const ownerWs = workspaces.find(w => w.id === ownerWsId);
-      if (!ownerWs) {
-        showToast('Workspace not found for this item', { type: 'error' });
-        return;
-      }
-      currentWorkspace = ownerWs;
-      try { localStorage.setItem('gyre_workspace_id', ownerWs.id); } catch { /* private browsing */ }
-      loadWorkspaceData(ownerWs.id);
+    const targetWs = ownerWsId
+      ? (workspaces.find(w => w.id === ownerWsId) ?? null)
+      : currentWorkspace;
+    if (!targetWs) {
+      showToast('Workspace not found for this item', { type: 'error' });
+      return;
+    }
+    if (targetWs.id !== currentWorkspace?.id) {
+      currentWorkspace = targetWs;
+      try { localStorage.setItem('gyre_workspace_id', targetWs.id); } catch { /* private browsing */ }
+      loadWorkspaceData(targetWs.id);
       currentRepo = null; // re-resolved below under the owning workspace
     }
 
