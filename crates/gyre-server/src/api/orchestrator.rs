@@ -592,6 +592,7 @@ mod tests {
             prompt: "You are a workspace-level orchestrator agent.".to_string(),
             version: 1,
             content_hash: "test-hash".to_string(),
+            approved_content_hash: None,
             required: false,
             approval_status: MetaSpecApprovalStatus::Pending,
             approved_by: None,
