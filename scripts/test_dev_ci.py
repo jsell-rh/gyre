@@ -82,6 +82,19 @@ class GitHubChecksTest(unittest.TestCase):
             self.pr['statusCheckRollup']=[self.check(conclusion)]
             self.assertEqual(self.observe()['status'],'pending')
 
+    def test_confirmed_merge_conflicts_are_actionable_independently_of_ci_readiness(self):
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='c'*40)
+        for checks in ([],[self.check()],[self.check(None,'IN_PROGRESS')],[self.check('FAILURE')]):
+            with self.subTest(checks=checks):
+                self.pr['statusCheckRollup']=checks
+                observed=self.observe()
+                self.assertEqual(observed['status'],'merge_conflict')
+                self.assertEqual(observed['head'],self.head)
+                self.assertEqual(observed['base'],'c'*40)
+                self.assertEqual(observed['verified_base'],self.base)
+        self.pr.update(mergeable='UNKNOWN',statusCheckRollup=[])
+        self.assertEqual(self.observe()['status'],'pending')
+
     def test_contradictory_status_requires_current_exact_head_workflow_and_job(self):
         check = self.check('SUCCESS','IN_PROGRESS') | {'completedAt':'2026-11-05T11:07:44Z'}
         self.pr['statusCheckRollup'] = [check]

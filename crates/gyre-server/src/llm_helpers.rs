@@ -113,6 +113,21 @@ pub async fn resolve_llm_model(
     workspace_id: &Id,
     function_key: &str,
 ) -> (String, Option<u32>) {
+    resolve_llm_model_with_default(state, workspace_id, function_key, DEFAULT_LLM_MODEL).await
+}
+
+/// Same resolution order as [`resolve_llm_model`], but the level-4 hardcoded
+/// default is caller-supplied. Used by surfaces whose spec mandates a different
+/// default model than the platform-wide one (e.g. the explorer's Claude Agent
+/// SDK path defaults to `claude-sonnet-4-6` per explorer-implementation.md §8;
+/// the native Vertex-backed fallback keeps the gemini default because claude
+/// model names are not valid there).
+pub async fn resolve_llm_model_with_default(
+    state: &AppState,
+    workspace_id: &Id,
+    function_key: &str,
+    fallback_default: &str,
+) -> (String, Option<u32>) {
     if let Ok(Some(cfg)) = state
         .llm_configs
         .get_effective(workspace_id, function_key)
@@ -122,9 +137,12 @@ pub async fn resolve_llm_model(
     }
     let model = match state.workspaces.find_by_id(workspace_id).await {
         Ok(Some(ws)) if ws.llm_model.is_some() => ws.llm_model.unwrap_or_default(),
-        _ => std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| DEFAULT_LLM_MODEL.to_string()),
+        _ => std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| fallback_default.to_string()),
     };
-    (model, max_tokens_for_function(function_key, |k| std::env::var(k).ok()))
+    (
+        model,
+        max_tokens_for_function(function_key, |k| std::env::var(k).ok()),
+    )
 }
 
 /// Resolved prompt template plus its provenance SHA (ui-layout.md §2:

@@ -1,6 +1,7 @@
 """Observe a published head independently of integration/base freshness."""
 import json
 import time
+import shutil
 from pathlib import Path
 
 from .catalog import helper
@@ -32,7 +33,24 @@ def verification_ready(store, task):
         return True
     ci = task['data'].get('ci') or {}
     return (ci.get('head') == published['head'] and ci.get('checks') == 'green'
-            and ci.get('status') in ('passed','policy_pending'))
+            and ci.get('status') in ('passed','policy_pending','artifact_refresh'))
+
+
+def generated_conflict(execution, task, receipt, base):
+    """Reproduce conflict paths using Git only; never allocate a sandbox/model."""
+    from .stages import checkout
+    path=checkout(execution,receipt['head'])
+    try:
+        execution.command('git','fetch','--quiet','origin',base,cwd=path,timeout=180)
+        execution.command('git','config','user.name','gyre-pipeline',cwd=path)
+        execution.command('git','config','user.email','jsell-rh@users.noreply.github.com',cwd=path)
+        merged=execution.command('git','-c','core.hooksPath=/dev/null','merge','--no-commit','--no-ff',base,cwd=path,check=False)
+        conflicts=execution.command('git','diff','--name-only','--diff-filter=U',cwd=path).stdout.splitlines()
+        if merged.returncode and not conflicts:
+            raise Wait('Could not reproduce PR conflict paths; retry observation')
+        return all(name.startswith('web/dist/') for name in conflicts),conflicts
+    finally:
+        shutil.rmtree(path,ignore_errors=True)
 
 
 def read(execution, task, receipt):
@@ -40,18 +58,36 @@ def read(execution, task, receipt):
     observation = module.observe(execution.command, task['data']['pr'], receipt['head'],
                                           receipt['base'], execution.directory)
     latest = json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json',
-                       'headRefOid,statusCheckRollup,state',timeout=30).stdout)
+                       'headRefOid,statusCheckRollup,state,baseRefOid,mergeStateStatus,mergeable',timeout=30).stdout)
     if latest['headRefOid'] != receipt['head']:
         raise Wait('PR changed during CI observation; discard the stale observation')
+    if observation['status'] == 'merge_conflict' and (not module.merge_conflict(latest) or latest['baseRefOid'] != observation['base']):
+        raise Wait('PR conflict or target base changed during observation; recheck before requesting implementation')
     latest, reconciled = module.reconcile_checks(execution.command,task['data']['pr'],receipt['head'],latest)
     pending, failed, infrastructure = module.check_sets(latest)
     if observation['status'] in ('candidate_failed','baseline_failed') and (not failed or latest['state'] != 'OPEN'):
         raise Wait('Failed CI changed while evidence was collected; observe again before requesting implementation')
     if observation['status'] in ('passed','policy_pending') and (pending or failed or infrastructure or not latest.get('statusCheckRollup')):
         raise Wait('CI readiness changed during observation; recheck before publication')
+    if observation['status']=='merge_conflict' and latest.get('statusCheckRollup') and not (pending or failed or infrastructure):
+        old=task['data'].get('ci') or {}
+        cached=(old.get('status')=='artifact_refresh' and old.get('head')==receipt['head'] and old.get('target_base')==observation['base'])
+        generated,conflicts=(True,old.get('conflicts',[])) if cached else generated_conflict(execution,task,receipt,observation['base'])
+        if not cached:
+            confirmed=json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json',
+                'headRefOid,statusCheckRollup,state,baseRefOid,mergeStateStatus,mergeable',timeout=30).stdout)
+            cp,cf,ci=module.check_sets(confirmed)
+            if (confirmed.get('headRefOid')!=receipt['head'] or confirmed.get('baseRefOid')!=observation['base']
+                    or not module.merge_conflict(confirmed) or cp or cf or ci or not confirmed.get('statusCheckRollup')):
+                raise Wait('PR changed during conflict-path inspection; discard stale classification')
+        observation['conflicts']=conflicts
+        if generated:
+            observation.update(status='artifact_refresh',checks='green')
     snapshot = {'head':receipt['head'],'base':receipt['base'],'status':observation['status'],
                 'checks':observation.get('checks'), 'merge_state':observation.get('merge_state'),
-                'checked_at':time.time(), 'log':observation.get('log')}
+                'checked_at':time.time(), 'log':observation.get('log'),
+                'target_base':observation.get('base') if observation['status']=='artifact_refresh' else None,
+                'conflicts':observation.get('conflicts',[])}
     with execution.store.transaction():
         execution.store._current(execution.claim['id'],execution.claim['token'])
         current = execution.store.task(task['name'])
@@ -75,7 +111,7 @@ def read(execution, task, receipt):
 
 def failure(execution, task, receipt, observation):
     status = observation['status']
-    if status not in ('candidate_failed','baseline_failed','closed'):
+    if status not in ('candidate_failed','baseline_failed','closed','merge_conflict'):
         return None
     finding = observation | {'id':execution.claim['id'],'category':'ci','source':receipt['head']}
     if observation.get('log'):
@@ -83,6 +119,10 @@ def failure(execution, task, receipt, observation):
     if status == 'closed':
         # Human closure is not a request for another implementation/PR.
         raise Wait('Associated PR was closed; awaiting an operator decision')
+    if status == 'merge_conflict':
+        finding.update(category='rebase',published_head=receipt['head'])
+        return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],
+                             'review':None,'verified':None}, [finding]
     if status == 'baseline_failed':
         from .stages import baseline_repair
         prerequisite = baseline_repair(execution,observation)
