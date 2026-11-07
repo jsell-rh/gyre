@@ -2286,7 +2286,11 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
             .cloned()
             .collect();
         // Same ordering contract as the SQL adapters: (position, created_at).
-        gates.sort_by(|a, b| a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+        gates.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
+        });
         Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {

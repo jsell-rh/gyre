@@ -150,7 +150,10 @@ impl QualityGateRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order((quality_gates::position.asc(), quality_gates::created_at.asc()))
+                .order((
+                    quality_gates::position.asc(),
+                    quality_gates::created_at.asc(),
+                ))
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())

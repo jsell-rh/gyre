@@ -685,7 +685,8 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::CREATED, "gate {name} created");
         }
 
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/gates")
@@ -715,7 +716,8 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
