@@ -2,9 +2,9 @@
 title: "Explorer Agent Self-Check Dry-Run Loop"
 spec_ref: "explorer-implementation.md §Self-Check Loop"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections: []
-commits: []
+commits: ["eff64e31d"]
 ---
 
 ## Spec Excerpt
@@ -38,12 +38,14 @@ From §Agent System Prompt:
 
 ## Current State
 
-**Implemented.** All acceptance criteria met:
-- `explorer_ws.rs` line 3566: `parse_view_query_from_text()` extracts `<view_query>...</view_query>` blocks
-- Line 128-129: `MAX_REFINEMENT_TURNS = 3` caps the loop
-- Lines 2843-2950: dry-run validation, actionable warning collection, re-prompting with tool result
-- Line 2955, 3068: `send_status(sender, "refining")` during refinement turns
-- Lines 3141-3173: final fallback with nudge if agent doesn't produce view_query
+Audited against the acceptance criteria on this assignment. The loop itself
+(extraction, dry-run, feedback, cap, statuses) was already real on both agent
+paths; two criteria were nonetheless open and are now closed (see Shipped):
+
+- "best query sent after 3 turns" — both loops sent the *latest* attempt at
+  the cap, not the fewest-warnings one → fixed (best-version tracking).
+- "integration test verifies the refinement flow" — no test exercised the
+  loop → added two WebSocket integration tests plus a scripted mock mode.
 
 ## Implementation Plan
 
@@ -76,23 +78,66 @@ From §Agent System Prompt:
 
 ## Acceptance Criteria
 
-- [ ] Server extracts `<view_query>` blocks from agent output
-- [ ] Extracted query is validated via dry-run
-- [ ] If warnings exist, agent receives feedback and can refine (up to 3 turns)
-- [ ] After 3 turns or no warnings, the best query is sent to the frontend
-- [ ] Status messages ("refining", "ready") are sent during the loop
-- [ ] Integration test verifies the refinement flow
+- [x] Server extracts `<view_query>` blocks from agent output
+- [x] Extracted query is validated via dry-run
+- [x] If warnings exist, agent receives feedback and can refine (up to 3 turns)
+- [x] After 3 turns or no warnings, the best query is sent to the frontend
+- [x] Status messages ("refining", "ready") are sent during the loop
+- [x] Integration test verifies the refinement flow
 
-## Agent Instructions
+## Shipped
 
-When working on this task:
-1. Update the progress field above to `in-progress`
-2. Read `crates/gyre-server/src/explorer_ws.rs` for the current WebSocket handler
-3. Read `crates/gyre-domain/src/view_query_resolver.rs` for `resolve_view_query_dryrun` and `DryRunResult`
-4. Read `crates/gyre-server/src/mcp.rs` for how the `graph_query_dryrun` tool works
-5. The `<view_query>` extraction should be a simple regex: `<view_query>(.*?)</view_query>` (dotall mode)
-6. On completion, update progress to `ready-for-review` and list git commits below
+The self-check loop itself (extraction, server-side dry-run, synthetic
+tool-result feedback, 3-turn cap, "refining"/"ready" statuses) was already
+implemented on both agent paths — native LlmPort loop and Claude Agent SDK
+loop — in `crates/gyre-server/src/explorer_ws.rs` (via task-070's branch).
+This assignment audited it against the acceptance criteria and closed the
+two real gaps found:
+
+### Best-version tracking at the refinement cap (eff64e31d)
+
+Spec: "If the agent hasn't resolved warnings by turn 3, send the best
+version anyway." Both loops previously sent the *latest* attempt at the
+cap — a later refinement that regressed (more actionable dry-run warnings)
+displaced an earlier, better one. Both loops now track the attempt with the
+fewest actionable warnings (`best_view_query: Option<(count, query, text)>`)
+and send that version when the cap is reached; ties keep the earlier
+attempt. On the clean path (zero warnings) the current query is the best,
+so behavior there is unchanged.
+
+### Integration tests for the refinement flow (eff64e31d)
+
+No test previously exercised the refinement loop. Added a scripted mode to
+`MockLlmPortFactory` (`scripted_tool_responses`: successive
+`complete_with_tools` calls return successive responses, last repeats) and
+two WebSocket integration tests in
+`crates/gyre-server/tests/explorer_ws_integration.rs` driving the loop
+end-to-end against a seeded graph store:
+
+- `explorer_ws_self_check_refinement_flow` — a first attempt with an
+  actionable warning (unresolved callout) is NOT forwarded; status
+  "refining" is emitted; the dry-run feedback triggers a second LLM call;
+  only the refined, warning-free query reaches the frontend; the turn ends
+  with terminal "ready".
+- `explorer_ws_self_check_sends_best_version_after_cap` — four attempts
+  with worsening warning counts run exactly 3 refinement turns; after the
+  cap the fewest-warnings (first) attempt is the one forwarded.
+
+### Test evidence
+
+- `cargo test -p gyre-server --test explorer_ws_integration` — 11 passed
+  (incl. the 2 new tests); `--lib explorer_ws` — 43 passed;
+  `cargo test -p gyre-adapters --lib llm::mock` — 9 passed (incl. 3 new
+  scripted-mode tests); `cargo test -p gyre-server --test graph_integration`
+  (mock-LLM consumer regression) — 37 passed.
+- Mutation-tested: reverting the best-version tracking makes the cap test
+  fail ("got 3 callouts" instead of the best 1); disabling the refinement
+  trigger (`actionable_dry_run_warnings` → empty) makes both tests fail.
+  Evidence retained in the assignment's review-evidence artifacts.
 
 ## Git Commits
 
-Implemented as part of the explorer-canvas branch prior to task decomposition.
+- eff64e31d — feat(explorer): task-034 send best view query at refinement cap + integration tests
+
+(The original loop implementation predates task decomposition — see
+task-070, which owns coverage section explorer-implementation.md §11.)
