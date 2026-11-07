@@ -600,6 +600,30 @@ async fn require_auth_middleware(
     match token {
         Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
+            // 1.5. Impersonation JWT (identity-security.md §Impersonation) —
+            //     the same validation as the auth extractor
+            //     (`FromRequestParts` step 1.5): EdDSA signature + active
+            //     session. Without this branch the token is rejected here
+            //     and impersonated calls never reach the API at all.
+            //     Attribution happens downstream in `abac_middleware`.
+            if t.starts_with("ey") {
+                if let Some(claims) = state
+                    .agent_signing_key
+                    .validate_impersonation_opt(t, &state.base_url)
+                {
+                    return match crate::impersonation::resolve_impersonation_auth(&claims, &state)
+                        .await
+                    {
+                        Some(_) => next.run(req).await,
+                        None => (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Impersonation session is not active",
+                        )
+                            .into_response(),
+                    };
+                }
+            }
+
             // Check per-agent tokens using constant-time compare.
             let valid = if let Ok(pairs) = state.kv_store.kv_list("agent_tokens").await {
                 pairs.iter().any(|(_, v)| auth::tokens_equal(v.as_str(), t))

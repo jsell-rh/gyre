@@ -781,6 +781,70 @@ pub fn init_resolver() {
     RESOURCE_RESOLVER.get_or_init(ResourceResolver::new);
 }
 
+/// Identity-security.md §Impersonation: attribute calls made under an
+/// impersonation token even when they bypass policy evaluation — ABAC-exempt
+/// routes and unresolved patterns (previously these returned before the
+/// attribution block, leaving e.g. an impersonated read of the target's
+/// private notifications unattributed and uncounted).
+///
+/// Peeks the bearer token; any request that is not an active impersonation
+/// token passes through untouched (no behavior change). When it is one, the
+/// action is recorded (fire-and-forget) and the request is marked so the
+/// handler's own auth extraction does not double-count the same call.
+async fn record_impersonated_passthrough(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    surface: &'static str,
+) -> Request<Body> {
+    use axum::http::header::AUTHORIZATION;
+
+    let Some(token) = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return req;
+    };
+    if !token.starts_with("ey") {
+        return req;
+    }
+    // Cheap cryptographic pre-filter: only impersonation JWTs proceed to
+    // the session lookup.
+    let Some(claims) = state
+        .agent_signing_key
+        .validate_impersonation_opt(token, &state.base_url)
+    else {
+        return req;
+    };
+    let Some(auth) = crate::impersonation::resolve_impersonation_auth(&claims, &state).await
+    else {
+        // Inactive session — the handler's auth extraction will reject it.
+        return req;
+    };
+
+    let (mut parts, body) = req.into_parts();
+    // Upstream middlewares (last_seen) may have marked the request to
+    // defer attribution to this middleware — for exempt/unresolved routes
+    // THIS branch is the attribution owner, so record regardless and mark
+    // the request so the handler's own auth extraction does not
+    // double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
+    if let Some(imp) = &auth.impersonation {
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            imp,
+            parts.method.as_str(),
+            parts.uri.path(),
+            true,
+            surface,
+        );
+    }
+    Request::from_parts(parts, body)
+}
+
 // ---------------------------------------------------------------------------
 // Middleware function
 // ---------------------------------------------------------------------------
@@ -806,17 +870,36 @@ pub async fn abac_middleware(
     let (resource_type, action_override, exempt) =
         match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
             Some(m) => (m.resource_type, m.action_override, m.exempt),
-            None => return next.run(req).await,
+            None => {
+                // No policy evaluation, but the call is still attributed
+                // when made under an impersonation token
+                // (identity-security.md §Impersonation).
+                let req =
+                    record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
+                return next.run(req).await;
+            }
         };
 
-    // ABAC-exempt routes pass through immediately.
+    // ABAC-exempt routes pass through immediately — after impersonation
+    // attribution, so an impersonated read of the target's private
+    // notifications is still audited (identity-security.md §Impersonation:
+    // full audit trail of ALL actions taken during impersonation).
     if exempt {
+        let req = record_impersonated_passthrough(state.clone(), req, "abac-exempt").await;
         return next.run(req).await;
     }
 
     // Extract auth from request (splits and reconstructs).
     let method = req.method().clone();
     let (mut parts, body) = req.into_parts();
+
+    // Evaluated routes are attributed AFTER policy evaluation (with the
+    // decision outcome). Mark the request so the auth-resolution layer
+    // (`AuthenticatedAgent::from_request_parts`, called here and again by
+    // handler extractors) does not double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
 
     let auth = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(a) => a,
@@ -866,20 +949,14 @@ pub async fn abac_middleware(
     // trail and counted in the session's actions_taken. Fire-and-forget so
     // the audit write never blocks the request.
     if let Some(imp) = auth.impersonation.clone() {
-        let audit_state = state.clone();
-        let method_str = method.to_string();
-        let pattern_clone = pattern.clone();
-        let allowed = result.effect == PolicyEffect::Allow;
-        tokio::spawn(async move {
-            crate::impersonation::record_impersonated_action(
-                &audit_state,
-                &imp,
-                &method_str,
-                &pattern_clone,
-                allowed,
-            )
-            .await;
-        });
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            &imp,
+            method.as_str(),
+            &pattern,
+            result.effect == PolicyEffect::Allow,
+            "abac",
+        );
     }
 
     // Record decision to audit log.

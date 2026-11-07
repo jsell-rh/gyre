@@ -584,6 +584,42 @@ async fn refresh_jwks(
 
 // -- Auth extractor -----------------------------------------------------------
 
+/// Identity-security.md §Impersonation: attribute every authenticated call
+/// made under an impersonation token at the auth-resolution layer. This is
+/// the shared choke point for surfaces that authenticate via the
+/// `AuthenticatedAgent` extractor WITHOUT the ABAC middleware (git smart
+/// HTTP, MCP, conversations, explorer, ws-ticket) — the middleware-covered
+/// `/api/v1` routes are recorded by `abac_middleware` instead (with the
+/// policy outcome for evaluated routes), and mark the request first so
+/// this never double-counts the same call.
+fn record_impersonated_extraction(
+    parts: &mut Parts,
+    state: &Arc<AppState>,
+    auth: &AuthenticatedAgent,
+    surface: &'static str,
+) {
+    use crate::impersonation::ImpersonationActionRecorded;
+    if parts
+        .extensions
+        .get::<ImpersonationActionRecorded>()
+        .is_some()
+    {
+        return; // already attributed for this request
+    }
+    let Some(imp) = auth.impersonation.clone() else {
+        return;
+    };
+    parts.extensions.insert(ImpersonationActionRecorded);
+    crate::impersonation::spawn_record_impersonated_action(
+        state,
+        &imp,
+        parts.method.as_str(),
+        parts.uri.path(),
+        true,
+        surface,
+    );
+}
+
 #[axum::async_trait]
 impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
     type Rejection = Response;
@@ -601,6 +637,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .map(|p| &p[7..])
         }) {
             if let Some(auth) = state.ws_tickets.consume(ticket) {
+                record_impersonated_extraction(parts, state, &auth, "ws-ticket");
                 return Ok(auth);
             }
             return Err((StatusCode::UNAUTHORIZED, "Invalid or expired ticket").into_response());
@@ -658,6 +695,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 {
                     Some(mut auth) => {
                         auth.deprecated_token_auth = deprecated_token_auth;
+                        record_impersonated_extraction(parts, state, &auth, "per-handler");
                         Ok(auth)
                     }
                     None => Err((

@@ -535,6 +535,19 @@ async fn authenticate(
 
     match crate::auth::authenticate_token(&token, state).await {
         Ok(auth) => {
+            // Identity-security.md §Impersonation: a WebSocket connection
+            // opened with an impersonation token is an action taken during
+            // impersonation — attribute it to the impersonator.
+            if let Some(imp) = &auth.impersonation {
+                crate::impersonation::spawn_record_impersonated_action(
+                    state,
+                    imp,
+                    "WS",
+                    "/ws",
+                    true,
+                    "websocket",
+                );
+            }
             let result = WsMessage::AuthResult {
                 success: true,
                 message: "authenticated".to_string(),

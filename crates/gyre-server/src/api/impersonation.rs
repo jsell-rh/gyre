@@ -1067,4 +1067,437 @@ mod tests {
         assert_eq!(NotificationType::ImpersonationRequest.default_priority(), 2);
         assert_eq!(NotificationType::ImpersonationAlert.default_priority(), 1);
     }
+
+    // ── review repairs ──────────────────────────────────────────────────
+
+    /// The impersonation token must work through the FULL production
+    /// layering (require_auth_middleware → last_seen → abac → handler),
+    /// not just through the ABAC-only test router. Previously
+    /// `require_auth_middleware` had no impersonation branch and rejected
+    /// the token with 401 before any handler ran.
+    #[tokio::test]
+    async fn impersonation_works_through_production_router() {
+        let (state, _admin_key, _target_key, _request_id, token) = run_full_flow().await;
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+
+        let app = crate::build_router(state.clone());
+
+        // Evaluated route (user resource, Developer role allowed by the
+        // seeded policies): must NOT be 401-rejected at require_auth.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // ABAC-exempt route — reading the target user's private
+        // notifications under the impersonation token.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // BOTH calls are attributed (fire-and-forget — poll for the
+        // writes to land): one on the evaluated surface with the policy
+        // outcome, one on the exempt surface.
+        let mut events = vec![];
+        for _ in 0..100 {
+            events = state
+                .audit
+                .query(&audit_filter("impersonation_action"))
+                .await
+                .unwrap();
+            if events.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            events.len(),
+            2,
+            "evaluated + exempt impersonated calls must each be audited"
+        );
+        let surfaces: Vec<&str> = events
+            .iter()
+            .map(|e| e.detail["surface"].as_str().unwrap())
+            .collect();
+        assert!(surfaces.contains(&"abac"), "surfaces: {surfaces:?}");
+        assert!(surfaces.contains(&"abac-exempt"), "surfaces: {surfaces:?}");
+        for e in &events {
+            assert_eq!(e.user_id.as_ref().unwrap().as_str(), "admin-1");
+            assert_eq!(e.detail["impersonator_id"], "admin-1");
+            assert_eq!(e.detail["target_user_id"], "target-1");
+        }
+
+        // No double-counting from the require_auth / last_seen / handler
+        // extractions of the same requests.
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        let session: ImpersonationSession = serde_json::from_str(&sessions[0].1).unwrap();
+        assert_eq!(session.actions_taken, 2);
+    }
+
+    /// Surfaces that authenticate via the `AuthenticatedAgent` extractor
+    /// WITHOUT the ABAC middleware (git smart HTTP, MCP, conversations,
+    /// explorer, ws-ticket) must attribute impersonated calls at the
+    /// auth-resolution layer.
+    #[tokio::test]
+    async fn per_handler_surfaces_are_attributed() {
+        let (state, _admin_key, _target_key, _request_id, token) = run_full_flow().await;
+
+        async fn ok_handler(
+            auth: crate::auth::AuthenticatedAgent,
+        ) -> StatusCode {
+            assert!(
+                auth.impersonation.is_some(),
+                "impersonation token must resolve with an ImpersonationContext"
+            );
+            StatusCode::OK
+        }
+        // Same wiring as git_http::git_info_refs / mcp::mcp_handler:
+        // per-handler auth extractor, no ABAC middleware.
+        let router = Router::new()
+            .route("/git/:workspace_slug/:repo_name/info/refs", axum::routing::get(ok_handler))
+            .with_state(state.clone());
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/git/imp-test/ws-imp-target-1/info/refs")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut found = None;
+        for _ in 0..100 {
+            let events = state
+                .audit
+                .query(&audit_filter("impersonation_action"))
+                .await
+                .unwrap();
+            if let Some(e) = events
+                .iter()
+                .find(|e| e.detail["surface"] == "per-handler")
+            {
+                found = Some(e.clone());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let e = found.expect("per-handler impersonated call must be audited");
+        assert_eq!(e.user_id.as_ref().unwrap().as_str(), "admin-1");
+        assert_eq!(e.detail["method"], "GET");
+        assert_eq!(e.detail["path"], "/git/imp-test/ws-imp-target-1/info/refs");
+
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        let session: ImpersonationSession = serde_json::from_str(&sessions[0].1).unwrap();
+        assert_eq!(session.actions_taken, 1);
+    }
+
+    /// A non-target caller must not learn an impersonation request's
+    /// status: the identity check runs BEFORE any status or expiry is
+    /// revealed (403 for a non-target, whether the request is pending,
+    /// approved, denied or expired — not a 409 that leaks consent state).
+    #[tokio::test]
+    async fn non_target_cannot_probe_request_status() {
+        let state = test_state();
+        let admin_key =
+            seed_user(&state, "admin-5", "Admin Five", vec![UserRole::Admin], false).await;
+        let target_key = seed_user(
+            &state,
+            "target-5",
+            "Target Five",
+            vec![UserRole::Developer],
+            true,
+        )
+        .await;
+        let other_key = seed_user(
+            &state,
+            "other-5",
+            "Other Five",
+            vec![UserRole::Developer],
+            true,
+        )
+        .await;
+
+        let post_approve = |key: String, request_id: String, code: String| {
+            let state = state.clone();
+            async move {
+                app(&state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!(
+                                "/api/v1/admin/impersonate/{request_id}/approve"
+                            ))
+                            .header("Authorization", format!("Bearer {key}"))
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({"approval_code": code}).to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Admin requests; target reads the code from the notification.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/impersonate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        Body::from(
+                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                        ),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let request_id = body_json(resp).await["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let notifs = body_json(
+            app(&state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/notifications")
+                        .header("Authorization", format!("Bearer {target_key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let code = notifs["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["notification_type"] == "ImpersonationRequest")
+            .map(|n| {
+                serde_json::from_str::<serde_json::Value>(n["body"].as_str().unwrap()).unwrap()
+                    ["approval_code"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .unwrap();
+
+        // Target approves — the request becomes Approved.
+        let resp = post_approve(target_key.clone(), request_id.clone(), code.clone()).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // A non-target probing the APPROVED request with the correct code
+        // gets 403 Forbidden — not 409 Conflict revealing that consent was
+        // already given.
+        let resp = post_approve(other_key.clone(), request_id.clone(), code.clone()).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Same for a request the target DENIED: non-target gets 403, not
+        // the "no longer pending" conflict.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/impersonate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        Body::from(
+                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                        ),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "admin already has an active session");
+
+        // End the active session so a second request can be created.
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        let (sid, _raw) = sessions[0].clone();
+        impersonation::end_session(&state, &sid, "test").await.unwrap();
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/impersonate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        Body::from(
+                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                        ),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let request_id2 = body_json(resp).await["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Target denies.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/impersonate/{request_id2}/deny"))
+                    .header("Authorization", format!("Bearer {target_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Non-target probing the DENIED request → 403, not 409.
+        let resp = post_approve(other_key, request_id2, code).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// KV adapter that yields before every operation — models a real async
+    /// backend (SQLite/Postgres) where the load→increment→save
+    /// read-modify-write genuinely interleaves across concurrent tasks.
+    /// The sync in-memory adapter cannot reproduce the lost-update race
+    /// this test guards against.
+    struct YieldingKvStore {
+        inner: Arc<dyn gyre_ports::KvJsonStore>,
+    }
+
+    impl YieldingKvStore {
+        fn new(inner: Arc<dyn gyre_ports::KvJsonStore>) -> Self {
+            Self { inner }
+        }
+    }
+
+    #[axum::async_trait]
+    impl gyre_ports::KvJsonStore for YieldingKvStore {
+        async fn kv_set(&self, namespace: &str, key: &str, value: String) -> anyhow::Result<()> {
+            tokio::task::yield_now().await;
+            self.inner.kv_set(namespace, key, value).await
+        }
+
+        async fn kv_get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<String>> {
+            tokio::task::yield_now().await;
+            self.inner.kv_get(namespace, key).await
+        }
+
+        async fn kv_remove(&self, namespace: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.kv_remove(namespace, key).await
+        }
+
+        async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            self.inner.kv_list(namespace).await
+        }
+
+        async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
+            self.inner.kv_clear(namespace).await
+        }
+    }
+
+    /// Concurrent impersonated calls must not lose `actions_taken` counts
+    /// (the increment is a read-modify-write serialized by the session
+    /// write lock; an unlocked RMW lets concurrent calls persist the same
+    /// count and underreport the session in ImpersonationEnded).
+    #[tokio::test]
+    async fn concurrent_impersonated_actions_are_counted_atomically() {
+        let (state, _admin_key, _target_key, _request_id, _token) = run_full_flow().await;
+
+        // Swap in the yielding adapter so the read-modify-write actually
+        // interleaves across the concurrent tasks below.
+        let mut yielding_state = (*state).clone();
+        yielding_state.kv_store = Arc::new(YieldingKvStore::new(state.kv_store.clone()));
+        let state = Arc::new(yielding_state);
+
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        let (_sid, raw) = sessions[0].clone();
+        let session: ImpersonationSession = serde_json::from_str(&raw).unwrap();
+        let ctx = crate::auth::ImpersonationContext {
+            impersonator_id: gyre_common::Id::new(session.impersonator_id.clone()),
+            impersonator_name: session.impersonator_name.clone(),
+            target_user_id: gyre_common::Id::new(session.target_user_id.clone()),
+            session_id: session.session_id.clone(),
+        };
+
+        // 8 concurrent recordings of impersonated actions.
+        let mut handles = vec![];
+        for i in 0..8 {
+            let state = state.clone();
+            let ctx = ctx.clone();
+            handles.push(tokio::spawn(async move {
+                impersonation::record_impersonated_action(
+                    &state,
+                    &ctx,
+                    "GET",
+                    &format!("/api/v1/some-resource/{i}"),
+                    true,
+                    "abac",
+                )
+                .await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        let session: ImpersonationSession = serde_json::from_str(&sessions[0].1).unwrap();
+        assert_eq!(
+            session.actions_taken, 8,
+            "every concurrent impersonated action must be counted exactly once"
+        );
+
+        // The audit events carry distinct sequential counts 1..=8 — no
+        // duplicated (lost-update) counts.
+        let events = state
+            .audit
+            .query(&audit_filter("impersonation_action"))
+            .await
+            .unwrap();
+        let mut counts: Vec<u64> = events
+            .iter()
+            .map(|e| e.detail["actions_taken"].as_u64().unwrap())
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        // Ending the session afterwards reports the full count.
+        impersonation::end_session(&state, &session.session_id, "test").await.unwrap();
+        let events = state
+            .audit
+            .query(&audit_filter("impersonation_ended"))
+            .await
+            .unwrap();
+        assert_eq!(events[0].detail["actions_taken"], 8);
+    }
 }

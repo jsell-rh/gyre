@@ -114,6 +114,14 @@ pub async fn last_seen_middleware(
 
     // Extract user_id from auth context. Split+reassemble to use the extractor.
     let (mut parts, body) = req.into_parts();
+    // This middleware runs BEFORE `abac_middleware`, which owns impersonated
+    // action attribution for `/api/v1` routes (evaluated routes after policy
+    // evaluation, exempt/unresolved routes before the passthrough). Mark the
+    // request so the extraction below does not double-count the same call at
+    // the auth-resolution layer (identity-security.md §Impersonation).
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
     let user_id = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(auth) => auth.user_id.map(|id| id.as_str().to_owned()),
         Err(_) => None,

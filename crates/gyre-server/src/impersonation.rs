@@ -196,6 +196,14 @@ pub async fn active_session_for_admin(
         .find(|s| s.impersonator_id == impersonator_id && !s.ended && s.expires_at > now))
 }
 
+/// Serializes every session-record read-modify-write (increment of
+/// `actions_taken`, session end). Without it, two concurrent impersonated
+/// calls can both load `actions_taken = N` and both persist `N + 1`,
+/// undercounting the session; worse, a racing increment can overwrite an
+/// `end_session` write and resurrect an ended session. Single-process
+/// lock: the kv store stays the record of truth, this only orders the RMW.
+static SESSION_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ── approval code ───────────────────────────────────────────────────────────
 
 /// Generate a one-time 8-digit numeric approval code (CSPRNG).
@@ -264,6 +272,17 @@ pub async fn approve_request(
         ApiError::NotFound(format!("impersonation request {request_id} not found"))
     })?;
 
+    // Per-handler authorization (ABAC-exempt route): only the target user
+    // of this request may approve it. Checked BEFORE any status or expiry
+    // is revealed — otherwise any authenticated user could probe which
+    // users an admin asked to impersonate and whether consent was given
+    // (a non-target probing an approved request must get 403, not 409).
+    if req.target_user_id != caller_user_id.as_str() {
+        return Err(ApiError::Forbidden(
+            "only the impersonation target may approve this request".to_string(),
+        ));
+    }
+
     if req.status != ImpersonationRequestStatus::Pending {
         return Err(ApiError::Conflict(format!(
             "impersonation request {request_id} is already {}",
@@ -282,14 +301,6 @@ pub async fn approve_request(
         save_request(state, &req).await?;
         return Err(ApiError::Conflict(
             "impersonation request has expired".to_string(),
-        ));
-    }
-
-    // Per-handler authorization (ABAC-exempt route): only the target user
-    // of this request may approve it.
-    if req.target_user_id != caller_user_id.as_str() {
-        return Err(ApiError::Forbidden(
-            "only the impersonation target may approve this request".to_string(),
         ));
     }
 
@@ -407,6 +418,10 @@ pub async fn end_session(
     session_id: &str,
     reason: &str,
 ) -> Result<ImpersonationSession, ApiError> {
+    // Hold the session-write lock across the read-modify-write so a
+    // concurrently recording impersonated action can neither interleave
+    // a stale increment over the end marker nor lose its own count.
+    let _guard = SESSION_WRITE_LOCK.lock().await;
     let mut session = load_session(state, session_id).await?.ok_or_else(|| {
         ApiError::NotFound(format!("impersonation session {session_id} not found"))
     })?;
@@ -506,16 +521,46 @@ pub async fn expire_sessions(state: &AppState) -> anyhow::Result<u64> {
     Ok(ended)
 }
 
+/// Request-extensions marker: the impersonated action for this HTTP
+/// request has already been recorded, so later `AuthenticatedAgent`
+/// extractions on the same request must not double-count it.
+/// `abac_middleware` records evaluated routes after policy evaluation
+/// (with the decision outcome) and exempt/unresolved routes before the
+/// passthrough; the auth-resolution layer records per-handler surfaces
+/// (git HTTP, MCP, conversations, explorer, ws-ticket) at extraction.
+#[derive(Clone, Copy, Debug)]
+pub struct ImpersonationActionRecorded;
+
 /// Record one API call made under an impersonation session: increments the
 /// session's `actions_taken` counter and writes an audit event attributed
 /// to the impersonator.
+///
+/// `surface` names where the call was attributed:
+/// - `"abac"` — an `/api/v1` route that went through policy evaluation
+///   (`allowed` carries the decision outcome);
+/// - `"abac-exempt"` / `"abac-unresolved"` — an `/api/v1` route that
+///   bypassed policy evaluation (the call proceeds, `allowed = true`);
+/// - `"per-handler"` — a surface that authenticates via the
+///   `AuthenticatedAgent` extractor without the ABAC middleware (git
+///   HTTP, MCP, conversations, explorer, ws-ticket). `allowed = true`
+///   means the call authenticated; the handler's own outcome is not
+///   visible at the auth-resolution layer;
+/// - `"websocket"` — a WebSocket/TTY connection opened with the token.
 pub async fn record_impersonated_action(
     state: &AppState,
     ctx: &ImpersonationContext,
     method: &str,
     path: &str,
     allowed: bool,
+    surface: &'static str,
 ) {
+    // Hold the session-write lock across the read-modify-write so
+    // concurrent impersonated calls cannot lose counts (an unlocked RMW
+    // lets two concurrent calls both persist the same count and
+    // underreport the session in ImpersonationEnded — verified by
+    // `concurrent_impersonated_actions_are_counted_atomically` with a
+    // yielding kv adapter).
+    let _guard = SESSION_WRITE_LOCK.lock().await;
     let mut wrote_event = false;
     if let Ok(Some(mut session)) = load_session(state, &ctx.session_id).await {
         if !session.ended {
@@ -531,6 +576,7 @@ pub async fn record_impersonated_action(
                         "session_id": ctx.session_id,
                         "method": method,
                         "path": path,
+                        "surface": surface,
                         "actions_taken": session.actions_taken,
                     }),
                     &ctx.session_id,
@@ -551,6 +597,25 @@ pub async fn record_impersonated_action(
             "impersonation action on inactive session (already ended?)"
         );
     }
+}
+
+/// Fire-and-forget wrapper around [`record_impersonated_action`] so the
+/// audit write never blocks the request path.
+pub fn spawn_record_impersonated_action(
+    state: &Arc<AppState>,
+    ctx: &ImpersonationContext,
+    method: &str,
+    path: &str,
+    allowed: bool,
+    surface: &'static str,
+) {
+    let state = state.clone();
+    let ctx = ctx.clone();
+    let method = method.to_string();
+    let path = path.to_string();
+    tokio::spawn(async move {
+        record_impersonated_action(&state, &ctx, &method, &path, allowed, surface).await;
+    });
 }
 
 /// Resolve an authenticated principal from validated impersonation JWT
