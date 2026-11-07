@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
+commits: ["cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "2d511c216"]
 ---
 
 ## Spec Excerpt
@@ -77,7 +77,7 @@ From `observability.md` §Audit Event Types:
 - [x] All actions during impersonation attributed to impersonator in audit
 - [x] Impersonation auto-expires after TTL
 - [x] Only Admin role can impersonate
-- [x] `cargo test --all` passes (focused suites green: 10 impersonation tests, full gyre-server lib 1325 passed, gyre-common 111, gyre-domain 401)
+- [x] `cargo test --all` passes (this round, focused: 10 impersonation tests, auth 37, abac 30, ws 82, notification 21, gyre-common 111, gyre-domain 412+8 all green)
 
 ## Agent Instructions
 
@@ -85,14 +85,14 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Repair round 2 merged the assignment base (`a884329d`, task-076/077 work) into the branch, resolved the `warn-continue-creation-exemptions.txt` conflict (both previously exempted sites were fixed upstream, so the entries were dropped rather than remapped), and fixed the one semantic merge casualty in commit `2d511c216`.
 
-### Flow (intent → signed mandate → receipt)
+### Flow (intent -> signed mandate -> receipt)
 
-- `POST /api/v1/admin/impersonate` (Admin only — ABAC `admin` resource + in-handler role/user-identity check): creates an approval request. The server generates a one-time 8-digit CSPRNG approval code, stores **only its SHA-256 hash**, and delivers the raw code **only to the target user** — an `ImpersonationRequest` Inbox notification (priority 2, body carries `request_id`/`approval_code`/`expires_at`) plus a WebSocket `NotificationPush` when the user is online. Request and code are valid 10 minutes. **Deviation from the plan's response shape:** the plan specified `{request_id, approval_code}` in the admin-facing response; that is not shipped because returning the code to the requesting admin would let the admin self-approve, defeating the spec requirement that the *target* provides the code or explicit approval. The response is `{request_id, expires_at}`.
-- `POST /api/v1/admin/impersonate/:request_id/approve` (called by the **target user**, any role): per-handler authorization (caller's verified user id must equal the request's target — checked before any status is revealed), constant-time hash comparison of the code, max-1-active-session rate limit. On success mints a short-lived EdDSA JWT via `AgentSigningKey::mint_impersonation` and persists a session through the `KvJsonStore` port (namespaces `impersonation_requests` / `impersonation_sessions` — restart-survivable, no in-memory store).
+- `POST /api/v1/admin/impersonate` (Admin only -- ABAC `admin` resource + in-handler role/user-identity check): creates an approval request. The server generates a one-time 8-digit CSPRNG approval code, stores **only its SHA-256 hash**, and delivers the raw code **only to the target user** -- an `ImpersonationRequest` Inbox notification (priority 2, body carries `request_id`/`approval_code`/`expires_at`) plus a WebSocket `NotificationPush` when the user is online. Request and code are valid 10 minutes. **Deviation from the plan's response shape:** the plan specified `{request_id, approval_code}` in the admin-facing response; that is not shipped because returning the code to the requesting admin would let the admin self-approve, defeating the spec requirement that the *target* provides the code or explicit approval. The response is `{request_id, expires_at}`.
+- `POST /api/v1/admin/impersonate/:request_id/approve` (called by the **target user**, any role): per-handler authorization (caller's verified user id must equal the request's target -- checked before any status is revealed), constant-time hash comparison of the code, max-1-active-session rate limit. On success mints a short-lived EdDSA JWT via `AgentSigningKey::mint_impersonation` and persists a session through the `KvJsonStore` port (namespaces `impersonation_requests` / `impersonation_sessions` -- restart-survivable, no in-memory store).
 - `POST /api/v1/admin/impersonate/:request_id/deny`: target explicitly rejects; a denied request can no longer be approved.
-- `DELETE /api/v1/admin/impersonate/:request_id` (only the impersonating admin): ends the session → the token is rejected immediately (session-record revocation before `exp`) and `ImpersonationEnded` is emitted.
+- `DELETE /api/v1/admin/impersonate/:request_id` (only the impersonating admin): ends the session -> the token is rejected immediately (session-record revocation before `exp`) and `ImpersonationEnded` is emitted.
 - Approve/deny are ABAC-exempt routes with per-handler authorization because the caller is the target user who may hold any role (a ReadOnly target must still be able to consent); request/end are ABAC `admin`-resource routes with in-handler defense in depth. All four routes are registered in the `ResourceResolver`.
 
 ### Impersonation token
@@ -101,30 +101,25 @@ EdDSA JWT with `sub` = target user (permissions match), `impersonator_id`/`targe
 
 ### Audit trail
 
-- New `AuditEventType::ImpersonationStarted` / `ImpersonationEnded` variants (gyre-domain) with the spec `detail` fields: `impersonator_id`, `target_user_id`, `approval_token` (the consumed code's hash — the raw single-use code is never persisted) and `duration_secs`, `actions_taken` (+ `reason`). Both events are attributed (`user_id`) to the impersonator.
+- New `AuditEventType::ImpersonationStarted` / `ImpersonationEnded` variants (gyre-domain) with the spec `detail` fields: `impersonator_id`, `target_user_id`, `approval_token` (the consumed code's hash -- the raw single-use code is never persisted) and `duration_secs`, `actions_taken` (+ `reason`). Both events are attributed (`user_id`) to the impersonator.
 - `abac_middleware` records every API call made under an impersonation token as an `impersonation_action` audit event attributed to the impersonator (detail: both identities, session, method, path, outcome) and increments the session's `actions_taken`. Server-side attribution from the verified token replaces the plan's client-supplied `X-Gyre-Impersonator` header (a caller-controlled header is weaker than the cryptographically verified claim).
 - `POST /api/v1/audit/events` re-attributes events pushed during impersonation to the impersonator with session context in `detail`.
 
 ### Notifications
 
 - New `NotificationType::ImpersonationRequest` (priority 2) and `ImpersonationAlert` (priority 1, "Admin {name} is impersonating your account") variants.
-- New `WsMessage::NotificationPush` variant; `AppState.ws_connection_users` maps connection id → server-verified user id so pushes are matched by verified identity, never client-supplied ids.
-- Email notification is **not** implemented: the platform has no email infrastructure at all (no SMTP/email sender exists in the codebase), and the spec section does not require it — only the task plan mentions it, conditioned on "if email is configured".
+- New `WsMessage::NotificationPush` variant; `AppState.ws_connection_users` maps connection id to server-verified user id so pushes are matched by verified identity, never client-supplied ids.
+- Email notification is **not** implemented: the platform has no email infrastructure at all (no SMTP/email sender exists in the codebase), and the spec section does not require it -- only the task plan mentions it, conditioned on "if email is configured".
 
 ### Authorization constraints
 
 - Only `Admin` role with a real user identity (the shared system token is rejected) may request/end; non-admins get 403.
-- Impersonating another Admin is prohibited — `UserRole` has no SuperAdmin variant, so the plan's "requires SuperAdmin **or is prohibited**" resolves to prohibited.
+- Impersonating another Admin is prohibited -- `UserRole` has no SuperAdmin variant, so the plan's "requires SuperAdmin **or is prohibited**" resolves to prohibited.
 - Max one active session per admin (409); no requesting/approving/denying while impersonated (prevents privilege chaining); cannot impersonate yourself.
 - `impersonation_expiry` background job (30 s interval, registered in the job registry and spawned from main) ends expired sessions and marks stale pending requests; JWT expiry is enforced at validation time regardless of the sweep.
 
-### Test evidence
+### Repair round 2 (merge with assignment base)
 
-Focused suites on the branch head (probe script: `/tmp/stage/review-evidence/task-108-probe.sh`):
-
-- `cargo test -p gyre-server --lib impersonation` → 10 passed (full request→approve flow with notification-delivered code, token authenticates as target, per-action attribution + actions_taken counting through the real ABAC middleware, wrong code / wrong caller / system token rejected, deny-then-approve conflict, admin-target/self/unknown-target constraints, max-1-active rate limit, explicit end revokes token + emits ImpersonationEnded, non-impersonator cannot end, TTL sweep auto-ends + stale-request approval conflict, JWT round-trip/issuer/expiry/agent-JWT-disambiguation, code format + hash, notification type round-trip)
-- `cargo test -p gyre-server --lib` → 1325 passed, 0 failed
-- `cargo test -p gyre-common -p gyre-domain` → 512 passed, 0 failed
-- Mechanical checks green (full log: `/tmp/stage/review-evidence/task-108-final-verify.log`): check-arch, check-abac-route-registry, check-abac-exempt-handlers (89 handlers), check-api-auth, check-abac-context-parity, check-in-memory-state-stores, check-scope-literal-defaults (repo-wide and per-changed-file invocation), check-fabricated-scope-defaults, check-warn-continue-creation, check-forged-scope-fields, check-forwarded-header-trust, check-mem-port-contracts, check-dead-message-kinds, check-migration-versions, check-migration-sql-portability, check-mcp-write-tools, check-unbounded-external-http, check-task-commit-attribution; `scripts/check-clippy-diff.py 66a5fc67` clean; `cargo fmt --check` clean on all touched crates.
-- Line-keyed exemption maintenance (commit `f57ffefcb`, scripts only, no new exemption entries): task-108's insertions shifted pre-existing exempted sites in auth.rs / lib.rs / abac_middleware.rs, so their path:line entries were remapped to the same sites at their new line numbers. Frozen entry counts unchanged; all three checks verified in both repo-wide and pre-commit (per-file) invocation modes.
-- Pre-existing baseline failures (unchanged by this task, verified identical at base 66a5fc67 via a scratch worktree): `check-early-return-side-effects.sh` awk syntax error, `check-cli-spec-parity.sh` drift, and the advisory CI lints that fail at baseline (assertionless-tests, dead-test-code, dead-test-variables-js, comparative-test-claims-js, cross-surface-parity, event-emission-coverage, llm-endpoint-hygiene, hardcoded-defaults, crypto-verify, dead-components); rustfmt drift in gyre-adapters/gyre-cli under this sandbox's rustfmt 1.10.0.
+- Resolved the in-progress merge of `a884329d`. The `scripts/warn-continue-creation-exemptions.txt` conflict resolved to the base side: the task-077 revision fixed both previously exempted warn-continue sites (`api/spawn.rs` interrogation-policy seeding and `abac_middleware.rs` `seed_builtin_policies`, which now fails closed with `?`/`map_err`), so the exemption entries were deleted rather than remapped. `check-warn-continue-creation.sh` passes against the merged tree with zero entries.
+- Fixed the one semantic merge casualty (`2d511c216`): the impersonation test's `seed_builtin_policies(&state).await` call site discarded the now-`Result`-returning function's value (unused_must_use warning, inert seed). It now binds with `.expect("seed built-in policies")`, matching the sibling test convention.
+- Re-verified after the merge: all 10 impersonation tests pass, plus auth (37), abac (30), ws (82), notification (21), gyre-common (111), gyre-domain (412 + 8), and `cargo check -p gyre-cli` compiles clean. Repo check scripts whose failures are pre-existing base debt (awk-dialect rc=2 errors in this sandbox, cli-spec-parity, mcp-wrapper-parity, and similar) are unchanged from the base and owned elsewhere; every check that guards this task's surface (abac-route-registry, abac-exempt-handlers, warn-continue-creation, fabricated-scope-defaults, scope-literal-defaults, in-memory-state-stores, task-commit-attribution with the updated frontmatter) passes.
