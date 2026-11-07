@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §Phase 4: Polish"
 depends_on: []
 progress: complete
 coverage_sections: []
-commits: []
+commits: ["d988af76230b318bf435a89bee9fdd9e6db04b2e"]
 ---
 
 ## Spec Excerpt
@@ -80,3 +80,47 @@ When working on this task:
 ## Git Commits
 
 Implemented as part of the explorer-canvas branch prior to task decomposition.
+
+## Shipped
+
+### Behavior (pre-existing on this branch, re-verified this round)
+
+- **Frontend streaming** (`web/src/lib/ExplorerChat.svelte`): the `case 'text'`
+  handler accumulates `done:false` chunks into a Svelte 5 `$state` buffer
+  (`streamingText`), rendered live via `renderMarkdown(streamingText)` in a
+  `.chat-message.streaming` bubble; `done:true` finalizes the concatenated
+  text as an assistant message. A 65s no-chunk timeout finalizes orphaned
+  streams; a `thinking`/`refining` status arriving mid-stream preserves the
+  partial text as a visually distinct `(thinking)` message instead of
+  dropping it.
+- **Status indicators** (`ExplorerChat.svelte`): `.thinking-indicator`
+  (role=status, animated dots) renders for `thinking`/`refining` while no
+  streaming text is on screen, labeled "Thinking..." / "Refining query..."
+  respectively; hidden on `ready` and while streaming text is displayed.
+- **Backend streaming** (`crates/gyre-server/src/explorer_ws.rs`): the LLM
+  response is forwarded in token chunks as `{"type":"text","done":false}`
+  frames with a final `done:true` frame, per the §WebSocket Protocol spec.
+
+### Verification layer (commit d988af762)
+
+`web/src/__tests__/ExplorerChat-streaming.test.js` mounts the real
+ExplorerChat component with a controllable WebSocket mock and drives the
+spec wire frames through the component's actual `handleMessage` path,
+asserting on the rendered DOM: progressive rendering across `done:false`
+chunks, trailing chunk delivered with `done:true`, indicator labels for
+`thinking`/`refining`, hiding on `ready`/streaming text, mid-stream turn
+preservation, and the user-message round trip. 6/6 pass at the current head
+(merge `228f0b479`); sibling suite `ExplorerChat.test.js` 108/108.
+Mutation-verified this round: breaking chunk accumulation fails 2 tests
+(exit 1); forcing the indicator render condition false fails 4 tests
+(exit 1). Evidence: `/tmp/stage/review-evidence/task-036/`.
+
+### Contract-repair note (finding 832389b5…)
+
+The prior checkpoint flipped the Acceptance Criteria checkboxes to `[x]`
+and rewrote the `## Git Commits` section body — both are protected contract
+text (`scripts/dev-contract.py` excludes only `Shipped`, `Implementation
+Notes`, `Implementation Log`, `Review`). This round keeps the restored
+assigned contract byte-identical except the agent-owned fields: `progress`,
+`commits`, and this `## Shipped` section. The production fix (component
+tests, commit `d988af762`) is preserved intact at the head.
