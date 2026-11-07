@@ -6,7 +6,7 @@ def profile(store, task, stage):
     memory = store.setting(f'compute_memory:{task}:{stage}', 4)
     if memory not in (4, 8):
         raise ValueError('unsupported compute memory tier')
-    return {'cpu': '1', 'memory': f'{memory}Gi', 'memory_gib': memory, 'build_jobs': 1}
+    return {'cpu': '1', 'memory': f'{memory}Gi', 'memory_gib': memory, 'build_jobs': 1, 'workspace_gib':30}
 
 
 def record_oom(store, task, stage, observed_gib, evidence):
@@ -32,6 +32,12 @@ def record_oom(store, task, stage, observed_gib, evidence):
 
 def from_usage(execution, name, usage):
     """Child-only OOMs need not terminate PID 1 or mark the pod OOMKilled."""
+    disk=usage.get('workspace') or {}
+    if disk.get('total',0)>0 and (disk.get('free',1024**3)<1024**2 or disk.get('inode_free',1)==0):
+        from .execution import Attention
+        error=Attention('Sandbox workspace exhausted; retain source/logs and correct the storage/build profile before explicitly retrying')
+        error.category='sandbox_storage';error.diagnostic={'sandbox':name,'source':'statvfs',**disk}
+        return error
     counters=usage.get('memory.events',{})
     if not isinstance(counters,dict) or int(counters.get('oom_kill',0))<=0:return None
     try:gib=int(usage['memory.max'])/(1024**3)

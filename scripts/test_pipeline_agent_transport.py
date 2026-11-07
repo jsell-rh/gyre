@@ -21,6 +21,24 @@ SCRIPT=Path(__file__).with_name('pipeline-agent.py').resolve()
 
 
 class AgentTransportTest(TestCase):
+    def test_cancel_quiesces_child_after_supervisor_crash(self):
+        import os,signal
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);marker=root/'running'
+            (root/'command.json').write_text(json.dumps({'argv':[sys.executable,'-c',f'from pathlib import Path; import time; Path({str(marker)!r}).touch(); time.sleep(60)'],'cwd':directory,'timeout':60}))
+            subprocess.run([sys.executable,str(SCRIPT),'launch',directory],check=True,capture_output=True)
+            self.addCleanup(lambda:subprocess.run([sys.executable,str(SCRIPT),'cancel',directory],capture_output=True))
+            deadline=time.monotonic()+5
+            while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(marker.exists())
+            parent=json.loads((root/'identity.json').read_text())
+            child=json.loads((root/'child.json').read_text())
+            os.kill(parent['pid'],signal.SIGKILL)
+            subprocess.run([sys.executable,str(SCRIPT),'cancel',directory],check=True,capture_output=True,timeout=10)
+            spec=importlib.util.spec_from_file_location('agent_identity',SCRIPT)
+            agent=importlib.util.module_from_spec(spec);spec.loader.exec_module(agent)
+            self.assertFalse(agent.alive(child))
+
     def test_launch_ack_loss_and_poll_failure_resume_exact_bytes_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);store=Store(root/'state');self.addCleanup(store.close)

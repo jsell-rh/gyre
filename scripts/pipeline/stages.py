@@ -545,6 +545,7 @@ def cleanup(execution, task):
         code = """import json,os,pathlib,signal,time
 pairs=[pathlib.Path('/tmp/stage/step.exit.process.json')]
 pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/identity.json'))
+pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/child.json'))
 for p in pairs:
  if not p.exists(): continue
  value=json.loads(p.read_text()); pid=int(value['pid']); stat=pathlib.Path(f'/proc/{pid}/stat')

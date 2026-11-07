@@ -124,6 +124,12 @@ def main():
                 job=json.loads((root/'command.json').read_text())
                 with (root/'stdout').open('ab',buffering=0) as out,(root/'stderr').open('ab',buffering=0) as err:
                     child=subprocess.Popen(job['argv'],cwd=job['cwd'],stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True)
+                    try:
+                        fields=Path(f'/proc/{child.pid}/stat').read_text().rsplit(')',1)[1].split()
+                        atomic(root/'child.json',{'pid':child.pid,'start':fields[19],'boot':Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
+                    except Exception:
+                        os.killpg(child.pid,signal.SIGKILL);child.wait()
+                        raise
                     try:code=child.wait(timeout=job['timeout'])
                     except subprocess.TimeoutExpired:
                         os.killpg(child.pid,signal.SIGKILL);child.wait();code=124
@@ -132,10 +138,23 @@ def main():
                 atomic(result,{'exit_code':74,'error_kind':type(exc).__name__})
         return
     if args.operation=='cancel':
+        child=root/'child.json'
         if identity.exists():
             value=json.loads(identity.read_text())
-            if alive(value):os.kill(value['pid'],signal.SIGTERM)
-        return
+            try:
+                if alive(value):os.kill(value['pid'],signal.SIGTERM)
+            except ProcessLookupError:pass
+        if child.exists():
+            value=json.loads(child.read_text())
+            try:
+                if alive(value):os.killpg(value['pid'],signal.SIGKILL)
+            except ProcessLookupError:pass
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            active=[p for p in (identity,child) if p.exists() and alive(json.loads(p.read_text()))]
+            if not active:return
+            time.sleep(.05)
+        raise RuntimeError('agent cancellation did not quiesce owned processes')
     print('GYRE_AGENT_POLL '+json.dumps(poll(root,args.offset,args.stderr_offset,args.wait)))
 
 

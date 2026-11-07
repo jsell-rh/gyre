@@ -77,6 +77,76 @@ def save_failure(execution, error):
         'attention':getattr(error,'attention',False),'diagnostic':getattr(error,'diagnostic',None)}));path.chmod(0o600)
 
 
+def ensure_workspace(execution, name, invoke=None):
+    """Size only this owned PVC before builds; never alter gateway-wide defaults."""
+    from .execution import Attention
+    execution.current()
+    store=execution.store
+    context,namespace=store.setting('runtime_kube_context'),store.setting('runtime_namespace')
+    if not context or not namespace:return  # Other backends provision storage at the gateway.
+    required=30
+    row=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
+    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+        raise Attention('refuse workspace provisioning after sandbox ownership changed')
+    if json.loads(row['data']).get('workspace_ready_gib',0)>=required:return
+    execution.phase('ProvisioningStorage',sandbox=name,workspace_gib=required)
+    prefix=['kubectl','--context',context,'--request-timeout=15s','-n',namespace]
+    def query(*args):
+        return subprocess.run(prefix+list(args),capture_output=True,text=True,timeout=20,check=True)
+    def size(value):
+        return float(value[:-2])/(1024 if value.endswith('Mi') else 1) if value.endswith(('Gi','Mi')) else 0
+    deadline=time.monotonic()+1800
+    bound=False
+    while time.monotonic()<deadline:
+        execution.current()
+        try:
+            if not bound:
+                observed=(invoke(['sandbox','get',name,'--output','json'],capture_output=True,text=True,timeout=20) if invoke else
+                          execution.os('sandbox','get',name,'--output','json',check=False,timeout=20))
+                if observed.returncode:
+                    execution.cancelled.wait(5);continue
+                labels=json.loads(observed.stdout[observed.stdout.find('{'):]).get('labels',{})
+                if labels.get('gyre.dev/pipeline')!=store.setting('owner') or labels.get('gyre.dev/work')!=execution.claim['id']:
+                    error=Attention('refuse workspace provisioning for a foreign gateway sandbox');error.category='sandbox_storage';raise error
+                bound=True
+            sandbox=json.loads(query('get','sandbox',name,'-o','json').stdout)
+            pvc=json.loads(query('get','pvc','workspace-'+name,'-o','json').stdout)
+            if sandbox['metadata'].get('deletionTimestamp') or pvc['metadata'].get('deletionTimestamp'):
+                error=Attention('Assigned workspace is being deleted; refusing to start a build');error.category='sandbox_storage';raise error
+            if not any(r.get('uid')==sandbox['metadata']['uid'] for r in pvc['metadata'].get('ownerReferences',[])):
+                error=Attention('workspace PVC ownership differs from the assigned sandbox');error.category='sandbox_storage';raise error
+            requested=size(pvc['spec']['resources']['requests']['storage'])
+            if requested<required:
+                patch=json.dumps({'spec':{'resources':{'requests':{'storage':str(required)+'Gi'}}}})
+                query('patch','pvc','workspace-'+name,'--type','merge','-p',patch)
+                store.event('workspace_expansion_requested',{'sandbox':name,'gib':required},execution.claim['task'],execution.claim['id'])
+            elif size(pvc.get('status',{}).get('capacity',{}).get('storage','0Gi'))>=required and not any(c['status']=='True' and c['type'] in ('Resizing','FileSystemResizePending') for c in pvc.get('status',{}).get('conditions',[])):
+                total=int(query('exec',name,'-c','agent','--','python3','-c',"import shutil;print(shutil.disk_usage('/sandbox/workspace').total)").stdout.strip())
+                if total>=required*1024**3*.95:
+                    execution.current()
+                    current=store.db.execute('SELECT state,data FROM resources WHERE name=?',(name,)).fetchone()
+                    store.resource_state(name,current['state'],json.loads(current['data'])|{'workspace_ready_gib':required})
+                    return
+        except subprocess.CalledProcessError as exc:
+            if any(term in (exc.stderr or '').lower() for term in ('forbidden','unauthorized','does not support volume expansion')):
+                error=Attention('Workspace storage provisioning was denied; configure scoped access or provision adequate gateway storage');error.category='sandbox_storage';raise error from exc
+        except (OSError,ValueError,subprocess.TimeoutExpired):pass
+        execution.cancelled.wait(5)
+    error=Attention('Workspace did not reach 30 GiB before the storage infrastructure deadline; no build was started');error.category='sandbox_storage';raise error
+
+
+def reclaim_build_cache(execution, name, invoke):
+    """After stopping an agent, free generated output so Git can save source."""
+    from .execution import Attention
+    row=execution.store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
+    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+        raise Attention('refuse cache reclamation after sandbox ownership changed')
+    code="import pathlib,shutil\np=pathlib.Path('/sandbox/workspace/.gyre-target')\nif p.is_symlink(): raise RuntimeError('refuse symlinked build cache')\nif p.exists(): shutil.rmtree(p)"
+    result=invoke(['sandbox','exec','-n',name,'--','python3','-c',code],capture_output=True,text=True,timeout=120)
+    if result.returncode:raise RuntimeError('generated build cache could not be reclaimed for source capture')
+    execution.store.event('build_cache_reclaimed',{'sandbox':name,'reason':'workspace exhausted; preserve source'},execution.claim['task'],execution.claim['id'])
+
+
 def restart(execution, name, invoke):
     """One restart per live claim. Never start an unowned or deleting sandbox."""
     from .execution import Attention

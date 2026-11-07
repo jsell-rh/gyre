@@ -139,6 +139,8 @@ def run(execution, path, identity, probe=None):
         # visible/Ready instead of deleting an allocation the autoscaler needs.
 
         execution.wait_ready(name)
+        from .runtime import ensure_workspace
+        ensure_workspace(execution,name)
         execution.remote(name, 'mkdir', '-p', '/tmp/stage', timeout=30)
         for source in sorted(bundle.iterdir()):
             execution.os('sandbox', 'upload', name, str(source), '/tmp/stage/' + source.name, '--no-git-ignore', timeout=180)

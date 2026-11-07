@@ -34,6 +34,16 @@ behavior and debug assertions remain enabled) to reduce memory and workspace
 footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
 assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
 memory. Compute choices and the triggering evidence remain in the ledger.
+Build workspaces need 30 GiB persistent disk; this is separate from worker RAM.
+With the scoped Kubernetes runtime context configured, the harness verifies
+gateway ownership and PVC owner UID, expands only that sandbox's volume, and
+waits for the mounted filesystem before starting builds. Other backends must
+provision adequate workspace storage at the gateway. This does not alter
+gateway-wide defaults. Disk or inode exhaustion is reported as storage failure,
+never as transport loss or an OOM; identical attempts require an explicit retry.
+After stopping an implementation agent, its generated build cache can be
+reclaimed to leave room for saving source. Source and symlink targets are never
+deleted by this reclamation.
 
 An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
 and `runtime_namespace` settings to capture workload termination reasons before

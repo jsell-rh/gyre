@@ -148,15 +148,16 @@ def main():
             raise ValueError('refuse deletion of an unowned fullsend sandbox')
         # On cancellation/failed inference the normal validator may not run.
         # Preserve an explicitly incomplete checkpoint before deleting compute.
-        try:
-            collect(execution, name, success=False)
-        except Exception as exc:
-            store.event('fullsend_checkpoint_unavailable', {'resource': name, 'error': type(exc).__name__}, execution.claim['task'])
-            # Keep existing recovery format for the independent cleanup stage.
-            recover_env = {**env, 'GYRE_DEV_RECOVERY_REPO': '/sandbox/workspace/checkout'}
-            subprocess.run([sys.executable, str(Path(__file__).with_name('dev-recover.py')), name,
-                            str(execution.directory / 'recovery.patch')], env=recover_env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        if execution.claim['stage']=='implement' and not (execution.directory/'outcome.json').exists():
+            try:
+                collect(execution, name, success=False)
+            except Exception as exc:
+                store.event('fullsend_checkpoint_unavailable', {'resource': name, 'error': type(exc).__name__}, execution.claim['task'])
+                # Keep existing recovery format for the independent cleanup stage.
+                recover_env = {**env, 'GYRE_DEV_RECOVERY_REPO': '/sandbox/workspace/checkout'}
+                subprocess.run([sys.executable, str(Path(__file__).with_name('dev-recover.py')), name,
+                                str(execution.directory / 'recovery.patch')], env=recover_env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
         store.resource_state(name, 'deleting')
     # Streaming exec/upload/download must inherit stdin/stdout. Retry bounded
     # control-plane calls on the precise CLI token-expiry diagnostic only.

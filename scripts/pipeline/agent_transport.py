@@ -19,6 +19,8 @@ def stream(execution, name, argv, timeout, invoke):
     # Identity is per claim and command. Lost launch acknowledgements and poll
     # retries reconnect to this run; they never launch a second coding process.
     key=hashlib.sha256(json.dumps(argv).encode()).hexdigest()[:24]
+    from .runtime import ensure_workspace
+    ensure_workspace(execution,name,invoke)
     root='/sandbox/workspace/.gyre-agent-'+key
     path=execution.directory/('agent-command-'+key+'.json')
     path.write_text(json.dumps({'argv':argv,'timeout':timeout,'cwd':'/sandbox/workspace'}));path.chmod(0o600)
@@ -62,13 +64,16 @@ def stream(execution, name, argv, timeout, invoke):
                 from .compute import from_usage
                 oom=from_usage(execution,name,frame.get('usage') or {})
                 if oom:
-                    call('cancel',root)
-                    try:
-                        from .fullsend import collect
-                        collect(execution,name,success=False)
-                    except Exception:pass
                     from .runtime import save_failure
                     save_failure(execution,oom)
+                    try:
+                        call('cancel',root)
+                        if oom.category=='sandbox_storage':
+                            from .runtime import reclaim_build_cache
+                            reclaim_build_cache(execution,name,invoke)
+                        from .fullsend import collect
+                        collect(execution,name,success=False)
+                    except Exception:pass  # Original resource evidence remains actionable.
                     return 74
 
                 if not connected or failures:

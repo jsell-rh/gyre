@@ -398,7 +398,7 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                     continue
                 execution.store.resource_state(name, 'deleting')
                 if inventory[name]['phase'].lower() != 'deleting':
-                    if inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
+                    if execution.claim['stage']=='implement' and inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
                         try:
                             collect(execution, name, success=False)
                         except Exception as exc:
