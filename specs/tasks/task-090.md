@@ -154,23 +154,26 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore (round 6)
+### Re-verification after contract restore (round 7)
 
 The executor again restored the assigned task document (repair id
-fae16a8b494946ee9f50120ecc0e212e, assigned base ad417f8a5, candidate head
-f6fdaf90) — this is the sixth such restore; each round the only working-tree
-delta is the task document itself. Resolved this round:
+bcc984bf254b47afa68055576953f109, assigned base ad417f8a5, candidate head
+7e7cde66) — this is the seventh such restore; each round the only
+working-tree delta is the task document itself. Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
   gates.rs rejection fields) is intact at HEAD from product-surface commit
-  0766a167, which is an ancestor of this branch head.
+  0766a167, which is an ancestor of this branch head. The only drift to
+  ExplorerCanvas since that commit is an unrelated span-status robustness
+  fix from another task; lens rendering is unchanged.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the three lens test files — 189/189 passed
-  (task090-vitest-lenses-r6.log, exit 0);
+  (task090-vitest-lenses-r7.log, exit 0);
   `cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r6.log, exit 0). Logs retained under
+  (task090-cargo-gates-r7.log, exit 0). Logs retained under
   /tmp/stage/review-evidence with exit codes.
 - Frontmatter re-verified (progress ready-for-review, acceptance boxes
   checked, product-surface commit 0766a167 attributed); the working tree
-  is clean — no generated web/dist churn was produced this round.
+  is clean — the web/dist churn produced by the cargo build was restored
+  to HEAD, not committed.
