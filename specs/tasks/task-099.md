@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "30c30ca8f89f131f9764e4742d7e53fe5514608e"]
 ---
 
 ## Spec Excerpt
@@ -161,9 +161,11 @@ orchestration with resume semantics, backed by the server pieces the spec
 requires. Implementation commits are in the frontmatter. Rounds 1-4 closed
 the F1-F7 and round-3 review findings; round 5 repaired the
 `80ce5b90` test regression (ws.rs fabricated-workspace fallback and
-merge-broken presence fixtures); this round (6) repaired the review finding
+merge-broken presence fixtures); round 6 repaired the review finding
 that candidate-changed lines violated the repo's changed-lines rustfmt
-gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files).
+gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files); this round
+(7, commit `30c30ca8`) resolved the rebase onto `4d6759a0` (task-084
+plus the task-077 revision), which conflicted in three files.
 
 ### Behavior
 
@@ -195,6 +197,21 @@ gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files).
   reflows the stray `).await;` left by the emit_telemetry
   sync-to-async change (mcp.rs), and reflows the remaining changed
   lines to rustfmt defaults.
+- Round-7 (rebase resolution, commit `30c30ca8`): merged base
+  `4d6759a0` into the branch and resolved the three conflicts —
+  (a) `gyre-cli/src/main.rs` step 6 kept the candidate's real
+  `push_and_sync_specs` implementation over the base's older
+  report-only block (the base contributed nothing else to the CLI;
+  bootstrap.rs/client.rs auto-merged back to the candidate versions);
+  (b) `inert-enforcement-exemptions.txt` dropped BOTH sides' entries —
+  each side had fixed the other's finding (base bound+branched the
+  `evaluate_attestation_abac` results in merge_processor.rs; candidate
+  removed the void `validate_persona` calls in api/orchestrator.rs), so
+  the merged tree has zero exempted sites and the file keeps only its
+  header; (c) `relative-path-defaults-exemptions.txt` dropped the
+  candidate's spawn.rs:600 entry — the merged spawn.rs (base's task-077
+  F6 rewrite) no longer contains the `"./repos/"` prose comment it
+  exempted.
 
 ### Tests
 
@@ -210,11 +227,27 @@ gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files).
   behavior drift: `cargo test -p gyre-server --lib ws::` — 82 passed,
   0 failed; `cargo test -p gyre-cli` — 131 + 1 passed, 0 failed;
   `cargo check -p gyre-server -p gyre-cli` — exit 0.
+- Round-7 merge-resolution probes (merged tree): `cargo check -p
+  gyre-cli -p gyre-server` — exit 0; `cargo test -p gyre-cli` — 131 + 1
+  passed, 0 failed; `cargo test -p gyre-server --lib merge_processor`
+  — 60 passed, 0 failed; `cargo test -p gyre-server --lib` — 1363
+  passed, 0 failed; `check-inert-enforcement.sh` and
+  `check-relative-path-defaults.sh` — both exit 0 against the resolved
+  exemption files (proving no unexempted violation and no stale entry
+  needed).
 
 ### Verification evidence
 
 - Evidence under `/tmp/stage/review-evidence/` (source SHAs, commands,
-  exit codes, logs; see its README.md).
+  exit codes, logs; see its README.md). Round-7 (rebase resolution)
+  evidence is in that directory's current contents: README.md plus the
+  five probe logs listed in it (both exemption check scripts, cargo
+  check, cli tests, merge_processor tests, server lib suite).
+- Round-7 merged base `4d6759a0` (task-084 + task-077 revision) into
+  the branch; conflicts resolved per the Behavior section. The merged
+  tree keeps the candidate's bootstrap behavior unchanged (the base
+  contributed no competing CLI code), and the exemption-file
+  resolutions are proven minimal by both check scripts exiting 0.
 - `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the finding's
   reproduction base) — exit 0, "changed lines clean (48 Rust files
   checked)"; also exit 0 against `86a98a29` (HEAD^1, the base CI's fmt
