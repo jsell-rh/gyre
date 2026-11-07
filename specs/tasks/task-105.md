@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Log Retention & Compression"
-commits: ["4597330e9528db2a379b420a8f07d2c8f8408038", "eda138a7bcccf283512c072474e4dd07893a3640"]
+commits: ["eda138a7bcccf283512c072474e4dd07893a3640", "4597330e9528db2a379b420a8f07d2c8f8408038"]
 ---
 
 ## Spec Excerpt
