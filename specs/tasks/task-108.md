@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
+commits: ["a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "14af7abd7e27ffcc7aa28e8703cdda7e97abe218"]
 ---
 
 ## Spec Excerpt
@@ -85,9 +85,18 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. This round repairs three independent-review findings plus a production defect the repair probe exposed. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. This round (`14af7abd7`) repairs two review findings on the previous repair round. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
 
-### This round (review repair: attribution coverage, approve ordering, atomic counter)
+### This round (review repair: exemption remap, approval critical-section serialization)
+
+- **`check-fabricated-scope-defaults.sh` passes again** (finding: the final base merge inserted lines above the pre-existing exempted site — the JWT `claims.tenant_id` fallback in `auth.rs`, already validated by `validate_tenant_id` before use — moving it from line 945 to 983 without re-updating the exemption remap, so the guard failed on the candidate and broke pre-commit/CI). The exemption entry is re-mapped to `auth.rs:983` (edit, not addition; the line count stays frozen at 5). Guard verified green on the fixed tree.
+- **The approval session-creation critical section is serialized** (finding: the Pending-status check, the max-1-active-session check, `save_session` and the request-status save were an unlocked read-modify-write, so two concurrent `POST .../approve` calls from the target both loaded the request as Pending and both minted live impersonation tokens for the same admin — two sessions for one consent, two `ImpersonationStarted` events, violating the max-1-active-per-admin rate limit). `SESSION_WRITE_LOCK` (the lock already held by the action counter and `end_session`) is now held across the whole section and released before token minting, audit emission and notification delivery. The sibling read-modify-writes are covered the same way:
+  - `create_request`'s rate-limit read + request save now run inside the lock (moved from the handler, which had checked it unlocked), closing the check-to-save gap against a concurrently approving request.
+  - `deny_request`'s terminal transition (a concurrent approve/deny pair can no longer both pass the Pending check and overwrite each other's status).
+  - The expiry sweep's stale-request marking (cannot overwrite a request a concurrent approve just marked Approved). The sweep's session-ending loop acquires/releases the lock per session, so taking it for the marking loop cannot deadlock.
+- New test `concurrent_approvals_create_exactly_one_session` (yielding kv adapter, same construction as the existing atomicity test): two concurrent approvals → exactly one succeeds, the loser gets 409, exactly one session and one `ImpersonationStarted`. **Mutation-verified**: with the approve lock removed, the test fails with `2` successful approvals (evidence in `/tmp/stage/review-evidence/task-108-mutation-probe.txt`); with the fix it passes.
+
+### Previous round (review repair: attribution coverage, approve ordering, atomic counter)
 
 - **Impersonation attribution now covers every authenticated surface** (finding: the `impersonation_action` recording ran only after policy evaluation, so ABAC-exempt routes, unresolved patterns, git HTTP, MCP and WebSocket left impersonated calls unattributed and uncounted):
   - Repair probe through the full production router (`build_router`: `require_auth_middleware` -> `last_seen` -> `abac` -> handler) exposed that `require_auth_middleware` had **no impersonation branch** — the token was 401-rejected before any handler ran, so impersonated `/api/v1/*` calls were impossible in a default production deployment (the test suites layered only `abac_middleware`, which is why they stayed green). Fixed by mirroring `FromRequestParts` step 1.5 in the middleware (EdDSA signature + active session; inactive session -> 401).
@@ -101,11 +110,11 @@ Admin user impersonation is implemented end-to-end on commit `cad88393d` (identi
 
 ### Verification (focused, this round)
 
-- `cargo test -p gyre-server --lib api::impersonation` — 13/13 green (4 new tests: full production-router flow incl. exempt-route attribution, per-handler surface attribution, non-target status probing, atomic concurrency).
-- `auth::` 37/37, `abac` 30/30, `ws::` 82/82, `middleware` 22/22, `mcp` 81/81, `git_http` 38/38, `explorer` 59/59, `tty` 3/3, `api::audit` 12/12, `api::jj` 11/11 — all green (every suite touching a changed auth path).
-- `cargo clippy -p gyre-server --all-targets` — no new warnings (lib warning count identical before/after the change).
-- Mechanical guards pass: check-arch, check-in-memory-state-stores, check-inert-enforcement, check-abac-exempt-handlers, check-abac-route-registry, check-lossy-secret-conversion, check-forged-scope-fields, check-unbounded-external-http, check-byte-slice-truncation.
-- Evidence: `/tmp/stage/review-evidence/task-108-repair-focused-tests.txt`. Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
+- `./scripts/check-fabricated-scope-defaults.sh` — OK (was FAIL on the candidate before the remap).
+- `cargo test -p gyre-server --lib api::impersonation` — 14/14 green (new: `concurrent_approvals_create_exactly_one_session`); `impersonation`-filtered across the crate — 15/15; `jobs::` 6/6; `auth::` 37/37.
+- `cargo clippy -p gyre-server --lib` — warning count for `impersonation.rs` identical before/after the change (6 pre-existing, 0 new).
+- Mutation probe: removing the approve critical-section lock makes the new test fail (`exactly one approval must succeed: left 2, right 1`); restoring the fix makes it pass.
+- Evidence: `/tmp/stage/review-evidence/task-108-fabricated-scope-guard.txt`, `task-108-impersonation-tests.txt`, `task-108-mutation-probe.txt`. Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
 
 ### Flow (intent -> signed mandate -> receipt)
 
