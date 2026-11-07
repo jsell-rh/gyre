@@ -3,7 +3,7 @@ title: "HSI Trust Suggestions Background Job"
 spec_ref: "human-system-interface.md §2 Trust Suggestions"
 depends_on:
   - task-077
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §2 Trust Suggestions"
 commits: []
@@ -73,3 +73,26 @@ This appears as an Inbox item (priority 8). The human decides.
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §2 "Trust Suggestions" for the full requirement. The `JobRegistry` exists in the server — check how existing background jobs are registered (look for `admin_run_job` or similar patterns in `crates/gyre-server/src/`). The `NotificationRepository` port already exists in `crates/gyre-ports/src/notification.rs` — use its `has_recent_dismissal` method for the 30-day cooldown check. The `Notification` struct is in `crates/gyre-common/src/notification.rs`. You need to determine the workspace's trust level from the workspace entity. Gate results should be queryable from the gate evaluation records. MR reverts require checking MR status for `Reverted` — verify this status variant exists in the MR model (the spec says to add `Reverted` to the MR status enum if not present).
+
+## Shipped
+
+The `trust_suggestion_check` background job now implements HSI §2 exactly as specified. A prior recovered-checkpoint version of `trust_suggestion.rs` existed at the assignment base but used percentage-based escalation thresholds (>80%/95% gate pass rate, <5%/2% revert rate), required terminal MRs in the window, and emitted a different title/body schema — all diverging from the spec's "0 gate failures and 0 reverted MRs in 30 days" contract. This assignment rewrote the evaluation to the spec.
+
+### Behavior
+
+- **Job registration**: `trust_suggestion_check` in the server's `JobRegistry` (jobs.rs) — daily (86400s), enabled, iterates all workspaces via `trust_suggestion::run_once`.
+- **Per-workspace criteria (HSI §2)**: counts gate failures in the last 30 days (gate results scoped per-MR across the workspace's MRs, each result's own timestamp — `finished_at` else `started_at` — decides window membership, status != Passed counts as a failure) and MR reverts in the last 30 days (status `Reverted`, by `reverted_at` else `updated_at`). Both counts 0 → suggestion warranted.
+- **Escalation ladder**: Supervised → Guided, Guided → Autonomous. Workspaces already at `Autonomous` (top of ladder) are skipped, as are `Custom` workspaces (off the ladder — no next preset level exists to suggest).
+- **Notification**: one per Admin/Owner member (each dismisses independently — spec says "Admin member"; Owner is included as the role holding admin rights over the workspace; Developer/Viewer members are excluded, covered by test). `notification_type: TrustSuggestion`, priority 8, title "Consider increasing trust level", body `{gate_failures, mr_reverts, period_days: 30, current_level, suggested_level}`, `repo_id: None` (workspace-level).
+- **Cooldowns**: per-user 30-day dismissal cooldown via `NotificationRepository::has_recent_dismissal`; active (unresolved, undismissed) suggestions are not duplicated on daily re-runs.
+- **Inline actions (plan step 5)**: Inbox "Increase Trust" now calls `PUT /api/v1/workspaces/:id` with `trust_level` from the notification body's `suggested_level` and resolves the notification (previously it only navigated to settings and dismissed); "Dismiss" calls `POST /api/v1/notifications/:id/dismiss`. New i18n keys `decisions.trust_increased` / `decisions.trust_increase_failed`.
+
+### Test evidence
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib trust_suggestion` — 9 passed, 0 failed: clean record generates suggestion (asserts type, priority 8, title, all 5 body fields, repo_id None); 0-activity workspace (0/0 counts) generates suggestion; gate failure in window suppresses; MR revert in window suppresses; failure older than 30 days ignored; Autonomous workspace skipped; one notification per Admin member (Developer/Viewer excluded); dismissal < 30 days ago → no new notification; active suggestion not duplicated on re-run.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — 1344 passed, 0 failed (no regressions).
+- `npx vitest run src/__tests__/Inbox.test.js` (web, after `npm ci`) — 35 passed, including a new test asserting "Increase Trust" calls `api.updateWorkspace('ws-1', { trust_level: 'Autonomous' })` and resolves the notification.
+- `cargo fmt --all -- --check` clean.
+- Logs: `/tmp/stage/review-evidence/probe-trust-suggestion-tests.log`, `probe-gyre-server-lib.log`, `probe-inbox-vitest.log`.
+
+Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication per the assignment.
