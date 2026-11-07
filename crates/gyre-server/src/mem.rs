@@ -1757,6 +1757,13 @@ impl PersonaRepository for MemPersonaRepository {
 pub struct MemPolicyRepository {
     policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
     decisions: Arc<Mutex<Vec<gyre_domain::PolicyDecision>>>,
+    /// Test hook: when set, `create` returns an error to simulate a policy-store
+    /// write failure (exercises fail-closed seeding, task-077 F6 class).
+    fail_creates: Arc<std::sync::atomic::AtomicBool>,
+    /// Test hook: when set, `list` returns an error to simulate a policy-store
+    /// read failure (exercises the fail-closed supervised-trust merge gate,
+    /// task-077 F9 class).
+    fail_lists: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemPolicyRepository {
@@ -1767,13 +1774,32 @@ impl MemPolicyRepository {
         Self {
             policies,
             decisions: Arc::new(Mutex::new(Vec::new())),
+            fail_creates: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Test hook: cause subsequent `create` calls to fail.
+    #[cfg(test)]
+    pub fn fail_creates(&self) {
+        self.fail_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: cause subsequent `list` calls to fail.
+    #[cfg(test)]
+    pub fn fail_lists(&self) {
+        self.fail_lists
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl gyre_ports::PolicyRepository for MemPolicyRepository {
     async fn create(&self, policy: &gyre_domain::Policy) -> Result<()> {
+        if self.fail_creates.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("simulated policy store failure");
+        }
         self.policies
             .lock()
             .await
@@ -1786,6 +1812,9 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
     }
 
     async fn list(&self) -> Result<Vec<gyre_domain::Policy>> {
+        if self.fail_lists.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("simulated policy store list failure");
+        }
         Ok(self.policies.lock().await.values().cloned().collect())
     }
 
@@ -3300,6 +3329,41 @@ pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
+/// Build a test AppState whose policy repo fails every `create`, used to
+/// exercise fail-closed built-in policy seeding (task-077 F6 class).
+#[cfg(test)]
+pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_creates();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+        None,
+    )
+}
+
+/// Build an AppState whose policy repo fails every `list`, used to exercise
+/// the fail-closed supervised-trust merge gate (task-077 F9): a policy-store
+/// read failure must HOLD the merge, never degrade to "no policies".
+#[cfg(test)]
+pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_lists();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+        None,
+    )
+}
+
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
@@ -3400,6 +3464,7 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
@@ -3988,16 +4053,21 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
         let mut store = self.store.write().await;
         let mut versions = self.versions.write().await;
         if let Some(existing) = store.iter().find(|m| m.id == meta_spec.id).cloned() {
-            // Archive old version.
-            let ver = gyre_domain::MetaSpecVersion {
-                id: Id::new(uuid::Uuid::new_v4().to_string()),
-                meta_spec_id: existing.id.clone(),
-                version: existing.version,
-                prompt: existing.prompt.clone(),
-                content_hash: existing.content_hash.clone(),
-                created_at: existing.updated_at,
-            };
-            versions.push(ver);
+            // Archive only when the content version changed — a same-version
+            // update (approval of unchanged content, required-flag toggle)
+            // must not create a duplicate history row (same contract as the
+            // SQLite/Postgres adapters).
+            if existing.version != meta_spec.version {
+                let ver = gyre_domain::MetaSpecVersion {
+                    id: Id::new(uuid::Uuid::new_v4().to_string()),
+                    meta_spec_id: existing.id.clone(),
+                    version: existing.version,
+                    prompt: existing.prompt.clone(),
+                    content_hash: existing.content_hash.clone(),
+                    created_at: existing.updated_at,
+                };
+                versions.push(ver);
+            }
         }
         store.retain(|m| m.id != meta_spec.id);
         store.push(meta_spec.clone());

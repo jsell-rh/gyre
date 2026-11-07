@@ -149,7 +149,11 @@ pub fn resolve_call_edges(
             source_id: from.id.clone(),
             target_id: to.id.clone(),
             edge_type: EdgeType::Calls,
-            metadata: None,
+            // Provenance tag (lsp-call-graph.md §7): distinguishes Pass 2
+            // (semantic, type-checker) `Calls` edges from Pass 1 (syntax)
+            // ones so `graph_summary` can report per-pass counts. Both passes
+            // emit the same `EdgeType::Calls` variant — only provenance differs.
+            metadata: Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string()),
             first_seen_at: now,
             last_seen_at: now,
             deleted_at: None,
@@ -322,6 +326,7 @@ fn path_contains_segment(haystack: &str, pkg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extractor::LanguageExtractor;
     use gyre_common::graph::{SpecConfidence, Visibility};
 
     fn func_node(id: &str, qname: &str, file: &str) -> GraphNode {
@@ -371,6 +376,63 @@ mod tests {
     fn detect_all_languages_empty_dir_is_empty() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(detect_all_languages(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detect_all_languages_typescript_markers() {
+        // The TypeScript extractor is selected by either marker named in
+        // task-075: a root tsconfig.json, or a package.json (root or one
+        // level down, for frontend-in-a-subdir monorepos).
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "tsconfig.json alone must select the TypeScript Pass 2 extractor"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","devDependencies":{"typescript":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "package.json with a TypeScript dependency must select the TypeScript extractor"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("frontend")).unwrap();
+        std::fs::write(
+            dir.path().join("frontend").join("package.json"),
+            "{\"name\":\"web\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "a package.json one level down (frontend monorepo layout) must select the TypeScript extractor"
+        );
+    }
+
+    #[test]
+    fn detect_all_languages_python_project_markers() {
+        // Each specced Python marker (pyproject.toml, setup.py,
+        // requirements.txt) must select the Python extractor — including at
+        // depth 1 for monorepo layouts (task-074 acceptance criterion).
+        for marker in ["pyproject.toml", "setup.py", "requirements.txt"] {
+            let root = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(root.path().join("backend")).unwrap();
+            std::fs::write(root.path().join("backend").join(marker), "").unwrap();
+            let langs = detect_all_languages(root.path());
+            assert_eq!(
+                langs,
+                vec![Language::Python],
+                "marker {marker} must select exactly Python"
+            );
+        }
     }
 
     /// Build a raw Pass 2 qualified name the way `scripts/go-callgraph`
@@ -629,6 +691,109 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].source_id, Id::new("a"));
         assert_eq!(edges[0].target_id, Id::new("b"));
+    }
+
+    #[test]
+    fn resolve_pyright_edges_against_pass1_python_nodes() {
+        // Name-contract integration for the Python Pass 2 driver
+        // (scripts/python-callgraph-pyright.mjs): the qualified names the
+        // pyright LSP driver emits must resolve exactly against the nodes
+        // the real Pass 1 tree-sitter PythonExtractor produces. The raw
+        // edges below are the verified output of the real driver + pyright
+        // 1.1.414 run against this same fixture (adapter test
+        // pyright_references_map_to_call_edges; stub replay in
+        // scripts/dashboard/test/python-callgraph.test.mjs).
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("app")).unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::write(dir.path().join("app/__init__.py"), "").unwrap();
+        std::fs::write(
+            dir.path().join("app/util.py"),
+            "def helper(x):\n    return x + 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("app/deco.py"),
+            "def wrap(f):\n    return f\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("app/service.py"),
+            "class Service:\n    def __init__(self):\n        self.ready = True\n\n    def handle(self):\n        return 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("app/main.py"),
+            concat!(
+                "from app.util import helper\n",
+                "from app.deco import wrap\n",
+                "from app.service import Service\n",
+                "\n",
+                "s = Service()\n",
+                "\n",
+                "@wrap\n",
+                "def decorated():\n",
+                "    pass\n",
+                "\n",
+                "def run():\n",
+                "    helper(1)\n",
+                "    s = Service()\n",
+                "    return s.handle()\n",
+                "\n",
+                "def other():\n",
+                "    run()\n",
+                "\n",
+                "helper(2)\n",
+            ),
+        )
+        .unwrap();
+
+        let pass1 = crate::PythonExtractor.extract(dir.path(), "sha");
+        assert!(
+            pass1.errors.is_empty(),
+            "pass 1 extraction reported {} errors",
+            pass1.errors.len()
+        );
+
+        let raw = vec![
+            ("app.main", "app.service.Service"),
+            ("app.main", "app.util.helper"),
+            ("app.main.decorated", "app.deco.wrap"),
+            ("app.main.other", "app.main.run"),
+            ("app.main.run", "app.service.Service"),
+            ("app.main.run", "app.service.Service.handle"),
+            ("app.main.run", "app.util.helper"),
+        ]
+        .into_iter()
+        .map(|(from, to)| CallEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+        let edges =
+            resolve_call_edges(Language::Python, &raw, &pass1.nodes, &[], &Id::new("repo1"));
+        let by_id: std::collections::HashMap<&str, &str> = pass1
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.qualified_name.as_str()))
+            .collect();
+        let mut resolved: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|e| (by_id[e.source_id.as_str()], by_id[e.target_id.as_str()]))
+            .collect();
+        resolved.sort_unstable();
+        let mut expected: Vec<(&str, &str)> = vec![
+            ("app.main", "app.service.Service"),
+            ("app.main", "app.util.helper"),
+            ("app.main.decorated", "app.deco.wrap"),
+            ("app.main.other", "app.main.run"),
+            ("app.main.run", "app.service.Service"),
+            ("app.main.run", "app.service.Service.handle"),
+            ("app.main.run", "app.util.helper"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(resolved, expected);
     }
 
     #[test]
