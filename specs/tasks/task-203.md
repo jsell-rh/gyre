@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "6bf73593ad04e5a956c67204389a9fa2a9ad31e5"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,7 @@ Full workspace suites, all-target Clippy, and GitHub CI are deferred to verifica
 ### Verification repair (`790b031d`)
 
 Durable finding `3f2e4f62`: the verification sandbox failed to compile the `search_wiring` test binary — `E0015: cannot call non-const associated function tokio::sync::Mutex::<()>::new in statics` — because `static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(())` depends on `Mutex::new` being `const fn`, which does not hold on the verification toolchain's tokio build. Fixed by initializing the env-var lock through `std::sync::LazyLock` (the pattern already used by `crates/gyre-adapters/src/call_graph.rs`), so no const call sits in the static initializer; test logic unchanged. Everything else in that verification run passed (arch lints, ABAC registry, mem port contracts, web build); the svelte a11y/unused-CSS output in the log tail is warnings-only. Post-fix probes in this sandbox, `SKIP_WEB_BUILD=1` via `/tmp/stage/bin/cargo` (notes in `/tmp/stage/review-evidence/task-203-e0015-repair.md`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `rustfmt --check` on the changed file — clean.
+
+### Verification repair (`6bf73593`)
+
+Durable finding `82706acf`: the verification checks run (`bash /tmp/stage/checks.sh`, candidate `4c1f2f62`) exited 1 with a single actionable code diagnostic — `crates/gyre-server/tests/search_wiring.rs:275: unused_must_use: unused std::result::Result that must be used`. Root cause: `abac_middleware::seed_builtin_policies(&state).await;` drops its `anyhow::Result<()>` at both call sites in the test (lines 200 and 275 of the candidate); rustc's `unused_must_use` fires on the dropped `#[must_use]` result. Everything else in that run passed (rustfmt clean, build OK, web build succeeded; the svelte a11y/unused-CSS output is warnings-only and pre-existing). Fix: both call sites now `.unwrap()`, matching every other fallible call in the file — no production code, test logic, or assertions changed. Post-fix probes in this sandbox, `SKIP_WEB_BUILD=1` via `/tmp/stage/bin/cargo` (notes and logs in `/tmp/stage/review-evidence/task-203-unused-must-use-repair.md`): `unused_must_use` reproduced pre-fix at :200 and :275, post-fix `cargo clippy -p gyre-server --all-targets` reports zero `unused_must_use`; `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `rustfmt --edition 2024 --check` — clean.
