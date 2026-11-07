@@ -11,6 +11,12 @@
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
+  // HSI §3 Default Views (task-088): Spec Realization, Change, System Trace.
+  // Boundary is the default explorer view (canvas drill-down), so it has no
+  // dedicated component — the ExplorerCanvas IS the Boundary View.
+  import SpecRealizationView from './explorer/SpecRealizationView.svelte';
+  import ChangeView from './explorer/ChangeView.svelte';
+  import SystemTraceView from './explorer/SystemTraceView.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -25,6 +31,10 @@
   let wsRepos = $state([]);
   let wsReposLoading = $state(true);
   let wsReposError = $state(null);
+  // HSI §3 Boundary View Level 1: per-repo type/endpoint counts from the
+  // workspace knowledge graph + cross-repo dependency chips.
+  let wsRepoStats = $state({});   // repoId → { types, endpoints }
+  let wsRepoDeps = $state({});    // repoId → [{ name, target_repo_id }]
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -37,6 +47,18 @@
   let graphError = $state(null);
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
+
+  // ── HSI §3 Default Views: view selector ───────────────────────────────
+  // Boundary (default) | Spec Realization | Change | System Trace.
+  // Boundary is the ExplorerCanvas C4 drill-down (workspace repo cards →
+  // packages → modules → code items); the other three are dedicated panels.
+  const EXPLORER_VIEWS = [
+    { id: 'boundary', label: 'Boundary' },
+    { id: 'spec-realization', label: 'Spec Realization' },
+    { id: 'change', label: 'Change' },
+    { id: 'system-trace', label: 'System Trace' },
+  ];
+  let explorerViewMode = $state('boundary');
 
   // Graph data quality warnings (e.g., missing LSP toolchains)
   let graphWarnings = $state([]);
@@ -754,6 +776,65 @@
     } finally {
       wsReposLoading = false;
     }
+    loadWsBoundaryStats();
+  }
+
+  /** HSI §3 Boundary View Level 1 — enrich the workspace repo cards with
+   *  type/endpoint counts (from the aggregated workspace knowledge graph)
+   *  and cross-repo dependency chips. Best-effort: failures leave the cards
+   *  without counts rather than breaking the repo list. */
+  async function loadWsBoundaryStats() {
+    if (!scope.workspaceId) return;
+    try {
+      const g = await api.workspaceGraph(scope.workspaceId);
+      const stats = {};
+      for (const n of g?.nodes ?? []) {
+        const rid = n.repo_id;
+        if (!rid) continue;
+        if (!stats[rid]) stats[rid] = { types: 0, endpoints: 0 };
+        const t = String(n.node_type ?? '').toLowerCase();
+        if (['type', 'interface', 'trait', 'class', 'enum'].includes(t)) stats[rid].types += 1;
+        if (t === 'endpoint') stats[rid].endpoints += 1;
+      }
+      wsRepoStats = stats;
+    } catch {
+      wsRepoStats = {};
+    }
+    // Cross-repo dependency chips per repo (names resolved against the list).
+    const deps = {};
+    await Promise.all(
+      wsRepos.map(async (repo) => {
+        try {
+          const edges = await api.repoDependencies(repo.id);
+          deps[repo.id] = (Array.isArray(edges) ? edges : []).map((e) => ({
+            target_repo_id: e.target_repo_id,
+            name:
+              wsRepos.find((r) => r.id === e.target_repo_id)?.name ??
+              e.target_artifact ??
+              e.target_repo_id,
+          }));
+        } catch {
+          deps[repo.id] = [];
+        }
+      })
+    );
+    wsRepoDeps = deps;
+  }
+
+  /** Switch the Explorer view (HSI §3 view selector). Resetting to Boundary
+   *  restores the canvas drill-down exactly as it was (canvas state is kept
+   *  in explorerCanvasState, so nothing is lost while other views are shown). */
+  function setExplorerView(mode) {
+    explorerViewMode = mode;
+    pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  /** Navigate from another view (Change / Spec Realization) to a node's
+   *  implementation details in the Boundary View. */
+  function navigateToBoundaryNode(node) {
+    explorerViewMode = 'boundary';
+    explorerCanvasState = { ...explorerCanvasState, selectedNode: node };
+    detailNode = node;
   }
 
   /** Read the drilled repo name from the current URL (?repo=name), or null.
@@ -1200,6 +1281,23 @@
                 {#if repo.description}
                   <span class="ws-repo-description">{repo.description}</span>
                 {/if}
+                <!-- HSI §3 Boundary View Level 1: type/endpoint counts from the
+                     workspace knowledge graph (C4 container card). -->
+                <span class="ws-repo-counts">
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.types ?? 0} types</span>
+                  <span class="ws-repo-count-sep">·</span>
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.endpoints ?? 0} endpoints</span>
+                </span>
+                {#if wsRepoDeps[repo.id]?.length}
+                  <span class="ws-repo-deps" title="Cross-repo dependencies">
+                    {#each wsRepoDeps[repo.id].slice(0, 4) as dep}
+                      <span class="ws-repo-dep-chip">→ {dep.name}</span>
+                    {/each}
+                    {#if wsRepoDeps[repo.id].length > 4}
+                      <span class="ws-repo-dep-more">+{wsRepoDeps[repo.id].length - 4}</span>
+                    {/if}
+                  </span>
+                {/if}
               </div>
             </div>
             <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
@@ -1291,9 +1389,24 @@
     </div>
 
 
-    <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
+    <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
+        <!-- HSI §3 view selector: Boundary | Spec Realization | Change | System Trace -->
+        <div class="explorer-view-tabs" role="tablist" aria-label="Explorer view" data-testid="explorer-view-selector">
+          {#each EXPLORER_VIEWS as v (v.id)}
+            <button
+              type="button"
+              role="tab"
+              class="view-tab"
+              class:active={explorerViewMode === v.id}
+              aria-selected={explorerViewMode === v.id}
+              onclick={() => setExplorerView(v.id)}
+            >{v.label}</button>
+          {/each}
+        </div>
+
+        {#if explorerViewMode === 'boundary'}
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -1356,6 +1469,7 @@
             </span>
           {/if}
         {/if}
+        {/if}
       </div>
     {/if}
 
@@ -1403,6 +1517,7 @@
                   </button>
                 </div>
               {/if}
+              {#if explorerViewMode === 'boundary'}
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
@@ -1452,8 +1567,27 @@
                 onTimelineMarkerClick={(_delta) => {}}
                 {timelineDeltaStats}
               />
-              <!-- Architecture Insights — collapsible panel inside canvas area -->
-              {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+              {:else if explorerViewMode === 'spec-realization'}
+                <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
+                <SpecRealizationView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onOpenSpec={(path) => openSpecEditor(path)}
+                  onSelectNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'change'}
+                <!-- HSI §3 Change View: architectural deltas since last visit -->
+                <ChangeView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onNavigateToNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'system-trace'}
+                <!-- HSI §3 System Trace View: SDLC timeline for an MR -->
+                <SystemTraceView repoId={selectedRepoId} />
+              {/if}
+              <!-- Architecture Insights — collapsible panel inside canvas area (Boundary view only) -->
+              {#if explorerViewMode === 'boundary' && selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
                 <div class="arch-insights-overlay">
                   <div class="arch-insights-toggle">
                     <button
@@ -2084,6 +2218,35 @@
     white-space: nowrap;
   }
 
+  /* HSI §3 Boundary View Level 1: type/endpoint counts + dep chips on cards */
+  .ws-repo-counts {
+    display: inline-flex;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .ws-repo-count-sep { color: var(--color-border); }
+
+  .ws-repo-deps {
+    display: inline-flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .ws-repo-dep-chip {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    border-radius: var(--radius-full, 999px);
+    padding: 0 var(--space-2);
+  }
+
+  .ws-repo-dep-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
   .ws-repo-explore {
     font-size: var(--text-sm);
     color: var(--color-link);
@@ -2304,6 +2467,41 @@
     background: var(--color-surface-elevated);
     flex-shrink: 0;
     flex-wrap: wrap;
+  }
+
+  /* HSI §3 view selector tabs (Boundary | Spec Realization | Change | System Trace) */
+  .explorer-view-tabs {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    padding: 2px;
+    flex-shrink: 0;
+  }
+
+  .view-tab {
+    border: none;
+    background: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .view-tab:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .view-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    box-shadow: inset 0 -2px 0 var(--color-focus);
+    font-weight: 600;
   }
 
   .search-input-wrap {
