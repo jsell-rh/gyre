@@ -51,3 +51,47 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 59 (repair cycle) — attribution clobber reproduced on candidate f6de4d887
+
+Assignment: base `be43a1b7b`, candidate `f6de4d887` ("process: record task-208
+branch commits"). Evidence: `/tmp/stage/review-evidence/r59/`.
+
+**Verdict: not approved — one blocking process finding; all product acceptance
+criteria re-verified clean.**
+
+- **[-] Blocking (process, 51st occurrence of the rounds 2–57 clobber class):**
+  the candidate's only change vs parent `d0128ac39` rewrites the task's
+  `commits:` frontmatter from the restored six-SHA list back to five, dropping
+  `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated
+  dist bundles from whitespace gate (task-208)` — root `.gitattributes`
+  `web/dist/** -whitespace`, live at `.gitattributes:4`). Exit-coded:
+  `git merge-base --is-ancestor ea006d52 HEAD` → 0, vs assigned base
+  `be43a1b7b` → 1 — task-208-labeled branch product surface invisible to
+  review scoping while unlisted, violating the AGENTS.md attribution invariant.
+  Root cause re-confirmed: the executor-staged `/tmp/stage/dev-attribution.py`
+  is again the pre-fix version (lacks the `path == '.gitattributes'`
+  product-surface line the fixed in-repo `scripts/dev-attribution.py` has at
+  line 26); the r57/r58 staged-copy repairs do not persist across attempts.
+  Durable fix belongs where `/tmp/stage` is populated from. Repair is
+  mechanical, product untouched: re-run the fixed in-repo pass
+  (`scripts/dev-attribution.py task-208 --commit`) to restore the six-SHA list
+  `e7c21825, aecd6847, a11cbf7e, ea006d52, ad1121c5, 98fd096e` (read-only
+  replica at this candidate computed exactly that list; working tree restored
+  byte-identical).
+- **Product criteria all clean at this exact candidate** (zero product drift
+  since r58-verified tip `c7ac4a5a4` — the candidate touches only
+  `specs/tasks/task-208.md`): dead-code grep over `crates/` + `web/src/` →
+  zero matches; routes and ABAC registrations for
+  `/api/v1/users/me/{agents,tasks,mrs}` absent (only URI references are inside
+  the 404 regression test, `users.rs:956-958`);
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed`
+  → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (1/1; cold
+  compile needed a second, longer window — first 900s attempt timed out
+  mid-build, exit 124, evidence retained); `npm ci` + vitest
+  `UserProfile.test.js` → 23/23; `scripts/test_dev_attribution.py` → 2/2 OK;
+  exactly six compliant profile tabs; spec amendment + coverage rows
+  (user-management row 22 `n/a`, HSI row 54 `implemented`) in place.
+- Verifier must still run `cargo test --all` and `cd web && npm test`; final
+  integration must rebuild `web/dist` from the merged `web/src` before
+  publishing.
