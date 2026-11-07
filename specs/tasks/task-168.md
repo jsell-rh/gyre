@@ -7,7 +7,7 @@ coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
+commits: ["4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673", "219780c5aef6f0a9fc88da61185949decc8e97a8"]
 ---
 
 ## Spec Excerpt
@@ -62,10 +62,7 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 All three coverage sections are implemented in production code (earlier
 checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
-`5e617c7`/`4443b66` repairs: base merges `110180fb` and `2f215b1e`
-resolved — dist rebuilt from merged source, and the `2f215b1e` merge's
-migration-version collision and stale-dist fixed in `4443b66` — see
-Repair rounds).
+`5e617c7`/`4443b66`/`219780c` repairs — see Repair rounds).
 
 ### Git push rejection for archived repos (§API Summary)
 
@@ -82,11 +79,11 @@ Repair rounds).
   `receive_pack_archived_repo_returns_403`,
   `info_refs_upload_pack_archived_repo_still_serves_clone_advertisement`
   (4 passed on the current merged tree,
-  `cargo-lib-archived-postmerge.log`), and integration test
+  `cargo-lib-archived-mergebase1d9547d.log`), and integration test
   `push_to_archived_repo_rejected` in `crates/gyre-server/tests/git_integration.rs`
   which runs a **real `git push`** against a live server and asserts the push
   fails with an "archived" reason (1 passed,
-  `cargo-integration-archived-push.log`).
+  `cargo-integration-archived-push-mergebase1d9547d.log`).
 - `0106d3a` fixed the first unit test's framing assertion: it asserted the body
   starts with `# service=...` but the correct wire format starts with the
   pkt-line length prefix (`001f# service=git-receive-pack\n0000`); the assertion
@@ -115,9 +112,9 @@ Repair rounds).
   `web/src/__tests__/RepoSettings.test.js` — 114 vitest tests pass
   (`vitest-task168-merge56.log`); gates API unit tests in `gates.rs` (position
   ordering, update validation) pass — 11 passed on the current merged tree
-  (`cargo-lib-gates-merge56.log`).
+  (`cargo-lib-gates-mergebase1d9547d.log`).
 
-### Repair rounds (5e617c7, 4443b66)
+### Repair rounds (5e617c7, 4443b66, 219780c)
 
 - `5e617c7`: resolved the in-progress merge of base `110180fb`; the only
   conflicts were generated `web/dist` artifacts, resolved by rebuilding dist
@@ -138,18 +135,36 @@ Repair rounds).
      while dist remained the pre-merge build. Rebuilt dist from the merged
      source (`npm ci` + `npm run build`); the new bundle contains
      `getSpecAssertionResults`.
-- Fresh evidence on head `4443b66` (logs under `/tmp/stage/review-evidence/`):
-  archived-repo unit tests 4/4 (`cargo-lib-archived-merge56.log`), gates API
-  tests 11/11 (`cargo-lib-gates-merge56.log`), vitest 114/114
-  (`vitest-task168-merge56.log`).
+- `219780c`: resolved the merge of base `1d9547de` (thin-worker-recovery;
+  only `web/dist` conflicts) and repaired the two verification findings
+  against that base:
+  1. **rustfmt changed-lines violations** in `postgres/quality_gate.rs`,
+     `sqlite/quality_gate.rs`, `api/gates.rs`, and `mem.rs` (gate-position
+     ordering code) — formatted;
+     `check-rustfmt-diff.py 1d9547de` now reports changed lines clean
+     (13 Rust files).
+  2. **New verification exemption** — the base fixed the `git_http.rs`
+     ws_id-fallback site itself (skip-and-log pattern), so our retargeted
+     exemption entry `git_http.rs:1535` no longer matched the base's
+     `git_http.rs:1495` entry and read as a *new* exemption. Deleted the
+     entry and lowered `FROZEN_EXEMPTION_COUNT` 5 → 4 per the documented
+     fix path (`check-fabricated-scope-defaults.sh` passes; the site is
+     genuinely fixed in the merged tree).
+- Fresh evidence on head `219780c` (logs under `/tmp/stage/review-evidence/`,
+  suffix `mergebase1d9547d`): archived-repo unit tests 4/4
+  (`cargo-lib-archived-mergebase1d9547d.log`), real-`git-push` integration
+  test 1/1 (`cargo-integration-archived-push-mergebase1d9547d.log`), gates
+  API tests 11/11 (`cargo-lib-gates-mergebase1d9547d.log`),
+  `check-rustfmt-diff.py` clean.
 
 ### Invariants
 
-All 17 mechanical invariant checks pass at head `4443b66` on the merged
+All 17 mechanical invariant checks pass at head `219780c` on the merged
 tree — `check-arch`, `check-abac-route-registry`, `check-migration-versions`,
 `check-migration-sql-portability`, `check-mem-port-contracts`,
 `check-inert-enforcement`, `check-dead-message-kinds`,
-`check-fabricated-scope-defaults`, `check-byte-slice-truncation`,
+`check-fabricated-scope-defaults` (frozen count lowered to 4 — the
+`git_http.rs` site is fixed by the base merge, entry deleted), `check-byte-slice-truncation`,
 `check-relative-path-defaults`, `check-fail-open-ref-resolution`,
 `check-lossy-secret-conversion`, `check-scope-literal-defaults`,
 `check-forwarded-header-trust`, `check-in-memory-state-stores`,
