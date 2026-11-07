@@ -51,3 +51,20 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 73 (2026-11-07) — attribution clobber on the assigned candidate; product clean
+
+Assignment: base `2badce49d`, candidate `381cd7635`. Independent review; evidence in `/tmp/stage/review-evidence/r73/`.
+
+**Finding (the only one — process, but it sits on the assigned candidate):** `381cd7635` ("process: record task-208 branch commits") is itself a clobber. Its only change vs parent `f631c753e` (the r72 repair) rewrites `commits:` from the correct six-SHA list back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes` `web/dist/** -whitespace`, live at `.gitattributes:4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0, `git merge-base --is-ancestor ea006d52 2badce49d` → 1, so it is live task-208 product surface invisible to review scoping while unlisted (AGENTS.md attribution invariant). Root cause unchanged: the executor-staged `/tmp/stage/dev-attribution.py` is again the pre-fix version (sha256 `627fce91…` vs fixed in-repo `c23f2505…`; the diff is exactly the missing `path == '.gitattributes' or` line at `scripts/dev-attribution.py:26`), so the checkpoint pass re-drops the SHA at every attempt. The durable fix must land wherever `/tmp/stage` is populated from — process owner.
+
+**Product-side verification (all clean, fresh probes this round):**
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- No route or ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}`; the only URI refs in `crates/` are inside the 404 regression test (`users.rs:956-958`).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (1 passed).
+- `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23.
+- `UserProfile.svelte` tabs exactly: info, tokens, memberships, ledger, notif-prefs, notifications; `api.js` clean.
+- Spec amendment in place (`user-management.md` §"My Stuff" Is Not a Surface; M22.8 row struck Removed at line 652; coverage row 22 `n/a`; HSI row 54); `e2e-flow.sh` asserts 404; `api-reference.md` and M22 milestone rows struck; remaining `users/me/*` endpoints untouched.
+- `python3 scripts/dev-attribution.py task-208` computes exactly the six-SHA list (working tree restored after the probe — tree clean); in-repo `check-task-commit-attribution.sh` exit 0 (its narrower legacy filter doesn't count `.gitattributes`; documented residual).
+
+Verdict: **needs-revision** — frontmatter restore only (re-run the fixed attribution pass and commit it); no product change required. Full `cargo test --all` and `cd web && npm test` remain for the verifier.
