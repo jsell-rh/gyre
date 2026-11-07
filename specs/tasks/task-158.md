@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
-commits: ["381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
+commits: ["381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df", "5ef42f5c3cef7360a801154841399d98b49b5fc7"]
 ---
 
 ## Spec Excerpt
@@ -148,7 +148,60 @@ Two findings from the independent review of candidate `8e4a59016`:
 
 Spec §8 step 3 amended with the fail-closed clause.
 
-### Test evidence (at HEAD `381962ab9`, merged base `a884329d7`)
+### Review repair (round 6107f63d, commit `5ef42f5c3`)
+
+Two findings from the independent review of candidate `d29f06ed7`:
+
+- **Global/Workspace approval fan-out 500s after persisting (code)** —
+  the else-branch of the `newly_approved` block propagated per-workspace
+  set-resolution errors with `?` AFTER `state.meta_specs.update(&ms)`
+  had already persisted the approval: one workspace anywhere with a
+  corrupt stored `meta_spec_sets` JSON row made every Global/
+  Workspace-scoped approval return 500 while the approval WAS persisted
+  and the fan-out was partially executed (workspaces listed before the
+  corrupt one had already received reconciliation tasks). Inconsistent
+  with the tenant controller's fail-closed skip one branch above. Now
+  matches the resolve result and skips the workspace with a warn log
+  (same fail-closed-skip as `run_tenant_reconciliation`), keeping the
+  approval response 200. Killing test:
+  `global_spec_approval_skips_unreadable_workspace_set` — corrupt
+  workspace created first (strongest ordering: under the old `?` the
+  loop aborted before the healthy workspace was scanned), then a
+  binding workspace: approval 200, `approval_status` Approved both in
+  response and persisted via the port, healthy workspace still gets
+  its reconciliation task, corrupt workspace gets none. Not executed
+  in this repair sandbox — crates.io unreachable and no cached
+  registry/target dir, so `cargo test` could not run (restriction
+  recorded in `/tmp/stage/review-evidence/build-restriction-round6107f63d.txt`;
+  remote verification must run it, plus the mutation kill: restore the
+  `?` propagation → test must fail).
+- **Compiler warning (code, minor)** —
+  `tenant_meta_spec_set_requires_admin` left the
+  `tokio::task::block_in_place(...)` result unused (`unused_must_use`).
+  Fixed with `.expect("seed built-in policies")`, matching the sibling
+  tests' pattern.
+
+### Test evidence (at HEAD `5ef42f5c3`; prior rounds at `381962ab9`)
+
+At HEAD `5ef42f5c3` (this repair round):
+
+- `cargo test` could NOT run in this repair sandbox — crates.io
+  unreachable (connection refused on `index.crates.io:443` and
+  `static.crates.io:443`), no cached crate registry, no prebuilt target
+  dir; see
+  `/tmp/stage/review-evidence/build-restriction-round6107f63d.txt`.
+  The new killing test and the two fixes were verified by inspection
+  against compiling sibling code paths (same call shapes, imports, and
+  port signatures) and by rustfmt parse. Remote verification must run:
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
+  global_spec_approval_skips_unreadable_workspace_set` plus the §8
+  suite, and the mutation kill (restore `?` → test fails).
+- `python3 scripts/check-rustfmt-diff.py HEAD~1` — clean (new lines
+  rustfmt-clean; only pre-existing debt lines differ).
+- 20 mechanical checks green offline (see
+  `/tmp/stage/review-evidence/mechanical-checks-round6107f63d.txt`).
+
+Prior rounds (at HEAD `381962ab9`, merged base `a884329d7`):
 
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1356 passed, 0
   failed**. §8 tests in `reconciliation.rs`: tenant propagation creates
