@@ -4881,16 +4881,23 @@
       if (lastTouchDist > 0) {
         const scale = dist / lastTouchDist;
         const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * scale));
-        // Zoom toward the pinch center (midpoint between two fingers)
+        // Zoom toward the pinch center (midpoint between two fingers).
+        // Solve targetCam so the world point under the midpoint stays under
+        // the midpoint at the new zoom — computed against targetCam (the
+        // authoritative pose being mutated), exactly like applyZoomAtMouse.
+        // Reading the world point via screenToWorld() here would use the
+        // lagging display camera `cam`, whose zoom does not change between
+        // the two reads — making the correction identically zero and
+        // anchoring every pinch at the screen center instead.
         const rect = canvasEl?.getBoundingClientRect();
         if (rect) {
           const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
           const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-          const worldBefore = screenToWorld(cx, cy);
+          const worldX = (cx - W / 2) / targetCam.zoom + targetCam.x;
+          const worldY = (cy - H / 2) / targetCam.zoom + targetCam.y;
           targetCam.zoom = newZoom;
-          const worldAfter = screenToWorld(cx, cy);
-          targetCam.x -= (worldAfter.x - worldBefore.x);
-          targetCam.y -= (worldAfter.y - worldBefore.y);
+          targetCam.x = worldX - (cx - W / 2) / newZoom;
+          targetCam.y = worldY - (cy - H / 2) / newZoom;
         } else {
           targetCam.zoom = newZoom;
         }
