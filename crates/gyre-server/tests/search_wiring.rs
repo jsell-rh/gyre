@@ -49,8 +49,11 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "search-wiring-token";
 
-/// Serializes env-var mutation across tests in this binary.
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+/// Serializes env-var mutation across tests in this binary. `LazyLock`
+/// initialization (not a const call in the static initializer) so the binary
+/// compiles on toolchains/tokio builds where `Mutex::new` is not const.
+static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Point `GYRE_DATABASE_URL` at a temp SQLite file. Pokes the env var while
 /// holding `ENV_LOCK` — safe because this integration test binary runs in its
