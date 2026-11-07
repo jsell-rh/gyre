@@ -179,3 +179,24 @@ The executor again restored the assigned task document (assigned base
   task090-gates-tests.log).
 - This task document was re-recorded (progress ready-for-review,
   acceptance boxes re-checked, this Shipped section restored).
+
+### Re-verification after contract restore (round 3)
+
+The executor restored the assigned task document a third time (repair
+id e0cee08bc8b44c33b8261faf694b3346, assigned base 36620aed). Resolved
+this round:
+
+- **No production code changes.** The restored task document was the only
+  working-tree delta; the three-lens implementation (lens-rendering.js,
+  ExplorerCanvas/ExplorerView evaluative overlays, gates.rs rejection
+  fields) is intact at HEAD from commit 0766a167.
+- **Fresh focused probes on this branch after `npm ci`:**
+  `npx vitest run` on the three lens test files — 189/189 passed
+  (task090-lens-tests-r3.log);
+  `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
+  `list_spec_approvals_includes_rejection_fields`)
+  (task090-gates-tests-r3.log). Both logs retained under
+  /tmp/stage/review-evidence with exit codes.
+- Frontmatter re-recorded (progress ready-for-review, acceptance boxes
+  re-checked, product-surface commit 0766a167 attributed); generated
+  web/dist churn from the test run was reverted, not committed.
