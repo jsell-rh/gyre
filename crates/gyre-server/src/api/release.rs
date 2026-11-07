@@ -282,7 +282,7 @@ mod tests {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(seed_builtin_policies(&state))
-                .unwrap()
+                .expect("seed built-in policies")
         });
 
         let agent_token = sign_test_jwt(

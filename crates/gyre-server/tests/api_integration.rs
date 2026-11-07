@@ -52,7 +52,7 @@ impl Ctx {
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
-            .unwrap();
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -1613,7 +1613,7 @@ async fn cors_includes_server_port() {
     let state = build_state(TOKEN, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
-        .unwrap();
+        .expect("seed built-in policies");
     let app = build_router(Arc::clone(&state));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 

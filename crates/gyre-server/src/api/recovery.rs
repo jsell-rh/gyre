@@ -110,7 +110,10 @@ fn gate_type_to_str(t: &GateType) -> &'static str {
     }
 }
 
-async fn post_merge_gates(state: &AppState, repo_id: &str) -> Result<Vec<PostMergeGateDto>, ApiError> {
+async fn post_merge_gates(
+    state: &AppState,
+    repo_id: &str,
+) -> Result<Vec<PostMergeGateDto>, ApiError> {
     let gates = state
         .quality_gates
         .list_by_repo_id_and_phase(repo_id, GatePhase::PostMerge)
@@ -226,7 +229,15 @@ pub async fn repo_status(
             &format!("refs/heads/{}", repo.default_branch),
         )
         .await
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            // Fail closed: an unresolvable default-branch ref means repo
+            // state cannot be determined — reporting it as an empty SHA
+            // would turn "cannot determine state" into "state is fine".
+            ApiError::Internal(anyhow::anyhow!(
+                "cannot resolve default branch '{}' of repo {repo_id}",
+                repo.default_branch
+            ))
+        })?;
         Some(
             crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
                 .await
@@ -272,12 +283,20 @@ pub async fn revert_mr(
     }
 
     // Resolve the merge commit: the target branch HEAD (the merge landed it).
-    let merge_sha = crate::git_refs::resolve_ref(
-        &repo.path,
-        &format!("refs/heads/{}", mr.target_branch),
-    )
-    .await
-    .unwrap_or_default();
+    let merge_sha =
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.target_branch))
+            .await
+            .ok_or_else(|| {
+                // Fail closed: reverting against an unresolvable target
+                // branch would pass an empty SHA to git revert — turning
+                // "cannot determine the merge commit" into a bogus revert
+                // attempt on no commit at all.
+                ApiError::InvalidInput(format!(
+                    "cannot resolve target branch '{}' of repo {repo_id}; \
+                     cannot determine the merge commit to revert",
+                    mr.target_branch
+                ))
+            })?;
 
     let revert_commit_sha = state
         .git_ops
@@ -381,5 +400,8 @@ pub async fn set_post_merge_gates(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
-    Ok((StatusCode::OK, Json(PostMergeGatesResponse { repo_id, gates })))
+    Ok((
+        StatusCode::OK,
+        Json(PostMergeGatesResponse { repo_id, gates }),
+    ))
 }

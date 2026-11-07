@@ -31,7 +31,7 @@ impl Ctx {
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
-            .unwrap();
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -54,7 +54,7 @@ impl Ctx {
         let state = Arc::new(s);
         abac_middleware::seed_builtin_policies(&state)
             .await
-            .unwrap();
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -672,7 +672,7 @@ async fn test_push_triggers_graph_extraction() {
     let state = gyre_server::build_state(token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
-        .unwrap();
+        .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
     let app = gyre_server::build_router(Arc::clone(&state));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

@@ -69,7 +69,7 @@ async fn start_server(auth_token: &str) -> (u16, String) {
     let state = build_state(auth_token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
-        .unwrap();
+        .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
@@ -88,11 +88,15 @@ async fn create_repo(
     name: &str,
 ) -> String {
     // Create workspace so git URL resolution works: /git/:workspace_slug/:repo_name/*
+    // Trust level Autonomous: these tests exercise the git transport and
+    // merge-queue mechanics, not the supervised-trust human-approval hold;
+    // under the default Supervised level the queue would (correctly) hold
+    // every MR for human review.
     let ws: serde_json::Value = client
         .post(format!("{api}/workspaces"))
         .header("Authorization", auth_hdr)
         .json(
-            &serde_json::json!({ "tenant_id": "default", "name": project_id, "slug": project_id }),
+            &serde_json::json!({ "tenant_id": "default", "name": project_id, "slug": project_id, "trust_level": "Autonomous" }),
         )
         .send()
         .await
