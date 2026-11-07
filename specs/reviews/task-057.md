@@ -43,3 +43,24 @@ All R2 findings resolved. No new findings.
 - All UI selectors in tests reference real CSS classes in production components (`ExplorerCanvas.svelte`, `ExplorerView.svelte`).
 - `setupGraphIntercept()` is called in `beforeEach()` before navigation in all test blocks.
 - `applyQueryViaEditor()` uses real UI interactions (button click, textarea fill, run button click).
+
+---
+
+## R4 — Container launch-fix round (candidate bdfc1daba)
+
+**Reviewer:** Review agent  
+**Base:** 30a1466962d447812b9cb48bfb0128d43554cca2  
+**Candidate delta:** `web/playwright.config.js` gains `chromiumSandbox: false` + `--no-zygote` launch args; task-057.md documentation updates (progress → ready-for-review, Shipped section); two process commits (attribution round-trip, net `commits: []` — passes `check-task-commit-attribution.sh` since `web/playwright.config.js` is outside its `crates/|web/src|web/tests` product-surface set).
+
+**Independent probes** (evidence: /tmp/stage/review-evidence):
+
+- Fresh environment reconstruction: `npm ci` in web/, `npm run build` — output byte-identical to committed `web/dist` (clean git status), so committed bundle proves current UI source. Cold debug build of gyre-server (SKIP_WEB_BUILD=1), launched on :2222.
+- `npx playwright test explorer-visual` → **15/15 passed, exit 0**, twice, against the committed baselines with no regeneration — confirms the launch flags change process topology only, not rendering.
+- **Mutation probe:** corrupting 2400 bytes of `zoom-level-0-packages-linux.png` → test **fails, exit 1** (baseline restored, tree clean after). The visual comparison genuinely gates; tests are not self-confirming.
+- `npx playwright test` (full suite) → **64/64 passed, exit 0** (15 visual + 49 app.spec.js).
+- All four TASK-057 mechanical guards (`check-identical-baselines.sh`, `check-stale-mechanism-claims-js.sh`, `check-phantom-test-apis-js.sh`, `check-playwright-route-lifecycle.sh`) → exit 0. `check-task-commit-attribution.sh` → exit 0.
+- All 15 committed baselines have unique content hashes; mock fixtures verifiably contain groups, callouts, narrative markers, and the red→orange→yellow→gray tiered_colors with dim_unmatched.
+
+**Acceptance criteria:** all eight satisfied — 15 test cases (≥4), 3 distinct zoom-level baselines, view-query test with groups/callouts/narrative via real editor UI, all 5 filter presets, blast radius tiered coloring + dimming, committed reproducible baselines, full Playwright suite green, and diffs detect rendering changes (proven by mutation).
+
+**Verdict:** `pass`
