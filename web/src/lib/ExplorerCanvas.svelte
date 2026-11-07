@@ -1,10 +1,9 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
-  import NodeBadge from '../components/NodeBadge.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
@@ -15,28 +14,28 @@
     computeTestReachable as computeTestReachableSet,
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
-  import { edgePassesFilter } from './canvas-filters.js';
+  import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
 
-  /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
+  /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
     repoId = '',
     nodes = [],
     edges = [],
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
-    filter = 'all',
-    lens = 'structural',
+    filter = $bindable('all'),
+    lens = $bindable('structural'),
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
     onScopeDrill = null,
     ghostOverlays = [],
-    filters = null,
     traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
     queryResult = null, // { node_metrics: Record<string, number>, ... } from dry-run resolve
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    rootLabel = '',          // breadcrumb root segment label (repo name at repo scope)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
     timelineActive = false,    // Whether time travel mode is active
@@ -243,6 +242,20 @@
   let drillTransitioning = $state(false);
   let drillTransitionStart = 0;
   const DRILL_TRANSITION_MS = 300;
+  // Camera pose at drill-transition start. Kept OUTSIDE the `cam` object on
+  // purpose: the layout $effect replaces `cam` wholesale (`cam = { ...targetCam }`)
+  // whenever the breadcrumb changes — which happens on every drill — so start
+  // pose stored on `cam` itself would be silently dropped and lerpCam would
+  // interpolate from `undefined` (NaN camera, broken hit-testing everywhere).
+  let drillStartCam = null;
+  // Two-phase drill (explorer-canvas.md §5 zoom transition): phase 1 zooms
+  // into the clicked node while unrelated nodes fade out (old layout still
+  // visible); when it completes, the scope is applied (breadcrumb push →
+  // layout swap) and phase 2 smoothly settles the camera on the new level.
+  // Applying the scope immediately would swap the layout in the same tick as
+  // the double-click, making unrelated nodes disappear abruptly (jump-cut)
+  // instead of fading out.
+  let pendingDrill = null;
 
   // Recent interaction trail for conversational context (sent with messages)
   let recentInteractions = $state([]);
@@ -823,7 +836,7 @@
       const st = statsMap.get(nid);
       st.durations.push(s.duration_us);
       st.total++;
-      if (s.status === 'error' || s.status === 'ERROR') st.errors++;
+      if ((s.status ?? '').toLowerCase() === 'error') st.errors++;
     }
     // Compute percentiles
     const result = new Map();
@@ -899,7 +912,7 @@
 
       if (currentTime >= spanStart && currentTime <= spanEnd) {
         const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = span.status === 'error' || span.status === 'ERROR';
+        const isError = (span.status ?? '').toLowerCase() === 'error';
         newParticles.push({
           fromId: parent.graph_node_id,
           toId: span.graph_node_id,
@@ -1565,81 +1578,42 @@
 
   // shouldShowChildren removed — dead code. Use isSummaryMode() (threshold 450px) instead.
 
-  // ── Filter visibility ─────────────────────────────────────────────
-  // Pre-compute call edge index
-  let nodesWithCallsEdges = $derived.by(() => {
-    const s = new Set();
-    for (const e of edges) {
-      if ((e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') {
-        s.add(edgeSrc(e));
-        s.add(edgeTgt(e));
-      }
-    }
-    return s;
-  });
+  // ── Filter presets (explorer-implementation.md §25 Phase 1: All, Endpoints,
+  // Types, Calls, Dependencies) — the toolbar buttons driving the `filter` prop.
+  // Labels match the spec's preset names; values feed filterOpacity/filterEdge.
+  const FILTER_PRESETS = [
+    ['all', 'All'],
+    ['endpoints', 'Endpoints'],
+    ['types', 'Types'],
+    ['calls', 'Calls'],
+    ['dependencies', 'Dependencies'],
+  ];
 
-  // Map filter-panel categories to node_type sets
-  const CATEGORY_NODE_TYPES = {
-    boundaries: new Set(['module', 'crate', 'package', 'namespace']),
-    interfaces: new Set(['endpoint', 'function', 'method', 'trait', 'interface']),
-    data: new Set(['type', 'struct', 'enum', 'field', 'table', 'model']),
-    specs: new Set(['spec', 'spec_file']),
-  };
-
-  function matchesActiveFilters(node) {
-    if (!filters) return true;
-    // Spec focus: highlight nodes governed by a specific spec (Vision Principle 3: specs as primary artifact)
-    if (filters.focus_spec) {
-      const specPath = filters.focus_spec;
-      // Match nodes with this spec_path
-      if (node.spec_path === specPath) return true;
-      // Match nodes governed by this spec via GovernedBy edges
-      const governed = edges.some(e => {
-        const src = e.source_id ?? e.from_node_id ?? e.from;
-        const tgt = e.target_id ?? e.to_node_id ?? e.to;
-        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
-        if (et !== 'governed_by' || src !== node.id) return false;
-        // Check if the target spec node matches
-        const specNode = nodes.find(n => n.id === tgt);
-        return specNode && (specNode.file_path === specPath || specNode.name === specPath || specNode.spec_path === specPath);
-      });
-      return governed;
-    }
-    // Focus on boundary/interface/data node
-    if (filters.focus_node) {
-      return node.id === filters.focus_node;
-    }
-    // Category check
-    if (filters.categories && filters.categories.length > 0) {
-      const nt = (node.node_type ?? '').toLowerCase();
-      let matched = false;
-      for (const cat of filters.categories) {
-        if (CATEGORY_NODE_TYPES[cat]?.has(nt)) { matched = true; break; }
-      }
-      // If the node type doesn't fit any known category, show it if all categories are active
-      if (!matched && filters.categories.length < 4) return false;
-    }
-    // Visibility check
-    if (filters.visibility === 'public' && node.visibility === 'private') return false;
-    if (filters.visibility === 'private' && node.visibility === 'public') return false;
-    // Churn check
-    if (filters.min_churn && (node.churn ?? 0) < filters.min_churn) return false;
-    return true;
+  function setFilter(value) {
+    if (filter === value) return;
+    filter = value;
+    syncCanvasState();
+    scheduleRedraw();
   }
 
+  // Pre-computed node participants of 'calls' and 'depends_on' edges —
+  // collectEdgeParticipants lives in canvas-filters.js (unit-testable).
+  // 'calls' feeds the Calls preset; both feed the Dependencies preset
+  // (edgePassesFilter('dependencies') renders depends_on + calls edges).
+  let nodesWithCallsEdges = $derived.by(() => collectEdgeParticipants(edges, 'calls'));
+  let nodesWithDependencyEdges = $derived.by(() => collectEdgeParticipants(edges, 'depends_on'));
+
+  // filter-panel category matching (CATEGORY_NODE_TYPES/matchesActiveFilters) removed with
+  // ExplorerFilterPanel — spec explorer-implementation.md "Replaces" lists the panel; filter
+  // presets + view queries are the filtering surfaces now.
+
+  // Node dimming per active filter — mapping lives in canvas-filters.js
+  // (unit-testable; must stay in agreement with edgePassesFilter above).
   function filterOpacity(ln) {
-    if (ln.kind === 'tree-group') return 1.0;
-    if (!ln.node) return 0.1;
-    // Apply active filters from filter panel
-    if (filters && !matchesActiveFilters(ln.node)) return 0.1;
-    if (filter === 'all') return 1.0;
-    switch (filter) {
-      case 'endpoints': return ln.node.node_type === 'endpoint' ? 1.0 : 0.1;
-      case 'types': return (ln.node.node_type === 'type' || ln.node.node_type === 'interface' || ln.node.node_type === 'field') ? 1.0 : 0.1;
-      case 'calls': return nodesWithCallsEdges.has(ln.node.id) ? 1.0 : 0.1;
-      case 'dependencies': return 0.1;
-      default: return 1.0;
-    }
+    return nodeFilterOpacity(filter, ln, {
+      calls: nodesWithCallsEdges,
+      dependencies: nodesWithDependencyEdges,
+    });
   }
 
   // Edge rendering per active filter — mapping lives in canvas-filters.js
@@ -3353,38 +3327,47 @@
           ctx.restore();
         }
       }
-      // Evaluative metric badge (when evaluative lens is active)
-      if (evalColor && n && sw > 50 && sh > 30) {
-        let metricVal = 0;
-        let metricLabel = '';
-        // Evaluative lens only shows trace-based (behavioral) metrics
-        if (evaluativeMetric === 'span_duration') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.meanDuration; metricLabel = metricVal < 1000 ? `${Math.round(metricVal)}\u00B5s` : `${(metricVal / 1000).toFixed(1)}ms`; }
-        }
-        else if (evaluativeMetric === 'span_count') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.spanCount; metricLabel = `${metricVal} spans`; }
-        }
-        else if (evaluativeMetric === 'error_rate') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.errorRate * 100; metricLabel = `${metricVal.toFixed(0)}% err`; }
-        }
-        if (metricVal > 0) {
+      // Evaluative metric badges (when evaluative lens is active).
+      // Spec §4: node badges show span count, error rate, AND mean duration —
+      // all three are rendered as a chip row, independent of which metric
+      // drives the heat coloring (heat metric selection only changes color).
+      if (lens === 'evaluative' && n && sw > 50 && sh > 30) {
+        const stats = nodeSpanStats.get(n.id);
+        if (stats && stats.spanCount > 0) {
           const bx = s.x + sw / 2 - 4;
           const by = s.y - sh / 2 + 4;
           const bfs = Math.max(7, Math.min(9, sw * 0.08));
           ctx.save();
           ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
-          const bw = measureText(ctx, metricLabel, ctx.font) + 6;
-          ctx.fillStyle = evalColor + '88';
-          ctx.beginPath();
-          ctx.roundRect(bx - bw, by - 2, bw, bfs + 4, 3);
-          ctx.fill();
-          ctx.fillStyle = '#fff';
           ctx.textAlign = 'right';
           ctx.textBaseline = 'top';
-          ctx.fillText(metricLabel, bx - 3, by);
+          // Chips are laid out right-to-left from the node's top-right corner:
+          // [mean duration] [error rate] [span count]
+          const meanUs = stats.meanDuration;
+          const chips = [
+            { label: `${stats.spanCount} spans`, bg: (evalColor ?? '#3b82f6') + '88', fg: '#fff' },
+            {
+              label: `${Math.round(stats.errorRate * 100)}% err`,
+              bg: stats.errorRate > 0 ? '#7f1d1d' : '#1e293b',
+              fg: stats.errorRate > 0 ? '#fca5a5' : '#94a3b8',
+            },
+            {
+              label: meanUs < 1000 ? `${Math.round(meanUs)}\u00B5s` : `${(meanUs / 1000).toFixed(1)}ms`,
+              bg: '#1e293b',
+              fg: '#e2e8f0',
+            },
+          ];
+          let cursorX = bx;
+          for (const chip of chips) {
+            const cw = measureText(ctx, chip.label, ctx.font) + 6;
+            ctx.fillStyle = chip.bg;
+            ctx.beginPath();
+            ctx.roundRect(cursorX - cw, by - 2, cw, bfs + 4, 3);
+            ctx.fill();
+            ctx.fillStyle = chip.fg;
+            ctx.fillText(chip.label, cursorX - 3, by);
+            cursorX -= cw + 2;
+          }
           ctx.restore();
         }
       }
@@ -3854,11 +3837,30 @@
       const elapsed = performance.now() - drillTransitionStart;
       const t = Math.min(elapsed / DRILL_TRANSITION_MS, 1);
       const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
-      cam.x = cam._drillStartX + (targetCam.x - cam._drillStartX) * eased;
-      cam.y = cam._drillStartY + (targetCam.y - cam._drillStartY) * eased;
-      cam.zoom = cam._drillStartZoom + (targetCam.zoom - cam._drillStartZoom) * eased;
+      // Fall back to the target pose when no start pose was captured (e.g. a
+      // drill started before any camera state existed) — never interpolate
+      // from undefined.
+      const start = drillStartCam ?? { x: targetCam.x, y: targetCam.y, zoom: targetCam.zoom };
+      cam.x = start.x + (targetCam.x - start.x) * eased;
+      cam.y = start.y + (targetCam.y - start.y) * eased;
+      cam.zoom = start.zoom + (targetCam.zoom - start.zoom) * eased;
       if (t >= 1) {
         drillTransitioning = false;
+        drillStartCam = null;
+        // Phase 1 complete: apply the deferred drill scope (breadcrumb push →
+        // layout swap) and run phase 2 — a smooth arrival on the new level's
+        // fitted view. The layout $effect sets targetCam to the new fit; it
+        // also hard-cuts `cam`, but that value is never drawn: drawFrame only
+        // runs inside animLoop after lerpCam, which re-derives `cam` from
+        // drillStartCam each frame.
+        const pending = pendingDrill;
+        pendingDrill = null;
+        if (pending) {
+          applyDrillScope(pending);
+          drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
+          drillTransitioning = true;
+          drillTransitionStart = performance.now();
+        }
       }
     } else {
       cam.x += (targetCam.x - cam.x) * LERP_SPEED;
@@ -3868,6 +3870,12 @@
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
     // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
     cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
+    // Last-resort guard: a non-finite camera (NaN world origin) makes every
+    // hit-test rect "contain" every point and renders nothing — snap to the
+    // target pose rather than propagate it.
+    if (!Number.isFinite(cam.x) || !Number.isFinite(cam.y) || !Number.isFinite(cam.zoom)) {
+      cam.x = targetCam.x; cam.y = targetCam.y; cam.zoom = targetCam.zoom;
+    }
     // Track significant zoom changes for the interaction context (§10)
     trackZoomChange();
   }
@@ -3879,8 +3887,12 @@
     lerpCam();
 
     // Advance ghost pulse animation (1 cycle per 1.5 seconds at ~60fps)
-    // Stop after 3 full cycles to avoid perpetual CPU usage
-    if (hasGhosts && ghostAnimCycles < 3) {
+    // Stop after 3 full cycles to avoid perpetual CPU usage.
+    // Structural lens renders ghosts without a pulse — drawGhostOverlays
+    // hardcodes basePulse=0 there ("No particles. No animation. Pure
+    // structure." — explorer-canvas.md §Structural) — so animating in the
+    // structural lens only burns rAF frames redrawing identical output.
+    if (hasGhosts && lens !== 'structural' && ghostAnimCycles < 3) {
       const prev = ghostPulsePhase;
       ghostPulsePhase = (ghostPulsePhase + 0.011) % 1;
       if (ghostPulsePhase < prev) ghostAnimCycles++;
@@ -3910,23 +3922,83 @@
     const dx = Math.abs(cam.x - targetCam.x);
     const dy = Math.abs(cam.y - targetCam.y);
     const dz = Math.abs(cam.zoom - targetCam.zoom);
-    // Keep animating when camera moving or a one-time redraw is needed.
-    // For ghosts: only animate the pulse for 3 cycles then stop to save CPU.
-    const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
+    const ghostNeedsAnim = hasGhosts && lens !== 'structural' && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
     if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
       needsAnim = false;
-      animFrame = requestAnimationFrame(animLoop);
+      // Re-frame directly rather than via scheduleAnim(): animScheduled must
+      // stay true across the frame boundary (a frame is still pending), and
+      // a mid-frame scheduleRedraw() must coalesce into this tail decision,
+      // not start a re-entrant frame chain on the same stack.
+      if (syncFrameDepth < SYNC_FRAME_DEPTH_MAX) {
+        syncFrameDepth++;
+        try {
+          animFrame = requestAnimationFrame(runFrame);
+        } finally {
+          syncFrameDepth--;
+        }
+      } else {
+        // Synchronous rAF (jsdom mocks, sync-rAF webview polyfills): the
+        // re-frame chain recurses on one stack, and conditions that are not
+        // frame-count-bounded (drill transitions keyed on wall-clock time,
+        // evaluative playback) never settle when the mock advances no time
+        // between frames — the chain would exhaust the stack. Stop cleanly
+        // here so a later scheduleRedraw() can start a fresh chain. Real
+        // browsers (async rAF) never accumulate depth and never reach this.
+        stopLoop();
+      }
     } else {
-      animFrame = null;
+      stopLoop();
     }
+  }
+
+  // ── Frame scheduling ──────────────────────────────────────────────
+  // A frame is "pending" from scheduleAnim() until animLoop's tail decides
+  // to stop. Scheduling is guarded by this flag, NOT by the animFrame handle:
+  // a synchronous requestAnimationFrame implementation (jsdom test mocks,
+  // embedded webviews with sync rAF polyfills) runs the callback BEFORE
+  // requestAnimationFrame returns, so `animFrame = requestAnimationFrame(...)`
+  // re-enters, and when the re-entered loop stops and writes `animFrame =
+  // null`, the outer assignment overwrites it with a stale handle. Every
+  // subsequent scheduleRedraw() would see a non-null animFrame and bail —
+  // the canvas would never redraw again. The flag is only cleared when the
+  // loop actually stops, so it stays accurate under both async and sync rAF.
+  let animScheduled = false;
+  // Depth of the synchronous re-frame chain (see the cap comment in
+  // animLoop's tail). Async rAF returns before the callback runs, so the
+  // finally-decrement always restores 0 and real browsers never accumulate
+  // depth; only a synchronous rAF grows this counter.
+  let syncFrameDepth = 0;
+  const SYNC_FRAME_DEPTH_MAX = 100;
+
+  function stopLoop() {
+    animFrame = null;
+    animScheduled = false;
+  }
+
+  function runFrame(ts) {
+    // untrack: the render loop must never register reactive dependencies in
+    // whatever effect scheduled it. Under a synchronous rAF, animLoop's
+    // reads — including the needsAnim $state it consumes and toggles in its
+    // tail — would be attributed to the calling effect, so every needsAnim
+    // flip would re-run that effect, re-schedule the loop, and flip it again:
+    // an infinite effect↔redraw cycle. Under async rAF the callback runs
+    // outside any effect and tracking is moot, but untrack keeps the
+    // invariant explicit for both execution models.
+    untrack(() => animLoop(ts));
+  }
+
+  function scheduleAnim() {
+    if (destroyed || animScheduled) return;
+    animScheduled = true;
+    animFrame = requestAnimationFrame(runFrame);
   }
 
   function scheduleRedraw() {
     if (destroyed) return;
     needsAnim = true;
-    if (!animFrame) animFrame = requestAnimationFrame(animLoop);
+    scheduleAnim();
   }
 
   // ── Interaction handlers ──────────────────────────────────────────
@@ -4270,9 +4342,91 @@
     scheduleRedraw();
   }
 
+  // ── Progressive drill-down scope resolution (explorer-canvas.md §5) ─────
+  // Double-clicking a container drills the canvas into its children via
+  // Contains edges. Real graph nodes (package/module/type with Contains
+  // children) drill directly. Synthetic path-tree groups — the treemap's
+  // directory-style groupings, e.g. the top-level package cells — have no
+  // node id in the Contains index, so resolve them to the real graph node
+  // whose Contains subtree covers the group's contents. For a group named
+  // "greeting-service" that is the greeting-service package node, and
+  // drilling shows exactly the modules inside it (spec Level 0 → 1).
+  function isContainsAncestor(ancestorId, nodeId) {
+    const { childToParent } = treeData;
+    let cur = childToParent.get(nodeId);
+    while (cur) {
+      if (cur === ancestorId) return true;
+      cur = childToParent.get(cur);
+    }
+    return false;
+  }
+
+  // Resolve a synthetic tree-group layout node to the real graph node whose
+  // Contains subtree covers the group's laid-out members. Returns null when
+  // no single member covers the rest (pure directory grouping) — callers
+  // then fall back to the camera zoom.
+  function resolveTreeGroupScopeNode(ln) {
+    if (!ln || ln.kind !== 'tree-group') return null;
+    // Real graph-node cells use their node id; synthetic path groups use
+    // '__tree__'-prefixed ids.
+    if (!ln.id.startsWith('__tree__')) return ln.node ?? null;
+    const { parentToChildren } = treeData;
+    // Collect the real graph nodes laid out inside this group's cell subtree.
+    const members = [];
+    const seen = new Set();
+    function collectCells(cells) {
+      for (const cell of cells) {
+        if (seen.has(cell.id)) continue;
+        seen.add(cell.id);
+        if (cell.node && !cell.id.startsWith('__tree__')) members.push(cell.node);
+        const kids = childrenIndex.get(cell.id);
+        if (kids) collectCells(kids);
+      }
+    }
+    collectCells(childrenIndex.get(ln.id) ?? []);
+    if (members.length === 0) return null;
+    // The scope node is the member that is a Contains-ancestor of every other
+    // member (the package/module node the group was formed around).
+    for (const cand of members) {
+      if (!(parentToChildren.get(cand.id)?.length > 0)) continue;
+      let coversAll = true;
+      for (const other of members) {
+        if (other.id !== cand.id && !isContainsAncestor(cand.id, other.id)) {
+          coversAll = false;
+          break;
+        }
+      }
+      if (coversAll) return cand;
+    }
+    return null;
+  }
+
+  // Unified drill target for a canvas hit: a real container node drills
+  // itself; a synthetic tree-group resolves to its Contains scope node.
+  // Returns null when there is nothing to drill (leaf nodes, scopeless
+  // directory groups).
+  function drillTargetForHit(hit) {
+    if (!hit) return null;
+    const node = hit.node;
+    if (node && (treeData.parentToChildren.get(node.id) ?? []).length > 0) return node;
+    if (hit.kind === 'tree-group') return resolveTreeGroupScopeNode(hit);
+    return null;
+  }
+
+  // Apply a drill's scope change: push the breadcrumb (which triggers the
+  // layout $effect to filter the canvas to the node's Contains children) and
+  // sync canvasState for deep-linking.
+  function applyDrillScope(node) {
+    breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
+    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
+  }
+
   // Drill into a node with smooth spatial zoom transition.
   // Zooms INTO the clicked node's bounding box, fades unrelated nodes,
-  // then renders children in the same layout style.
+  // then renders children in the same layout style. The scope change
+  // (breadcrumb push, layout swap) is deferred to the end of the zoom
+  // (pendingDrill) so the fade-out plays on the old layout instead of the
+  // children appearing via an abrupt content swap.
   function drillInto(node) {
     // Guard: prevent rapid double-clicks from queuing multiple drill transitions
     if (drillTransitioning) return;
@@ -4286,26 +4440,27 @@
     const ww = ln?.w ?? 200;
     const wh = ln?.h ?? 200;
 
-    // Start fade transition: dim unrelated nodes (animated in render loop)
-    drillFadeTarget = node.id;
+    // Start fade transition: dim unrelated nodes (animated in render loop).
+    // Target the clicked LAYOUT cell so the cell itself (and its laid-out
+    // children, via the parentTreeGroup chain) stay bright while siblings
+    // and the rest of the canvas fade out.
+    drillFadeTarget = ln?.id ?? node.id;
     drillFadeAlpha = 1.0;
     needsAnim = true; // Ensure the render loop picks up the fade animation
     trackInteraction(`drill:${node.name ?? node.id}`);
-    breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
     selectedNodeId = null;
-    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
     onNodeDetail(null);
 
     // Smooth spatial zoom: target camera to center on this node and fit it
-    // Store start positions for ease-out cubic interpolation
-    cam._drillStartX = cam.x;
-    cam._drillStartY = cam.y;
-    cam._drillStartZoom = cam.zoom;
+    // Store start positions for ease-out cubic interpolation (kept off the
+    // `cam` object — see drillStartCam declaration)
+    drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
     targetCam.x = wx;
     targetCam.y = wy;
     const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
     disarmZoomTracking();
     targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
+    pendingDrill = node;
     drillTransitioning = true;
     drillTransitionStart = performance.now();
     needsAnim = true;
@@ -4335,10 +4490,11 @@
 
     // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
     // Double-click → filter to children, update breadcrumb, smooth zoom transition.
-    if (node) {
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+    // Real container nodes and resolvable synthetic groups (packages) both drill.
+    if (node || hit.kind === 'tree-group') {
+      const drillTarget = drillTargetForHit(hit);
+      if (drillTarget) {
+        drillInto(drillTarget);
         return;
       }
     }
@@ -4385,12 +4541,14 @@
       y: menuY,
       node: hit.node,
       hit,
+      drillTarget: drillTargetForHit(hit),
     };
   }
 
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
+    const drillTarget = contextMenu.drillTarget;
     contextMenu = null;
     ctxMoreOpen = false;
     if (action === 'trace') {
@@ -4482,10 +4640,11 @@
       // preserving all canvas state (zoom, query, conversation, drill-down).
       onNodeDetail({ ...node, _action: 'view_code' });
     } else if (action === 'drill') {
-      // Drill into this node via Contains edges with smooth zoom transition
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+      // Drill into this node via Contains edges with smooth zoom transition.
+      // For synthetic tree-groups this is the resolved Contains scope node.
+      const target = drillTarget ?? node;
+      if (target && (treeData.parentToChildren.get(target.id) ?? []).length > 0) {
+        drillInto(target);
       }
     }
   }
@@ -4520,6 +4679,9 @@
   // index=-1 means go to root, otherwise go to breadcrumb[index].
   function navigateBreadcrumb(index) {
     const prevBreadcrumb = [...breadcrumb];
+    // Cancel any in-flight drill: navigating up supersedes the pending scope
+    // change, otherwise the deferred breadcrumb push would land on top of it.
+    pendingDrill = null;
     if (index < 0) {
       breadcrumb = [];
     } else {
@@ -4531,9 +4693,7 @@
 
     // Smooth zoom-out: animate camera with ease-out cubic to the target parent node or fit all.
     disarmZoomTracking();
-    cam._drillStartX = cam.x;
-    cam._drillStartY = cam.y;
-    cam._drillStartZoom = cam.zoom;
+    drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
     if (breadcrumb.length === 0) {
       // Going to root: fit the entire tree
       const allBounds = computeAllNodesBounds();
@@ -4650,8 +4810,14 @@
       const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === selectedNodeId);
       if (ln?.node) {
         const children = treeData.parentToChildren.get(ln.node.id) ?? [];
-        if (children.length > 0) drillInto(ln.node);
-        else onNodeDetail(ln.node);
+        if (children.length > 0) {
+          drillInto(ln.node);
+        } else {
+          // Synthetic tree-group selection: resolve to its Contains scope
+          const scopeNode = resolveTreeGroupScopeNode(ln);
+          if (scopeNode) drillInto(scopeNode);
+          else onNodeDetail(ln.node);
+        }
       }
       return;
     }
@@ -4786,16 +4952,23 @@
       if (lastTouchDist > 0) {
         const scale = dist / lastTouchDist;
         const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * scale));
-        // Zoom toward the pinch center (midpoint between two fingers)
+        // Zoom toward the pinch center (midpoint between two fingers).
+        // Solve targetCam so the world point under the midpoint stays under
+        // the midpoint at the new zoom — computed against targetCam (the
+        // authoritative pose being mutated), exactly like applyZoomAtMouse.
+        // Reading the world point via screenToWorld() here would use the
+        // lagging display camera `cam`, whose zoom does not change between
+        // the two reads — making the correction identically zero and
+        // anchoring every pinch at the screen center instead.
         const rect = canvasEl?.getBoundingClientRect();
         if (rect) {
           const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
           const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-          const worldBefore = screenToWorld(cx, cy);
+          const worldX = (cx - W / 2) / targetCam.zoom + targetCam.x;
+          const worldY = (cy - H / 2) / targetCam.zoom + targetCam.y;
           targetCam.zoom = newZoom;
-          const worldAfter = screenToWorld(cx, cy);
-          targetCam.x -= (worldAfter.x - worldBefore.x);
-          targetCam.y -= (worldAfter.y - worldBefore.y);
+          targetCam.x = worldX - (cx - W / 2) / newZoom;
+          targetCam.y = worldY - (cy - H / 2) / newZoom;
         } else {
           targetCam.zoom = newZoom;
         }
@@ -5138,12 +5311,25 @@
     </div>
   {/if}
 
-  <!-- Toolbar — filter presets removed per spec: use ExplorerFilterPanel or view queries for filtering -->
+  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
   <div class="treemap-toolbar">
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" disabled title="Observable lens is disabled — pending production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
+      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
+    </div>
+
+    <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
+      {#each FILTER_PRESETS as [value, label]}
+        <button
+          class="tb-btn tb-btn-filter"
+          class:active={filter === value}
+          onclick={() => setFilter(value)}
+          aria-pressed={filter === value}
+          title={`Filter preset: ${label}`}
+          type="button"
+        >{label}</button>
+      {/each}
     </div>
 
     {#if lens === 'evaluative'}
@@ -5365,7 +5551,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 View history
               </button>
-              {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+              {#if contextMenu.drillTarget && (treeData.parentToChildren.get(contextMenu.drillTarget.id) ?? []).length > 0}
                 <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
                   Drill into
@@ -5567,6 +5753,7 @@
   <!-- Breadcrumb -->
   <Breadcrumb
     {breadcrumb}
+    rootLabel={rootLabel || 'Root'}
     onNavigate={(i) => { navigateBreadcrumb(i); }}
     onReset={() => { navigateBreadcrumb(-1); }}
   />
