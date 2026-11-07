@@ -6109,9 +6109,18 @@ mod tests {
             result.warnings
         );
         let w = warning.unwrap();
-        assert!(w.contains("Ghost"), "warning must name each unresolved node: {w}");
-        assert!(w.contains("Phantom"), "warning must name each unresolved node: {w}");
-        assert!(!w.contains("Alpha"), "resolved steps must not be listed: {w}");
+        assert!(
+            w.contains("Ghost"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            w.contains("Phantom"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            !w.contains("Alpha"),
+            "resolved steps must not be listed: {w}"
+        );
     }
 
     // ── $selected scope edge cases (spec §30) ──────────────────────────────
@@ -6134,7 +6143,10 @@ mod tests {
             result.warnings
         );
         assert!(
-            !result.warnings.iter().any(|w| w.contains("Scope matched 0 nodes")),
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
             "interactive scopes must not double-report as an empty-scope warning, got: {:?}",
             result.warnings
         );
@@ -6264,7 +6276,9 @@ mod tests {
         ];
         let errors = query.validate();
         assert!(
-            errors.iter().any(|e| e.contains("Duplicate narrative step order")),
+            errors
+                .iter()
+                .any(|e| e.contains("Duplicate narrative step order")),
             "duplicate narrative order must be rejected, got: {:?}",
             errors
         );

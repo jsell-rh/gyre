@@ -1813,7 +1813,11 @@ async fn test_saved_views_ownership_enforcement() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "creator must be able to update own view");
+    assert_eq!(
+        resp.status(),
+        200,
+        "creator must be able to update own view"
+    );
     let updated: Value = resp.json().await.unwrap();
     assert_eq!(updated["name"].as_str().unwrap(), "Agent A View v2");
 
@@ -1882,7 +1886,11 @@ async fn test_saved_views_ownership_enforcement() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "agent B must be able to update own view");
+    assert_eq!(
+        resp.status(),
+        200,
+        "agent B must be able to update own view"
+    );
 
     let resp = ctx
         .client
@@ -1891,7 +1899,11 @@ async fn test_saved_views_ownership_enforcement() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204, "agent B must be able to delete own view");
+    assert_eq!(
+        resp.status(),
+        204,
+        "agent B must be able to delete own view"
+    );
 
     // Agent A (the creator) deletes its own view — allowed.
     let resp = ctx
@@ -1901,7 +1913,11 @@ async fn test_saved_views_ownership_enforcement() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204, "creator must be able to delete own view");
+    assert_eq!(
+        resp.status(),
+        204,
+        "creator must be able to delete own view"
+    );
 
     // System default views cannot be deleted by anyone — the is_system guard
     // fires before the ownership check.
