@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
-commits: ["3c22bfa874c70968192207603815adbddec5f6df"]
+commits: ["3c22bfa874c70968192207603815adbddec5f6df", "381962ab9"]
 ---
 
 ## Spec Excerpt
@@ -102,6 +102,10 @@ the blast-radius endpoint (reason `tenant_inheritance` vs
 tenant's workspaces, skips workspaces that override a changed path (their
 own rollout policy governs), and runs a §6 reconciliation wave per
 non-overriding workspace (task per repo, existing dedup/title rules).
+A workspace whose own set cannot be read (storage error / corrupt JSON)
+is skipped too — the override gate never fails open, so an unreadable
+set is never treated as "no overrides" (counted in
+`workspaces_skipped_error`, surfaced in both trigger log sites).
 Triggers: tenant-set PUT (path diff; removals are not triggers) and
 approval of a Tenant-scoped registry entry. Only paths the tenant set
 pins propagate — an unbound change has an empty blast radius.
@@ -117,42 +121,62 @@ realization (tenant set + inheritance + override skip + force), replacing
 the never-shipped `POST /api/v1/tenant/meta-spec-rollout` sketch.
 Coverage matrix row 12 → `implemented`; api-reference documented.
 
-### Contract repair (this round)
+### Review repair (round cd6d7fac, commit `381962ab9`)
 
-The previous round modified the protected task text (checked the
-acceptance-criteria boxes); the executor restored the assigned contract.
-No source change was needed: the production fix from `3c22bfa87` survived
-the base merge intact. This round only re-records the allowed task-doc
-fields (frontmatter progress/commits plus these Shipped notes) and
-re-verifies the merged tree.
+Two findings from the independent review of candidate `8e4a59016`:
 
-### Test evidence (re-verified at merged HEAD)
+- **Fail-open override gate (code)** — `run_tenant_reconciliation`
+  decoded an unreadable workspace set (storage error / corrupt JSON) as
+  an empty set via `unwrap_or_default`, dropping that workspace's
+  overrides so tenant propagation — including urgent force changes —
+  could stomp a workspace that pinned its own version. Now fails closed:
+  the workspace is skipped with a warn log and a
+  `workspaces_skipped_error` summary counter. Killing test:
+  `tenant_reconciliation_fails_closed_on_unreadable_workspace_set`
+  (corrupt stored set + force → no propagation; fails under the old
+  gate — verified by mutation).
+- **No killing test for the set-PUT trigger (test)** — removing the
+  `run_tenant_reconciliation` call from `put_tenant_meta_spec_set` left
+  the full suite green (reproduced in review). New killing test:
+  `tenant_set_put_propagates_approved_pins_to_inheriting_workspaces` —
+  PUTs a tenant set pinning an APPROVED meta-spec through the API and
+  asserts a reconciliation task in the inheriting workspace, none in
+  the overriding one, and that a removal-only re-PUT creates none
+  (fresh workspace added after the first PUT so dedup cannot mask a
+  spurious trigger). Verified killing by mutation (trigger call
+  deleted → test fails).
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1350 passed, 0
-  failed** (includes upstream task-075/077 tests merged after the
-  candidate). §8 tests in `reconciliation.rs`: tenant propagation creates
-  per-workspace tasks; override prevents propagation; force bypasses the
-  override; unbound paths do not propagate; blast radius includes all
-  non-overriding workspaces (never crossing tenants); merge semantics;
-  effective-set SHA reflects inheritance; workspace GET returns the
-  effective set; full API flow — Tenant-scoped spec creation → tenant-set
-  bind → approval reconciles only the inheriting workspace → force
-  approval reaches the overrider. `meta_specs.rs`: tenant-set GET/PUT
-  roundtrip, Admin-only, tenant containment, unknown tenant 404,
-  Tenant-scope creation validation, force 400 on Global scope, force 403
-  cross-tenant.
+Spec §8 step 3 amended with the fail-closed clause.
+
+### Test evidence (at HEAD `381962ab9`, merged base `a884329d7`)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1356 passed, 0
+  failed**. §8 tests in `reconciliation.rs`: tenant propagation creates
+  per-workspace tasks; override prevents propagation; force bypasses
+  the override; unbound paths do not propagate; blast radius includes
+  all non-overriding workspaces (never crossing tenants); merge
+  semantics; effective-set SHA reflects inheritance; workspace GET
+  returns the effective set; full API flow — Tenant-scoped spec creation
+  → tenant-set bind → approval reconciles only the inheriting workspace
+  → force approval reaches the overrider; **set-PUT propagation trigger
+  (killing)**; **fail-closed override gate (killing)**. `meta_specs.rs`:
+  tenant-set GET/PUT roundtrip, Admin-only, tenant containment, unknown
+  tenant 404, Tenant-scope creation validation, force 400 on Global
+  scope, force 403 cross-tenant.
+- Mutation kills (evidence retained under
+  `/tmp/stage/review-evidence/`): trigger-call deletion →
+  `tenant_set_put_propagates…` FAILED; fail-open gate restored →
+  `tenant_reconciliation_fails_closed…` FAILED.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — **359 passed, 0
-  failed**: tenant set repo roundtrip/overwrite/delete/independence
-  (SQLite, fresh-migrated DB), Tenant-scoped meta-spec round-trip + scope
-  filter.
-- Mechanical checks all green at merged HEAD (see
-  `/tmp/stage/review-evidence/mechanical-checks.txt`): arch,
-  abac-route-registry, abac-exempt-handlers, migration-versions,
-  migration-sql-portability, mem-port-contracts,
-  in-memory-state-stores, forged-scope-fields, scope-literal-defaults,
-  dead-message-kinds, inert-enforcement, mcp-write-tools,
-  byte-slice-truncation, fail-open-ref-resolution,
+  failed** at the prior checkpoint (no adapter code touched this round):
+  tenant set repo roundtrip/overwrite/delete/independence (SQLite,
+  fresh-migrated DB), Tenant-scoped meta-spec round-trip + scope filter.
+- Mechanical checks 19/19 green at HEAD (arch, abac-route-registry,
+  abac-exempt-handlers, migration-versions, migration-sql-portability,
+  mem-port-contracts, in-memory-state-stores, forged-scope-fields,
+  scope-literal-defaults, dead-message-kinds, inert-enforcement,
+  mcp-write-tools, byte-slice-truncation, fail-open-ref-resolution,
   relative-path-defaults, lossy-secret-conversion,
   fabricated-scope-defaults, forwarded-header-trust,
-  unbounded-external-http, task-commit-attribution (passes once this
-  commit records `3c22bfa87` in the frontmatter).
+  unbounded-external-http; see
+  `/tmp/stage/review-evidence/mechanical-checks-round2.txt`).
