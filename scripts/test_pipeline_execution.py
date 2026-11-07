@@ -308,6 +308,37 @@ class CrashTest(unittest.TestCase):
                 self.assertEqual(self.store.db.execute('SELECT state FROM resources WHERE name=?',(resource,)).fetchone()[0],'absent')
                 self.store.finish(ident,execution.claim['token'],{}, {})
 
+    def test_crash_cleanup_stops_durable_agent_before_capturing_source(self):
+        import sys,time
+        workspace=Path(self.temp.name)/'workspace';root=workspace/'.gyre-agent-proof'
+        root.mkdir(parents=True)
+        helper=Path(__file__).with_name('pipeline-agent.py')
+        marker=workspace/'running'
+        job={'argv':[sys.executable,'-c',f'from pathlib import Path; import time; Path({str(marker)!r}).touch(); time.sleep(60)'],
+             'cwd':str(workspace),'timeout':60}
+        (root/'command.json').write_text(json.dumps(job))
+        subprocess.run([sys.executable,str(helper),'launch',str(root)],check=True,capture_output=True)
+        self.addCleanup(lambda:subprocess.run([sys.executable,str(helper),'cancel',str(root)],capture_output=True))
+        deadline=time.monotonic()+5
+        while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+        self.assertTrue(marker.exists())
+        self.store.reserve('orphan',self.work,self.claim['token'],'sandbox',10)
+        self.store.retry(self.work,self.claim['token'],{'message':'lost host'},delay=0)
+        ident=self.store.enqueue('cleanup','task-001','g',{'resource':'orphan'})
+        execution=Execution(self.store,self.store.claim('cleanup','cleaner',ident=ident))
+        item={'name':'orphan','phase':'Ready','labels':{'gyre.dev/pipeline':self.store.setting('owner')}}
+        def remote(name,*args,**kwargs):
+            if args[0]=='python3':
+                code=args[-1].replace('/sandbox/workspace',str(workspace)).replace('/tmp/stage/step.exit.process.json',str(workspace/'missing.json'))
+                return subprocess.run([sys.executable,'-c',code],check=True,capture_output=True,text=True)
+            return subprocess.CompletedProcess([],0,'bounded log','')
+        def capture(*args,**kwargs):
+            self.assertEqual(json.loads((root/'result.json').read_text())['exit_code'],130)
+            return subprocess.CompletedProcess([],0,'','')
+        with patch.object(execution,'login'),patch('pipeline.stages.gateway.inventory',side_effect=[[item],[],[]]),patch.object(execution,'remote',side_effect=remote),patch.object(execution,'command',side_effect=capture) as capture_call,patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')):
+            cleanup(execution,self.store.task('task-001'))
+        self.assertEqual(capture_call.call_count,1)
+
     def test_cleanup_captures_but_never_promotes_explicitly_fenced_source(self):
         self.store.reserve('fenced-pod', self.work, self.claim['token'], 'sandbox', 1)
         self.store.resource_state('fenced-pod', 'absent')
