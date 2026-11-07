@@ -82,3 +82,24 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Review — task-093 (round 4, verification-repair)
+
+Candidate `93f9467a37c1ea7d442d1ea13ec1f5cf3f9bf15c` against base `1d9547defeb08d9cd2a40f3c656e20644b625602`. Verdict: **complete**.
+
+Scope: the retained verification log (candidate `a2cdeaf5`, base `88bd81bf`) failed on exactly two findings. This round independently re-verified both on the current tree and reviewed the incremental diff.
+
+Incremental product change since the base merge (`0d149f95`): `b277fff9` only — one line, `approved_content_hash: None` in the unapproved-persona kill-test's `Pending` persona literal (E0063 repair after task-099 added the field to `gyre_domain::MetaSpec`). Verified against the field contract (`meta_spec.rs:140-144`: set only on transition to Approved, never caller-derived) — `None` is the correct value for a persona that never transitioned. The remainder of base→candidate is docs/process commits plus the round-2/3-reviewed task-093 surface arriving through the merge.
+
+Durable findings, both resolved with independent evidence:
+
+- **E0063 (compile)** — resolved. The full `gyre-server` lib test target compiles (1,322 tests present in the binary). Focused probes: `api::orchestrator` 24/24, `api::spawn` 34/34, `mcp::` 80/80, `agents::` 7/7, `gyre-domain` pass. `python3 scripts/check-rustfmt-diff.py <base>` → clean (5 Rust files).
+- **check-abac-exempt-handlers ERROR (orchestrator.rs:281, old tree)** — resolved on this tree. Both orchestrator routes are resolver-registered (`abac_middleware.rs`: `/api/v1/repos/:id/orchestrator/spawn` → repo/write, `/api/v1/workspaces/:id/orchestrator/spawn` → workspace/write); `check-abac-exempt-handlers` passes (86 handlers, exit 0); `check-abac-route-registry` passes with `FROZEN_EXEMPTION_COUNT` honestly lowered 52→50 (entries removed, not maintained); the handler enforces tenant containment via `check_workspace_tenant` with a real Forbidden branch, wrapper-tested in both directions and both tiers.
+
+Other mechanical checks re-run green: arch, inert-enforcement, mcp-write-tools, task-commit-attribution, migration-versions.
+
+Spec conformance re-confirmed by reading the code and tests (no source mutation): `OrchestratorType` on `Agent` with serde roundtrip tests; one-live-per-scope on both spawn tiers (409 on conflict, tombstone-aware default-name respawn, strict explicit names); workspace-/repo-scoped orchestrator JWTs validated in tests through the real signing key; auto-restart on every terminal path (stale Abort, `/fail`, `/stop`) via shared `handle_orchestrator_death` with terminal-state guards, a one-live gate inside `restart_orchestrator` (pinned by `double_death_handling_entry_yields_one_live_orchestrator`), budget-symmetric replacement, and exhausted-budget no-restart; repo-tier death escalation with `replacement_agent_id`/`informational` payload; all five MCP tools tier-gated with same-scope checks; `gyre_message_send` in the `needs_write` RBAC gate with ReadOnly-denial and Agent-role positive tests. Tests assert real persisted state (agent rows, JWT claims, budget counters, message inboxes), with negative controls — no self-confirming patterns found.
+
+Non-blocking observation (not a finding): the explicit-name conflict check in `spawn_orchestrator` skips on a `find_by_name` store error (`if let Ok(Some(_))`); the subsequent `create` still fails closed on the adapters' duplicate-name constraint (SQLite unique index; mem adapter guards in code per check-mem-port-contracts), so this is a style inconsistency with `unique_default_name`'s error propagation, not an enforcement gap.
+
+— Reviewer, 2026-11-07 (round 4)
