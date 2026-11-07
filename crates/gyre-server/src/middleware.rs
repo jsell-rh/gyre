@@ -261,6 +261,7 @@ mod tests {
             trust_anchors: base.trust_anchors.clone(),
             trusted_issuers: base.trusted_issuers.clone(),
             remote_jwks_cache: base.remote_jwks_cache.clone(),
+            trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
             commit_signatures: base.commit_signatures.clone(),
             signing_config: base.signing_config.clone(),
             tunnel_store: base.tunnel_store.clone(),

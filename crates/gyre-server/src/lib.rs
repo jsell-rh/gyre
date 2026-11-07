@@ -35,6 +35,7 @@ pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
+pub mod reconciliation;
 pub mod retention;
 pub mod siem;
 pub(crate) mod signing;
@@ -53,6 +54,7 @@ pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
 pub mod trust_suggestion;
+pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
@@ -315,6 +317,12 @@ pub struct AppState {
     /// (task-107 F3: verification resolves trust from here, never from the
     /// record being verified).
     pub signing_config: commit_signatures::SigningConfig,
+    /// Trusted reverse-proxy networks for forensic source-IP resolution
+    /// (task-102 F3 / CWE-348). Populated from `GYRE_TRUSTED_PROXIES`
+    /// (comma-separated CIDRs / bare IPs). Empty (the default) = every
+    /// connection is direct: the socket peer is always the source and
+    /// forwarded headers are ignored.
+    pub trusted_proxies: trusted_proxy::TrustedProxies,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
     /// Container audit records (persisted).
@@ -1099,6 +1107,7 @@ pub fn build_state(
         ),
         signing_config: commit_signatures::SigningConfig::from_env(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: trusted_proxy::TrustedProxies::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: store!(
             dyn ContainerAuditRepository,
@@ -1463,6 +1472,41 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
     }
 }
 
+/// Materialize the default Tenant entity on first startup
+/// (hierarchy-enforcement.md §1 Bootstrap Behavior).
+///
+/// On an empty database the platform has no Tenant row backing the `"default"`
+/// tenant scope that every tenant-filtered adapter query resolves against —
+/// the scope would be a phantom. This creates it with the spec-mandated
+/// field values: name "Default", slug "default", no OIDC issuer, unlimited
+/// budget (`BudgetConfig::default()`), no workspace cap. The row's id is
+/// `"default"` — the operative single-tenant scope — so it is the real
+/// tenant existing data references, not an orphaned UUID (the spec's
+/// `deterministic_uuid` form is deferred multi-tenant work, §68-70).
+///
+/// Idempotent: a no-op when the default tenant already exists.
+pub async fn bootstrap_default_tenant(state: &Arc<AppState>) {
+    use gyre_domain::budget::BudgetConfig;
+    use gyre_domain::tenant::Tenant;
+
+    let default_id = Id::new("default");
+    if let Ok(Some(_)) = state.tenants.find_by_id(&default_id).await {
+        return; // already bootstrapped
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut tenant = Tenant::new(default_id, "Default", "default", now);
+    tenant.budget = Some(BudgetConfig::default());
+
+    if let Err(e) = state.tenants.create(&tenant).await {
+        tracing::warn!("failed to bootstrap default tenant: {e}");
+    }
+}
+
 /// Spawn a background task that evicts stale LLM rate-limiter entries every 60 seconds.
 ///
 /// Prevents unbounded map growth: entries for users who have been idle for a full window
@@ -1607,6 +1651,7 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
             approved_at: Some(now),
+            approved_content_hash: Some(sha256_hex(prompt)),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -1732,5 +1777,68 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// task-197 / hierarchy-enforcement §1 Bootstrap Behavior: startup must
+    /// materialize the default Tenant row on an empty database, with the
+    /// spec field values, and be idempotent across restarts.
+    ///
+    /// Exercises the real SQLite `TenantRepository` against the `tenants`
+    /// table (not the mem repo) so the assertions verify the durable row
+    /// production startup writes, and so "not wired" fails visibly: without
+    /// the bootstrap call, `find_by_id("default")` returns None.
+    #[tokio::test]
+    async fn bootstrap_default_tenant_materializes_row_and_is_idempotent() {
+        use gyre_common::Id;
+        use gyre_domain::budget::BudgetConfig;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        // Wire the SQLite adapter into state.tenants exactly as build_state
+        // does in DB-backed mode (store! macro path).
+        let mut base = (*mem::test_state()).clone();
+        base.tenants = Arc::new(storage);
+        let state = Arc::new(base);
+
+        // Empty database: no default tenant yet.
+        assert!(
+            state
+                .tenants
+                .find_by_id(&Id::new("default"))
+                .await
+                .unwrap()
+                .is_none(),
+            "fresh DB must not contain a default tenant before bootstrap"
+        );
+
+        bootstrap_default_tenant(&state).await;
+
+        let tenant = state
+            .tenants
+            .find_by_id(&Id::new("default"))
+            .await
+            .unwrap()
+            .expect("default tenant materialized after bootstrap");
+        assert_eq!(tenant.id, Id::new("default"));
+        assert_eq!(tenant.name, "Default");
+        assert_eq!(tenant.slug, "default");
+        assert_eq!(tenant.oidc_issuer, None);
+        assert_eq!(tenant.max_workspaces, None);
+        assert!(tenant.created_at > 0);
+        // BudgetConfig has no PartialEq — compare serialized form against
+        // Some(BudgetConfig::default()) (all limits unset = unlimited).
+        assert_eq!(
+            serde_json::to_value(tenant.budget).unwrap(),
+            serde_json::to_value(Some(BudgetConfig::default())).unwrap()
+        );
+
+        // Restart against the populated DB: exactly one default tenant remains.
+        bootstrap_default_tenant(&state).await;
+        let tenants = state.tenants.list().await.unwrap();
+        assert_eq!(
+            tenants.iter().filter(|t| t.slug == "default").count(),
+            1,
+            "second bootstrap call must not create a duplicate default tenant"
+        );
     }
 }

@@ -3402,6 +3402,7 @@ fn test_state_inner(
         commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
         signing_config: crate::commit_signatures::SigningConfig::default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
@@ -3988,16 +3989,21 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
         let mut store = self.store.write().await;
         let mut versions = self.versions.write().await;
         if let Some(existing) = store.iter().find(|m| m.id == meta_spec.id).cloned() {
-            // Archive old version.
-            let ver = gyre_domain::MetaSpecVersion {
-                id: Id::new(uuid::Uuid::new_v4().to_string()),
-                meta_spec_id: existing.id.clone(),
-                version: existing.version,
-                prompt: existing.prompt.clone(),
-                content_hash: existing.content_hash.clone(),
-                created_at: existing.updated_at,
-            };
-            versions.push(ver);
+            // Archive only when the content version changed — a same-version
+            // update (approval of unchanged content, required-flag toggle)
+            // must not create a duplicate history row (same contract as the
+            // SQLite/Postgres adapters).
+            if existing.version != meta_spec.version {
+                let ver = gyre_domain::MetaSpecVersion {
+                    id: Id::new(uuid::Uuid::new_v4().to_string()),
+                    meta_spec_id: existing.id.clone(),
+                    version: existing.version,
+                    prompt: existing.prompt.clone(),
+                    content_hash: existing.content_hash.clone(),
+                    created_at: existing.updated_at,
+                };
+                versions.push(ver);
+            }
         }
         store.retain(|m| m.id != meta_spec.id);
         store.push(meta_spec.clone());
