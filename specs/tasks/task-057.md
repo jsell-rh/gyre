@@ -9,7 +9,7 @@ depends_on:
   - task-033
   - task-037
   - task-053
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-057.md
 coverage_sections: []
 commits: []
