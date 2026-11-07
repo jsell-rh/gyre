@@ -479,7 +479,9 @@ mod tests {
         // Route through the ABAC middleware so impersonated actions are
         // recorded (same layering as build_router).
         crate::abac_middleware::init_resolver();
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
 
         async fn ok_handler() -> StatusCode {
             StatusCode::OK
