@@ -800,10 +800,15 @@ async fn explorer_ws_full_session_lifecycle() {
             }
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
             Ok(Some(Ok(Message::Text(_) | Message::Binary(_) | Message::Frame(_)))) => continue,
-            Ok(Some(Err(_))) | Err(_) => {
+            // Stream error: the socket is gone (not held open) — counts as closed.
+            Ok(Some(Err(_))) => {
                 closed = true;
                 break;
             }
+            // Timeout elapsed with no Close reply and no stream end: the server
+            // is still holding the socket. This is a hang, NOT a clean
+            // disconnect — fail the assertion.
+            Err(_) => break,
         }
     }
     assert!(
