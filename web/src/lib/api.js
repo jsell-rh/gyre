@@ -1,3 +1,5 @@
+import { captureLastSeenHeader } from './last-seen.js';
+
 const API_BASE = '/api/v1';
 const AUTH_TOKEN_KEY = 'gyre_auth_token';
 
@@ -41,6 +43,9 @@ async function request(path, options = {}) {
       },
       signal: controller.signal,
     });
+    // Cache the server's last-seen stamp (present only on tracked,
+    // workspace-scoped responses). Feeds the Change View's `since` value.
+    captureLastSeenHeader(res.headers);
     if (!res.ok) {
       if (res.status === 401) {
         throw new Error('Session expired — please re-authenticate.');
