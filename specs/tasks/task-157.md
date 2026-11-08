@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
+commits: ["de208c147ff0653404a2b6b0a8d33e1f2e8b91a1", "aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
 ---
 
 ## Spec Excerpt
@@ -80,14 +80,12 @@ From `meta-spec-reconciliation.md` §7 — Rollout Policy:
 ## Shipped
 
 Real, production implementation of `meta-spec-reconciliation.md` §7 Rollout
-Policy in commits `a1ff51f2cd964fa606e58eee76baaf73435a5be3` and
-`e67c467191726aa1e3510cd15c2ea0ee044362b5`, re-verified after merging the
-assignment base `7da7bbfff69da433592962a911abe23677d5ac3a` (the merge kept
-the rollout implementation byte-identical; only `api/meta_specs.rs`
-combined it with base's task-077 per-handler admin gates), then repaired
-in commit `aa73b69a563fedd2c99929831aca325cfc1d3dc5` after the
-verification gate (`checks.sh`, base `124a852bedb4e5759bf143b6c2683df6eeb03849`)
-failed on three lint findings — none behavioral:
+Policy, plus the review-repair for overlapping rolling waves, in commits
+`a1ff51f2cd964fa606e58eee76baaf73435a5be3`,
+`e67c467191726aa1e3510cd15c2ea0ee044362b5`,
+`aa73b69a563fedd2c99929831aca325cfc1d3dc5` (lint repair), and
+`de208c147ff0653404a2b6b0a8d33e1f2e8b91a1` (overlapping-wave merge fix) on
+the assignment base `124a852bedb4e5759bf143b6c2683df6eeb03849`.
 
 ### Spec fidelity
 
@@ -123,7 +121,7 @@ still wanted, that is a spec amendment request, not a code gap.
 - **Controller integration** (`crates/gyre-server/src/reconciliation.rs`):
   `run_reconciliation` loads the workspace's policy and dispatches on the
   strategy. `Immediate` creates every task at once. `Rolling` creates only
-  the first `max_concurrent_agents` tasks and persists the remainder
+  the first `max_concurrent_agents` tasks and defers the remainder
   (kv-backed, restart-safe); the shared `on_reconciliation_task_terminal`
   hook — used by all three terminal-transition surfaces (REST task update,
   REST repo deletion, MCP `update_task`) — creates the next batch when the
@@ -135,6 +133,17 @@ still wanted, that is a spec amendment request, not a code gap.
   creates all tasks without `task_type`: they sit in Backlog and cannot
   trigger agent spawning (enforced by the existing `spawn_agent_core`
   task-type gate) — the repo orchestrator decides when to engage them.
+- **Overlapping waves** (review repair, commit `de208c147`): the deferred
+  remainder is MERGED, never overwritten. `merge_pending_rollout` retains
+  all stored deferred entries except those superseded by an incoming entry
+  with the same (repo, title) or consumed by the caller (created as tasks,
+  deduplicated away, or resolved out of the loaded snapshot). A second
+  meta-spec change approved while a rolling rollout is in flight (a wide
+  window by design — Rolling waits for each batch and is the §7 default)
+  extends the pending work instead of discarding the first wave's deferred
+  tasks; both remainders are batched together and drained by the normal
+  advance, with `ReconciliationCompleted` still firing exactly once at the
+  very end.
 - **auto_merge**: when the policy enables it, a reconciliation MR created
   by agent completion (§6 step 6) is enqueued into the merge queue, which
   triggers gate execution; the merge processor merges a queued entry only
@@ -149,49 +158,60 @@ still wanted, that is a spec amendment request, not a code gap.
   event, and is registered in the ABAC route resolver (`meta_spec`
   resource) — no new exemptions.
 
-### Verification repair
+### Review repair (attempt 5a60eba0, commit `de208c147`)
 
-- rustfmt violations on changed lines in 7 rollout files (sqlite adapter,
-  domain `lib.rs`/`meta_spec.rs`, `api/meta_specs.rs`, `api/repos.rs`,
-  server `lib.rs`, `reconciliation.rs`) — fixed by `cargo fmt --all`, which
-  touched exactly the 8 flagged files (7 + the ports file below),
-  formatting-only diff.
-- `clippy::double_must_use` at `gyre-ports/src/rollout_policy.rs` — the
-  `async_trait` macro expansion artifact; fixed with the repo's established
-  trait-level `#[allow(clippy::double_must_use)]` pattern (same as
-  `meta_spec_repository.rs`, `spec_assertion_result_repo.rs`, `storage.rs`).
-- `unused_must_use` at `api/meta_specs.rs` — the
-  `block_on(seed_builtin_policies(...))` result in
-  `put_rollout_policy_requires_admin` was discarded; now
-  `.expect("seed built-in policies")`, matching every sibling test.
+Review finding `dde37e8e` reproduced on candidate `1ca46e9e7`: the rolling
+strategy's pending remainder lived under a per-workspace singleton KV key
+and `persist_pending_rollout` unconditionally `kv_set` it, so a second wave
+triggered while a rolling rollout was in flight overwrote the first wave's
+deferred tasks — silent work loss (persona tasks 1/4 vs reviewer tasks
+4/4 in the reviewer's reproduction). Fixed by replacing the overwrite
+persist with `merge_pending_rollout` (see Behavior above); both call sites
+(`run_reconciliation`'s rolling branch — passing the first-batch task keys
+as consumed — and `maybe_advance_rolling_rollout` — passing the loaded
+snapshot keys as consumed) merge instead of overwrite. Two regression
+tests were added, each mutation-verified to fail under the semantics it
+guards against:
 
-Post-repair, both diff-scoped gates pass on this branch:
-`check-rustfmt-diff.py` → "changed lines clean (20 Rust files checked)";
-`check-clippy-diff.py` → "changed lines clean (20 Rust files, 1096 existing
-warnings outside changes)".
+- `overlapping_rolling_waves_retain_both_remainders` — fails under the old
+  overwrite semantics (the review reproduction: both waves' deferred
+  remainders retained, every repo receives both waves' tasks, completion
+  fires exactly once).
+- `retriggered_rolling_wave_supersedes_not_duplicates` — fails under a
+  pure-append merge (guards the duplication the merge could introduce): a
+  same-version re-trigger consumes the deferral of work it just put in
+  flight and supersedes the matching deferred entry instead of
+  duplicating it. The test identifies repos by observed task state, not id
+  order, because mem-adapter repo iteration order is not deterministic
+  across processes (an earlier hardcoded-order draft was flaky and fixed
+  before commit).
+
+Evidence retained at `/tmp/stage/review-evidence/task-157-overlap-fix-*.txt`:
+focused tests, diff-scoped rustfmt/clippy gates, and a notes file recording
+the mutation checks (temporary source mutations, reverted afterwards).
 
 ### Test evidence
 
-Focused probes re-run post-repair (head `aa73b69a5`, output retained at
-`/tmp/stage/review-evidence/task-157-repair-*.txt`):
+Focused probes at head `de208c147`:
 
-- `cargo test -p gyre-domain meta_spec` — 6 passed: spec default,
-  wire-name round-trips, priority mapping/round-trip, full JSON shape.
-- `cargo test -p gyre-server --lib reconciliation::tests` — 28 passed,
-  including: immediate creates all tasks at once; rolling creates batch 1
-  only and advances on completion; background leaves tasks in Backlog;
-  priority mapping; strategy-switch flush; batch-size change applies to
-  the next batch; auto_merge enqueues / default does not /
+- `cargo test -p gyre-server --lib reconciliation::tests` — 30 passed
+  (28 pre-existing + the 2 new regression tests), covering: immediate
+  creates all tasks at once; rolling creates batch 1 only and advances on
+  completion; background leaves tasks in Backlog; priority mapping;
+  strategy-switch flush; batch-size change applies to the next batch;
+  overlapping waves retain both remainders; re-triggered wave supersedes
+  not duplicates; auto_merge enqueues / default does not /
   non-reconciliation MRs ignored; unset policy is the spec default;
-  `ReconciliationCompleted` fires exactly once at rollout end. Pre-existing
-  §6/§10/§11 tests still green.
-- `cargo test -p gyre-server --lib api::meta_specs` — 25 passed, including
-  GET default, PUT round-trip, partial update, Admin-only 403, invalid
-  strategy/priority/batch-size 400, unknown workspace 404.
-- Rollout implementation files (domain `meta_spec.rs`, `reconciliation.rs`,
-  sqlite `rollout_policy.rs`, migration 000057, `gyre-ports`) verified
-  byte-identical to candidate `1e76c52eb` after the merge
-  (`task-157-rollout-files-vs-candidate.diff`, empty).
+  `ReconciliationCompleted` fires exactly once at rollout end. Suite run
+  five times consecutively — stable (no order-dependent flakiness).
+- `cargo test -p gyre-server --lib api::meta_specs` — 25 passed.
+- `cargo test -p gyre-domain meta_spec` — 6 passed (run at the earlier
+  repair head `aa73b69a5`; this repair touches only
+  `gyre-server/src/reconciliation.rs`).
+- Diff-scoped gates against base `124a852be`:
+  `check-rustfmt-diff.py` → "changed lines clean (20 Rust files checked)";
+  `check-clippy-diff.py` → "changed lines clean (20 Rust files, 1096
+  existing warnings outside changes)".
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub
 CI are owned by verification/publication and were not repeated here.
