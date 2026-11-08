@@ -3,7 +3,7 @@ title: "Canonical Navigation — Scope-Aware Content Routing"
 spec_ref: "ui-navigation.md §2, §3, §7, §10"
 depends_on:
   - task-082
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
