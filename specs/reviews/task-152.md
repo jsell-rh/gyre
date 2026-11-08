@@ -57,3 +57,76 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 8 — independent review of the rebase resolution (candidate `08f705782`)
+
+Scope: the exact assigned candidate `08f7057826c94a77d8fe9ae4a561b690f9931bcb` against base
+`c5deca801` (full diff: narrative.rs +1062, api/graph.rs +442, graph_extraction.rs +275,
+explorer_ws.rs +118, llm_defaults.rs +12, gyre-common DeltaEdgeEntry, gate script repair,
+coverage/docs/task/review records). Working tree clean at HEAD = candidate throughout;
+`dev-review-guard.py check` exit 0 (no source edits; all mutation probes restored, verified
+by `git status --porcelain` empty after each).
+
+Focused probes (all on the exact head, `CARGO_HOME=/tmp/cargo-home`, evidence under
+`/tmp/stage/review-evidence/r8-*.log`):
+
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed**.
+- `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed, 0 failed**.
+- `cargo test -p gyre-server --lib -- api::graph graph_extraction session_registry` →
+  **66 passed, 0 failed** (both merged test sets: narrative + main's repo-scoped briefing
+  filter tests, updated to the 4-arg `assemble_briefing`).
+- `cargo test -p gyre-server --test explorer_ws_integration` → **15 passed, 0 failed** on the
+  exact head — including `explorer_ws_session_limit_is_per_server_instance`, the regression
+  the round-6 fix targeted. The earlier rounds' transport restriction (no `accept()`) is moot
+  in the current sandbox: `/tmp/stage/capabilities.json` reports the listener probe supported
+  and the real-TCP run confirms it. No host-only deferral remains for this binary.
+- Gates: check-arch, check-byte-slice-truncation, check-fail-open-ref-resolution,
+  check-inert-enforcement, check-unbounded-external-http (narrative LLM call is
+  `tokio::time::timeout(10s)`-bounded), check-mem-port-contracts, check-fabricated-scope-defaults,
+  check-lossy-secret-conversion, check-relative-path-defaults, check-task-commit-attribution →
+  all exit 0. `check-rustfmt-diff.py c5deca801` → changed lines clean (7 files). Focused
+  `cargo clippy -p gyre-domain --lib` / `-p gyre-server --lib`: zero warnings on
+  candidate-changed lines (remaining warnings are pre-existing base lines; the workspace-wide
+  clippy-diff invocation is blocked by the executor wrapper — infrastructure, not a defect).
+
+Non-blinding proofs (each mutation reverted immediately, tree verified clean):
+
+1. **Timeline narrative**: `DeltaResponse::from_delta` forced to emit `String::new()` →
+   `timeline_endpoint_returns_grounded_narrative` **FAILED** (exit 101). The test proves real
+   production narrative generation, not mirroring.
+2. **LLM path**: `llm_architecture_narrative` forced to return the fallback (`if true { return
+   fallback; }`) → `briefing_summary_uses_llm_narrative_when_configured` **FAILED** while
+   `briefing_summary_falls_back_to_template_narrative_without_llm` still passed — exactly the
+   discriminating split the AC requires. Echo mock verified genuine
+   (`gyre-adapters/src/llm/mock.rs:85-92`: `complete` returns the user prompt, so the asserted
+   `LLM_NARRATIVE_USER_PROMPT` in the summary can only appear via a real port round-trip).
+3. **Spec governance grounding**: node `spec_path`/`spec_paths` collection disabled in
+   `NarrativeGrounding::from_graph` → 2 domain tests **FAILED**
+   (`single_addition_renders_grounded_spec_example_shape`,
+   `facts_json_carries_grounding`).
+4. **Template-substitution gate not blinded by the candidate's script repairs**: baseline
+   exit 0; planted `{{narr_mode}}` in `PROMPT_GRAPH_NARRATIVE`'s string value → exit 1,
+   correctly attributed to `llm_architecture_narrative` in api/graph.rs. The comment-strip
+   (doc-block bleed fix), single-awk span bounds, and here-string grep all retain the
+   true-positive class.
+
+Rebase-resolution semantics verified: `collect_architecture_narratives` takes `repo_filter`
+and narrows the briefing architecture narrative to the filtered repo (code-verified; main's
+`briefing_repo_filter_narrows_sections_to_that_repo` passes on the merged tree);
+`compact_delta_records_true_removed_edge_count` drives the real extraction pipeline over a
+real bare git repo with main's `pass2_telemetry` argument and passes.
+
+Minor observations (non-blocking, recorded for completeness):
+
+- Grouped additions (>3) omit per-node grounding specs from the "Governed by spec" sentence
+  (delta-level `spec_ref` still renders) — defensible resolution of the plan's own tension
+  between per-node governance and grouped batching.
+- `collect_architecture_narratives` silently skips a repo whose `list_deltas` fails (the
+  repo-listing and grounding-load failures are warn-logged; the per-repo delta read is not).
+  Advisory summary content degrades gracefully; no wrong data.
+- Coverage row 9 cites pre-rebase commit `f88e55b7` — historically accurate (commit exists in
+  the repo) and the described code matches the current tree exactly.
+
+Round-8 verdict: **approved** — every §6 acceptance criterion is met by real production code
+with discriminating tests; no fake implementations, no gate weakening, no scope-unsafe
+handling found in the diff.
