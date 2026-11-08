@@ -55,7 +55,8 @@ pub async fn activity_handler(
                 "event_type": event_type,
                 "title": n.title,
                 "description": n.body,
-                "entity_type": if body.get("mr_id").is_some() { Some("mr") }
+                "entity_type": if n.source.entity_type != "system" { Some(n.source.entity_type.as_str()) }
+                    else if body.get("mr_id").is_some() { Some("mr") }
                     else if body.get("agent_id").is_some() { Some("agent") }
                     else if body.get("spec_path").is_some() { Some("spec") }
                     else if body.get("task_id").is_some() { Some("task") }
@@ -65,7 +66,8 @@ pub async fn activity_handler(
                     .or_else(|| body.get("spec_path"))
                     .or_else(|| body.get("task_id"))
                     .and_then(|v| v.as_str())
-                    .or(n.entity_ref.as_deref()),
+                    .or(Some(n.source.entity_id.as_str()))
+                    .filter(|s| !s.is_empty()),
                 "entity_name": body.get("mr_title")
                     .or_else(|| body.get("agent_name"))
                     .and_then(|v| v.as_str()),
@@ -74,7 +76,7 @@ pub async fn activity_handler(
                 "mr_id": body.get("mr_id").and_then(|v| v.as_str()),
                 "task_id": body.get("task_id").and_then(|v| v.as_str()),
                 "spec_path": body.get("spec_path").and_then(|v| v.as_str()),
-                "repo_id": n.repo_id,
+                "repo_id": n.source.repo_id.as_ref().map(|r| r.as_str()),
             })
         })
         .collect();

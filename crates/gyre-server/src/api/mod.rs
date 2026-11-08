@@ -80,8 +80,9 @@ use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
     get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
     get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    list_tokens, mark_notification_read, mark_notification_unread, remove_member,
+    resolve_notification, update_me, update_member_role, update_notification_preferences,
+    update_team,
 };
 
 use crate::AppState;
@@ -824,6 +825,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/notifications/:id/resolve",
             post(resolve_notification),
+        )
+        .route(
+            "/api/v1/notifications/:id/read",
+            post(mark_notification_read),
+        )
+        .route(
+            "/api/v1/notifications/:id/unread",
+            post(mark_notification_unread),
         )
         // Workspace members (M22.8)
         .route(

@@ -1700,7 +1700,8 @@ async fn notify_cross_workspace_dependents(
                 now as i64,
             );
             notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.entity_id = changed_spec_path.to_string();
 
             if let Err(e) = state.notifications.create(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
@@ -2940,12 +2941,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
