@@ -9,6 +9,7 @@ use gyre_common::Id;
 /// `gyre_domain::RolloutPolicy` happens in the server layer. A missing row
 /// means "use the spec default policy" — it is not an error.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait RolloutPolicyRepository: Send + Sync {
     /// Get the raw JSON for a workspace's rollout policy, or `None` if unset.
     async fn get(&self, workspace_id: &Id) -> Result<Option<String>>;

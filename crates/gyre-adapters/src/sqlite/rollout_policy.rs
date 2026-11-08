@@ -139,7 +139,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(got.contains("\"immediate\""), "expected overwrite, got {got}");
+        assert!(
+            got.contains("\"immediate\""),
+            "expected overwrite, got {got}"
+        );
     }
 
     #[tokio::test]

@@ -837,7 +837,9 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -885,7 +887,9 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -910,7 +914,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"strategy":"background"}"#))
@@ -936,7 +942,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         let ws_resp = crate::api::api_router()
@@ -947,7 +955,9 @@ mod tests {
                     .uri("/api/v1/workspaces")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"policy-admin-ws","slug":"policy-admin-ws"}"#))
+                    .body(Body::from(
+                        r#"{"name":"policy-admin-ws","slug":"policy-admin-ws"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -969,7 +979,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
                     .header("authorization", format!("Bearer {dev_token}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"strategy":"immediate"}"#))
@@ -986,10 +998,7 @@ mod tests {
         let ws_id = create_workspace(&app, "policy-invalid-ws").await;
 
         for (body, what) in [
-            (
-                r#"{"strategy":"staged"}"#,
-                "unknown strategy",
-            ),
+            (r#"{"strategy":"staged"}"#, "unknown strategy"),
             (
                 r#"{"strategy":"rolling","priority":"urgent"}"#,
                 "unknown priority",
@@ -1004,7 +1013,9 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("PUT")
-                        .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                        .uri(format!(
+                            "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                        ))
                         .header("authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(body))
@@ -1012,11 +1023,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::BAD_REQUEST,
-                "must reject {what}"
-            );
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "must reject {what}");
         }
     }
 
@@ -1037,7 +1044,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} on missing workspace");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} on missing workspace"
+            );
         }
     }
 

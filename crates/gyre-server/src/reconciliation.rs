@@ -29,7 +29,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gyre_common::{Id, Notification, NotificationType};
-use gyre_domain::{MergeQueueEntry, RolloutPolicy, RolloutStrategy, TaskPriority, TaskStatus, TaskType};
+use gyre_domain::{
+    MergeQueueEntry, RolloutPolicy, RolloutStrategy, TaskPriority, TaskStatus, TaskType,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -651,7 +653,11 @@ async fn create_reconciliation_task(
     // §6 flow step 5: the repo orchestrator spawns the reconciliation
     // agent — delegation is the signal-chain discriminator for that.
     // Background (§7) passes `delegation = false` to leave the task inert.
-    task.task_type = if delegation { Some(TaskType::Delegation) } else { None };
+    task.task_type = if delegation {
+        Some(TaskType::Delegation)
+    } else {
+        None
+    };
 
     match state.tasks.create(&task).await {
         Err(e) => {
@@ -876,7 +882,12 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         if created < batch_size {
             let cand = pending_task.into_candidate();
             if create_reconciliation_task(
-                state, workspace_id, &cand, task_priority.clone(), true, now,
+                state,
+                workspace_id,
+                &cand,
+                task_priority.clone(),
+                true,
+                now,
             )
             .await
             {
@@ -964,8 +975,12 @@ pub async fn maybe_auto_enqueue_reconciliation_mr(
     }
     // Trigger quality-gate execution for the enqueued MR (same as the
     // explicit enqueue handler) — the merge processor merges once they pass.
-    crate::gate_executor::trigger_gates_for_mr(state.clone(), mr.id.clone(), mr.repository_id.clone())
-        .await;
+    crate::gate_executor::trigger_gates_for_mr(
+        state.clone(),
+        mr.id.clone(),
+        mr.repository_id.clone(),
+    )
+    .await;
     info!(
         mr_id = %mr.id,
         workspace_id = %mr.workspace_id,
@@ -1617,7 +1632,9 @@ mod tests {
         assert_eq!(summary.tasks_created, 3);
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(tasks.len(), 3);
-        assert!(tasks.iter().all(|t| t.task_type == Some(TaskType::Delegation)));
+        assert!(tasks
+            .iter()
+            .all(|t| t.task_type == Some(TaskType::Delegation)));
         assert!(pending_rollout_state(&state, "ws-imm").await.is_none());
     }
 
@@ -1712,7 +1729,14 @@ mod tests {
     async fn count_completed_messages(state: &Arc<AppState>, ws_id: &Id) -> usize {
         state
             .messages
-            .list_by_workspace(ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+            .list_by_workspace(
+                ws_id,
+                Some("reconciliation_completed"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
             .await
             .unwrap()
             .len()
@@ -1805,9 +1829,7 @@ mod tests {
         let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
-            pending_rollout_state(&state, "ws-switch")
-                .await
-                .unwrap()["remaining"]
+            pending_rollout_state(&state, "ws-switch").await.unwrap()["remaining"]
                 .as_array()
                 .unwrap()
                 .len(),

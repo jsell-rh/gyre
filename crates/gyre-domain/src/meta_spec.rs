@@ -311,20 +311,36 @@ mod tests {
         assert_eq!(p.strategy, RolloutStrategy::Rolling);
         assert_eq!(p.priority, ReconciliationPriority::Normal);
         assert!(!p.auto_merge);
-        assert!(p.max_concurrent_agents >= 1, "rolling batch size must be non-zero");
+        assert!(
+            p.max_concurrent_agents >= 1,
+            "rolling batch size must be non-zero"
+        );
     }
 
     #[test]
     fn rollout_strategy_round_trips_wire_names() {
-        for s in [&RolloutStrategy::Immediate, &RolloutStrategy::Rolling, &RolloutStrategy::Background] {
+        for s in [
+            &RolloutStrategy::Immediate,
+            &RolloutStrategy::Rolling,
+            &RolloutStrategy::Background,
+        ] {
             let json = serde_json::to_string(s).unwrap();
             assert_eq!(serde_json::from_str::<RolloutStrategy>(&json).unwrap(), *s);
             assert_eq!(RolloutStrategy::parse(s.as_str()), Some(s.clone()));
         }
         // Wire names are the lowercase strategy names from the §7 table.
-        assert_eq!(serde_json::to_string(&RolloutStrategy::Immediate).unwrap(), "\"immediate\"");
-        assert_eq!(serde_json::to_string(&RolloutStrategy::Rolling).unwrap(), "\"rolling\"");
-        assert_eq!(serde_json::to_string(&RolloutStrategy::Background).unwrap(), "\"background\"");
+        assert_eq!(
+            serde_json::to_string(&RolloutStrategy::Immediate).unwrap(),
+            "\"immediate\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RolloutStrategy::Rolling).unwrap(),
+            "\"rolling\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RolloutStrategy::Background).unwrap(),
+            "\"background\""
+        );
         assert!(RolloutStrategy::parse("staged").is_none());
     }
 
@@ -343,9 +359,18 @@ mod tests {
             );
             assert_eq!(ReconciliationPriority::parse(p.as_str()), Some(p.clone()));
         }
-        assert_eq!(ReconciliationPriority::High.task_priority(), TaskPriority::High);
-        assert_eq!(ReconciliationPriority::Normal.task_priority(), TaskPriority::Medium);
-        assert_eq!(ReconciliationPriority::Low.task_priority(), TaskPriority::Low);
+        assert_eq!(
+            ReconciliationPriority::High.task_priority(),
+            TaskPriority::High
+        );
+        assert_eq!(
+            ReconciliationPriority::Normal.task_priority(),
+            TaskPriority::Medium
+        );
+        assert_eq!(
+            ReconciliationPriority::Low.task_priority(),
+            TaskPriority::Low
+        );
         assert!(ReconciliationPriority::parse("urgent").is_none());
     }
 

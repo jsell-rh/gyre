@@ -288,11 +288,8 @@ pub async fn archive_repo(
                 l == crate::reconciliation::RECONCILIATION_LABEL
                     || l == crate::reconciliation::DRIFT_REVIEW_LABEL
             }) {
-                crate::reconciliation::on_reconciliation_task_terminal(
-                    &state,
-                    &task.workspace_id,
-                )
-                .await;
+                crate::reconciliation::on_reconciliation_task_terminal(&state, &task.workspace_id)
+                    .await;
             }
         }
     }
