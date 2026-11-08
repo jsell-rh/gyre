@@ -51,3 +51,23 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 3 (2026-11-08) — candidate `4df2f51`: attribution clobber recurrence; verdict needs-revision
+
+Assignment: base `637be718` (task-083, merged by executor at `f42667e` before assignment start), candidate `4df2f51` ("process: record task-208 branch commits", the 93rd clobber recurrence of the rounds 2–91 class; same defect as round-97 candidate `9715f20`). Evidence: `/tmp/stage/review-evidence/r99/`.
+
+Product surface (all clean, fresh probes at candidate HEAD):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches (exit 1). The only `/users/me/{agents,tasks,mrs}` URI references in `crates/` are the 404 literals inside the regression test itself (`users.rs:956-958`).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (1 passed, exit 0). Test inspected: drives the real router via `app().oneshot` with a bearer token and asserts 404 on all three URIs — a genuine route-table probe, fails on reintroduction.
+- `web`: `npm ci` (exit 0) + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed (exit 0). `UserProfile.svelte` renders exactly the six compliant tabs (info, tokens, memberships, ledger, notif-prefs, notifications, lines 119–126); zero `my-agents`/`my-tasks`/`my-mrs` references.
+- Remaining `users/me/*` endpoints (`/me`, `/me/tokens/:id`, `/me/notification-preferences`, `/me/judgments`, `/me/notifications`) keep the per-handler-auth ABAC-exempt model unchanged.
+- Spec amendment and coverage rows intact: `user-management.md` §"My Stuff" Views records the supersession (lines 456-457, 611); M22.8 completeness row struck Removed (line 652); coverage row 22 `n/a` with supersession note, row 23 `task-assigned` task-114; HSI coverage row 54 `implemented`.
+
+Finding (sole, blocking):
+
+- [-] **F-R3: candidate drops `ea006d52` from `commits:` frontmatter.** The candidate's only change vs parent `7fe0b145` is a 1+/1− rewrite of `commits:` from six SHAs back to five, removing `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes`, live at HEAD `.gitattributes:1-4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 4df2f51` → 0; `git merge-base --is-ancestor ea006d52 637be718` (assigned base) → 1. It is therefore task-208-labeled branch product surface that becomes invisible to review scoping while unlisted — violating the AGENTS.md attribution invariant and contradicting the task's own Shipped record (six SHAs). The in-repo gate `scripts/check-task-commit-attribution.sh task-208` exits 0 only because its narrower product-surface regex does not cover root `.gitattributes` (known residual, process owner). The fixed in-repo pass computes the correct six-SHA list (`python3 scripts/dev-attribution.py task-208`; probe `03c` captured the working-tree restore diff, then restored — tree clean). Root cause re-confirmed: executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) is the pre-fix version, differing from the fixed in-repo `scripts/dev-attribution.py` (sha256 `c23f2505…`) by exactly the missing `path == '.gitattributes' or` product-surface line; the executor re-populates `/tmp/stage` from a durable pre-fix source, so every end-of-assignment checkpoint pass re-drops the SHA.
+
+  **Repair:** (1) restore the six-SHA list on the branch (`python3 scripts/dev-attribution.py task-208 --commit`); (2) fix the durable source that populates `/tmp/stage/dev-attribution.py` so the checkpoint pass stops regressing (process owner — sandbox-local replacement does not persist across attempts).
+
+Verdict: **needs-revision** — product work remains complete and verified, but the candidate itself carries the attribution clobber; it must not be approved while a task-labeled product-surface commit is unlisted.
