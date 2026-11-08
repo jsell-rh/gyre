@@ -43,3 +43,97 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 10 (post round-9 repairs, candidate f7f30e427 on base 414fe9aa1)
+
+Scope: the round-9 merge resolution (`8441d58b1`) plus the four review
+repairs (`14c20424d`), re-verified independently after nine prior rounds.
+All four round-9 durable findings are closed with live evidence; no new
+defects found. Evidence: `/tmp/stage/review-evidence/` (README.md with
+full probe logs).
+
+### Round-9 findings — all verified fixed
+
+- **F1 (security) create_user cross-tenant mint** — users.rs:812 rejects
+  with 403 unless `is_system_principal() && auth.tenant_id == req.tenant_id`.
+  `is_system_principal()` is `agent_id == "system" && user_id.is_none()`;
+  API-key and JWT auth always carry a real `user_id` (auth.rs re-read), so
+  no user-named-"system" spoof is possible, and API-key auth fail-closes
+  on unbound users. LIVE-CONFIRMED: jsell (Admin API-key user of "Acme
+  Corp", created by this task's own non-dev bootstrap) POSTing a user into
+  the dev tenant gets 403 with the containment message; same-tenant
+  creation still gets 201 (probe-api.log).
+- **F2 (code) Pending-persona 409 misread as AlreadyLive** — client.rs
+  classifies the "approve it before spawning" 409 as `PersonaPending`,
+  which fails the step truthfully; step 5's resume approves Pending
+  personas instead of skipping them. LIVE-CONFIRMED both branches: a
+  tenant-scoped Pending repo-orchestrator persona is approved on re-run
+  (exit 0, bootstrap-pending-A.log); a workspace-scoped Pending persona
+  with no live orchestrator fails the run with exit 1 and the server
+  detail instead of a false "already active" (bootstrap-pending-B2.log).
+- **F3 (code) gate duplication on re-run** — server rejects duplicate
+  gate names per repo with 409 (gates.rs, tested:
+  create_gate_rejects_duplicate_name_per_repo) and step 7 lists existing
+  gates and skips configured names. LIVE-CONFIRMED: after two dev
+  bootstrap runs the repo holds exactly 3 gates, no duplicates
+  (probe-api.log), re-run prints skip lines (bootstrap-dev-2.log).
+- **F4 (code) unverified credential reuse** — the step-2 fallback fires
+  only on `CreateUserError::Duplicate` (real 409); the saved token is
+  verified via GET /users/me and must match both the requested username
+  and the target tenant. LIVE-CONFIRMED: normal resume continues as jsell
+  after verification (bootstrap-acme-2.log, whoami in probe-api.log); a
+  config holding the dev token fails the run ("saved credentials
+  authenticate as 'system', not 'jsell'", fail3.log).
+
+### Merge-resolution verification
+
+- `2026-10-09-000056_user_tenant_id` is a documented no-op (the column is
+  owned by task-120's earlier-sorting 000058); fresh databases no longer
+  abort with "duplicate column name". schema.rs carries both
+  users.tenant_id (nullable) and agents.persona_id consistently.
+- Task-120 fixture repairs verified by the full server test matrix (lib
+  1435, all integration targets green), including
+  api_key_auth_grants_access.
+- Exemption-file changes are removals/count reductions only
+  (fabricated-scope 4→3, scope-literal 24→13, inert-enforcement
+  validate_persona sites removed); every frozen-baseline script exits 0.
+- The git_http system-principal workspace fallback and repos.rs
+  sync_specs both use the hardened `is_system_principal()` gate with
+  per-handler tenant containment, tested.
+
+### Probes run
+
+`cargo test -p gyre-cli` (139+1), `-p gyre-server --lib` (1435),
+`-p gyre-server --tests` (all targets), `-p gyre-adapters` (375+12
+ignored) — all green. 20 mechanical check scripts exit 0;
+`check-rustfmt-diff.py 414fe9aa1` clean. Live e2e against a
+candidate-built server: dev first-run with --starter-kit (5 files, 3
+gates, 4 personas, orchestrator registered with truthful launch-failure
+report), dev re-run (full resume/dedupe), non-dev bootstrap with
+--admin-user (key saved, verified continuation), cross-tenant 403 probe,
+wrong-credential rejection, both Pending-persona branches, and all three
+failure paths (server down, --dev --tenant, missing --tenant) — exits 1
+as required. Pre-existing non-green scripts re-confirmed unchanged from
+base: check-cli-spec-parity (spec_assist display, main.rs:1235 identical
+at base), check-dead-components (4 violations, all in web/ — zero web
+files changed by this diff), check-assertionless-tests /
+check-notification-priority (mawk-vs-gawk environment failures; scripts
+unchanged from base).
+
+### Non-blocking observations
+
+- The Pending-persona 409 classification string-matches the server error
+  text; the server test asserts only "repo-orchestrator", not the full
+  phrase, so a future server-side rewording would silently degrade the
+  CLI to AlreadyLive. Currently correct and live-verified; a pinned
+  server-side phrase test or a structured error code would harden it.
+- Coverage-matrix row 51 still describes the starter-manifest schema
+  defect as open; the candidate ships the fix (`approval: {mode:
+  human_only}` with a shape regression test). Matrix text is
+  auditor-owned.
+
+Verdict: **approved** — the task contract is satisfied by real,
+independently exercised behavior; all four round-9 findings closed with
+live evidence.
+
+— Round-10 reviewer, 2026-11-08
