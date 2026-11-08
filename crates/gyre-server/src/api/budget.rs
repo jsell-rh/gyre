@@ -198,8 +198,7 @@ pub async fn budget_summary(
     auth: AuthenticatedAgent,
 ) -> Result<Json<TenantBudgetSummary>, ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/budget/summary")
-            .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/budget/summary").await;
         return Err(ApiError::Forbidden(
             "only Admin role may read tenant budget summary".to_string(),
         ));

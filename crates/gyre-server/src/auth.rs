@@ -424,14 +424,7 @@ pub(crate) async fn record_auth_failure_for_middleware(
     source_ip: Option<String>,
     user_agent: Option<String>,
 ) {
-    record_auth_failure(
-        state,
-        token_kind,
-        rejection_reason,
-        source_ip,
-        user_agent,
-    )
-    .await;
+    record_auth_failure(state, token_kind, rejection_reason, source_ip, user_agent).await;
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -445,9 +438,24 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
-    #[serde(default)]
-    tenant_id: Option<String>,
+    /// Tenant scope claim. An IdP that does not issue tenant claims is a
+    /// single-tenant deployment whose callers belong to the bootstrapped
+    /// "default" tenant (hierarchy-enforcement.md §1) — expressed as the
+    /// claim's schema default (applied at deserialization), not as a
+    /// use-site fallback.
+    #[serde(default = "default_tenant_claim")]
+    tenant_id: String,
+}
+
+/// Serde default for [`JwtClaims::tenant_id`]: an absent tenant claim maps
+/// to the bootstrapped "default" tenant — the documented single-tenant IdP
+/// contract ("Absent = \"default\""). This is a deterministic function of
+/// the cryptographically verified token, not a fabricated scope identity on
+/// a lookup failure: there is no fallible lookup between the verified claims
+/// and this value, and "default" is a real Tenant row materialized at
+/// startup (bootstrap_default_tenant in lib.rs).
+fn default_tenant_claim() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1037,8 +1045,11 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from JWT claim. The claim's schema
+    // default ("default" — the bootstrapped single-tenant scope) was already
+    // applied at deserialization, so the value here is fully determined by
+    // the verified token.
+    let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user.

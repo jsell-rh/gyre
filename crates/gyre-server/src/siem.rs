@@ -450,7 +450,7 @@ mod tests {
             // Severity is the 7th CEF header field (index 6):
             // CEF:0|Vendor|Product|Version|Signature|Name|<severity>|ext
             let header = msg.split('|').collect::<Vec<_>>();
-            assert_eq!(header.len() >= 8, true, "CEF header must have 8 fields");
+            assert!(header.len() >= 8, "CEF header must have 8 fields");
             assert_eq!(
                 header[6],
                 expected.to_string(),

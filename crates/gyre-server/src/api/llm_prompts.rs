@@ -192,13 +192,8 @@ pub async fn list_tenant_defaults(
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<PromptTemplateResponse>>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "GET /api/v1/admin/llm/prompts",
-        )
-        .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/admin/llm/prompts")
+            .await;
         return Err(ApiError::Forbidden("admin role required".to_string()));
     }
 

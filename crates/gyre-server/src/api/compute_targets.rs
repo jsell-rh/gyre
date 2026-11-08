@@ -95,13 +95,8 @@ pub async fn create_compute_target(
     Json(req): Json<CreateComputeTargetRequest>,
 ) -> Result<(StatusCode, Json<ComputeTargetResponse>), ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "POST /api/v1/compute-targets",
-        )
-        .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/compute-targets")
+            .await;
         return Err(ApiError::Forbidden(
             "compute target management requires Admin role".to_string(),
         ));
@@ -154,13 +149,8 @@ pub async fn update_compute_target(
     Json(req): Json<UpdateComputeTargetRequest>,
 ) -> Result<Json<ComputeTargetResponse>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "PUT /api/v1/compute-targets/:id",
-        )
-        .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "PUT /api/v1/compute-targets/:id")
+            .await;
         return Err(ApiError::Forbidden(
             "compute target management requires Admin role".to_string(),
         ));

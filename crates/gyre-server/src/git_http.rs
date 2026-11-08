@@ -1608,10 +1608,7 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
 /// from the request body is therefore only a *request*. Confirm each ref now
 /// points at the requested new SHA (`git rev-parse <refname> == new_sha`);
 /// updates git declined are dropped so no acceptance signaling runs for them.
-async fn verify_applied_ref_updates(
-    repo_path: &str,
-    ref_updates: &[RefUpdate],
-) -> Vec<RefUpdate> {
+async fn verify_applied_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) -> Vec<RefUpdate> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let mut applied = Vec::with_capacity(ref_updates.len());
 
@@ -1638,7 +1635,9 @@ async fn verify_applied_ref_updates(
             .await;
         let is_applied = match resolved {
             Ok(o) if o.status.success() => {
-                let sha = String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase();
+                let sha = String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_ascii_lowercase();
                 sha == update.new_sha.to_ascii_lowercase()
             }
             _ => false,
@@ -5287,10 +5286,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", "Bearer test-token")
-                    .header(
-                        "content-type",
-                        "application/x-git-receive-pack-request",
-                    )
+                    .header("content-type", "application/x-git-receive-pack-request")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -5356,7 +5352,14 @@ mod tests {
         git(&["update-ref", "refs/heads/main", &tip]);
         // Stale client diverged from `base`; its update is non-fast-forward
         // relative to the server's `tip`.
-        let stale = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: stale client"]);
+        let stale = git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "feat: stale client",
+        ]);
 
         // Push body: stale client sends `base -> stale` (its outdated view of
         // the ref) plus a packfile containing the stale commit.
@@ -5391,10 +5394,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", "Bearer test-token")
-                    .header(
-                        "content-type",
-                        "application/x-git-receive-pack-request",
-                    )
+                    .header("content-type", "application/x-git-receive-pack-request")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -5418,7 +5418,13 @@ mod tests {
         assert!(
             accepted.is_empty(),
             "git declined the ref update, but git_push_accepted events were recorded: {}",
-            serde_json::to_string_pretty(&accepted.iter().map(|e| e.detail.clone()).collect::<Vec<_>>()).unwrap()
+            serde_json::to_string_pretty(
+                &accepted
+                    .iter()
+                    .map(|e| e.detail.clone())
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
         );
         // A git-level decline is not a gate rejection either — the spec
         // reserves GitPushRejected for "push rejected by gate".
@@ -5455,7 +5461,14 @@ mod tests {
         let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
         git(&["update-ref", "refs/heads/main", &base]);
         // Non-conventional commit message: the gate must reject the push.
-        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "not conventional at all"]);
+        let tip = git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "not conventional at all",
+        ]);
         git(&["update-ref", "refs/heads/main", &tip]);
 
         let line = format!("{base} {tip} refs/heads/main");
@@ -5489,10 +5502,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", "Bearer test-token")
-                    .header(
-                        "content-type",
-                        "application/x-git-receive-pack-request",
-                    )
+                    .header("content-type", "application/x-git-receive-pack-request")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -5511,7 +5521,10 @@ mod tests {
         assert_eq!(e.detail["branch"], "main");
         assert_eq!(e.detail["gate_name"], "conventional-commit");
         assert!(
-            e.detail["reason"].as_str().unwrap().contains("conventional"),
+            e.detail["reason"]
+                .as_str()
+                .unwrap()
+                .contains("conventional"),
             "rejection reason should name the violation: {}",
             e.detail["reason"]
         );
@@ -5583,10 +5596,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", "Bearer test-token")
-                    .header(
-                        "content-type",
-                        "application/x-git-receive-pack-request",
-                    )
+                    .header("content-type", "application/x-git-receive-pack-request")
                     .body(Body::from(body))
                     .unwrap(),
             )

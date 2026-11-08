@@ -1110,13 +1110,8 @@ pub async fn create_meta_spec_registry(
     // surface): creating registry entries defines tenant-wide governance;
     // non-Admin callers must not mint meta-specs.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "POST /api/v1/meta-specs-registry",
-        )
-        .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may create meta-specs registry entries".to_string(),
         ));

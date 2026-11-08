@@ -204,7 +204,12 @@ pub async fn delete_trust_anchor(
     Path((tenant_id, anchor_id)): Path<(String, String)>,
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    require_admin(&state, &auth, "DELETE /api/v1/tenants/:id/trust-anchors/:aid").await?;
+    require_admin(
+        &state,
+        &auth,
+        "DELETE /api/v1/tenants/:id/trust-anchors/:aid",
+    )
+    .await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),

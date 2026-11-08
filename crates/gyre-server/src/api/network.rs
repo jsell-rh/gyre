@@ -127,13 +127,8 @@ pub async fn register_peer(
     } else {
         // Non-JWT (global token, API key): require Admin.
         if !auth.roles.contains(&UserRole::Admin) {
-            crate::rbac::record_rbac_denied(
-                &state,
-                &auth,
-                "Admin",
-                "POST /api/v1/network/peers",
-            )
-            .await;
+            crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/network/peers")
+                .await;
             return Err(ApiError::Forbidden(
                 "Admin role required to register a peer for another agent".to_string(),
             ));
