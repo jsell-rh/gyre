@@ -1831,6 +1831,11 @@ async fn run_explorer_agent_sdk(
     // Capped at MAX_REFINEMENT_TURNS (3); when the cap is reached (or the
     // warnings are resolved) the best version is sent to the frontend anyway.
     let mut refinement_count = 0usize;
+    // Spec §11: best version across refinement rounds — fewest actionable
+    // warnings. A regressed refinement never replaces a better earlier
+    // attempt; the best one is what the frontend receives when the cap is
+    // reached. Tuples: (actionable warning count, query JSON, assistant text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
     let mut current_question = user_question.to_string();
     loop {
         let (assistant_text, view_query) = run_sdk_subprocess_once(
@@ -1878,6 +1883,16 @@ async fn run_explorer_agent_sdk(
         match check_result {
             Some(dr) => {
                 let actionable = actionable_dry_run_warnings(&dr, &query_json);
+                // Update the best-version tracker: strictly fewer actionable
+                // warnings wins; ties keep the earlier attempt.
+                let warning_count = actionable.len();
+                let better_than_best = best_view_query
+                    .as_ref()
+                    .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                if better_than_best {
+                    best_view_query =
+                        Some((warning_count, query_json.clone(), assistant_text.clone()));
+                }
                 if actionable.is_empty() || refinement_count >= MAX_REFINEMENT_TURNS {
                     if !actionable.is_empty() {
                         // Spec §11: cap reached — send the best version anyway.
@@ -1887,14 +1902,22 @@ async fn run_explorer_agent_sdk(
                             "Explorer SDK self-check cap reached; sending best version"
                         );
                     }
+                    // Spec §11: send the BEST version — when the cap is reached
+                    // with warnings outstanding, an earlier attempt with fewer
+                    // warnings wins over the current (possibly regressed) one.
+                    // On the clean path the current query IS the best.
+                    let (send_query, send_text) = match &best_view_query {
+                        Some((_count, q, t)) => (q.clone(), t.clone()),
+                        None => (query_json.clone(), assistant_text.clone()),
+                    };
                     // Forward the finalized view query to the frontend, with the
                     // agent's preceding text as the explanation.
                     let view_msg = ExplorerServerMessage::ViewQuery {
-                        query: query_json.clone(),
-                        explanation: if assistant_text.is_empty() {
+                        query: send_query,
+                        explanation: if send_text.is_empty() {
                             None
                         } else {
-                            Some(assistant_text.clone())
+                            Some(send_text)
                         },
                     };
                     sender
@@ -3085,6 +3108,12 @@ async fn run_explorer_agent(
     let mut refinement_count = 0;
     let mut tool_turn_count = 0;
     let mut view_query_sent = false;
+    // Spec §11 Self-Check Loop: track the best view query across refinement
+    // turns — the attempt with the fewest actionable dry-run warnings. If a
+    // later refinement regresses, this earlier version is what the frontend
+    // receives when the refinement cap is reached ("send the best version
+    // anyway"). Tuples: (actionable warning count, query JSON, clean text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
         // Send keepalive ping if the interval has elapsed (prevents
@@ -3191,6 +3220,17 @@ async fn run_explorer_agent(
                     // clutter do.
                     let actionable_warnings: Vec<&String> =
                         actionable_dry_run_warnings(dr, &query_json);
+                    // Update the best-version tracker: a query replaces the
+                    // incumbent only when it has strictly fewer actionable
+                    // warnings (ties keep the earlier attempt).
+                    let warning_count = actionable_warnings.len();
+                    let better_than_best = best_view_query
+                        .as_ref()
+                        .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                    if better_than_best {
+                        best_view_query =
+                            Some((warning_count, query_json.clone(), clean_text.clone()));
+                    }
                     if !actionable_warnings.is_empty() && refinement_count < MAX_REFINEMENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
@@ -3230,8 +3270,18 @@ async fn run_explorer_agent(
                     }
                 }
 
+                // Spec §11: send the BEST version. When the refinement cap
+                // is reached with warnings still outstanding, an earlier
+                // attempt with fewer warnings wins over the current (possibly
+                // regressed) one. On the clean path the current query IS the
+                // best (zero actionable warnings), so this is a no-op there.
+                let (send_query, send_text) = match &best_view_query {
+                    Some((_count, q, t)) => (q.clone(), t.clone()),
+                    None => (query_json.clone(), clean_text.clone()),
+                };
+
                 // Send finalized text done before view_query to avoid race
-                if !clean_text.is_empty() {
+                if !clean_text.is_empty() || !send_text.is_empty() {
                     let done_msg = ExplorerServerMessage::Text {
                         content: String::new(),
                         done: true,
@@ -3249,13 +3299,13 @@ async fn run_explorer_agent(
 
                 // Send the view query to the frontend, with the LLM's preceding
                 // text as explanation so the UI can show what the visualization reveals.
-                let explanation_text = if clean_text.is_empty() {
+                let explanation_text = if send_text.is_empty() {
                     None
                 } else {
-                    Some(clean_text.clone())
+                    Some(send_text.clone())
                 };
                 let view_msg = ExplorerServerMessage::ViewQuery {
-                    query: query_json.clone(),
+                    query: send_query,
                     explanation: explanation_text,
                 };
                 view_query_sent = true;

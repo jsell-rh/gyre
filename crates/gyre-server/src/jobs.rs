@@ -496,10 +496,10 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "trust_suggestion_check".to_string(),
-                description:
-                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
-             notifications for Admin/Owner members when criteria are met (HSI §2)"
-                        .to_string(),
+                description: "Queries 30-day gate failures and MR reverts per workspace; creates \
+             TrustSuggestion notifications for Admin/Owner members when both counts \
+             are 0 and trust can escalate (HSI §2)"
+                    .to_string(),
                 interval_secs: 86400,
                 enabled: true,
                 run_at_utc_hour: None,

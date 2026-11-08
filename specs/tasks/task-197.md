@@ -126,36 +126,27 @@ immediately after `build_state` and before `seed_builtin_policies` so the
 tenant exists before any tenant-scoped seeding. The demo `/admin/seed` path
 and `POST /api/v1/tenants` are untouched.
 
-Verification (evidence: /tmp/stage/review-evidence/task-197-verification.md):
+### Reconciliation round (requirements_changed repair)
+
+The retained source checkpoint (2bfa6bbb) was re-merged with the current
+base (4d6759a0). The task-197 implementation had already been absorbed
+into the mainline: the merge resolved to a tree identical to base with
+`bootstrap_default_tenant`, its main.rs wiring, and its test all intact;
+the candidate→HEAD diff contains only unrelated later work (presence
+eviction refactor, trusted proxies, meta-spec sweep) and nothing of
+task-197 was lost. No source changes were required this round. The
+coverage row (hierarchy-enforcement.md §5 Bootstrap Behavior) was updated
+from task-assigned to implemented to reflect the shipped behavior.
+
+### Verification (evidence: /tmp/stage/review-evidence/task-197-verification.md)
 
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib bootstrap_default_tenant`
   → 1 passed. The test builds an `AppState` over a fresh temp SQLite DB wired
   to the real `SqliteStorage` `TenantRepository`, asserts `find_by_id("default")`
   is `None` before bootstrap, then asserts the row exists with the spec field
   values after, and that a second call leaves exactly one default tenant.
-- Hardness probe: replacing the bootstrap body with a no-op makes that test
-  FAIL (0 passed; 1 failed) — it verifies the materialized row, not mirrored
-  logic. Probe reverted; post-revert re-run passes.
+- Hardness probe (re-run this round): replacing the bootstrap body with a
+  no-op makes that test FAIL (0 passed; 1 failed) — it verifies the
+  materialized row, not mirrored logic. Probe reverted; post-revert re-run
+  passes and the tree is clean.
 - `bash scripts/check-arch.sh` → passed.
-
-### Repair round (clippy finding)
-
-The retained verification failure (checks.sh exit 1) was
-`clippy::needless_borrows_for_generic_args` at the bootstrap test's
-`serde_json::to_value(&tenant.budget)` / `to_value(&Some(...))` — both
-operands implement `Serialize` directly. Fixed in 2419125d by dropping the
-borrows; re-verified:
-
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib bootstrap_default_tenant`
-  → 1 passed; full `SKIP_WEB_BUILD=1 cargo test -p gyre-server` →
-  1243 + 66 + 21 + 3 + 1 passed, 0 failed.
-- Clippy over `-p gyre-server --all-targets` (with the base's pre-existing
-  `never_loop` in gyre-domain force-warned so the build reaches gyre-server;
-  that lint is identical in base 3c39ab1f and outside this task's files):
-  zero warnings pointing at `src/lib.rs` or `src/main.rs`; the only remaining
-  `needless_borrows` hits are in merge_processor.rs / speculative_merge.rs,
-  both unchanged from base.
-- `bash scripts/check-arch.sh` → passed.
-
-Evidence: /tmp/stage/review-evidence/task-197-verification.md (this round:
-task-197-repair-round.md alongside it).
