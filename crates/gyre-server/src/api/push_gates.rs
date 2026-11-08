@@ -166,6 +166,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/push-gates")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -208,6 +209,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/push-gates")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

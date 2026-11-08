@@ -753,6 +753,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -770,6 +771,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/provenance"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -786,6 +788,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such-repo/provenance")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -815,6 +818,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/provenance?commit=abc123"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

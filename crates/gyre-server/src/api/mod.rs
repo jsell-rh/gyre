@@ -40,6 +40,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
+pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
@@ -188,6 +189,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/abac-policy",
             get(crate::abac::get_abac_policy).put(crate::abac::set_abac_policy),
+        )
+        // Per-repo access overrides (user-management.md §Repo Access)
+        .route(
+            "/api/v1/repos/:id/access-overrides",
+            get(repo_access::list_access_overrides),
+        )
+        .route(
+            "/api/v1/repos/:id/access-overrides/:user_id",
+            put(repo_access::set_access_override).delete(repo_access::delete_access_override),
         )
         // Cross-agent code awareness (M13.4)
         .route("/api/v1/repos/:id/blame", get(code_awareness::get_blame))
@@ -473,6 +483,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/orphaned-workspaces",
+            get(admin::admin_orphaned_workspaces),
+        )
         .route(
             "/api/v1/admin/agents/:id/kill",
             post(admin::admin_kill_agent),
@@ -833,6 +847,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Spec-canonical role-change endpoint (user-management.md §API:
+        // "PUT /api/v1/workspaces/{id}/members/{user_id}/role — Change
+        // member role (including ownership transfer)"). The PUT on the
+        // parent pattern above is the M22.8 legacy alias for the same
+        // handler.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
         )
         // Teams (M22.8)
         .route(

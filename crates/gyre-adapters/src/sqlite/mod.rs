@@ -34,6 +34,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access_override;
 pub mod repository;
 pub mod review;
 pub mod saved_view;
@@ -223,6 +224,7 @@ mod tests {
             "personas",
             "teams",
             "workspace_memberships",
+            "repo_access_overrides",
             "notifications",
             "policies",
             "policy_decisions",

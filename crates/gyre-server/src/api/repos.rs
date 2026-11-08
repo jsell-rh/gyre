@@ -10,6 +10,7 @@ use gyre_domain::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -133,6 +134,7 @@ pub struct DiffQuery {
 }
 
 pub async fn create_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRepoRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), ApiError> {
@@ -144,6 +146,15 @@ pub async fn create_repo(
             ));
         }
     }
+    // user-management.md §Repo Access: repo access is inherited from
+    // workspace membership — creating a repo requires the Write permission.
+    crate::workspace_governance::check_workspace_membership_scope(
+        &state,
+        &Id::new(&req.workspace_id),
+        &auth,
+        gyre_domain::RepoPermission::Write,
+    )
+    .await?;
     // C-4 fix: always compute path server-side, never from user input.
     let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
 
@@ -186,13 +197,48 @@ pub async fn create_repo(
 }
 
 pub async fn list_repos(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListReposQuery>,
 ) -> Result<Json<Vec<RepoResponse>>, ApiError> {
     let repos = if let Some(ws_id) = params.workspace_id {
+        // user-management.md §Repo Access: reading a workspace's repos
+        // requires the Read permission from workspace membership.
+        crate::workspace_governance::check_workspace_membership_scope(
+            &state,
+            &Id::new(&ws_id),
+            &auth,
+            gyre_domain::RepoPermission::Read,
+        )
+        .await?;
         state.repos.list_by_workspace(&Id::new(ws_id)).await?
     } else {
-        state.repos.list().await?
+        let all = state.repos.list().await?;
+        // Unfiltered listing: restrict to repos the caller can read. System,
+        // global-Admin, and Agent callers see everything (agents are scoped
+        // at spawn time; the admin sees the whole tenant).
+        if auth.agent_id == "system"
+            || auth.roles.contains(&gyre_domain::UserRole::Admin)
+            || auth.roles.contains(&gyre_domain::UserRole::Agent)
+        {
+            all
+        } else {
+            let mut readable = Vec::new();
+            for repo in all {
+                if crate::workspace_governance::check_repo_access_scope(
+                    &state,
+                    &repo,
+                    &auth,
+                    gyre_domain::RepoPermission::Read,
+                )
+                .await
+                .is_ok()
+                {
+                    readable.push(repo);
+                }
+            }
+            readable
+        }
     };
     let mut responses = Vec::with_capacity(repos.len());
     for repo in repos {
@@ -202,6 +248,7 @@ pub async fn list_repos(
 }
 
 pub async fn get_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RepoResponse>, ApiError> {
@@ -210,10 +257,18 @@ pub async fn get_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    crate::workspace_governance::check_repo_access_scope(
+        &state,
+        &repo,
+        &auth,
+        gyre_domain::RepoPermission::Read,
+    )
+    .await?;
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
 pub async fn update_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateRepoRequest>,
@@ -223,6 +278,13 @@ pub async fn update_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    crate::workspace_governance::check_repo_access_scope(
+        &state,
+        &repo,
+        &auth,
+        gyre_domain::RepoPermission::Write,
+    )
+    .await?;
 
     if let Some(name) = req.name {
         if name.contains("..") || name.contains('/') {
@@ -245,6 +307,7 @@ pub async fn update_repo(
 }
 
 pub async fn archive_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RepoResponse>, ApiError> {
@@ -253,6 +316,15 @@ pub async fn archive_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    // Archiving is repo administration (user-management.md §Repo Access:
+    // "Admin | ... admin").
+    crate::workspace_governance::check_repo_access_scope(
+        &state,
+        &repo,
+        &auth,
+        gyre_domain::RepoPermission::Admin,
+    )
+    .await?;
 
     if repo.is_archived() {
         return Err(ApiError::InvalidInput(
@@ -337,6 +409,7 @@ pub async fn archive_repo(
 }
 
 pub async fn unarchive_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RepoResponse>, ApiError> {
@@ -345,6 +418,13 @@ pub async fn unarchive_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    crate::workspace_governance::check_repo_access_scope(
+        &state,
+        &repo,
+        &auth,
+        gyre_domain::RepoPermission::Admin,
+    )
+    .await?;
 
     if !repo.is_archived() {
         return Err(ApiError::InvalidInput("repo is not archived".to_string()));
@@ -357,6 +437,7 @@ pub async fn unarchive_repo(
 }
 
 pub async fn delete_repo(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -365,6 +446,14 @@ pub async fn delete_repo(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    // Deleting a repo is repo administration.
+    crate::workspace_governance::check_repo_access_scope(
+        &state,
+        &repo,
+        &auth,
+        gyre_domain::RepoPermission::Admin,
+    )
+    .await?;
 
     if !repo.is_archived() {
         return Err(ApiError::InvalidInput(
@@ -679,6 +768,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -694,6 +784,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -714,6 +805,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -740,6 +832,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -765,6 +858,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -775,6 +869,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos?workspace_id=ws-42")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -791,6 +886,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such-repo")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -811,6 +907,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -823,6 +920,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{id}/branches"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -839,6 +937,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/branches")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -858,6 +957,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -870,6 +970,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{id}/commits"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -895,6 +996,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -914,6 +1016,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/repos/{id}"))
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
@@ -940,6 +1043,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -955,6 +1059,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -971,6 +1076,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/unarchive"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -993,6 +1099,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1011,6 +1118,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1224,6 +1332,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1239,6 +1348,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/repos/{id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1252,6 +1362,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1263,6 +1374,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/repos/{id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1304,6 +1416,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1314,6 +1427,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/repos/{id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1347,6 +1461,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos/mirror")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )

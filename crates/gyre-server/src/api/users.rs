@@ -462,6 +462,18 @@ pub async fn invite_member(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InviteMemberRequest>,
 ) -> Result<(StatusCode, Json<MembershipResponse>), ApiError> {
+    // user-management.md §Workspace Invitation Flow: "Access is always
+    // granted by an existing member with Owner/Admin role" — enforced in
+    // the handler because the middleware ABAC policies are global-role
+    // based and cannot express workspace membership.
+    crate::workspace_governance::require_workspace_role(
+        &state,
+        &auth,
+        &Id::new(&workspace_id),
+        WorkspaceRole::Admin,
+    )
+    .await?;
+
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
 
@@ -469,6 +481,20 @@ pub async fn invite_member(
     let ws_id = Id::new(workspace_id);
     let user_id = Id::new(req.user_id);
     let now = now_secs();
+
+    // One membership per (user, workspace): a duplicate invite would shadow
+    // the original row in owner accounting and role updates.
+    if state
+        .workspace_memberships
+        .find_by_user_and_workspace(&user_id, &ws_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(format!(
+            "user {} is already a member of workspace {}",
+            user_id, ws_id
+        )));
+    }
 
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
@@ -516,13 +542,30 @@ pub async fn list_members(
 #[derive(Deserialize)]
 pub struct UpdateMemberRoleRequest {
     pub role: String,
+    /// Why the role is being changed — recorded in the audit log
+    /// (user-management.md §Ownership Transfer & Reclamation: the action is
+    /// "audit-logged with the previous owner and reason").
+    pub reason: Option<String>,
 }
 
 pub async fn update_member_role(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMemberRoleRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Member management requires workspace Owner/Admin. A Tenant Admin
+    // reassigning ownership ("{\"role\":\"Owner\"}") passes through the
+    // global-Admin bypass; a workspace Owner performing a voluntary
+    // transfer passes via their membership.
+    crate::workspace_governance::require_workspace_role(
+        &state,
+        &auth,
+        &Id::new(&workspace_id),
+        WorkspaceRole::Admin,
+    )
+    .await?;
+
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
     let ws_id = Id::new(workspace_id);
@@ -532,17 +575,69 @@ pub async fn update_member_role(
         .find_by_user_and_workspace(&uid, &ws_id)
         .await?
         .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+
+    // user-management.md §Ownership Transfer & Reclamation: "Cannot remove
+    // last Owner" — and an Owner "must designate a new Owner before
+    // downgrading their own role". Downgrading the final active Owner is
+    // rejected; a transfer designates the new Owner first.
+    if membership.role == WorkspaceRole::Owner
+        && role != WorkspaceRole::Owner
+        && crate::workspace_governance::active_owner_count(&state, &ws_id).await? <= 1
+    {
+        return Err(ApiError::Conflict(
+            "cannot downgrade the last Owner of a workspace; designate a new Owner first"
+                .to_string(),
+        ));
+    }
+
+    let previous_role = membership.role;
     state
         .workspace_memberships
         .update_role(&membership.id, role)
         .await?;
+
+    // Audit-log the change. An ownership transfer is a change that makes
+    // the target an Owner (reassignment or voluntary transfer); an Owner
+    // stepping down is a role change (already guarded by the last-Owner
+    // protection). Spec: "audit-logged with the previous owner and reason",
+    // "Transfer is audit-logged".
+    let ownership_transfer = role == WorkspaceRole::Owner;
+    let event_kind = if ownership_transfer {
+        "workspace_ownership_transferred"
+    } else {
+        "workspace_member_role_changed"
+    };
+    crate::workspace_governance::record_membership_audit(
+        &state,
+        &auth,
+        &ws_id,
+        event_kind,
+        serde_json::json!({
+            "target_user_id": uid.to_string(),
+            "previous_role": previous_role.as_str(),
+            "new_role": role.as_str(),
+            "previous_owner": if previous_role == WorkspaceRole::Owner { Some(uid.to_string()) } else { None },
+            "reason": req.reason,
+        }),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn remove_member(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
+    crate::workspace_governance::require_workspace_role(
+        &state,
+        &auth,
+        &Id::new(&workspace_id),
+        WorkspaceRole::Admin,
+    )
+    .await?;
+
     let ws_id = Id::new(workspace_id);
     let uid = Id::new(user_id);
     let membership = state
@@ -550,7 +645,38 @@ pub async fn remove_member(
         .find_by_user_and_workspace(&uid, &ws_id)
         .await?
         .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+
+    // user-management.md §Ownership Transfer & Reclamation: "Cannot remove
+    // last Owner" — and "Cannot remove themselves as Owner if they're the
+    // last Owner".
+    if membership.role == WorkspaceRole::Owner
+        && crate::workspace_governance::active_owner_count(&state, &ws_id).await? <= 1
+    {
+        return Err(ApiError::Conflict(
+            "cannot remove the last Owner of a workspace".to_string(),
+        ));
+    }
+
     state.workspace_memberships.delete(&membership.id).await?;
+
+    crate::workspace_governance::record_membership_audit(
+        &state,
+        &auth,
+        &ws_id,
+        "workspace_member_removed",
+        serde_json::json!({
+            "target_user_id": uid.to_string(),
+            "previous_role": membership.role.as_str(),
+        }),
+    )
+    .await;
+
+    // If this removal left the workspace with no active Owner, notify the
+    // Tenant Admins immediately rather than waiting for the detection job.
+    if let Some(ws) = state.workspaces.find_by_id(&ws_id).await? {
+        crate::workspace_governance::note_workspace_ownerless(&state, &ws).await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1524,6 +1650,319 @@ mod tests {
             resp.status(),
             StatusCode::CONFLICT,
             "duplicate username must be a 409 conflict"
+        );
+    }
+
+    // ── Workspace membership governance (user-management.md
+    // §Ownership Transfer & Reclamation) ────────────────────────────────
+
+    /// Seed a workspace with the given (user, role, accepted) memberships.
+    async fn seed_workspace_with_members(
+        state: &std::sync::Arc<crate::AppState>,
+        ws_id: &str,
+        members: &[(&str, gyre_domain::WorkspaceRole, bool)],
+    ) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(ws_id),
+            Id::new("default"),
+            "Governance WS",
+            "governance-ws",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        for (uid, role, accepted) in members {
+            let mut m = gyre_domain::WorkspaceMembership::new(
+                Id::new(format!("m-{uid}")),
+                Id::new(*uid),
+                Id::new(ws_id),
+                *role,
+                Id::new("inviter"),
+                1000,
+            );
+            if *accepted {
+                m.accept(1500);
+            }
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cannot_remove_last_owner() {
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-last-owner",
+            &[("owner-1", gyre_domain::WorkspaceRole::Owner, true)],
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workspaces/ws-last-owner/members/owner-1")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "removing the last Owner must be rejected"
+        );
+        // The membership is still there.
+        assert!(
+            state
+                .workspace_memberships
+                .find_by_user_and_workspace(&Id::new("owner-1"), &Id::new("ws-last-owner"))
+                .await
+                .unwrap()
+                .is_some(),
+            "last Owner membership must survive the rejected removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn cannot_downgrade_last_owner() {
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-last-owner",
+            &[("owner-1", gyre_domain::WorkspaceRole::Owner, true)],
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-last-owner/members/owner-1/role")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"role":"Admin","reason":"voluntary downgrade"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "downgrading the last Owner (no designated successor) must be rejected"
+        );
+        let m = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new("owner-1"), &Id::new("ws-last-owner"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.role, gyre_domain::WorkspaceRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_updates_role_and_is_audit_logged() {
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-transfer",
+            &[
+                ("owner-1", gyre_domain::WorkspaceRole::Owner, true),
+                ("dev-1", gyre_domain::WorkspaceRole::Developer, true),
+            ],
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Designate the new Owner first (spec: transfer designates the new
+        // Owner before the old one downgrades).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-transfer/members/dev-1/role")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"role":"Owner","reason":"transfer to successor"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let m = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new("dev-1"), &Id::new("ws-transfer"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.role, gyre_domain::WorkspaceRole::Owner);
+
+        // The old Owner may now downgrade — two Owners exist.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-transfer/members/owner-1/role")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"role":"Admin","reason":"stepping down"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "with a second Owner designated, the first may downgrade"
+        );
+
+        // The transfer is audit-logged with previous role, new role, and reason.
+        let filter = gyre_ports::AuditQueryFilter {
+            limit: 100,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        let transfer = events
+            .iter()
+            .find(|e| e.event_type.as_str() == "workspace_ownership_transferred")
+            .expect("ownership transfer must be audit-logged");
+        let detail = transfer.detail.as_object().unwrap();
+        assert_eq!(detail["target_user_id"], "dev-1");
+        assert_eq!(detail["previous_role"], "Developer");
+        assert_eq!(detail["new_role"], "Owner");
+        assert_eq!(detail["reason"], "transfer to successor");
+        // The role-change (downgrade) event is logged separately.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_type.as_str() == "workspace_member_role_changed"),
+            "non-ownership role changes are audit-logged too"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_removal_with_remaining_owner_succeeds_and_is_audited() {
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-remove",
+            &[
+                ("owner-1", gyre_domain::WorkspaceRole::Owner, true),
+                ("dev-1", gyre_domain::WorkspaceRole::Developer, true),
+            ],
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workspaces/ws-remove/members/dev-1")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let events = state
+            .audit
+            .query(&gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_type.as_str() == "workspace_member_removed"),
+            "member removal must be audit-logged"
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_duplicate_member_is_conflict() {
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-dup",
+            &[("dev-1", gyre_domain::WorkspaceRole::Developer, true)],
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-dup/members")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"user_id":"dev-1","role":"Admin"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "re-inviting an existing member must 409, not shadow the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_member_cannot_manage_members() {
+        // user-management.md §Workspace Invitation Flow: access is granted
+        // only by an existing member with Owner/Admin role. A read-only
+        // non-member must be forbidden from inviting.
+        let state = test_state();
+        seed_workspace_with_members(
+            &state,
+            "ws-mgmt",
+            &[("owner-1", gyre_domain::WorkspaceRole::Owner, true)],
+        )
+        .await;
+
+        // A non-admin user authenticated by API key.
+        let mut outsider = gyre_domain::User::new_sso(
+            Id::new("outsider-1"),
+            "ext-outsider",
+            "outsider",
+            "Outsider",
+            1000,
+        );
+        outsider.roles = vec![gyre_domain::UserRole::ReadOnly];
+        state.users.create(&outsider).await.unwrap();
+        let raw_key = "gyre_test_outsider_key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &outsider.id, "k")
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-mgmt/members")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"user_id":"friend-1","role":"Viewer"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-member must not be able to invite workspace members"
         );
     }
 }

@@ -460,6 +460,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -479,6 +480,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/blame"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -492,6 +494,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/blame?path=src/lib.rs"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -506,6 +509,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/blame")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -522,6 +526,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/hot-files"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -538,6 +543,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/hot-files")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -586,6 +592,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/review-routing")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

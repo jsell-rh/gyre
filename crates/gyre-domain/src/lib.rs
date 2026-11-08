@@ -120,4 +120,6 @@ pub use user::{
 };
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
-pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
+pub use workspace_membership::{
+    effective_repo_role, RepoAccessOverride, RepoPermission, WorkspaceMembership, WorkspaceRole,
+};

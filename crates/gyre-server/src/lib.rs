@@ -57,6 +57,7 @@ pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
+pub mod workspace_governance;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -73,10 +74,11 @@ use gyre_ports::{
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    RepoAccessOverrideRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -349,6 +351,8 @@ pub struct AppState {
     pub policies: Arc<dyn PolicyRepository>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
+    /// Per-repo access override repository (user-management.md §Repo Access).
+    pub repo_access_overrides: Arc<dyn RepoAccessOverrideRepository>,
     /// Team repository (M22.8).
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
@@ -1039,7 +1043,14 @@ pub fn build_state(
             dyn PolicyRepository,
             mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
         ),
-        workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
+        workspace_memberships: store!(
+            dyn WorkspaceMembershipRepository,
+            mem::MemWorkspaceMembershipRepository::default()
+        ),
+        repo_access_overrides: store!(
+            dyn RepoAccessOverrideRepository,
+            mem::MemRepoAccessOverrideRepository::default()
+        ),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: store!(
             dyn NotificationRepository,

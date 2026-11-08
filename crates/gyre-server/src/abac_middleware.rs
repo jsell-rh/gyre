@@ -129,6 +129,13 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
+                // Per-repo access overrides (user-management.md §Repo Access).
+                RouteResourceMapping::api("/api/v1/repos/:id/access-overrides", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/access-overrides/:user_id",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/review-routing", "repo", None),
@@ -318,6 +325,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                RouteResourceMapping::api("/api/v1/admin/orphaned-workspaces", "admin", None),
                 // NEW-27 fix: all /api/v1/admin/* routes use resource_type="admin" so that
                 // builtin-admin-only-deny (priority 850) rejects non-Admin callers.
                 // Previously, kill/reassign used "agent" and compute-targets used
@@ -398,6 +406,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members/:user_id",
+                    "workspace_member",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/members/:user_id/role",
                     "workspace_member",
                     None,
                 ),
@@ -506,6 +519,45 @@ fn method_to_action(method: &Method) -> &'static str {
         Method::DELETE => "delete",
         _ => "write", // POST and other methods default to write
     }
+}
+
+/// Resource types whose `:id` path segment is a workspace id (used to
+/// resolve `subject.workspace_role` from the caller's membership).
+const WORKSPACE_PARENTED_RESOURCES: &[&str] = &[
+    "workspace",
+    "workspace_member",
+    "team",
+    "graph",
+    "explorer_view",
+    "budget",
+    "meta_spec",
+];
+
+/// Extract the workspace id from a request path, using the matched route
+/// pattern to know which segments are parameters.
+///
+/// - A `:workspace_id` segment is a workspace id for every resource type.
+/// - An `:id` segment is a workspace id only for workspace-parented resource
+///   types (e.g. `/api/v1/workspaces/:id/graph`); for repo routes `:id` is a
+///   repo id and must not be treated as a workspace.
+fn workspace_id_from_path(pattern: &str, path: &str, resource_type: &str) -> Option<Id> {
+    let pattern_segments: Vec<&str> = pattern.split('/').collect();
+    let path_segments: Vec<&str> = path.split('/').collect();
+    for (i, seg) in pattern_segments.iter().enumerate() {
+        let candidate = match *seg {
+            ":workspace_id" => path_segments.get(i).copied(),
+            ":id" if WORKSPACE_PARENTED_RESOURCES.contains(&resource_type) => {
+                path_segments.get(i).copied()
+            }
+            _ => continue,
+        };
+        if let Some(value) = candidate {
+            if !value.is_empty() && !value.starts_with(':') {
+                return Some(Id::new(value));
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +976,27 @@ pub async fn abac_middleware(
         ctx.merge_jwt_claims(claims);
     }
 
+    // user-management.md §Repo Access / ABAC integration: surface the
+    // caller's workspace membership role as `subject.workspace_role` so
+    // policies can express membership-based conditions. Only active
+    // (accepted) memberships authorize anything; a pending invitation
+    // yields no attribute.
+    if let Some(ws_id) = workspace_id_from_path(&pattern, req.uri().path(), resource_type) {
+        let user_id = auth
+            .user_id
+            .clone()
+            .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
+        if let Ok(Some(m)) = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&user_id, &ws_id)
+            .await
+        {
+            if m.is_active() {
+                ctx.set("subject.workspace_role", m.role.as_str());
+            }
+        }
+    }
+
     // Resolve action.
     let action = action_override.unwrap_or_else(|| method_to_action(&method));
 
@@ -1113,6 +1186,155 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_role_attribute_governs_member_management() {
+        // user-management.md §ABAC integration: the caller's workspace
+        // membership role must be available as subject.workspace_role, and
+        // policies must be able to condition on it. A read-only user with an
+        // accepted Owner membership passes a workspace_role-conditioned
+        // Allow; the same user without membership is denied.
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+        init_resolver();
+
+        // A policy allowing workspace_member writes only for workspace Owners.
+        let owner_policy = gyre_domain::policy::Policy {
+            id: Id::new("test-workspace-owner-members-manage"),
+            name: "workspace-owner-members-manage".to_string(),
+            description: "Allow workspace_member writes for Owners".to_string(),
+            scope: gyre_domain::policy::PolicyScope::Tenant,
+            scope_id: None,
+            priority: 950,
+            effect: gyre_domain::policy::PolicyEffect::Allow,
+            conditions: vec![gyre_domain::policy::Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: gyre_domain::policy::ConditionOp::Equals,
+                value: gyre_domain::policy::ConditionValue::String("Owner".to_string()),
+            }],
+            actions: vec!["write".to_string()],
+            resource_types: vec!["workspace_member".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: "system".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.policies.create(&owner_policy))
+                .unwrap();
+        });
+
+        // Pre-provision the SSO user the JWT resolves to, plus a workspace
+        // with an accepted Owner membership for them.
+        let user = gyre_domain::User::new_sso(
+            Id::new("user-owner-1"),
+            "owner-sub",
+            "owner-user",
+            "Owner User",
+            1000,
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.users.create(&user))
+                .unwrap();
+        });
+        let ws = Workspace::new(
+            Id::new("ws-role-1"),
+            Id::new("default"),
+            "Role WS",
+            "role-ws",
+            1000,
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.workspaces.create(&ws))
+                .unwrap();
+        });
+        let mut membership = WorkspaceMembership::new(
+            Id::new("m-owner-1"),
+            Id::new("user-owner-1"),
+            ws.id.clone(),
+            WorkspaceRole::Owner,
+            Id::new("user-owner-1"),
+            1000,
+        );
+        membership.accept(1500);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.workspace_memberships.create(&membership))
+                .unwrap();
+        });
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:id/members", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "owner-sub",
+                "preferred_username": "owner-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+
+        // With the accepted Owner membership, the workspace_role-conditioned
+        // policy allows the write.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-role-1/members")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Owner membership must surface subject.workspace_role and allow the policy"
+        );
+
+        // Same user, different workspace (no membership): no attribute, the
+        // policy does not match, read-only global role denies the write.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-other/members")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "without membership there is no workspace_role attribute and the write is denied"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -82,6 +82,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Orphaned-workspace detection (user-management.md §Ownership Transfer &
+    // Reclamation) — hourly; flags ownerless workspaces after
+    // GYRE_ORPHANED_WORKSPACE_DAYS (default 30).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "orphaned_workspace_detector".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());

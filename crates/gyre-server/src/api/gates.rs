@@ -430,6 +430,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/gates")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -556,6 +557,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/repos/repo-1/gates/{gate_id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

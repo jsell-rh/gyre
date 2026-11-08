@@ -146,6 +146,35 @@ pub async fn create_workspace(
         .apply_trust_transition(&ws, false, &seed_policies)
         .await
         .map_err(ApiError::Internal)?;
+
+    // user-management.md §Workspace Membership: "Users access workspaces
+    // through explicit membership" — the creating user is seeded as the
+    // workspace Owner (accepted: the creator exercised ownership by
+    // creating the workspace). System-token creations carry no user
+    // identity and seed no membership.
+    if let Some(user_id) = &auth.user_id {
+        let mut membership = gyre_domain::WorkspaceMembership::new(
+            new_id(),
+            user_id.clone(),
+            ws.id.clone(),
+            gyre_domain::WorkspaceRole::Owner,
+            user_id.clone(),
+            now_secs(),
+        );
+        membership.accept(now_secs());
+        if let Err(e) = state.workspace_memberships.create(&membership).await {
+            // The workspace exists; a failed membership seed must not report
+            // creation as failed, but it must be visible — the creator would
+            // otherwise silently lack the Owner membership.
+            tracing::warn!(
+                workspace_id = %ws.id,
+                user_id = %user_id,
+                error = %e,
+                "failed to seed creator Owner membership"
+            );
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(WorkspaceResponse::from(ws))))
 }
 
@@ -315,6 +344,15 @@ pub async fn add_repo_to_workspace(
     if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
         return Err(ApiError::NotFound(format!("workspace {ws_id} not found")));
     }
+    // user-management.md §Repo Access: configuring repos is an Admin-level
+    // permission ("Admin | Full (read, write, admin, manage gates)").
+    crate::workspace_governance::check_workspace_membership_scope(
+        &state,
+        &ws.id,
+        &auth,
+        gyre_domain::RepoPermission::Admin,
+    )
+    .await?;
     let mut repo = state
         .repos
         .find_by_id(&Id::new(&req.repo_id))

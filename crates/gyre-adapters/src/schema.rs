@@ -1007,3 +1007,15 @@ diesel::table! {
         checked_at -> BigInt,
     }
 }
+
+diesel::table! {
+    repo_access_overrides (id) {
+        id -> Text,
+        repo_id -> Text,
+        user_id -> Text,
+        role -> Text,
+        created_by -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}

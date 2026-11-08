@@ -253,6 +253,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&repo_body).unwrap()))
                     .unwrap(),
             )

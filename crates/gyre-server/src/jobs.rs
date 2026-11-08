@@ -530,6 +530,25 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register orphaned-workspace detection job (runs hourly,
+    // user-management.md §Ownership Transfer & Reclamation). Flags workspaces
+    // with no active Owner as orphaned after GYRE_ORPHANED_WORKSPACE_DAYS
+    // (default 30) and notifies Tenant Admins.
+    registry
+        .register(
+            JobDefinition {
+                name: "orphaned_workspace_detector".to_string(),
+                description: "Detects workspaces with no active Owner, notifies Tenant \
+                     Admins, and flags them orphaned after the configured period"
+                    .to_string(),
+                interval_secs: crate::workspace_governance::DETECTION_INTERVAL_SECS,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::workspace_governance::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

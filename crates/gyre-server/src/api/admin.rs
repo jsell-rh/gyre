@@ -264,6 +264,54 @@ pub async fn admin_audit(
 
 // ── Agent Kill ────────────────────────────────────────────────────────────────
 
+/// GET /api/v1/admin/orphaned-workspaces — workspaces with no active Owner,
+/// with their ownerless/orphaned status (user-management.md §Ownership
+/// Transfer & Reclamation: the admin dashboard flags orphaned workspaces
+/// after a configurable period, default 30 days).
+pub async fn admin_orphaned_workspaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let now = now_secs();
+    let period_secs = crate::workspace_governance::orphan_period_days() * 24 * 3600;
+    let workspaces = state.workspaces.list().await?;
+    let mut items = Vec::new();
+    for ws in workspaces {
+        let owners = crate::workspace_governance::active_owner_count(&state, &ws.id).await?;
+        if owners > 0 {
+            continue;
+        }
+        let gs: crate::workspace_governance::GovernanceState = state
+            .kv_store
+            .kv_get(
+                crate::workspace_governance::GOVERNANCE_KV_NAMESPACE,
+                ws.id.as_str(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        items.push(serde_json::json!({
+            "workspace_id": ws.id.to_string(),
+            "name": ws.name,
+            "tenant_id": ws.tenant_id.to_string(),
+            "ownerless_since": gs.ownerless_since,
+            "last_notified_at": gs.last_notified_at,
+            "orphaned_since": gs.orphaned_since,
+            "orphaned": crate::workspace_governance::is_orphaned(&gs, now, period_secs),
+            "orphan_period_days": crate::workspace_governance::orphan_period_days(),
+        }));
+    }
+    let orphaned = items
+        .iter()
+        .filter(|i| i["orphaned"].as_bool().unwrap_or(false))
+        .count();
+    Ok(Json(serde_json::json!({
+        "workspaces": items,
+        "orphaned_count": orphaned,
+    })))
+}
+
 /// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
 pub async fn admin_kill_agent(
     State(state): State<Arc<AppState>>,

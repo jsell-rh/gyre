@@ -2067,6 +2067,85 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// RepoAccessOverride
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::RepoAccessOverride;
+use gyre_ports::RepoAccessOverrideRepository;
+
+#[derive(Default)]
+pub struct MemRepoAccessOverrideRepository {
+    store: Arc<Mutex<HashMap<String, RepoAccessOverride>>>,
+}
+
+#[async_trait]
+impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
+    async fn create(&self, o: &RepoAccessOverride) -> Result<()> {
+        // Port contract: "Fails if an override for the same (repo_id, user_id)
+        // pair already exists". The DB adapters enforce this via the
+        // UNIQUE(repo_id, user_id) constraint; the mem adapter guards in code.
+        let mut store = self.store.lock().await;
+        if store
+            .values()
+            .any(|e| e.repo_id == o.repo_id && e.user_id == o.user_id)
+        {
+            anyhow::bail!(
+                "repo access override for repo {} user {} already exists",
+                o.repo_id,
+                o.user_id
+            );
+        }
+        store.insert(o.id.to_string(), o.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<RepoAccessOverride>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_repo_and_user(
+        &self,
+        repo_id: &Id,
+        user_id: &Id,
+    ) -> Result<Option<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|o| o.repo_id == *repo_id && o.user_id == *user_id)
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|o| o.repo_id == *repo_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn update_role(&self, id: &Id, role: WorkspaceRole) -> Result<()> {
+        if let Some(o) = self.store.lock().await.get_mut(id.as_str()) {
+            o.role = role;
+            o.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -3598,6 +3677,7 @@ fn test_state_inner(
         personas: Arc::new(MemPersonaRepository::default()),
         policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),

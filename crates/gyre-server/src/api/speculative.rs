@@ -140,6 +140,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -157,6 +158,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/speculative"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -174,6 +176,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/speculative")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -209,6 +212,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/speculative"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -229,6 +233,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/speculative/feat-x"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -263,6 +268,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/speculative/feat-y"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

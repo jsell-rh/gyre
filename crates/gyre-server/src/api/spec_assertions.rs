@@ -236,6 +236,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "name": "assert-repo",
@@ -325,6 +326,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "name": "empty-assert-repo",
@@ -377,6 +379,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "name": "assert-get-repo",
@@ -492,6 +495,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "name": "assert-empty-get-repo",

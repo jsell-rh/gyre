@@ -247,6 +247,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -273,6 +274,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -285,6 +287,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/agent-commits"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -311,6 +314,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                        .header("Authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
@@ -350,6 +354,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/repos/no-such/commits/record")
                     .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -389,6 +394,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/worktrees"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -405,6 +411,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/repos/{repo_id}/worktrees/{wt_id}"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -447,6 +454,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/worktrees"))
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -463,6 +471,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such/worktrees")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

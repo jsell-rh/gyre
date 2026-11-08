@@ -61,6 +61,9 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 2 — a workspace has no active Owner and the Tenant Admin must
+    /// reassign ownership (user-management.md §Ownership Transfer & Reclamation).
+    WorkspaceOwnerless,
 }
 
 impl NotificationType {
@@ -89,6 +92,7 @@ impl NotificationType {
             Self::SpecConflict => "SpecConflict",
             Self::MrReverted => "MrReverted",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::WorkspaceOwnerless => "WorkspaceOwnerless",
         }
     }
 
@@ -117,6 +121,7 @@ impl NotificationType {
             "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "WorkspaceOwnerless" => Some(Self::WorkspaceOwnerless),
             _ => None,
         }
     }
@@ -146,6 +151,7 @@ impl NotificationType {
             Self::SpecConflict => 2,
             Self::MrReverted => 2,
             Self::MergeQueueEscalation => 1,
+            Self::WorkspaceOwnerless => 2,
         }
     }
 }
@@ -258,6 +264,7 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MrReverted,
             NotificationType::MergeQueueEscalation,
+            NotificationType::WorkspaceOwnerless,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
