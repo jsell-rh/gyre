@@ -264,6 +264,7 @@ diesel::table! {
         resource_id -> Nullable<Text>,
         outcome -> Text,
         detail -> Text,
+        detail_zstd -> Nullable<Binary>,
         source_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
         timestamp -> BigInt,

@@ -348,29 +348,21 @@ pub async fn get_mr_timeline(
 
 /// Parse `nodes_added` and `nodes_modified` counts from a delta JSON string.
 ///
-/// The delta_json is opaque, but graph_extraction.rs serialises a known shape.
-/// We do a best-effort parse and fall back to 0 rather than failing the request.
+/// The delta_json is opaque, but graph_extraction.rs serialises a known shape
+/// where `nodes_added` is an ARRAY of `{name, node_type, qualified_name}` entries
+/// and `nodes_modified` is an ARRAY of `{qualified_name, field_changes}` entries
+/// (a bare count number is also accepted for hand-built fixtures). We do a
+/// best-effort parse and fall back to 0 rather than failing the request.
 fn parse_delta_counts(delta_json: &str) -> (u64, u64) {
+    fn count(v: &Value, key: &str) -> u64 {
+        match v.get(key) {
+            Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+            Some(Value::Array(a)) => a.len() as u64,
+            _ => 0,
+        }
+    }
     if let Ok(v) = serde_json::from_str::<Value>(delta_json) {
-        let added = v
-            .get("nodes_added")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                v.get("added")
-                    .and_then(Value::as_array)
-                    .map(|a| a.len() as u64)
-            })
-            .unwrap_or(0);
-        let modified = v
-            .get("nodes_modified")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                v.get("modified")
-                    .and_then(Value::as_array)
-                    .map(|a| a.len() as u64)
-            })
-            .unwrap_or(0);
-        (added, modified)
+        (count(&v, "nodes_added"), count(&v, "nodes_modified"))
     } else {
         (0, 0)
     }
@@ -997,8 +989,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_delta_counts_fallback_to_array_length() {
-        let json = r#"{"added": ["n1", "n2"], "modified": ["n3"]}"#;
+    async fn parse_delta_counts_producer_array_shape() {
+        // Shape written by graph_extraction.rs: nodes_added/nodes_modified are
+        // ARRAYS of entries, not bare counts. Regression: the old parser only
+        // accepted bare numbers and the (nonexistent) "added"/"modified" keys,
+        // so every real GraphExtraction event reported 0/0.
+        let json = r#"{"nodes_extracted": 5, "edges_extracted": 3,
+            "nodes_added": [{"name":"Foo","node_type":"type","qualified_name":"crate::Foo"},
+                            {"name":"bar","node_type":"function","qualified_name":"crate::bar"}],
+            "nodes_modified": [{"qualified_name":"crate::Baz","field_changes":[]}],
+            "nodes_removed": ["crate::Old"]}"#;
         let (a, m) = parse_delta_counts(json);
         assert_eq!(a, 2);
         assert_eq!(m, 1);
