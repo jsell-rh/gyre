@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
-use gyre_ports::{AuditQueryFilter, AuditRepository};
+use gyre_ports::{AuditQueryFilter, AuditRepository, CompressionStats};
 use std::sync::Arc;
 
 use super::PgStorage;
@@ -25,31 +25,46 @@ struct AuditEventRow {
     resource_id: Option<String>,
     outcome: String,
     detail: String,
+    /// zstd-compressed detail JSON; NULL = row not yet compressed
+    /// (log-compression job, observability.md §Log Retention &
+    /// Compression).
+    detail_zstd: Option<Vec<u8>>,
     source_ip: Option<String>,
     user_agent: Option<String>,
     timestamp: i64,
 }
 
-impl From<AuditEventRow> for AuditEvent {
-    fn from(r: AuditEventRow) -> Self {
-        let detail: serde_json::Value = serde_json::from_str(&r.detail)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        AuditEvent {
-            id: Id::new(r.id),
-            event_type: AuditEventType::from_str(&r.event_type),
-            agent_id: r.agent_id.map(Id::new),
-            user_id: r.user_id.map(Id::new),
-            session_id: r.session_id,
-            workspace_id: r.workspace_id.map(Id::new),
-            repo_id: r.repo_id.map(Id::new),
-            resource_type: r.resource_type,
-            resource_id: r.resource_id,
-            outcome: AuditOutcome::from_str(&r.outcome).unwrap_or(AuditOutcome::Success),
+impl AuditEventRow {
+    /// Materialize a domain event, decompressing the detail payload when
+    /// the row is compressed. Decompression or JSON parse failure of a
+    /// compressed payload is a hard error: a corrupted audit record must
+    /// surface, not silently degrade to an empty detail object.
+    fn into_event(self) -> Result<AuditEvent> {
+        let detail = match self.detail_zstd {
+            Some(z) if !z.is_empty() => {
+                let raw =
+                    zstd::decode_all(z.as_slice()).context("decompress audit detail (zstd)")?;
+                serde_json::from_slice(&raw).context("parse compressed audit detail")?
+            }
+            _ => serde_json::from_str(&self.detail)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+        };
+        Ok(AuditEvent {
+            id: Id::new(self.id),
+            event_type: AuditEventType::from_str(&self.event_type),
+            agent_id: self.agent_id.map(Id::new),
+            user_id: self.user_id.map(Id::new),
+            session_id: self.session_id,
+            workspace_id: self.workspace_id.map(Id::new),
+            repo_id: self.repo_id.map(Id::new),
+            resource_type: self.resource_type,
+            resource_id: self.resource_id,
+            outcome: AuditOutcome::from_str(&self.outcome).unwrap_or(AuditOutcome::Success),
             detail,
-            source_ip: r.source_ip,
-            user_agent: r.user_agent,
-            timestamp: r.timestamp as u64,
-        }
+            source_ip: self.source_ip,
+            user_agent: self.user_agent,
+            timestamp: self.timestamp as u64,
+        })
     }
 }
 
@@ -67,6 +82,7 @@ struct AuditEventRecord<'a> {
     resource_id: Option<&'a str>,
     outcome: &'a str,
     detail: String,
+    detail_zstd: Option<Vec<u8>>,
     source_ip: Option<&'a str>,
     user_agent: Option<&'a str>,
     timestamp: i64,
@@ -94,6 +110,9 @@ fn to_record(e: &AuditEvent) -> AuditEventRecord<'_> {
         resource_id: e.resource_id.as_deref(),
         outcome: e.outcome.as_str(),
         detail: serde_json::to_string(&e.detail).unwrap_or_else(|_| "{}".to_string()),
+        // New rows are never pre-compressed; the log-compression job
+        // picks them up once they age past 7 days.
+        detail_zstd: None,
         source_ip: e.source_ip.as_deref(),
         user_agent: e.user_agent.as_deref(),
         timestamp: e.timestamp as i64,
@@ -152,7 +171,9 @@ impl AuditRepository for PgStorage {
                 .limit(filter.limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
                 .context("query audit_events")?;
-            Ok(rows.into_iter().map(AuditEvent::from).collect())
+            rows.into_iter()
+                .map(AuditEventRow::into_event)
+                .collect::<Result<Vec<_>>>()
         })
         .await?
     }
@@ -198,7 +219,9 @@ impl AuditRepository for PgStorage {
                 .limit(limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
                 .context("since_timestamp audit_events")?;
-            Ok(rows.into_iter().map(AuditEvent::from).collect())
+            rows.into_iter()
+                .map(AuditEventRow::into_event)
+                .collect::<Result<Vec<_>>>()
         })
         .await?
     }
@@ -212,6 +235,50 @@ impl AuditRepository for PgStorage {
                 .execute(&mut *conn)
                 .context("delete old audit_events")?;
             Ok(n as u64)
+        })
+        .await?
+    }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<CompressionStats> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<CompressionStats> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Candidates: not yet compressed, older than the cutoff.
+            let rows: Vec<(String, String)> = audit_events::table
+                .filter(audit_events::detail_zstd.is_null())
+                .filter(audit_events::timestamp.lt(cutoff_secs as i64))
+                .order(audit_events::timestamp.asc())
+                .limit(limit as i64)
+                .select((audit_events::id, audit_events::detail))
+                .load(&mut *conn)
+                .context("select audit_events for compression")?;
+
+            let mut stats = CompressionStats::default();
+            for (id, detail) in rows {
+                let compressed =
+                    zstd::encode_all(detail.as_bytes(), 3).context("zstd compress audit detail")?;
+                // The NULL guard makes the update idempotent under
+                // concurrency: only the first writer flips the row.
+                let n = diesel::update(audit_events::table)
+                    .filter(audit_events::id.eq(&id))
+                    .filter(audit_events::detail_zstd.is_null())
+                    .set((
+                        audit_events::detail.eq(""),
+                        audit_events::detail_zstd.eq(Some(compressed.clone())),
+                    ))
+                    .execute(&mut *conn)
+                    .context("compress audit detail")?;
+                if n == 1 {
+                    stats.compressed += 1;
+                    stats.bytes_before += detail.len() as u64;
+                    stats.bytes_after += compressed.len() as u64;
+                }
+            }
+            Ok(stats)
         })
         .await?
     }
