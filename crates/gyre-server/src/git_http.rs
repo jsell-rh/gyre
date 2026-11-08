@@ -496,6 +496,16 @@ pub async fn git_receive_pack(
         Err(e) => return git_err(e),
     };
 
+    // Review repair (task-104): receive-pack reports per-ref rejections
+    // (non-fast-forward, stale client, `receive.denyNonFastForwards`, ref
+    // lock contention) in the report-status stream back to the client — the
+    // process still exits 0. The ref updates parsed from the request are
+    // therefore only *requests*. Verify which of them actually landed
+    // before any push-acceptance signaling runs: a declined update must not
+    // produce a GitPushAccepted audit event (spec trigger: "Smart HTTP push
+    // accepted") or any other post-receive acceptance processing.
+    let applied_updates = verify_applied_ref_updates(&repo_path, &ref_updates).await;
+
     // Pre-accept gate checks: run after git accepts packfile, undo refs on failure.
     // task-104: gate outcomes are captured so the GitPushAccepted audit event
     // carries the spec'd push_gate_results detail field.
@@ -768,7 +778,7 @@ pub async fn git_receive_pack(
         let commit_count = record_pushed_commits(
             &state_clone,
             &repo_path_clone,
-            &ref_updates,
+            &applied_updates,
             &agent_id,
             task_id_clone.as_deref(),
             parent_agent_id_clone.as_deref(),
@@ -785,31 +795,36 @@ pub async fn git_receive_pack(
                 &agent_id,
                 &tenant_id_clone,
                 turn,
-                &ref_updates,
+                &applied_updates,
                 crate::api::now_secs(),
             )
             .await;
         }
-        // Emit PushAccepted event via unified message bus.
-        state_clone
-            .emit_event(
-                Some(repo_workspace_id_clone.clone()),
-                gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
-                gyre_common::message::MessageKind::PushAccepted,
-                Some(serde_json::json!({
-                    "repo_id": repo_id_clone,
-                    "branch": branch_clone,
-                    "agent_id": agent_id,
-                    "commit_count": commit_count as u64,
-                    "task_id": task_id_clone,
-                })),
-            )
-            .await;
+        // Emit PushAccepted event via unified message bus — only when git
+        // actually applied at least one ref update. A push git declined in
+        // full (e.g. every update non-fast-forward) is not an accepted push.
+        if !applied_updates.is_empty() {
+            state_clone
+                .emit_event(
+                    Some(repo_workspace_id_clone.clone()),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
+                    gyre_common::message::MessageKind::PushAccepted,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id_clone,
+                        "branch": branch_clone,
+                        "agent_id": agent_id,
+                        "commit_count": commit_count as u64,
+                        "task_id": task_id_clone,
+                    })),
+                )
+                .await;
+        }
 
         // task-104: GitPushAccepted audit event (observability.md §Audit
-        // Event Types) — one event per accepted ref update, carrying the
-        // branch, commit SHA, and the pre-accept gate results.
-        for update in ref_updates.iter() {
+        // Event Types) — one event per ref update git actually applied
+        // (verified via rev-parse; git-declined updates emit nothing),
+        // carrying the branch, commit SHA, and the pre-accept gate results.
+        for update in applied_updates.iter() {
             emit_git_push_accepted_audit(
                 &state_clone,
                 &repo_id_clone,
@@ -919,7 +934,8 @@ pub async fn git_receive_pack(
             }
 
             // Phase 2: strategy-implied constraint evaluation (TASK-007).
-            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+            // Only for ref updates git actually applied.
+            let constraint_ref_updates: Vec<(String, String, String)> = applied_updates
                 .iter()
                 .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
                 .collect();
@@ -936,13 +952,14 @@ pub async fn git_receive_pack(
             .await;
         }
 
-        // Spec lifecycle: auto-create tasks for spec changes on the default branch.
+        // Spec lifecycle: auto-create tasks for spec changes on the default
+        // branch — only for ref updates git actually applied.
         process_spec_lifecycle(
             &state_clone,
             &repo_id_clone,
             &repo_path_clone,
             &default_branch_clone,
-            &ref_updates,
+            &applied_updates,
         )
         .await;
 
@@ -953,7 +970,7 @@ pub async fn git_receive_pack(
         //   item 3: "if the parent MR is later rebased, the dependency is
         //   re-evaluated") — the dependent child's edge is re-checked even
         //   though the child's branch never moved.
-        let pushed_branches: Vec<String> = ref_updates
+        let pushed_branches: Vec<String> = applied_updates
             .iter()
             .filter_map(|u| u.refname.strip_prefix("refs/heads/").map(str::to_string))
             .collect();
@@ -978,7 +995,7 @@ pub async fn git_receive_pack(
             .ok()
             .flatten()
             .map(|ws| ws.tenant_id);
-        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+        for update in applied_updates.iter().filter(|u| u.refname == default_ref) {
             let now = crate::api::now_secs();
             crate::spec_registry::sync_spec_ledger(
                 &state_clone.spec_ledger,
@@ -1580,6 +1597,69 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
             }
         }
     }
+}
+
+/// Verify which of the requested ref updates `git receive-pack` actually
+/// applied (task-104 review repair).
+///
+/// receive-pack reports per-ref rejections (non-fast-forward, stale client,
+/// `receive.denyNonFastForwards`, ref lock contention) in the report-status
+/// stream back to the client — the process still exits 0. A ref update parsed
+/// from the request body is therefore only a *request*. Confirm each ref now
+/// points at the requested new SHA (`git rev-parse <refname> == new_sha`);
+/// updates git declined are dropped so no acceptance signaling runs for them.
+async fn verify_applied_ref_updates(
+    repo_path: &str,
+    ref_updates: &[RefUpdate],
+) -> Vec<RefUpdate> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let mut applied = Vec::with_capacity(ref_updates.len());
+
+    for update in ref_updates {
+        // Refnames come from the client request body; only plain ref paths
+        // are ever handed to the git subprocess.
+        if !update.refname.starts_with("refs/") {
+            warn!(
+                repo_path,
+                refname = %update.refname,
+                "ref update with non-'refs/' refname; treating as not applied"
+            );
+            continue;
+        }
+        let resolved = Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("rev-parse")
+            .arg("--verify")
+            // Refnames are client-controlled; never let one parse as an option.
+            .arg("--end-of-options")
+            .arg(&update.refname)
+            .output()
+            .await;
+        let is_applied = match resolved {
+            Ok(o) if o.status.success() => {
+                let sha = String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase();
+                sha == update.new_sha.to_ascii_lowercase()
+            }
+            _ => false,
+        };
+        if is_applied {
+            applied.push(RefUpdate {
+                old_sha: update.old_sha.clone(),
+                new_sha: update.new_sha.clone(),
+                refname: update.refname.clone(),
+            });
+        } else {
+            warn!(
+                repo_path,
+                refname = %update.refname,
+                new_sha = %update.new_sha,
+                "git receive-pack declined this ref update; not recording push acceptance for it"
+            );
+        }
+    }
+
+    applied
 }
 
 // ---------------------------------------------------------------------------
@@ -5241,6 +5321,109 @@ mod tests {
         assert_eq!(e.workspace_id.as_ref().unwrap().as_str(), "ws-test");
         assert_eq!(e.outcome, gyre_domain::AuditOutcome::Success);
         assert_eq!(e.resource_type, "repo");
+    }
+
+    /// Review repair regression test (task-104): `git receive-pack` declines
+    /// a non-fast-forward ref update in its report-status stream while the
+    /// process still exits 0. The stale-client push below (server ref at
+    /// `tip`, client pushes `base -> divergent`) must NOT record a
+    /// GitPushAccepted audit event — the spec trigger is "Smart HTTP push
+    /// accepted", and the update never landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_declined_by_git_records_no_git_push_accepted_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Server history: base <- tip, with refs/heads/main at `tip`.
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
+        git(&["update-ref", "refs/heads/main", &tip]);
+        // Stale client diverged from `base`; its update is non-fast-forward
+        // relative to the server's `tip`.
+        let stale = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: stale client"]);
+
+        // Push body: stale client sends `base -> stale` (its outdated view of
+        // the ref) plus a packfile containing the stale commit.
+        let line = format!("{base} {stale} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{stale}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header(
+                        "content-type",
+                        "application/x-git-receive-pack-request",
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // receive-pack exits 0 even though it declined the ref update —
+        // the rejection travels in the report-status stream, so the HTTP
+        // response stays 200 with git's own report.
+        assert_eq!(resp.status(), StatusCode::OK);
+        // The ref update was NOT applied: main still points at `tip`.
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"]),
+            tip,
+            "receive-pack must not have moved refs/heads/main"
+        );
+
+        // Give the spawned post-receive task ample opportunity to (wrongly)
+        // emit acceptance events, then assert none exist.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let accepted = audit_events_of(&state, "git_push_accepted").await;
+        assert!(
+            accepted.is_empty(),
+            "git declined the ref update, but git_push_accepted events were recorded: {}",
+            serde_json::to_string_pretty(&accepted.iter().map(|e| e.detail.clone()).collect::<Vec<_>>()).unwrap()
+        );
+        // A git-level decline is not a gate rejection either — the spec
+        // reserves GitPushRejected for "push rejected by gate".
+        let rejected = audit_events_of(&state, "git_push_rejected").await;
+        assert!(rejected.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
