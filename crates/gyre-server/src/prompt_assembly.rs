@@ -78,7 +78,7 @@ fn scope_str(scope: &MetaSpecScope) -> &'static str {
 /// Sort meta-specs by injection-order rank for their kind
 /// (persona → principle → standard → process), with a stable name tiebreak
 /// so the assembled set (and its SHA) is deterministic.
-fn sort_by_kind(specs: &mut Vec<MetaSpec>) {
+fn sort_by_kind(specs: &mut [MetaSpec]) {
     specs.sort_by(|a, b| {
         kind_rank(&a.kind)
             .cmp(&kind_rank(&b.kind))
@@ -932,7 +932,7 @@ mod tests {
         let mut s2 = s1.clone();
         s2.used.content_hash = "h2".into();
         assert_ne!(
-            prompt_set_sha(&[s1.clone()]),
+            prompt_set_sha(std::slice::from_ref(&s1)),
             prompt_set_sha(&[s2]),
             "hash must reflect content_hash"
         );
