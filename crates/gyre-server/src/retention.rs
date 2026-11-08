@@ -8,10 +8,12 @@
 //!   (per-workspace + per-server caps, gyre-common/src/message.rs). The
 //!   ring caps bound steady-state volume; the 90-day age policy is enforced
 //!   by `TelemetryBuffer::purge_older_than` driven from `run_cleanup`.
-//! - `agent_logs` — in-memory `HashMap<agent, Vec<String>>` with canonical
-//!   `[ts] message` lines (api/agent_logs.rs). Entries past the cutoff are
-//!   drained. "Compress after 7 days" (spec) is a size optimization, not a
-//!   retention requirement — not implemented; the 30-day purge is.
+//! - `agent_logs` — in-memory [`AgentLogBuffer`](crate::log_compression)
+//!   with canonical `[ts] message` lines (api/agent_logs.rs). Entries
+//!   past the cutoff are drained; lines older than 7 days are
+//!   zstd-compressed into the buffer's cold segment by the
+//!   `log-compression` job (observability.md §Log Retention &
+//!   Compression) and decompressed transparently on read.
 //! - `audit_events` / `analytics_events` — hard DELETE via the repository
 //!   ports (`delete_older_than`), SQLite + Postgres adapters.
 //! - `snapshots` — tiered file policy `24h×24 + 7d×7 + 4w×4` on
@@ -309,7 +311,7 @@ impl RetentionStore {
                         .delete_older_than(read_cutoff, cutoff)
                         .await?
                 }
-                "agent_logs" => purge_agent_logs(state, cutoff).await,
+                "agent_logs" => state.agent_logs.purge_older_than(cutoff).await,
                 "snapshots" => {
                     // Tier counts come from the policy row (configurable
                     // via PUT /admin/retention); u64::MAX spec default
@@ -456,32 +458,6 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-/// Drain agent-log lines whose `[ts]` prefix is older than `cutoff`.
-/// Lines without a parseable prefix are kept (conservative — cannot prove
-/// age, do not delete). Returns lines purged.
-async fn purge_agent_logs(state: &AppState, cutoff: u64) -> u64 {
-    let mut logs = state.agent_logs.lock().await;
-    let mut purged = 0u64;
-    for buf in logs.values_mut() {
-        let before = buf.len();
-        buf.retain(|line| !agent_log_line_is_old(line, cutoff));
-        purged += (before - buf.len()) as u64;
-    }
-    purged
-}
-
-/// A line is old when it starts with `[ts]` and ts < cutoff.
-fn agent_log_line_is_old(line: &str, cutoff: u64) -> bool {
-    let Some(ts) = line
-        .strip_prefix('[')
-        .and_then(|rest| rest.split_once(']'))
-        .and_then(|(ts, _)| ts.trim().parse::<u64>().ok())
-    else {
-        return false;
-    };
-    ts < cutoff
 }
 
 /// Apply the tiered snapshot policy to the snapshot directory. Tier counts
@@ -968,14 +944,13 @@ mod tests {
         .await
         .unwrap();
         // agent_logs: 30d policy — one old line, one new line, one unprefixed.
-        state.agent_logs.lock().await.insert(
-            "agent-1".to_string(),
-            vec![
-                format!("[{}] old line", t - 40 * DAY),
-                format!("[{}] new line", t - DAY),
-                "no prefix line".to_string(),
-            ],
-        );
+        for line in [
+            format!("[{}] old line", t - 40 * DAY),
+            format!("[{}] new line", t - DAY),
+            "no prefix line".to_string(),
+        ] {
+            state.agent_logs.append("agent-1".to_string(), line).await;
+        }
         // attestation: ancient, must never be purged.
         let bundle = AttestationBundle {
             attestation: MergeAttestation {
@@ -1057,8 +1032,7 @@ mod tests {
         );
 
         // agent_logs: old line drained; new line and unprefixed line kept.
-        let logs = state.agent_logs.lock().await;
-        let lines = logs.get("agent-1").unwrap();
+        let lines = state.agent_logs.replay("agent-1").await.unwrap();
         assert_eq!(
             lines.len(),
             2,
@@ -1066,7 +1040,6 @@ mod tests {
         );
         assert!(lines.iter().any(|l| l.contains("new line")));
         assert!(lines.iter().any(|l| l.contains("no prefix line")));
-        drop(logs);
 
         // attestation: ancient bundle survives (never purged).
         assert!(
@@ -1123,24 +1096,32 @@ mod tests {
         assert_eq!(audit_first, audit_second);
     }
 
-    #[test]
-    fn agent_log_line_is_old_boundaries() {
-        let cutoff = 1000;
-        assert!(agent_log_line_is_old("[999] x", cutoff));
+    #[tokio::test]
+    async fn agent_log_purge_boundaries() {
+        // The purge rule now lives in AgentLogBuffer::purge_older_than;
+        // same boundary contract as the previous inline implementation.
+        let buf = crate::log_compression::AgentLogBuffer::new();
+        for line in [
+            "[999] x".to_string(),
+            "[1000] x".to_string(),
+            "[1001] x".to_string(),
+            "no prefix".to_string(),
+            "[abc] x".to_string(),
+            String::new(),
+        ] {
+            buf.append("agent-1".to_string(), line).await;
+        }
+        let purged = buf.purge_older_than(1000).await;
+        assert_eq!(purged, 1, "only [999] x is older than the cutoff");
+        let lines = buf.replay("agent-1").await.unwrap();
+        assert_eq!(lines.len(), 5);
+        assert!(lines.iter().any(|l| l == "[1000] x"), "cutoff is exclusive");
         assert!(
-            !agent_log_line_is_old("[1000] x", cutoff),
-            "cutoff is exclusive"
-        );
-        assert!(!agent_log_line_is_old("[1001] x", cutoff));
-        assert!(
-            !agent_log_line_is_old("no prefix", cutoff),
+            lines.iter().any(|l| l == "no prefix"),
             "unparseable prefix kept"
         );
-        assert!(
-            !agent_log_line_is_old("[abc] x", cutoff),
-            "non-numeric ts kept"
-        );
-        assert!(!agent_log_line_is_old("", cutoff));
+        assert!(lines.iter().any(|l| l == "[abc] x"), "non-numeric ts kept");
+        assert!(lines.iter().any(|l| l.is_empty()), "empty line kept");
     }
 
     #[test]
