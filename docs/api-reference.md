@@ -218,7 +218,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
-| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s) (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
