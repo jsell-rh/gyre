@@ -3,12 +3,12 @@ title: "Canonical Navigation — Scope-Aware Content Routing"
 spec_ref: "ui-navigation.md §2, §3, §7, §10"
 depends_on:
   - task-082
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "4cef86db1b2fe6c0dc182068ea8c0ed0a789a15b"]
+commits: ["af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "c69d9fd546809cfac5195d7663526f5c24848ea1"]
 ---
 
 ## Authority and Scope
@@ -132,6 +132,23 @@ is claimed here, per section, with the verifying evidence below.
 
 ### Verification
 
+- CI repair (`c69d9fd5`, closing the run-42441309727 E2E finding): the
+  12 explorer visual regressions failed because the committed baselines
+  predate this task's spec-required Graph | Briefing control-bar sub-tab
+  on the repo-scope Architecture tab — the bar consumes 34px of header
+  height, so every `.treemap-canvas-area` shot rendered 34px shorter
+  (919x397 → 919x363, 579x335 → 579x301) and the full-page tabpanel
+  re-flowed. Baselines replaced with the failed run's own actual
+  screenshots (the authoritative rendering of the specced UI in the gate
+  environment; dist verified byte-identical to the candidate's verified
+  asset build by content hash, same chromium 1208). Local verification:
+  full e2e suite 64/64 passed against the new baselines; local rendering
+  is byte-deterministic run-to-run; mutation probe — serving the
+  pre-sub-tab dist fails `zoom_level_0` on the 919x397 vs 919x363 size
+  mismatch, so the baselines genuinely pin the new UI. Assertion strength
+  unchanged (same tests, locators, maxDiffPixelRatio 0.02); toolbar and
+  blast-radius-tiered baselines untouched and still passing. Evidence
+  under `/tmp/stage/review-evidence/`.
 - CI-gate repair (`6cf4a224`, closing the `9bb8899472` verification
   finding): the two repo-wide gate failures in `api/specs.rs` were
   pre-existing legacy-debt sites that `c38c8e003`'s 173 inserted lines had
