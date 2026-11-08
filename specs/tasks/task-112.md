@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["7601f79ab5fd116a7e22fb0a137b18fb895953bc"]
+commits: ["7601f79ab5fd116a7e22fb0a137b18fb895953bc", "36985b7c3b3faccf3f515ca200070c03880c91c7"]
 ---
 
 ## Shipped
@@ -59,7 +59,8 @@ per-handler auth; ABAC-exempt with documented self-scope invariant). PUT
 rejects `in_app: false` (spec: "can't disable") and non-absolute webhook/Slack
 URLs. Storage: new `user_channel_preferences` table (migration 000057 —
 renumbered from 000056 after the 9bef21a4 rebase merge brought
-spec_assertion_results in under the same version; portable
+spec_assertion_results in under the same version, then to 000058 after the
+72ad2a128 merge brought spec_approval_attestation in under 000057; portable
 SQLite/PG SQL), `UserChannelPreferenceRepository` port with SQLite and mem
 adapters (both enforce the upsert contract).
 
@@ -87,6 +88,65 @@ Sandbox restriction recorded: TCP listener probe unsupported (`accept` →
 errno 95), so live HTTP round-trip verification against a local listener is
 deferred to host verification; channel delivery is covered by the captured
 `HttpSender` test double asserting URL, headers (HMAC signature), and body.
+
+### Repair round (rebase merge 72ad2a128) — compile-verified with real cargo
+
+This round's sandbox has crates.io access, so the merged Rust tree was
+actually compiled and tested locally for the first time since the task
+landed (prior rounds were inspection-only due to the transport
+restriction).
+
+- **Merge resolved** (36985b7c3): base 72ad2a128 (task-096 rollback circuit
+  breaker, task-053 meta-spec hash, call-graph/LSP work, pipeline tooling)
+  merged into the branch. Three textual conflicts:
+  - `api/users.rs` invite_member notification: kept `state.as_ref()` (the
+    merged `notify_rich` takes `&AppState`; our handler holds
+    `State<Arc<AppState>>`); merged in upstream's richer comment.
+  - `merge_processor.rs` apply_revert_side_effects: kept our specialized
+    `notify_mr_reverted(state, author_agent_id, workspace, mr_id, reason)`
+    call — upstream's positional form referenced a nonexistent `user_id`
+    binding in that function and passed a fabricated `"default"` tenant
+    literal (would violate the fabricated-scope-defaults invariant our
+    helper exists to uphold).
+  - `check-fabricated-scope-defaults.sh`: dropped a duplicated
+    `FROZEN_EXEMPTION_COUNT=4` line (exemption file has 3 entries ≤ frozen
+    4; gate re-run OK).
+  - `web/dist` rename/delete conflicts resolved in the index; generated
+    assets are restored from the assignment base by the executor and
+    rebuilt remotely.
+- **Migration version collision fixed again**: upstream brought
+  `2026-10-08-000057_spec_approval_attestation` under the same version as
+  our `user_channel_preferences`. Renumbered ours to
+  `2026-10-08-000058_user_channel_preferences` per
+  `check-migration-versions.sh` (gate OK; table references are by schema
+  name, not migration dir, so the rename is behavior-neutral).
+- **Local verification evidence on merge HEAD 36985b7c3** (this sandbox,
+  crates.io reachable):
+  - `SKIP_WEB_BUILD=1 cargo build -p gyre-server --lib`: clean.
+  - `SKIP_WEB_BUILD=1 cargo test --workspace --no-run`: all test targets
+    compile (lib + every integration suite).
+  - `cargo test -p gyre-server --lib notification_dispatcher`: 15 passed.
+  - `cargo test -p gyre-server --lib api::users`: 13 passed (all four
+    channel-prefs API tests included).
+  - `cargo test -p gyre-server --lib merge_processor::`: 63 passed.
+  - `cargo test -p gyre-server --test graph_integration
+    test_divergence_detection_creates_notifications`: 1 passed — the
+    previously transport-blocked probe from the 296d542 round now runs
+    green locally.
+  - Text gates re-run OK: arch, abac-route-registry, abac-exempt-handlers,
+    dead-message-kinds, unbounded-external-http, mem-port-contracts,
+    byte-slice-truncation, relative-path-defaults, inert-enforcement,
+    mcp-write-tools, lossy-secret-conversion, scope-literal-defaults,
+    forwarded-header-trust, in-memory-state-stores, forged-scope-fields,
+    fail-open-ref-resolution, migration-versions,
+    migration-sql-portability, fabricated-scope-defaults, api-auth,
+    message-delivery, unwired-port-methods, sandbox-sweep-artifacts,
+    no-em-dash, task-commit-attribution.
+- **Remaining sandbox restriction** (infrastructure, not a code defect):
+  `awk` is mawk-only, so the gawk-syntax gates (notification-audience,
+  notification-priority, notification-test-coverage, tenant-filter,
+  path-scope-binding, cross-surface-parity) still cannot run locally —
+  they parse-error under mawk before evaluating any rule.
 
 ### Repair round (rebase merge 9bef21a4)
 
