@@ -109,3 +109,54 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+## R2 — Rebase round (independent review)
+
+Comparison base: c5deca801a331e049f35b181f42d898df24e7e2b → candidate
+f2299bfbc2af645b4c121be1860ea50fa3a7e700 (branch HEAD; includes merge 0a843e984
+resolving main's task-105/rustfmt advance, conflict in `crates/gyre-cli/src/bootstrap.rs`).
+
+Diff scope: 21 files — domain defs, SQLite adapter tests, CLI consolidation (deletes the
+private `bootstrap/personas/*.md` embeds, re-exports `gyre_domain::BUILTIN_PERSONA_DEFS`),
+server seeding + wiring (startup/tenant-create/admin-seed), rate-limit clock injection
+(prior-round flake repair), coverage updates, task file. No `scripts/` changes, no
+exemption growth, no deleted tests.
+
+### Findings
+
+None.
+
+### Evidence (this sandbox, /tmp/stage/review-evidence/)
+
+- Focused suites all green: `gyre-domain --lib builtin` 2 ok;
+  `gyre-server --lib seed_builtin_personas` 3 ok; `create_tenant_seeds` 1 ok;
+  `rate_limit` 18 ok (incl. deterministic `refills_to_full_rate_on_new_second`);
+  `gyre-adapters --lib persona` 2 ok (SQLite round-trip + idempotent reseed);
+  `gyre-cli --bin gyre bootstrap` 15 ok (incl. pointer-equality single-source test).
+- Mechanical gates: `check-arch.sh` passes; `check-task-commit-attribution.sh` passes;
+  `rustfmt --check` clean on all task-changed files; clippy 0 errors on changed crates.
+- **Live startup probe** (`live-startup-probe.md`): built and ran the real binary against
+  a fresh SQLite DB — startup seeded exactly 4 personas at `{"kind":"Tenant","id":"default"}`
+  scope, all `Approved`/`approved_by=system`/`version=1`. Restart against the same DB:
+  still 4 rows, same IDs, same `approved_at` (not overwritten). All four `content_hash`
+  values independently recomputed with Python hashlib SHA-256 over
+  `system_prompt + capabilities.join(",")` — all match.
+- Merge resolution verified: `bootstrap.rs` keeps the candidate-side single-source
+  re-export; main's conflicting hunk was rustfmt-only on the now-deleted private struct;
+  compiles, tests pass, rustfmt clean.
+- Startup ordering confirmed in `main.rs`: `bootstrap_default_tenant` →
+  `seed_builtin_policies` (fail-closed) → `seed_builtin_meta_specs` →
+  `seed_builtin_personas`, all before `TcpListener::bind` (main.rs:115).
+
+### Notes (non-blocking)
+
+- `r2d2: database is locked` ERROR lines appear during first-boot migrations (pre-existing
+  SQLite pool contention, before persona code runs); startup completes normally.
+- Seeding failures at tenant-create time are logged (warn), not transactional — a failed
+  seed self-heals on next restart via idempotent startup seeding. Matches the task plan's
+  check-then-insert shape and the `seed_builtin_meta_specs` convention.
+
+## Verdict
+
+R2: no findings — candidate approved against platform-model.md §2 Built-In Personas
+and the task-140 acceptance criteria.
