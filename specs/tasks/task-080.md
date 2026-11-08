@@ -9,7 +9,7 @@ progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §31 Integration Tests"
   - "explorer-implementation.md §32 Visual Tests"
-commits: ["659f64e8e32cc4317f9b3b78f39b58c3561d1d3e"]
+commits: ["659f64e8e32cc4317f9b3b78f39b58c3561d1d3e", "da74a27ff27141e98d6b79532ced8730ba494ba8"]
 ---
 
 ## Spec Excerpt
@@ -81,29 +81,35 @@ Read `crates/gyre-server/src/explorer_ws.rs` for the WebSocket protocol implemen
 
 ## Shipped
 
-**Status: implemented — all four §31 integration-test scenarios and all four §32 visual-test scenarios have real, passing tests, re-verified on the merged head (candidate + task-070 lineage).**
+**Status: implemented — all four §31 integration-test scenarios and all four §32 visual-test scenarios have real, passing tests on the current head, which carries the full 15-test mainline+task-080 inventory in `explorer_ws_integration.rs` (11 mainline tests + 4 task-080 tests).**
 
-### Merge reconciliation (this round)
+### Review repair (this round)
 
-The retained source checkpoint (explorer tests) was merged with the task-070 lineage (LLM explorer agent, best-version refinement tracking, call-graph context notes). The conflicted `crates/gyre-server/tests/explorer_ws_integration.rs` was resolved to the checkpoint's superset version (13 tests: the 9 pre-existing + the 4 task-080 tests). The merged `explorer_ws.rs` keeps the candidate's protocol contract and adds base-side enhancements (best-version-across-refinement-rounds tracking; call-graph completeness note in the agent system prompt) — the tests pass unchanged against it, confirming the checkpoint's assertions were contract-level, not implementation-coupled.
+Independent review found that the earlier merge resolution of `explorer_ws_integration.rs` had silently dropped two mainline tests from the assigned base (task-034 lineage, commit eff64e31d): `explorer_ws_self_check_refinement_flow` and `explorer_ws_self_check_sends_best_version_after_cap` — leaving the best-version-at-refinement-cap behavior (the `best_view_query` tracker in both the SDK and native `LlmPort` self-check loops of `explorer_ws.rs`) with zero test coverage, while the previous Shipped notes incorrectly described the resolution as a superset. Both tests are now restored (commit da74a27ff), ported onto the test-local `ScriptedLlmFactory` infrastructure with the shared `run_message_turn`/`TurnTrace` helper; the earlier claim that the checkpoint's assertions "pass unchanged" against the merged `explorer_ws.rs` was true only for the 9 retained tests and concealed the loss of the other 2. The base's `.expect()` on `seed_builtin_policies` was also restored, removing an `unused_must_use` warning from the test binary.
+
+### Merge reconciliation (earlier round, corrected)
+
+The retained source checkpoint (explorer tests) was merged with the task-070 lineage (LLM explorer agent, best-version refinement tracking, call-graph context notes). The conflicted `explorer_ws_integration.rs` was resolved to the checkpoint's version — 13 tests at the time (9 of the 11 mainline tests retained + the 4 task-080 tests), an accidental net loss of 2 mainline tests now repaired above. The merged `explorer_ws.rs` keeps the candidate's protocol contract and carries the base-side enhancements (best-version-across-refinement-rounds tracking; call-graph completeness note in the agent system prompt), which the two restored tests now cover.
 
 ### §31 Integration Tests (crates/gyre-server/tests/explorer_ws_integration.rs)
 
 - **WebSocket session lifecycle** — `explorer_ws_full_session_lifecycle`: connect, `list_views` protocol exchange, a full message turn (thinking status → streamed text done=true → view_query → ready), then a clean client Close frame with the server confirmed closing the socket (Close reply or stream end, never a 5s hang).
 - **Agent generates valid ViewQuery from a question** — `explorer_ws_agent_generates_view_query_from_question`: seeds real graph nodes (Space, TaskPort, Workspace, Tenant, RepoStore) into the graph store, asks "What would break if I change Space?" over the no-LLM fallback path, and asserts the emitted query is a `focus` scope on node `Space` (extracted from the question and validated against actual graph nodes) that deserializes against the ViewQuery grammar.
 - **Self-check loop catches and fixes overly broad groups** — `explorer_ws_self_check_loop_refines_broad_groups`: a `ScriptedLlmFactory` (test-local `LlmPort` impl with a shared call counter) wires `AppState.llm` so the native agent path runs deterministically. Seeded 25 `node_N` graph nodes make the scripted broad group (`nodes: ["node"]`, substring-matches 25 > 20 threshold) trigger the dry-run "too broad" warning. Asserts: `refining` status observed, exactly 2 LLM calls (one refinement round), and exactly one view_query reaching the client — the refined one. Mutation-checked: setting `MAX_REFINEMENT_TURNS = 0` fails the test, so the pass is attributable to the real refinement loop, not fixture drift.
+- **Self-check refinement flow (restored mainline)** — `explorer_ws_self_check_refinement_flow`: a first scripted attempt referencing a nonexistent callout node triggers an actionable unresolved-callout warning → `refining` status → the second attempt (produced after receiving the dry-run feedback as a synthetic tool result) resolves cleanly; exactly the refined view_query reaches the frontend.
+- **Best version sent after refinement cap (restored mainline)** — `explorer_ws_self_check_sends_best_version_after_cap`: four scripted attempts with monotonically worsening warning counts run exactly `MAX_REFINEMENT_TURNS` (3) refinement rounds; at the cap the frontend receives the best attempt (fewest actionable warnings — the first one), proving a later regressed refinement does not displace an earlier, better attempt via the `best_view_query` tracker.
 - **Saved view round-trip** — WS save→list→load covered by `explorer_ws_save_and_load_view`; `explorer_rest_saved_view_round_trip` covers the REST half: `POST /api/v1/repos/:id/views` (201) → list contains it → `GET /views/:view_id` returns name/description and exactly-equal query JSON (the render round-trip input) → `DELETE` → 404 on re-load.
 
 ### §32 Visual Tests (web/tests/e2e/explorer-visual.spec.js)
 
 The Playwright suite (deterministic mock graph + forced-webfont environment, baselines committed in `-snapshots/`) covers all four spec scenarios: semantic zoom at three levels, view-query rendering (groups/callouts/narrative + annotation bar), filter subsets via the query editor, and blast-radius interactive mode (tiered coloring + node click). `filter_preset_buttons_show_correct_subsets` clicks the **real toolbar preset buttons** (Endpoints/Types) as the spec's implementation plan describes, with baselines `filter-preset-endpoints.png` / `filter-preset-types.png`; the All/Endpoints/Types states render pixel-distinct screenshots (not just below the 2% diff threshold), so a preset that stops applying its filter fails the test. The base-side `ExplorerCanvas.svelte` changes merged this round (evaluative-lens chip badges, frame-scheduling rework) do not alter any committed baseline — the chips require trace span stats the mock graph does not provide, and settled rendering is unchanged — confirmed by the full-suite pass on the merged head.
 
-### Test evidence (merged head, this round)
+### Test evidence (current head, after review repair)
 
-- `cargo test -p gyre-server --test explorer_ws_integration`: **13 passed, 0 failed** — evidence: `/tmp/stage/review-evidence/explorer-ws-integration-postmerge.log`.
-- `cd web && npm ci && npm test` (vitest): **67 files, 1668 passed, 41 skipped, 0 failed** (grown from the checkpoint's 64 files/1626 tests via the merged base-side test additions).
-- Playwright `explorer-visual` on the merged head: **all 16 tests pass in a single browser process (1.1m)** — evidence: `/tmp/stage/review-evidence/explorer-visual-postmerge.log`. This supersedes the earlier single-process/test-by-test restriction: with the committed `chromiumSandbox: false` + `--no-zygote` config and the preinstalled headless shell (`PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/gyre-playwright`), the full suite runs in one process against a directly-launched server binary.
-- Mutation checks retained from the checkpoint round: `MAX_REFINEMENT_TURNS = 0` fails the self-check test; breaking the `types` preset dimming is caught by `canvas-filters.test.js` (unit); pixel-distinct preset baselines catch a preset that applies no filter.
+- `cargo test -p gyre-server --test explorer_ws_integration`: **15 passed, 0 failed** (11 mainline + 4 task-080) — evidence: `/tmp/stage/review-evidence/explorer-ws-integration-15tests.log`.
+- `cd web && npm ci && npm test` (vitest): **67 files, 1668 passed, 41 skipped, 0 failed** (measured on the pre-repair merged head; this round's repair touched no frontend code).
+- Playwright `explorer-visual` on the merged head: **all 16 tests pass in a single browser process (1.1m)** — evidence: `/tmp/stage/review-evidence/explorer-visual-postmerge.log`. This supersedes the earlier single-process/test-by-test restriction: with the committed `chromiumSandbox: false` + `--no-zygote` config and the preinstalled headless shell (`PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/gyre-playwright`), the full suite runs in one process against a directly-launched server binary. Not re-run this round: the repair touched only the Rust test file and this task doc.
+- Mutation checks retained from the checkpoint round: `MAX_REFINEMENT_TURNS = 0` fails the self-check test; breaking the `types` preset dimming is caught by `canvas-filters.test.js` (unit); pixel-distinct preset baselines catch a preset that applies no filter. The restored best-version test fails if the `best_view_query` tracker stops preferring the attempt with the fewest actionable warnings (e.g. sending the last attempt instead).
 
 ### Sandbox restrictions (for remote verification, not code defects)
 
