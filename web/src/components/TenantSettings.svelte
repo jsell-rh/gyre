@@ -31,6 +31,7 @@
   const TABS = [
     { id: 'users',      labelKey: 'tenant_settings.tabs.users' },
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
+    { id: 'workspaces', labelKey: 'tenant_settings.tabs.workspaces' },
     { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
     { id: 'policies',   label: 'Policies' },
     { id: 'llm',        label: 'LLM Defaults' },
@@ -52,6 +53,17 @@
   let computeTargets = $state([]);
   let computeLoading = $state(false);
   let computeError = $state(null);
+
+  // ── Workspaces (HSI §1.5 Admin tenant scope: Manage Workspaces + New Workspace) ──
+  let tenantWorkspaces = $state([]);
+  let workspacesLoading = $state(false);
+  let workspacesError = $state(null);
+  let newWsOpen = $state(false);
+  let newWsName = $state('');
+  let newWsDescription = $state('');
+  let newWsSaving = $state(false);
+  let newWsError = $state(null);
+  const goToWorkspaceHome = getContext('goToWorkspaceHome') ?? null;
 
   // ── Budget ────────────────────────────────────────────────────────────
   let budgetSummary = $state(null);
@@ -209,6 +221,9 @@
     if (tab === 'compute') {
       if (untrack(() => computeTargets.length === 0 && !computeLoading)) loadCompute();
     }
+    if (tab === 'workspaces') {
+      if (untrack(() => tenantWorkspaces.length === 0 && !workspacesLoading)) loadWorkspaces();
+    }
     if (tab === 'budget') {
       if (untrack(() => !budgetSummary && !budgetLoading)) loadBudget();
     }
@@ -263,6 +278,39 @@
       computeError = e?.message ?? $t('tenant_settings.error_load_compute');
     } finally {
       computeLoading = false;
+    }
+  }
+
+  async function loadWorkspaces() {
+    workspacesLoading = true;
+    workspacesError = null;
+    try {
+      const data = await api.workspaces();
+      tenantWorkspaces = Array.isArray(data) ? data : [];
+    } catch (e) {
+      workspacesError = e?.message ?? $t('tenant_settings.error_load_workspaces');
+    } finally {
+      workspacesLoading = false;
+    }
+  }
+
+  async function handleCreateWorkspace() {
+    const name = newWsName.trim();
+    if (!name) return;
+    newWsSaving = true;
+    newWsError = null;
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const newWs = await api.createWorkspace({ name, description: newWsDescription.trim() || undefined, slug });
+      newWsOpen = false;
+      newWsName = '';
+      newWsDescription = '';
+      await loadWorkspaces();
+      if (newWs) goToWorkspaceHome?.(newWs);
+    } catch (e) {
+      newWsError = e?.message ?? $t('tenant_settings.error_create_workspace');
+    } finally {
+      newWsSaving = false;
     }
   }
 
@@ -746,6 +794,107 @@
                   <td>
                     <button class="delete-btn" onclick={() => deleteComputeTarget(ct.id)} disabled={computeDeleting === ct.id} title="Delete {ct.name}">
                       {computeDeleting === ct.id ? '…' : '✕'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+
+    <!-- ── Workspaces (HSI §1.5 Admin tenant scope: Manage Workspaces) ── -->
+    {:else if activeTab === 'workspaces'}
+      <div id="tab-panel-workspaces" role="tabpanel" aria-label="Workspaces" class="tab-panel" data-testid="tenant-tab-workspaces">
+        <div class="panel-header">
+          <h2 class="panel-title">{$t('tenant_settings.workspaces.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.workspaces.desc')}</p>
+          <button
+            class="btn-primary"
+            onclick={() => { newWsOpen = !newWsOpen; newWsError = null; }}
+            data-testid="tenant-new-workspace-btn"
+          >
+            {$t('tenant_settings.workspaces.new_btn')}
+          </button>
+        </div>
+
+        {#if newWsOpen}
+          <form
+            class="new-ws-form"
+            data-testid="tenant-new-workspace-form"
+            onsubmit={(e) => { e.preventDefault(); handleCreateWorkspace(); }}
+          >
+            <label class="create-ws-label" for="tenant-new-ws-name">
+              {$t('tenant_settings.workspaces.name_label')}
+              <input
+                id="tenant-new-ws-name"
+                class="field-input"
+                type="text"
+                bind:value={newWsName}
+                required
+                disabled={newWsSaving}
+                data-testid="tenant-new-ws-name"
+                placeholder={$t('tenant_settings.workspaces.name_placeholder')}
+              />
+            </label>
+            <label class="create-ws-label" for="tenant-new-ws-desc">
+              {$t('tenant_settings.workspaces.desc_label')}
+              <input
+                id="tenant-new-ws-desc"
+                class="field-input"
+                type="text"
+                bind:value={newWsDescription}
+                disabled={newWsSaving}
+                data-testid="tenant-new-ws-desc"
+                placeholder={$t('tenant_settings.workspaces.desc_placeholder')}
+              />
+            </label>
+            <div class="form-actions">
+              <button
+                class="btn-primary"
+                type="submit"
+                disabled={newWsSaving}
+                data-testid="tenant-new-ws-submit"
+              >
+                {newWsSaving ? $t('tenant_settings.workspaces.creating') : $t('tenant_settings.workspaces.create_btn')}
+              </button>
+              <button type="button" class="btn-secondary" onclick={() => { newWsOpen = false; }}>
+                {$t('common.cancel')}
+              </button>
+            </div>
+            {#if newWsError}
+              <p class="panel-error" role="alert" data-testid="tenant-new-ws-error">{newWsError}</p>
+            {/if}
+          </form>
+        {/if}
+
+        {#if workspacesLoading}
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.workspaces.loading')}</div>
+        {:else if workspacesError}
+          <div class="panel-error" role="alert">{workspacesError}</div>
+        {:else if tenantWorkspaces.length === 0}
+          <div class="panel-empty">{$t('tenant_settings.workspaces.empty')}</div>
+        {:else}
+          <table class="data-table" data-testid="tenant-workspaces-table">
+            <thead>
+              <tr>
+                <th scope="col">{$t('tenant_settings.workspaces.col_name')}</th>
+                <th scope="col">{$t('tenant_settings.workspaces.col_slug')}</th>
+                <th scope="col">{$t('tenant_settings.workspaces.col_trust')}</th>
+                <th scope="col">{$t('tenant_settings.workspaces.col_created')}</th>
+                <th scope="col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each tenantWorkspaces as ws (ws.id)}
+                <tr data-testid="tenant-workspace-row">
+                  <td>{ws.name}</td>
+                  <td class="mono">{ws.slug ?? '—'}</td>
+                  <td>{ws.trust_level ?? '—'}</td>
+                  <td>{fmtTimestamp(ws.created_at)}</td>
+                  <td>
+                    <button class="btn-secondary" onclick={() => goToWorkspaceHome?.(ws)} data-testid="tenant-ws-open-btn">
+                      {$t('tenant_settings.workspaces.open_btn')}
                     </button>
                   </td>
                 </tr>

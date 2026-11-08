@@ -1,12 +1,12 @@
 ---
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
-depends_on: []
-progress: needs-revision
+depends_on: [task-217]
+progress: complete
 review: specs/reviews/task-087.md
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
-commits: [998a3518, 4c868136, 1d08e5a3]
+commits: ["115ed5aee2eb8fa9800624c71239086281d2f8d2", "71707120536a17352ca21965214e75b0f73cc515", "998a3518a94e63fa3527145f82890f906a300587", "595439867f28db37c75ff74538480e41b09eae53"]
 ---
 
 ## Spec Excerpt
@@ -82,6 +82,14 @@ The `TraceRepository` port already exists in `crates/gyre-ports/src/trace.rs` an
 - [x] Max spans per trace capped at configured limit
 - [x] Trace replaced on re-run for same MR
 - [x] `cargo test --all` passes
+
+## Shipped
+
+- **TraceCapture gate + OTLP receiver**: `trace_capture` gate type parses the spec's YAML config block (otlp_port/test_command/max_spans/capture_external/env), runs the 7-step lifecycle — tonic OTLP gRPC receiver bound before the test command, OTel env vars injected (user env overrides, `{{repo_name}}` templated), post-capture span→graph-node linkage (HTTP→Endpoint via `http.route`, function→Function via `code.function`, DB→Module, unresolved→None), `GateTrace` stored with real source-branch commit SHA; gate always passes (observational).
+- **Span payload endpoint with real authorization**: `GET /api/v1/trace-spans/:span_id/payload` takes only `:span_id` (compound trace-prefixed ids are globally unique), resolves span → trace → MR → workspace and returns 403 on cross-tenant access; tested for 200/401/403/404 and trace-replacement semantics. `GET /api/v1/merge-requests/:id/trace` and the `trace://` MCP resource share one assembler.
+- **Storage lifecycle on all three adapters**: one trace per MR with replace-on-re-run, payload rows built from raw summaries (4KB truncated columns + full-payload blobs retrievable by span), `promote_to_attestation` on merge and `delete_by_mr` on close; the mem adapter now mirrors the SQLite contract (payload rows populated, replacement cascade, 4KB truncation, permanence) so in-memory mode no longer 404s payloads.
+- **Spec-cased wire format**: `SpanKind`/`SpanStatus` serialize PascalCase (`"Server"`/`"Ok"`) per the HSI §3a JSON example with legacy-lowercase deserialization aliases and case-insensitive parse; all web span-status consumers (DetailPanel waterfall, ExplorerCanvas, FlowCanvas error ring, NodeDetailPanel, MoldableView normalization) handle both casings, with regression tests on both sides.
+- **Rebase repair + rustfmt gate fix (this round, merge commit 520165e8)**: concluded the in-progress merge of upstream base `1d9547de` (thin-worker-recovery PR #698) — all Rust sources auto-merged; only `web/dist` hashed-bundle conflicts, resolved as staged (generated assets are restored/rebuilt by final integration). The failing verification round's only real defect was the changed-lines rustfmt gate on `api/traces.rs`, `mem.rs`, `otlp_receiver.rs`; fixed in `115ed5ae` with whitespace-only rustfmt (method-chain wrapping, assert/closure indentation, no behavior change). Post-fix probes at `115ed5ae`: `check-rustfmt-diff.py 1d9547de` clean (4 files); `cargo check -p gyre-server` clean; focused trace suites 37/37 in gyre-server (gate_executor trace_capture 7, api::traces 6, mem trace contract+payload 13, otlp_receiver 10, merge_processor/mcp trace resources) and 8/8 gyre-common trace; check-task-commit-attribution OK. Evidence: `/tmp/stage/review-evidence/task-087-rustfmt-repair.md`.
 
 ## Agent Instructions
 

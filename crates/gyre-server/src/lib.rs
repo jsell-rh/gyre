@@ -67,8 +67,8 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
-    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
     ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
     GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
@@ -339,6 +339,8 @@ pub struct AppState {
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §Budget Tracking).
+    pub budget_calls: Arc<dyn BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -1133,6 +1135,10 @@ pub fn build_state(
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
+        ),
+        budget_calls: store!(
+            dyn BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
         ),
         search: store!(
             dyn gyre_ports::SearchPort,

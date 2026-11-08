@@ -559,7 +559,9 @@ mod tests {
         // `builtin-agent-scoped-access` (write on any resource type). The
         // bare test state has an empty policy store, which would 403 the
         // request before the signing path under test is ever reached.
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
 
         let (app, repo_id) = create_project_and_repo(app).await;
 
