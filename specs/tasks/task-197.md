@@ -2,7 +2,7 @@
 title: "Materialize default Tenant entity on first-startup bootstrap"
 spec_ref: "hierarchy-enforcement.md §1 Bootstrap Behavior (§50-66)"
 depends_on: [task-225]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "hierarchy-enforcement.md §5"
 commits: ["2419125dd059894f7b106d45306133a5b1cf84d5", "71901c549c031a0a774ce71e87e9842bc7932048"]
