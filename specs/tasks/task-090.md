@@ -144,34 +144,43 @@ lens selection.
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
 
-### Re-verification after contract restore (round 13)
+### Rebase repair and re-verification (round 14)
 
-The executor again restored the assigned task document (repair id
-`4c71002f1ec54160b9da4ef48cb88973`, assigned base 30a14669, candidate
-head 9ff1173) — the only working-tree delta was the task document
-itself. Resolved this round:
+The executor assigned a rebase repair (repair id `13613c1a0d49475aae2ada405a41157c`,
+assigned base 124a852, candidate head 0e4d785): merging the new assignment
+base (task-193's spec-approval attestation work and the trace/causal Explorer
+work) into this branch conflicted in `ExplorerView.svelte` and
+`ExplorerCanvas.svelte`. Resolved this round:
 
-- **No production code changes.** The three-lens implementation
+- **Merge conflicts resolved by union of both import groups.** Both
+  conflicts were import blocks only: HEAD (this branch) imports the lens
+  pipeline (`lens-rendering.js`), the incoming side imports the trace
+  pipeline (`trace-navigation.js`, `causal-trace.js`). Both features are
+  used by the merged files (verified: `evaluativeNodeDecorations`/
+  `gateStatusDecoration` draw paths, `loadEvaluativeData`/`gateStatusBySpec`/
+  `specApprovals` data flow, and `buildTraceSteps`/`computeTraceOrder`/
+  `traceStepTargetNode` trace paths all intact), so both import sets are
+  kept. The merge commit is `be494b399`; no conflict markers remain
+  tree-wide.
+- **No other production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
-  gates.rs rejection fields) is intact at HEAD from product-surface
-  commit 0766a167, an ancestor of this branch head. Later ExplorerCanvas
-  changes (task-053 performance work) preserved the evaluative
-  decorations — verified by inspection and by the component suite below.
-- **Fresh focused probes on this branch after `npm ci`:**
-  `npx vitest run` on the lens unit/URL test files — 32/32 passed
-  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r13.log,
-  exit 0); `ExplorerCanvas.test.js` — 157/157 passed
-  (task090-vitest-explorercanvas-r13.log, exit 0);
+  gates.rs rejection fields) is intact from product-surface commit
+  0766a167, an ancestor of this branch head; the incoming task-193
+  spec-approval changes (attestation/stack_hash validity, ledger API
+  changes in specs.rs/spec_ledger.rs) merged cleanly around it.
+- **Fresh focused probes on the merged tree after `npm ci`:**
+  `npx vitest run` on the six suites covering both conflicted files —
+  lens-rendering (27), ExplorerViewLensUrl (5), ExplorerCanvas (157),
+  ExplorerCanvasTrace, causal-trace, ExplorerViewLargeGraph — 238/238
+  passed (task090-merge-resolution-tests.log, exit 0);
   `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r13.log, exit 0; no web/dist churn). Logs retained
-  under /tmp/stage/review-evidence with exit codes.
+  incl. `list_spec_approvals_includes_rejection_fields`, confirming the
+  ledger rejection fields survive the merge with task-193's ledger changes
+  (task090-cargo-gates-merge.log, exit 0). Logs retained under
+  /tmp/stage/review-evidence with exit codes.
 - **Assigned task text preserved byte-identical.** The acceptance criteria
-  checkboxes are left unchecked exactly as assigned — marking them is a
-  protected-task-text change that triggered the repeated contract
-  restores; acceptance is decided by independent review, not by
-  self-checking the boxes. Frontmatter restored (progress
-  ready-for-review, product-surface commit 0766a167 attributed in
-  `commits:`), which keeps
-  `scripts/check-task-commit-attribution.sh` satisfied; process-type
-  commits are out of its scope. The working tree is clean apart from this
-  task document.
+  checkboxes are left unchecked exactly as assigned — acceptance is decided
+  by independent review, not by self-checking the boxes. Frontmatter
+  unchanged (progress ready-for-review, product-surface commit 0766a167
+  attributed in `commits:`); the merge commit is process-type and out of
+  `scripts/check-task-commit-attribution.sh` scope. Working tree clean.
