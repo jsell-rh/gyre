@@ -187,6 +187,31 @@ impl JjOpsPort for JjOpsAdapter {
         Ok(())
     }
 
+    async fn jj_bookmark_set(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        // `set`, not `create`: the completion path points the source-branch
+        // bookmark at the agent's working change, and that bookmark usually
+        // already exists — the spawn flow pre-creates the git branch and
+        // jj's git import materializes it as a local bookmark. `jj bookmark
+        // create` refuses ("Bookmark already exists", jj 0.39.0
+        // bookmark/create.rs) and the subsequent export would push the
+        // stale spawn-time position, silently losing the agent's work.
+        // `set` creates-or-moves; `--allow-backwards` keeps the move valid
+        // when a prior rebase/undo left the bookmark sideways of `@`.
+        self.run_jj(
+            repo_path,
+            &[
+                "bookmark",
+                "set",
+                name,
+                "-r",
+                change_id,
+                "--allow-backwards",
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn jj_undo(&self, repo_path: &str) -> Result<()> {
         // Top-level `jj undo` (jj ≥ 0.21): "Undo the last operation".
         // `jj op undo` is NOT a subcommand of `jj operation` in jj 0.39.0
@@ -1074,6 +1099,104 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// R19 F1 contract — the reviewer repro: in the workspace layout this
+    /// task ships, the source branch exists as a git ref BEFORE the
+    /// agent's jj workspace is created (spawn's `create_branch` writes
+    /// refs/heads/<branch> into the bare repo), and jj's git import
+    /// materializes it as a LOCAL bookmark. On completion the bookmark
+    /// must be pointed at the agent's working change — but `jj bookmark
+    /// create` refuses on an existing bookmark, so the port's
+    /// `jj_bookmark_set` (create-or-move) must be used, and the
+    /// subsequent `jj git export` must carry the agent's edit into the
+    /// bare repo's refs. Pre-fix, the create failed and the export
+    /// pushed the bookmark's stale spawn-time position: the MR diffed
+    /// and merged an unchanged branch, silently losing the agent's work.
+    #[tokio::test]
+    async fn jj_bookmark_set_moves_imported_bookmark_to_agent_work() {
+        if !jj_fixture_guard() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = fixture_shared_checkout(&dir).await;
+        let main_checkout = dir.path().join("jj-main");
+
+        // The spawn flow: the branch exists in the bare git repo FIRST
+        // (one commit on top of main), then the agent's workspace is
+        // added on it — exactly `create_branch` + `jj_workspace_add`.
+        let scratch = dir.path().join("scratch");
+        std::fs::write(scratch.join("spawn-branch.txt"), "branch base\n").unwrap();
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "spawn branch base"]);
+        git(&scratch, &["push", &repo_path, "HEAD:refs/heads/feat/set"]);
+        let spawn_tip = git_rev_parse(&scratch, "HEAD");
+
+        let ws = dir.path().join("workspaces").join("agent-set");
+        let adapter = JjOpsAdapter::new();
+        adapter
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws.to_str().unwrap(),
+                "agent-set",
+                "feat/set",
+                "agent work",
+            )
+            .await
+            .expect("workspace add");
+
+        // The agent's in-progress work lives in @ (the working-copy
+        // change) — nothing is committed until MR time.
+        std::fs::write(ws.join("feature.txt"), "agent change\n").unwrap();
+
+        // The repro: `jj_bookmark_create` on the imported bookmark FAILS —
+        // the branch name is already a local jj bookmark (git import
+        // merged it in). Pinned so the create-vs-set distinction cannot
+        // silently regress.
+        let err = adapter
+            .jj_bookmark_create(ws.to_str().unwrap(), "feat/set", "@")
+            .await
+            .expect_err("bookmark create must refuse on an imported bookmark");
+        assert!(
+            err.to_string().to_lowercase().contains("already exists"),
+            "create must fail with 'already exists', got: {err}"
+        );
+
+        // The fix: `set` moves the existing bookmark onto the working
+        // change instead of refusing.
+        adapter
+            .jj_bookmark_set(ws.to_str().unwrap(), "feat/set", "@")
+            .await
+            .expect("bookmark set must move the imported bookmark to @");
+
+        // The export carries the bookmark — and the agent's edit — into
+        // the bare git repo's refs, where diff/can_merge/merge read it.
+        adapter
+            .jj_git_export(ws.to_str().unwrap())
+            .await
+            .expect("jj git export");
+
+        let new_tip = git_rev_parse(std::path::Path::new(&repo_path), "refs/heads/feat/set");
+        assert_ne!(
+            new_tip, spawn_tip,
+            "export must move refs/heads/feat/set off its spawn-time position"
+        );
+        let show = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["show", "refs/heads/feat/set:feature.txt"])
+            .output()
+            .expect("git binary");
+        assert!(
+            show.status.success(),
+            "feature.txt must exist at the exported branch tip: {}",
+            String::from_utf8_lossy(&show.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&show.stdout),
+            "agent change\n",
+            "the bare repo's branch must carry the agent's edit at @ — the work the MR diffs and merges"
+        );
     }
 
     /// F1 contract, clean path: after the target branch moves in the git

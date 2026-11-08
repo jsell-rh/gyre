@@ -54,6 +54,20 @@ pub trait JjOpsPort: Send + Sync {
     /// Create a bookmark (branch) pointing to a specific change.
     async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()>;
 
+    /// Point the bookmark `name` at `change_id`, creating it when absent
+    /// and MOVING it when already present (`jj bookmark set <name> -r
+    /// <change_id> --allow-backwards`).
+    ///
+    /// Unlike [`JjOpsPort::jj_bookmark_create`], this must succeed when the
+    /// bookmark already exists — required on the agent-completion path:
+    /// the spawn flow pre-creates the source branch in the backing git
+    /// repo and jj's git import materializes it as a local bookmark long
+    /// before the agent completes, so `jj bookmark create` refuses with
+    /// "Bookmark already exists" and the subsequent export would push the
+    /// bookmark's stale spawn-time position, stranding the agent's work at
+    /// `@` outside every bookmark.
+    async fn jj_bookmark_set(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()>;
+
     /// Undo the last jj operation.
     async fn jj_undo(&self, repo_path: &str) -> Result<()>;
 

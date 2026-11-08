@@ -193,6 +193,12 @@ pub struct ConfigurableGitOps {
     /// When true, `revert_commit` returns a Conflict — the R4-F1
     /// conflict path must be testable without a real git repo.
     pub revert_conflicts: bool,
+    /// Shared flag consulted by `diff`: when set, `diff` reports one
+    /// changed file (task-106 R19 F2 — lets a test observe, through the
+    /// MR's diff_stats, whether the jj git export ran BEFORE the stats
+    /// were computed; the flag is flipped by the jj double's export side
+    /// effect at the exact call point).
+    pub diff_change_when: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
@@ -203,6 +209,7 @@ impl Default for ConfigurableGitOps {
             revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
             revert_fails: false,
             revert_conflicts: false,
+            diff_change_when: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -240,9 +247,13 @@ impl GitOpsPort for ConfigurableGitOps {
     }
 
     async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        let changed = usize::from(
+            self.diff_change_when
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
         Ok(DiffResult {
-            files_changed: 0,
-            insertions: 0,
+            files_changed: changed,
+            insertions: changed,
             deletions: 0,
             patches: vec![],
         })
@@ -408,6 +419,10 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
+    async fn jj_bookmark_set(&self, _repo_path: &str, _name: &str, _change_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
         Ok(())
     }
@@ -467,6 +482,19 @@ pub struct ConfigurableJjOps {
     /// `"{main_checkout_path}:{git_repo_path}"` per call.
     pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
     pub git_export_calls: parking_lot::Mutex<Vec<String>>,
+    /// `jj_bookmark_set` calls as `(repo_path, name, change_id)` in order
+    /// (task-106 R19 F1: the completion path must SET the imported
+    /// bookmark, not create).
+    pub bookmark_set_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// `jj_bookmark_create` calls as `(repo_path, name, change_id)` in
+    /// order — recorded so tests can pin that the completion path never
+    /// regresses to create (task-106 R19 F1).
+    pub bookmark_create_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Synchronous side effect run inside `jj_git_export` before it
+    /// returns (task-106 R19 F2: lets tests make the export's effect on
+    /// git-visible state observable at the exact call point, so
+    /// export-before-stats ordering is provable with doubles).
+    pub git_export_effect: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 #[cfg(test)]
@@ -497,12 +525,21 @@ impl JjOpsPort for ConfigurableJjOps {
         Ok("0000000000000000000000000000000000000000".to_string())
     }
 
-    async fn jj_bookmark_create(
-        &self,
-        _repo_path: &str,
-        _name: &str,
-        _change_id: &str,
-    ) -> Result<()> {
+    async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_create_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
+        Ok(())
+    }
+
+    async fn jj_bookmark_set(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_set_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
         Ok(())
     }
 
@@ -562,6 +599,9 @@ impl JjOpsPort for ConfigurableJjOps {
     }
 
     async fn jj_git_export(&self, workspace_path: &str) -> Result<()> {
+        if let Some(effect) = self.git_export_effect.lock().as_ref() {
+            effect();
+        }
         self.git_export_calls
             .lock()
             .push(workspace_path.to_string());

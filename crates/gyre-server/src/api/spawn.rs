@@ -1478,7 +1478,62 @@ pub async fn complete_agent(
         }
     }
 
-    // Compute diff stats + conflict detection (like create_mr does).
+    // jj completion path (source-control.md §4): the agent's in-progress
+    // change must become visible to git-backed consumers (diff,
+    // can_merge, merge_branches) BEFORE the MR's stats are computed from
+    // those git refs (R19 F2: stats read the bare repo's refs, so a
+    // post-create export left a fresh MR with empty/stale diff_stats and
+    // a pre-export conflict verdict). In the workspace layout, agent work
+    // lives in jj's object database — `jj git export` pushes it into the
+    // bare git repo's refs, and a bookmark on the source branch makes the
+    // branch tip resolvable by name.
+    if let Some(wt) = worktrees.first() {
+        if std::path::Path::new(&wt.path).join(".jj").exists() {
+            // Bookmark SET, not create (R19 F1): the spawn flow
+            // pre-creates the source branch in the bare repo and jj's
+            // git import materializes it as a local bookmark, so `jj
+            // bookmark create` fails with "Bookmark already exists" and
+            // the export would push the bookmark's stale spawn-time
+            // position — the agent's work at @ would never reach the bare
+            // repo and the MR would diff and merge an unchanged branch.
+            // `set` moves the existing bookmark onto @.
+            if let Err(e) = state
+                .jj_ops
+                .jj_bookmark_set(&wt.path, &mr.source_branch, "@")
+                .await
+            {
+                tracing::warn!(agent_id = %agent.id, "jj bookmark set failed: {e}");
+            }
+            if let Err(e) = state.jj_ops.jj_git_export(&wt.path).await {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    error = %e,
+                    "jj git export failed — agent work may be invisible to merge checks"
+                );
+            } else {
+                tracing::info!(
+                    agent_id = %agent.id,
+                    branch = %mr.source_branch,
+                    "jj work exported to git on complete"
+                );
+            }
+        } else if std::path::Path::new(&wt.path).exists() {
+            // Legacy colocated layout (pre-workspace): bookmark best-effort.
+            // `set` here too — the colocated repo's branches are equally
+            // likely to pre-exist the completion (R19 F1).
+            if let Err(e) = state
+                .jj_ops
+                .jj_bookmark_set(&wt.path, &mr.source_branch, "@")
+                .await
+            {
+                tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
+            }
+        }
+    }
+
+    // Compute diff stats + conflict detection (like create_mr does) —
+    // AFTER the jj export above so the stats reflect the agent's actual
+    // completed work (R19 F2).
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         mr.workspace_id = repo.workspace_id.clone();
         if let Ok(diff) = state
@@ -1539,48 +1594,6 @@ pub async fn complete_agent(
     cleanup_interrogation_policies(&state, &id).await;
     // Also remove any stored conversation context for this agent.
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
-
-    // jj completion path (source-control.md §4): the agent's in-progress
-    // change must become visible to git-backed consumers (diff,
-    // can_merge, merge_branches) when the agent completes. In the
-    // workspace layout, agent work lives in jj's object database —
-    // `jj git export` pushes it into the bare git repo's refs. A bookmark
-    // on the source branch makes the branch tip resolvable by name.
-    if let Some(wt) = worktrees.first() {
-        if std::path::Path::new(&wt.path).join(".jj").exists() {
-            // Workspace working copy: create the branch bookmark and
-            // export to git so the MR's diff/conflict checks see the work.
-            if let Err(e) = state
-                .jj_ops
-                .jj_bookmark_create(&wt.path, &mr.source_branch, "@")
-                .await
-            {
-                tracing::warn!(agent_id = %agent.id, "jj bookmark create failed: {e}");
-            }
-            if let Err(e) = state.jj_ops.jj_git_export(&wt.path).await {
-                tracing::warn!(
-                    agent_id = %agent.id,
-                    error = %e,
-                    "jj git export failed — agent work may be invisible to merge checks"
-                );
-            } else {
-                tracing::info!(
-                    agent_id = %agent.id,
-                    branch = %mr.source_branch,
-                    "jj work exported to git on complete"
-                );
-            }
-        } else if std::path::Path::new(&wt.path).exists() {
-            // Legacy colocated layout (pre-workspace): bookmark best-effort.
-            if let Err(e) = state
-                .jj_ops
-                .jj_bookmark_create(&wt.path, &mr.source_branch, "@")
-                .await
-            {
-                tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
-            }
-        }
-    }
 
     // Write snapshot ref for this agent (best-effort — never fail the complete request)
     let snap_result: Result<(), anyhow::Error> = async {
@@ -2156,8 +2169,11 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
+    use super::complete_agent;
     use super::create_interrogation_policies_in;
     use super::spawn_agent_core;
+    use super::CompleteAgentRequest;
+    use super::SpawnAgentRequest;
     use crate::mem::{test_state, test_state_with_jj_ops, test_state_with_secrets};
     use axum::{body::Body, Router};
     use gyre_common::Id;
@@ -2469,6 +2485,135 @@ mod tests {
             wts[0].path.contains("/workspaces/"),
             "jj-provisioned agent must record the jj workspace path, got {}",
             wts[0].path
+        );
+    }
+
+    /// Task-106 R19 F1+F2: on completion of a jj-workspace agent, the
+    /// source-branch bookmark must be SET (moved onto @), not created —
+    /// the spawn flow pre-creates the branch in the bare repo and jj's
+    /// git import materializes it as a local bookmark, so `jj bookmark
+    /// create` fails with "Bookmark already exists" and the export
+    /// would push the stale spawn-time position, silently losing the
+    /// agent's work (F1). And the export must run BEFORE the MR's diff
+    /// stats are computed from git refs (F2): the jj double's export
+    /// side effect flips the shared flag the git double's `diff` reads,
+    /// so a fresh MR carrying non-empty diff_stats proves the ordering.
+    /// Fails on both pre-fix behaviors.
+    #[tokio::test]
+    async fn complete_agent_sets_bookmark_and_exports_before_mr_stats() {
+        use std::sync::atomic::Ordering;
+
+        let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+        let git = std::sync::Arc::new(crate::mem::ConfigurableGitOps::default());
+        let state = crate::mem::test_state_with_jj_and_git_ops(jj.clone(), git.clone());
+
+        // The export's effect on git-visible state, observable at the
+        // exact call point: once `jj_git_export` runs, `diff` reports
+        // the exported work.
+        let diff_flag = git.diff_change_when.clone();
+        *jj.git_export_effect.lock() = Some(Box::new(move || {
+            diff_flag.store(true, Ordering::SeqCst);
+        }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().join("repo.git");
+        let mut repo = gyre_domain::Repository::new(
+            Id::new("repo-r19"),
+            Id::new("ws-1"),
+            "r19-repo",
+            repo_path.to_str().unwrap().to_string(),
+            1000,
+        );
+        repo.default_branch = "main".to_string();
+        state.repos.create(&repo).await.unwrap();
+
+        let mut task = gyre_domain::Task::new(Id::new("task-r19"), "r19 completion task", 1000);
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        state.tasks.create(&task).await.unwrap();
+        let auth = crate::auth::AuthenticatedAgent {
+            agent_id: "spawner".to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        let req = SpawnAgentRequest {
+            name: "r19-worker".to_string(),
+            repo_id: "repo-r19".to_string(),
+            task_id: "task-r19".to_string(),
+            branch: "feat/r19".to_string(),
+            parent_id: None,
+            compute_target_id: None,
+            disconnected_behavior: None,
+            loop_config: None,
+            agent_type: None,
+            conversation_sha: None,
+        };
+        let resp = spawn_agent_core(&state, req, &auth)
+            .await
+            .expect("spawn must succeed");
+        let agent_id = resp.agent.id.to_string();
+
+        // The recorded worktree is the jj workspace; give it the `.jj`
+        // marker the completion path keys on (the double's provisioning
+        // records the path without creating the dir).
+        let wts = state
+            .worktrees
+            .find_by_agent(&Id::new(&agent_id))
+            .await
+            .unwrap();
+        assert_eq!(wts.len(), 1);
+        let ws_path = wts[0].path.clone();
+        assert!(ws_path.contains("/workspaces/"));
+        std::fs::create_dir_all(std::path::Path::new(&ws_path).join(".jj"))
+            .expect("create workspace .jj marker");
+
+        let (status, mr_json) = {
+            let (code, body) = complete_agent(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(agent_id.clone()),
+                axum::Json(CompleteAgentRequest {
+                    branch: "feat/r19".to_string(),
+                    title: "R19 feature".to_string(),
+                    target_branch: "main".to_string(),
+                    conversation_sha: None,
+                }),
+            )
+            .await
+            .expect("complete must succeed");
+            let mr = serde_json::to_value(&body.0).unwrap();
+            (code, mr)
+        };
+        assert_eq!(status, StatusCode::CREATED);
+
+        // F1: the bookmark was SET onto @ in the agent's workspace — and
+        // create was never invoked (pre-fix: create on the imported
+        // bookmark, which fails in production with "Bookmark already
+        // exists").
+        let sets = jj.bookmark_set_calls.lock().clone();
+        assert_eq!(
+            sets,
+            vec![(ws_path.clone(), "feat/r19".to_string(), "@".to_string())],
+            "completion must SET the source-branch bookmark onto @"
+        );
+        assert!(
+            jj.bookmark_create_calls.lock().is_empty(),
+            "completion must not use bookmark create (F1)"
+        );
+
+        // The export ran, in the agent's workspace.
+        assert_eq!(jj.git_export_calls.lock().clone(), vec![ws_path.clone()]);
+
+        // F2: the MR's diff stats were computed AFTER the export — they
+        // carry the exported work (pre-fix: stats read the pre-export
+        // refs and came back empty).
+        assert_eq!(
+            mr_json["diff_stats"]["files_changed"].as_u64(),
+            Some(1),
+            "diff_stats must reflect the post-export branch state (F2), got {:?}",
+            mr_json["diff_stats"]
         );
     }
 

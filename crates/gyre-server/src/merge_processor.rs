@@ -302,6 +302,21 @@ async fn run_rebase(
             )
             .await;
 
+            // A clean rebase clears the conflict state an earlier
+            // conflicted rebase surfaced on the author's MR (R19 F3):
+            // the flag must not outlive the conflict itself — the agent
+            // resolved it in their workspace and the stack now sits
+            // cleanly on the moved target. Only a flagged MR is touched
+            // (no write on the ordinary never-conflicted path).
+            if let Ok(Some(mut mr)) =
+                find_mr_by_author_branch(state, &repo.id, &agent.agent_id, &agent.branch).await
+            {
+                if mr.has_conflicts == Some(true) {
+                    mr.has_conflicts = Some(false);
+                    let _ = state.merge_requests.update(&mr).await;
+                }
+            }
+
             // Notify the agent: baseline moved, here is the new base.
             state
                 .emit_event(
@@ -8138,6 +8153,88 @@ mod tests {
         .unwrap()
         .expect("the other repo's MR must be found");
         assert_eq!(in_other.id, Id::new("mr-inflight-other"));
+    }
+
+    /// R19 F3: a clean rebase clears the conflict flag an earlier
+    /// conflicted rebase surfaced on the author's MR — the
+    /// conflicts-as-state surface must not report state jj no longer
+    /// has (the agent resolved the conflict in their workspace; the
+    /// next movement of the target rebases their stack cleanly). Fails
+    /// on the pre-fix behavior: the success arm never reset the flag.
+    #[tokio::test]
+    async fn rebase_success_clears_stale_conflict_flag() {
+        let (state, jj, repo, inflight_mr) = setup_rebase_fixture().await;
+
+        // First movement conflicts — the in-flight MR is flagged.
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Conflict {
+            rebased_count: 1,
+            files: vec!["src/lib.rs".to_string()],
+        }));
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        let flagged = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flagged.has_conflicts,
+            Some(true),
+            "precondition: the conflict round must flag the MR"
+        );
+
+        // The agent resolves the conflict; the backoff window expires
+        // (backdated, as the replay tests do) so the next movement
+        // rebases instead of deferring.
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        // A second MR lands on the same target branch — clean this time.
+        let mut second_agent = gyre_domain::Agent::new(Id::new("agent-merged-2"), "merged-2", 1000);
+        second_agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&second_agent).await.unwrap();
+        let mut second_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged-2"),
+            repo.id.clone(),
+            "second landed work",
+            "feat/merged-2",
+            "main",
+            1000,
+        );
+        second_mr.workspace_id = Id::new("ws-1");
+        second_mr.author_agent_id = Some(Id::new("agent-merged-2"));
+        state.merge_requests.create(&second_mr).await.unwrap();
+
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        enqueue_mr(&state, "mr-merged-2", 100, 2000).await;
+        process_next(&state).await.unwrap();
+
+        // The clean rebase really ran (not deferred away).
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "precondition: the second movement must rebase the agent again"
+        );
+        let cleared = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleared.has_conflicts,
+            Some(false),
+            "a clean rebase must clear the stale conflict flag (R19 F3)"
+        );
     }
 
     /// Safeguard (plan item 5): Dead/Completed agents are never rebased —
