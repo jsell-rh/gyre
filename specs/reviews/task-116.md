@@ -1,5 +1,35 @@
 # Review — task-116: Implement meta-spec prompt assembly
 
+Round: 7 (rebase/contract-repair verification of candidate `9830f429a` against
+base `98a5299b9`). Evidence:
+`/tmp/stage/review-evidence/task116-round7.md`.
+
+## Round 7 verdict
+
+APPROVED. Round 7 verified the final two commits of the assignment: the
+assignment-base merge `0be374088` and the docs-only contract restore
+`9830f429a`.
+
+- **Merge safety:** `git diff 47368bac2..0be374088` over every task-owned
+  source file (prompt_assembly.rs, api/meta_specs.rs, api/spawn.rs,
+  merge_processor.rs, jobs.rs, lib.rs, main.rs, abac_middleware.rs,
+  api/mod.rs) is empty; the mem.rs delta contains only upstream
+  user-repository work, no meta-spec/binding lines. All three round-6
+  fixes (approval gating in every assembly band, binding-membership gate,
+  mem delete binding guard) are byte-identical to the round-6-reviewed
+  state.
+- **Contract restore:** `9830f429a` touches only `specs/tasks/task-116.md`.
+- **Probes at HEAD:** full gyre-server lib suite 1433 passed / 0 failed;
+  full gyre-adapters lib suite 375 passed / 0 failed; docker/gyre-agent
+  `npm test` 12 passed (real runner child-process delivery test);
+  web MetaSpecs vitest 102 passed; all 19 structural invariant scripts OK.
+  All seven round-6 regression tests confirmed passing by name.
+- **Non-blocking:** stale "ABAC-exempt" comments in api/meta_specs.rs
+  (routes moved to the resolver in round 4; enforcement unaffected —
+  handler Admin gates are the surface either way); §2 coverage rows still
+carry the pre-implementation audit notes — updating the coverage matrix
+  belongs to the spec-fidelity auditor stage.
+
 Round: 5 (rounds 4–5 re-reviewed the registry-write governance gate).
 Reviewer scope: `git diff 66422bd..9205a9e` for `crates/gyre-server/src/api/meta_specs.rs`
 (rounds 4–5 delta over the round-3 base); all other task files verified byte-identical
