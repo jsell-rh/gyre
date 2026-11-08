@@ -99,32 +99,36 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Rebase-resolution round: merge of upstream `9bef21a4` onto candidate
-`f60123f5`.** The branch arrived with an interrupted merge whose only
-unmerged path was `docs/server-config.md` — both sides had appended
-env-var rows at the end of the table. Resolved by keeping BOTH sides:
-our task-110 `GYRE_INVITE_EXPIRY_INTERVAL_SECS` row plus upstream's
-`GO_CALLGRAPH_BIN` (task-072) and `PYRIGHT_LANGSERVER_BIN` (task-074)
-rows. The resolved file is byte-identical to
-`9bef21a4:docs/server-config.md` except for exactly that one inserted
-row (verified by diff before staging). All other paths auto-merged;
-this round's manual resolution touches documentation only — zero Rust
-code — and the invitation implementation is intact in the merged tree
-(`transition_status` present in the ports, the SQLite/Postgres
-invitation adapters, and `mem.rs`; invite routes still registered in
-`api/mod.rs`). Evidence log:
-`/tmp/stage/review-evidence/task-110-rebase-round-2.md`.
+**Rebase-resolution round: merge of upstream `72ad2a128` (task-096
+rollback circuit breaker) onto candidate `467c6685a`.** The branch
+arrived with an interrupted merge whose only unmerged paths were the
+two exemption ledgers,
+`scripts/fabricated-scope-defaults-exemptions.txt` and
+`scripts/warn-continue-creation-exemptions.txt` — zero Rust code in
+conflict; all other paths auto-merged. Each conflict entry was resolved
+by verifying the actual site in the merged tree, not by siding with
+either branch:
 
-**Sandbox restriction this round (not a code defect):** the focused
-test re-run (`cargo test -p gyre-server --lib api::invitations`)
-timed out twice at the tool level while compiling, after which the
-sandbox's shell supervisor (tirith) blocked every shell command for
-the remainder of the assignment window — so the test re-run and the
-`git commit` of the resolved merge could not be executed here. The
-working tree holds the fully resolved, staged merge; the commit and
-test re-run remain for the executor checkpoint / host verification.
-Per assignment instructions this transport restriction is recorded
-rather than treated as a failure.
+- `specs.rs:959` (fabricated-scope) — dropped: task-193's fix (tenant
+  resolved from the workspace record, fanout skipped+logged) is in the
+  merged tree.
+- `git_http.rs:1495` (fabricated-scope) — dropped: dead entry; no
+  matchable lookup-fallback site exists in any version (task-095's
+  upstream commit `7a0bd1db7` dropped it for the same reason).
+- `auth.rs:777` (fabricated-scope) — kept at HEAD's re-anchored line:
+  the merged tree has the JWT-claims fallback at 777 (task-110 added
+  lines above; the merge did not touch auth.rs).
+- `speculative_merge.rs:372`, `gate_executor.rs:111` — kept; both sites
+  verified at exactly those lines in the merged tree. Resolved file: 3
+  entries vs frozen count 4 (no growth).
+- `abac_middleware.rs` seed + `spawn.rs:219` (warn-continue) — both
+  entries removed: both sites fail closed in the merged tree
+  (`map_err(...)?` propagation; task-077 F6 fix present).
+
+The merge was committed as `a481428a6`, and the prior round's deferred
+focused-test re-run was executed at that head (the prior sandbox had
+blocked compilation; this round it succeeded). Evidence log:
+`/tmp/stage/review-evidence/task-110-rebase-round-3.md`.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -159,8 +163,7 @@ rather than treated as a failure.
   selectors; `docs/server-config.md` documents
   `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
 
-### Test evidence (prior rounds, re-verified at earlier heads of this
-same Rust lineage)
+### Test evidence (re-run at merged head `a481428a6`, this round)
 
 - `cargo test -p gyre-server --lib api::invitations` — 18 passed / 0
   failed (lifecycle suite, invitee-surface tests, HTTP 403
@@ -168,16 +171,15 @@ same Rust lineage)
 - `cargo test -p gyre-adapters invitation` — 3 passed / 0 failed
   (round-trip single-use claim; wrong-source-status transition
   rejected).
-- `cargo test -p gyre-server --lib abac_middleware` — 9/0;
-  `cargo test -p gyre-server --lib mem::` — 10/0; full
-  `cargo test -p gyre-server --lib` — 1263/0;
-  `cargo test --offline -p gyre-domain --lib invitation` — 4/0.
-- `bash scripts/check-task-commit-attribution.sh` — exit 0 at the
-  prior merge head.
-- This round's merge resolution changes no Rust code, so the above
-  remains the operative evidence for the implementation; the
-  re-run-at-head is deferred to host verification per the sandbox
-  restriction noted above. No TCP listener is bindable in this
-  sandbox (accept() errno 95, /tmp/stage/capabilities.json), so the
-  live-server HTTP smoke also remains for host verification / CI at
-  the PR head.
+- `cargo test --offline -p gyre-domain --lib invitation` — 4 passed /
+  0 failed (policy defaults, status roundtrip, expiry only when
+  pending).
+- `bash scripts/check-fabricated-scope-defaults.sh` — OK (resolved
+  exemption file matches the merged tree's actual sites).
+- `bash scripts/check-warn-continue-creation.sh` — OK (zero entries;
+  both former sites fail closed in the merged tree).
+- `bash scripts/check-task-commit-attribution.sh` — OK.
+- A loopback TCP listener is bindable in this sandbox (probe OK this
+  round, unlike earlier rounds), and the in-process HTTP-layer tests
+  above already exercise the full routing chain; a separate
+  live-server smoke remains for host verification / CI at the PR head.
