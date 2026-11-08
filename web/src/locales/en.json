@@ -493,6 +493,8 @@
     "adjust_metaspec": "Adjust Meta-spec",
     "increase_limit": "Increase Limit",
     "increase_trust": "Increase Trust",
+    "trust_increased": "Trust level increased",
+    "trust_increase_failed": "Could not update trust level — please try again.",
     "view_code": "View Code",
     "update_spec": "Update Spec",
     "accept": "Accept",
@@ -1007,7 +1009,8 @@
     "spec_editor_cancel": "Cancel",
     "spec_editor_predicting": "Predicting graph impact…",
     "spec_editor_predict_error": "Prediction failed: {error}",
-    "spec_editor_no_changes": "No structural changes predicted."
+    "spec_editor_no_changes": "No structural changes predicted.",
+    "large_graph_warning": "Large graph ({count} nodes) — viewport culling and zoom-level detail are active; pan/zoom may be slower than usual."
   },
   "detail_panel": {
     "title": "Title",
@@ -1469,7 +1472,8 @@
     "back_label": "Back to workspace home",
     "tabs": {
       "general": "General",
-      "trust": "Trust & Policies",
+      "trust": "Trust Level",
+      "policies": "Policies",
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
@@ -1490,7 +1494,7 @@
       "save": "Save"
     },
     "trust": {
-      "title": "Trust & Policies",
+      "title": "Trust Level",
       "trust_level_title": "Trust Level",
       "trust_level_desc": "Controls how autonomously agents operate in this workspace.",
       "trust_level_label": "Trust level",
@@ -1505,9 +1509,13 @@
       "saving": "Saving…",
       "saved": "Saved ✓",
       "save_trust_level": "Save Trust Level",
-      "abac_title": "ABAC Policies",
-      "abac_loading": "Loading policies…",
-      "abac_empty": "No ABAC policies configured for this workspace.",
+      "implied_title": "Policies implied by {level}",
+      "implied_desc": "Read-only summary of the trust: policies this preset creates (or would create if you switch and save).",
+      "implied_none": "No trust: policies — this level relies on built-in policies only.",
+      "implied_custom": "Custom trust — manage policies directly in the Policies tab.",
+      "will_add": "Will add",
+      "will_remove": "Will remove",
+      "view_all_policies": "View all policies →",
       "abac_delete_failed": "Failed to delete policy: {error}",
       "drift_title": "Meta-Spec Drift Policy",
       "drift_desc": "Controls how the workspace responds when agents produce code under outdated meta-spec versions.",
@@ -1518,6 +1526,20 @@
       "drift_tolerance_label": "Drift tolerance (versions behind)",
       "drift_tolerance_hint": "Allow agents to be this many versions behind before triggering warn/block.",
       "save_drift_policy": "Save Drift Policy"
+    },
+    "policies": {
+      "title": "Policies",
+      "loading": "Loading policies…",
+      "empty": "No ABAC policies configured for this workspace.",
+      "banner_preset": "Trust level: {level} — policies are preset-managed. Switch to Custom to edit.",
+      "banner_custom": "Custom trust — full policy editor enabled.",
+      "change_trust": "← Change trust level",
+      "group_builtin": "Built-in policies",
+      "group_trust": "Trust preset policies",
+      "group_user": "User-created policies",
+      "from_badge": "From: {level}",
+      "immutable_tooltip": "This policy cannot be removed or overridden.",
+      "preset_managed_tooltip": "Preset-managed by the trust level — switch to Custom to edit."
     },
     "teams": {
       "title": "Teams",

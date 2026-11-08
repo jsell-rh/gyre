@@ -67,6 +67,7 @@ vi.mock('../lib/api.js', () => ({
     approveSpec: vi.fn().mockResolvedValue({}),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
@@ -238,6 +239,33 @@ describe('Inbox', () => {
       expect(document.body.textContent).toContain('Retry Gate');
       expect(document.body.textContent).toContain('View MR');
       expect(document.body.textContent).toContain('Dismiss');
+    });
+  });
+
+  it('trust_suggestion: Increase Trust updates the workspace trust level and resolves', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-trust',
+        notification_type: 'trust_suggestion',
+        priority: 8,
+        title: 'Consider increasing trust level',
+        body: JSON.stringify({
+          gate_failures: 0,
+          mr_reverts: 0,
+          period_days: 30,
+          current_level: 'Guided',
+          suggested_level: 'Autonomous',
+        }),
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Consider increasing trust level/ });
+    await fireEvent.click(header);
+    const increaseBtn = await findByText('Increase Trust');
+    await fireEvent.click(increaseBtn);
+    await waitFor(() => {
+      expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', { trust_level: 'Autonomous' });
+      expect(api.resolveNotification).toHaveBeenCalledWith('notif-trust');
     });
   });
 
