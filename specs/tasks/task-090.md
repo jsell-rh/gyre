@@ -172,4 +172,20 @@ the actual PNG captured by the failing CI run, the full
 unchanged), and the full e2e suite passes (65/65). Evidence retained at
 /tmp/stage/review-evidence (controller-side).
 
+### Generated web/dist disposition (repair round)
+
+The review finding that branch HEAD's committed `web/dist` bundle equals the
+pre-task-090 base bundle is confirmed and is a generated-asset issue only —
+no source defect: `web/src` and `gates.rs` are byte-identical to the
+independently reviewed candidate 64598aca. Per controller policy the executor
+restores web/dist from the assignment base and final integration rebuilds and
+publishes those assets remotely from source. Verified in this round
+(evidence: /tmp/stage/review-evidence/task-090-dist): a fresh `npm ci` +
+`vite build` of HEAD source (temp outDir, committed dist untouched) emits
+`index-QXRGsaeH.js` byte-identical (sha256 4c80cc80…) to the verified task-090
+feature bundle from 54c0b32ab, containing gateStatusBySpec, specApprovals,
+lens URL persistence, and the evaluative legend labels. Focused re-run:
+lens-rendering + ExplorerCanvas + ExplorerViewLensUrl — 191/191 passed.
+No dist files were committed in this assignment.
+
 Acceptance criteria left unchecked for independent review.
