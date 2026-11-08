@@ -542,6 +542,10 @@ pub async fn run_reconciliation(
             let remaining: Vec<PendingRolloutTask> =
                 iter.map(PendingRolloutTask::from_candidate).collect();
 
+            // (repo_id, title) of the tasks this wave just put in flight:
+            // any stored deferred entry for the same work is consumed — it
+            // is now open, and a stale deferral would re-create it later.
+            let mut created_keys: Vec<(String, String)> = Vec::new();
             for cand in first_batch {
                 if create_reconciliation_task(
                     state,
@@ -554,21 +558,28 @@ pub async fn run_reconciliation(
                 .await
                 {
                     summary.tasks_created += 1;
+                    created_keys.push((cand.repo_id.to_string(), cand.title.clone()));
                 }
             }
 
-            if !remaining.is_empty() {
-                let pending = PendingRollout {
-                    workspace_id: ws_id.to_string(),
-                    remaining,
-                };
-                persist_pending_rollout(state, &ws_id, &pending).await;
-                info!(
-                    workspace_id = %ws_id,
-                    deferred = pending.remaining.len(),
-                    batch_size,
-                    "reconciliation: rolling rollout — first batch created, remainder deferred"
-                );
+            if !remaining.is_empty() || !created_keys.is_empty() {
+                // Merge with any in-flight remainder: an overlapping wave
+                // (another meta-spec change approved while this rolling
+                // rollout is draining) must extend the pending work, not
+                // overwrite it. `created_keys` prunes stored deferrals of
+                // work this wave just put in flight.
+                let deferred = remaining.len();
+                let total_deferred =
+                    merge_pending_rollout(state, &ws_id, remaining, &created_keys).await;
+                if deferred > 0 {
+                    info!(
+                        workspace_id = %ws_id,
+                        deferred,
+                        total_deferred,
+                        batch_size,
+                        "reconciliation: rolling rollout — first batch created, remainder deferred"
+                    );
+                }
             }
         }
     }
@@ -766,21 +777,95 @@ struct PendingRollout {
     remaining: Vec<PendingRolloutTask>,
 }
 
-async fn persist_pending_rollout(state: &Arc<AppState>, ws_id: &Id, pending: &PendingRollout) {
-    let json = match serde_json::to_string(pending) {
-        Ok(j) => j,
-        Err(e) => {
-            warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to serialize pending state");
-            return;
-        }
-    };
-    if let Err(e) = state
+/// Merge deferred rolling-rollout work into the workspace's pending state
+/// (§7 Rolling). Returns the resulting deferred count.
+///
+/// `incoming` are newly deferred tasks. `consumed` lists the (repo_id,
+/// title) pairs the caller has resolved out of the pending remainder
+/// (created as tasks, deduplicated against open work, or superseded) —
+/// their stored entries are dropped. A stored entry with the same
+/// (repo_id, title) as an incoming entry is replaced by it: a re-triggered
+/// wave supersedes the older deferral of the same work instead of
+/// duplicating it. Everything else stored is retained.
+///
+/// Merging — rather than overwriting — is what keeps overlapping waves
+/// lossless. The pending remainder lives under ONE per-workspace key, so
+/// an unconditional write would let a second wave triggered while a
+/// rolling rollout is in flight (a wide window by design: Rolling waits
+/// for each batch) silently discard the first wave's deferred tasks,
+/// leaving their repos unreconciled against the superseded spec change
+/// with no error or warning. Merged, both waves' remainders are batched
+/// together and drained by the normal batch advance.
+async fn merge_pending_rollout(
+    state: &Arc<AppState>,
+    ws_id: &Id,
+    incoming: Vec<PendingRolloutTask>,
+    consumed: &[(String, String)],
+) -> usize {
+    let mut remaining: Vec<PendingRolloutTask> = Vec::new();
+    match state
         .kv_store
-        .kv_set(ROLLOUT_PENDING_NS, ws_id.as_str(), json)
+        .kv_get(ROLLOUT_PENDING_NS, ws_id.as_str())
         .await
     {
-        warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to persist pending state");
+        Ok(Some(raw)) => match serde_json::from_str::<PendingRollout>(&raw) {
+            Ok(stored) => {
+                for t in stored.remaining {
+                    let superseded = incoming
+                        .iter()
+                        .any(|n| n.repo_id == t.repo_id && n.title == t.title)
+                        || consumed.iter().any(|c| c.0 == t.repo_id && c.1 == t.title);
+                    if !superseded {
+                        remaining.push(t);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    workspace_id = %ws_id,
+                    error = %e,
+                    "rolling rollout: corrupt pending state, keeping only the incoming remainder"
+                );
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                workspace_id = %ws_id,
+                error = %e,
+                "rolling rollout: failed to read pending state, keeping only the incoming remainder"
+            );
+        }
     }
+    remaining.extend(incoming);
+
+    if remaining.is_empty() {
+        let _ = state
+            .kv_store
+            .kv_remove(ROLLOUT_PENDING_NS, ws_id.as_str())
+            .await;
+        return 0;
+    }
+    let count = remaining.len();
+    let pending = PendingRollout {
+        workspace_id: ws_id.to_string(),
+        remaining,
+    };
+    match serde_json::to_string(&pending) {
+        Ok(json) => {
+            if let Err(e) = state
+                .kv_store
+                .kv_set(ROLLOUT_PENDING_NS, ws_id.as_str(), json)
+                .await
+            {
+                warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to persist pending state");
+            }
+        }
+        Err(e) => {
+            warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to serialize pending state");
+        }
+    }
+    count
 }
 
 /// Create the next batch of a rolling rollout when the previous batch has
@@ -867,6 +952,16 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
 
     let mut created: usize = 0;
     let mut kept: Vec<PendingRolloutTask> = Vec::new();
+    // Every entry of the loaded snapshot is resolved by this advance
+    // (created, deduplicated away, or re-deferred via `kept`). Passing the
+    // snapshot keys as `consumed` makes the final merge retain ONLY
+    // entries a concurrent wave registered after this snapshot was loaded
+    // (plus `kept`) — a plain overwrite would discard them.
+    let consumed: Vec<(String, String)> = pending
+        .remaining
+        .iter()
+        .map(|t| (t.repo_id.clone(), t.title.clone()))
+        .collect();
     for pending_task in std::mem::take(&mut pending.remaining) {
         // Already in flight (e.g. a concurrent wave created the same
         // task): drop from the remainder instead of duplicating it.
@@ -898,23 +993,18 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         }
     }
 
-    if kept.is_empty() {
-        let _ = state
-            .kv_store
-            .kv_remove(ROLLOUT_PENDING_NS, workspace_id.as_str())
-            .await;
+    let deferred = merge_pending_rollout(state, workspace_id, kept, &consumed).await;
+    if deferred == 0 {
         info!(
             workspace_id = %workspace_id,
             created,
             "rolling rollout: no deferred work left"
         );
     } else {
-        pending.remaining = kept;
-        persist_pending_rollout(state, workspace_id, &pending).await;
         info!(
             workspace_id = %workspace_id,
             created,
-            deferred = pending.remaining.len(),
+            deferred,
             "rolling rollout: next batch created"
         );
     }
@@ -1910,6 +2000,216 @@ mod tests {
             .count();
         assert_eq!(open, 3, "batch-size change must apply to the next batch");
         assert!(pending_rollout_state(&state, "ws-bsize").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_rolling_waves_retain_both_remainders() {
+        // Regression (review dde37e8e): the pending remainder lives under
+        // one per-workspace key, so persisting a second wave's remainder
+        // while a rolling rollout is in flight used to overwrite the first
+        // wave's deferred tasks — silent work loss, repos left
+        // unreconciled. The persist must MERGE: both waves' remainders are
+        // retained and drained by the normal batch advance.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-overlap").await;
+        for i in 0..4 {
+            make_repo(&state, &format!("repo-ov-{i}"), "ws-overlap").await;
+        }
+        let persona = make_meta_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        set_policy(
+            &state,
+            "ws-overlap",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        // Wave A: persona v4 → 1 task + 3 deferred.
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        assert_eq!(a.tasks_created, 1);
+
+        // Wave B triggers while wave A's rollout is in flight (its first
+        // batch is still open): reviewer v2 → 1 task + 3 deferred. Must
+        // extend, not clobber, wave A's remainder.
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        assert_eq!(b.tasks_created, 1);
+
+        let pending = pending_rollout_state(&state, "ws-overlap")
+            .await
+            .expect("overlapping waves must keep a pending remainder");
+        let remaining = pending["remaining"].as_array().unwrap();
+        assert_eq!(
+            remaining.len(),
+            6,
+            "both waves' deferred remainders must be retained (3 + 3)"
+        );
+        let count_for = |spec: &str| {
+            remaining
+                .iter()
+                .filter(|e| e["title"].as_str().unwrap().contains(spec))
+                .count()
+        };
+        assert_eq!(count_for("backend-developer"), 3);
+        assert_eq!(count_for("code-reviewer"), 3);
+
+        // Drive the whole (now merged) rollout to completion: batch after
+        // batch, one task per advance (batch size 1).
+        for _ in 0..20 {
+            if pending_rollout_state(&state, "ws-overlap").await.is_none() {
+                break;
+            }
+            finish_all_reconciliation_tasks(&state, "ws-overlap").await;
+            on_reconciliation_task_terminal(&state, &ws.id).await;
+        }
+        // Finish the final batch the loop left open.
+        finish_all_reconciliation_tasks(&state, "ws-overlap").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        assert!(
+            pending_rollout_state(&state, "ws-overlap").await.is_none(),
+            "the merged rollout must fully drain"
+        );
+
+        // EVERY repo must have received BOTH waves' reconciliation tasks —
+        // this is the exact assertion the overwrite bug failed (persona
+        // tasks were 1/4).
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        let persona_tasks = tasks
+            .iter()
+            .filter(|t| t.title.contains("backend-developer"))
+            .count();
+        let reviewer_tasks = tasks
+            .iter()
+            .filter(|t| t.title.contains("code-reviewer"))
+            .count();
+        assert_eq!(
+            persona_tasks, 4,
+            "every repo must receive the persona wave's task"
+        );
+        assert_eq!(
+            reviewer_tasks, 4,
+            "every repo must receive the reviewer wave's task"
+        );
+        assert_eq!(
+            count_completed_messages(&state, &ws.id).await,
+            1,
+            "the merged rollout completes exactly once, at the very end"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retriggered_rolling_wave_supersedes_not_duplicates() {
+        // A re-trigger of the SAME spec+version while its remainder is
+        // deferred replaces the matching deferred entries instead of
+        // duplicating them — the merge must be additive across waves but
+        // idempotent within one.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-retrig").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-rt-{i}"), "ws-retrig").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-retrig",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(first.tasks_created, 1); // batch 1
+        assert_eq!(
+            pending_rollout_state(&state, "ws-retrig").await.unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Re-trigger the same version: the open task's repo dedupes
+        // (skipped); one deferred repo's task is created as the re-trigger's
+        // first batch — which must CONSUME that repo's stored deferral (the
+        // work is now in flight; a stale deferral would re-create it after
+        // it goes terminal) — and the other re-defers, superseding its
+        // stored entry. The remainder must shrink to exactly that one
+        // deferral, never duplicating anything. (Repo iteration order from
+        // the mem store is not deterministic, so identify the repos by
+        // observed task state, not by id order.)
+        let open_before: Vec<String> = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .iter()
+            .map(|t| t.repo_id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            open_before.len(),
+            1,
+            "wave A must have exactly one open task"
+        );
+
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(second.tasks_created, 1); // one deferred repo, as batch 1
+        assert_eq!(second.tasks_skipped, 1); // the already-open repo
+
+        let open_after: Vec<String> = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .iter()
+            .map(|t| t.repo_id.as_str().to_string())
+            .collect();
+        let newly_in_flight: Vec<&String> = open_after
+            .iter()
+            .filter(|r| !open_before.contains(r))
+            .collect();
+        assert_eq!(
+            newly_in_flight.len(),
+            1,
+            "the re-trigger put exactly one repo in flight"
+        );
+
+        let remaining = pending_rollout_state(&state, "ws-retrig").await.unwrap()["remaining"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "a re-triggered wave must not duplicate deferred entries"
+        );
+        let deferred_repo = remaining[0]["repo_id"].as_str().unwrap();
+        assert!(
+            !open_before.contains(&deferred_repo.to_string()),
+            "the already-open repo is skipped, never re-deferred"
+        );
+        assert_ne!(
+            deferred_repo,
+            newly_in_flight[0].as_str(),
+            "the stored deferral for work just put in flight must be consumed"
+        );
+
+        // Drain: exactly one task per repo at the end.
+        for _ in 0..10 {
+            if pending_rollout_state(&state, "ws-retrig").await.is_none() {
+                break;
+            }
+            finish_all_reconciliation_tasks(&state, "ws-retrig").await;
+            on_reconciliation_task_terminal(&state, &ws.id).await;
+        }
+        finish_all_reconciliation_tasks(&state, "ws-retrig").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(
+            tasks.len(),
+            3,
+            "each repo ends with exactly one reconciliation task"
+        );
     }
 
     // -- §7: auto_merge ------------------------------------------------------
