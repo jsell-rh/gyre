@@ -8,7 +8,7 @@ coverage_sections:
   - "platform-model.md §6 Circuit Breaker"
   - "platform-model.md §6 CLI"
   - "platform-model.md §6 UI"
-commits: ["109ec4d0ba38140d9a885d2861ce8585bc212b23"]
+commits: ["109ec4d0ba38140d9a885d2861ce8585bc212b23", "d3ce6e03f70fc2581e6e78c70298e8d03fa131bb"]
 ---
 
 ## Spec Excerpt
