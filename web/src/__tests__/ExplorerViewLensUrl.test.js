@@ -171,15 +171,23 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    // loadEvaluativeData fires on graph load. GET /api/v1/merge-requests
-    // only accepts repository_id / workspace_id / status (ListMrsQuery);
-    // a repo_id (or per_page) param is silently ignored, and with no
-    // recognized scope the handler returns ALL tenant MRs — attributing
-    // other repos' gate outcomes to this repo's evaluative overlay.
-    // The gate-status join must therefore be requested repository_id-scoped.
+    // loadEvaluativeData fires on graph load alongside the trace and
+    // liveness-gate loaders. GET /api/v1/merge-requests only understands
+    // repository_id / workspace_id / status / per_page (ListMrsQuery);
+    // a repo_id param is silently ignored, and with no recognized scope
+    // the handler returns ALL tenant MRs — attributing other repos' gate
+    // outcomes to this repo's evaluative overlay. Every MR list call —
+    // the evaluative gate-data join included — must therefore be
+    // repository_id-scoped, never repo_id.
     await waitFor(() => {
-      expect(api.mergeRequests).toHaveBeenCalledWith({ repository_id: 'repo-1' });
+      // trace + evaluative + liveness-gate loaders all fire on graph load
+      expect(api.mergeRequests.mock.calls.length).toBeGreaterThanOrEqual(3);
     });
+    for (const call of api.mergeRequests.mock.calls) {
+      const params = call[0] ?? {};
+      expect(params.repository_id).toBe('repo-1');
+      expect(params).not.toHaveProperty('repo_id');
+    }
   });
 
   it('the observable lens is disabled with a coming-soon tooltip', async () => {

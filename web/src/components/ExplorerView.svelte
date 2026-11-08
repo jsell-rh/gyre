@@ -4,11 +4,8 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
-<<<<<<< HEAD
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
-=======
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
@@ -947,13 +944,10 @@
     graphError = null;
     selectedNode = null;
     traceData = null;
-<<<<<<< HEAD
     gateStatusBySpec = {};
     specApprovals = [];
-=======
     gateRecords = [];
     livenessTimeline = null;
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
     graphWarnings = [];
     graphWarningsDismissed = false;
     perfWarningDismissed = false;
@@ -967,18 +961,15 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
-<<<<<<< HEAD
       // Load evaluative lens overlays: gate outcomes + spec approvals
       // (best-effort, non-blocking)
       loadEvaluativeData(repoId);
-=======
       // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
       loadGateData(repoId);
       // Load recent ArchitecturalDelta records for the fading change rings
       // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
       // load must not gate.
       loadLivenessTimeline(repoId);
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -1038,7 +1029,6 @@
     } catch { /* trace loading is best-effort */ }
   }
 
-<<<<<<< HEAD
   /** Load Evaluative lens data (HSI §3): gate outcomes and spec approvals.
    *
    *  Gate status: gate results are recorded per MR, and each MR carries a
@@ -1063,11 +1053,14 @@
 
     // Gate outcomes per spec path from recent MRs.
     try {
-      // GET /api/v1/merge-requests scopes by `repository_id` (ListMrsQuery:
-      // status / repository_id / workspace_id — no repo_id, no per_page), so
-      // the list must be requested repo-scoped and the 50-MR recency
-      // window applied client-side after sorting.
-      const mrs = await api.mergeRequests({ repository_id: repoId });
+      // GET /api/v1/merge-requests scopes by `repository_id` and caps via
+      // `per_page` (newest first — ListMrsQuery), so the gate-status window
+      // is requested repo-scoped with a bounded per-MR gate fetch fan-out
+      // (the same ≤10 bound the liveness loaders uphold); a repo_id param
+      // is silently ignored and would attribute other repos' gate outcomes
+      // to this repo's evaluative overlay. A client-side sort keeps the
+      // recency order explicit even if a backend ignores the cap.
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       // Most recent first: the latest MR with concluded gates decides a
       // spec path's status; older MRs for the same path are ignored.
@@ -1075,7 +1068,7 @@
         const at = Number(a?.created_at ?? 0) || 0;
         const bt = Number(b?.created_at ?? 0) || 0;
         return bt - at;
-      }).slice(0, 50);
+      }).slice(0, 10);
       const byPath = {};
       for (const mr of sorted) {
         const specRef = mr?.spec_ref;
@@ -1102,7 +1095,8 @@
     } catch {
       gateStatusBySpec = {};
     }
-=======
+  }
+
   /**
    * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
    * Each MR's spec_ref links its gate results to the graph nodes the spec
@@ -1144,7 +1138,6 @@
       if (selectedRepoId !== repoId) return; // stale — user switched repos
       livenessTimeline = Array.isArray(timeline) ? timeline : [];
     } catch { /* recent-change rings are best-effort */ }
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
   }
 
   function onRepoChange(e) {
