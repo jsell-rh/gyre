@@ -119,6 +119,14 @@ export const api = {
       body: JSON.stringify(data),
     }),
   mergeQueue: () => request('/merge-queue'),
+  // Repo main-branch health + merge queue pause state (platform-model.md §6).
+  // withGates: false skips post-merge gate execution server-side (pause state
+  // only) — use it when rendering many repos' pause state.
+  repoStatus: (id, { withGates = true } = {}) =>
+    request(`/repos/${id}/status${withGates ? '' : '?gates=false'}`),
+  pauseRepoQueue: (id, reason) =>
+    request(`/repos/${id}/queue/pause`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  resumeRepoQueue: (id) => request(`/repos/${id}/queue/resume`, { method: 'PUT' }),
   enqueue: (mrId, priority = 50) =>
     request('/merge-queue/enqueue', {
       method: 'POST',
