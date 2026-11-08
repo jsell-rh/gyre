@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Default Views (Automatic, No LLM)"
-commits: ["2620dd8cf17dcfd2fde2972b76f345dd77116b58", "8407bd1cfe42fc1ab324cb7bffd8275bce4c5acd", "1a50c2276ef6c6c7a6e5e4ec092c112fa7703e45", "8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15"]
+commits: ["2620dd8cf17dcfd2fde2972b76f345dd77116b58", "8407bd1cfe42fc1ab324cb7bffd8275bce4c5acd", "1a50c2276ef6c6c7a6e5e4ec092c112fa7703e45", "8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15", "cd37fa928fe948f0ca2b813fb5ab491771b75796", "d4e72e32cd9fad766a2c54973b04d631ab179a3f"]
 ---
 
 ## Spec Excerpt
@@ -161,6 +161,24 @@ renders only in Boundary mode behind the view selector. All four view
 panels coexist with task-078's shortcuts, streaming and performance
 warnings (merge commit 531ca48b7).
 
+### Rebase integration (task-083 Canonical Navigation)
+
+Merged base 637be7187 (task-083: scope-aware content routing, Graph|Briefing
+arch sub-tabs at repo scope) into the candidate (merge commit cd37fa928,
+integration commit d4e72e32). Text conflict in `ExplorerView.svelte` import
+block resolved by keeping task-083's import ordering (NodeDetailPanel after
+ExplorerCanvas, Briefing import) plus this task's three view-component
+imports — the duplicate NodeDetailPanel import on the candidate side was
+dropped (Svelte compile error). `api.js` auto-merged cleanly and retains
+both sides' changes (`captureLastSeenHeader` in `request()` and task-083's
+`repoId` param on `getWorkspaceBriefing`). Semantically the two tablists
+compose: the Briefing sub-tab branch precedes the graph branch, and within
+the Graph sub-tab the HSI §3 view selector governs (canvas only in Boundary
+mode). `ExplorerDefaultViews.test.js` now scopes its tab queries to the
+`explorer-view-selector` tablist — the assertion still pins exactly the
+four view tabs in order, it just no longer assumes the Explorer is the only
+tablist at repo scope.
+
 ### Test evidence
 
 - `web/src/__tests__/last-seen.test.js` — header capture, older/equal
@@ -180,9 +198,13 @@ warnings (merge commit 531ca48b7).
   counts/dependency chips.
 - `cargo test -p gyre-server --lib api::mr_timeline` — 13 passed
   (including the new producer-shape test).
-- Full `npm test` in `web/` after the rebase: 76 files, 1771 passed,
+- Full `npm test` in `web/` after the task-078 rebase: 76 files, 1771 passed,
   41 skipped (includes task-078's ExplorerViewShortcuts, causal-trace and
   streaming suites alongside the default-view suites above).
+- After the task-083 merge: focused vitest run of the ten merge-relevant
+  suites (ExplorerDefaultViews, ExplorerViewScope, ExplorerViewShortcuts,
+  ExplorerCanvasDrillDown, last-seen, ChangeView, SpecRealizationView,
+  SystemTraceView, Briefing, AppShell) — 154 passed.
 
 ### CI repair — explorer visual baselines (run 42455312769)
 
@@ -204,3 +226,18 @@ new baselines; mutation probe — building a dist with the
 `explorer-view-tabs` block removed fails zoom_level_0 (919x395 expected vs
 919x397 received), so the baselines genuinely pin the new toolbar.
 Evidence retained under the attempt's review-evidence directory.
+
+### Baseline regeneration after the task-083 merge
+
+The task-083 merge re-drifted the same 11 baselines: the repo-scope header
+now also carries the Graph|Briefing arch sub-tabs row, so
+`.treemap-canvas-area` renders 34px shorter (919x395 → 919x361, 579x333 →
+579x299, 579x296 → 579x262, 579x466 → 579x432 — same widths, pure vertical
+offset; local run at merge head, 11 failed / 4 passed, every failure a
+uniform size mismatch). Commit d4e72e32 regenerated the 11 baselines
+locally against the merged UI (forced-font fixtures; server built from
+merged sources). Post-update full explorer-visual suite: 15/15 passed.
+Mutation probe repeated at the merged head: hiding the view-selector
+tablist fails zoom_level_0 (919x361 expected vs 919x363 received), so the
+regenerated baselines pin the merged toolbar with both tablists. The
+toolbar, blast-radius-tiered and full-page baselines are unchanged.
