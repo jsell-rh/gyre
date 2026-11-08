@@ -2606,10 +2606,7 @@ impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
         repo_id: &str,
         config: gyre_domain::SpecLifecycleConfig,
     ) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(repo_id.to_string(), config);
+        self.store.lock().await.insert(repo_id.to_string(), config);
         Ok(())
     }
 }

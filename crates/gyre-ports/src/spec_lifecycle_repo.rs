@@ -7,6 +7,7 @@ use gyre_domain::SpecLifecycleConfig;
 /// Absent rows mean "defaults" — `get_for_repo` returns
 /// [`SpecLifecycleConfig::default()`], never an error, so the post-receive
 /// hook degrades to default behavior rather than skipping processing.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait SpecLifecycleRepository: Send + Sync {
     /// Get the spec lifecycle config for a repo. Returns defaults when

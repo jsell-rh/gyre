@@ -30,10 +30,7 @@ pub async fn get_spec_lifecycle(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
-    let config = state
-        .spec_lifecycle_configs
-        .get_for_repo(&repo_id)
-        .await?;
+    let config = state.spec_lifecycle_configs.get_for_repo(&repo_id).await?;
 
     Ok(Json(config))
 }
@@ -106,11 +103,7 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    async fn put(
-        app: &Router,
-        uri: &str,
-        body: serde_json::Value,
-    ) -> axum::response::Response {
+    async fn put(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
         let req = Request::builder()
             .method(Method::PUT)
             .uri(uri)
@@ -172,10 +165,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(!json["enabled"].as_bool().unwrap());
-        assert_eq!(
-            json["watched_paths"][0].as_str().unwrap(),
-            "docs/specs/"
-        );
+        assert_eq!(json["watched_paths"][0].as_str().unwrap(), "docs/specs/");
         assert_eq!(json["default_priority_new"].as_str().unwrap(), "Critical");
 
         // And through the store directly (what git_http.rs reads).
@@ -232,7 +222,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .unwrap();
         });
 
         let repo = Repository::new(

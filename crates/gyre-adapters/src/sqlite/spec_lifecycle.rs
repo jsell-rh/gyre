@@ -86,7 +86,10 @@ mod tests {
         let (_tmp, s) = setup();
         let cfg = s.get_for_repo("repo-none").await.unwrap();
         assert!(cfg.enabled);
-        assert_eq!(cfg.watched_paths, vec!["specs/system/", "specs/development/"]);
+        assert_eq!(
+            cfg.watched_paths,
+            vec!["specs/system/", "specs/development/"]
+        );
         assert_eq!(
             cfg.ignored_paths,
             vec![
@@ -97,8 +100,14 @@ mod tests {
             ]
         );
         assert_eq!(cfg.default_priority_new, gyre_domain::TaskPriority::Medium);
-        assert_eq!(cfg.default_priority_modified, gyre_domain::TaskPriority::High);
-        assert_eq!(cfg.default_priority_deleted, gyre_domain::TaskPriority::High);
+        assert_eq!(
+            cfg.default_priority_modified,
+            gyre_domain::TaskPriority::High
+        );
+        assert_eq!(
+            cfg.default_priority_deleted,
+            gyre_domain::TaskPriority::High
+        );
     }
 
     #[tokio::test]
@@ -121,9 +130,18 @@ mod tests {
         assert_eq!(got.ignored_paths, vec!["docs/specs/archive/"]);
         assert!(!got.auto_invalidate_approvals);
         assert!(!got.dedup_open_tasks);
-        assert_eq!(got.default_priority_new, gyre_domain::TaskPriority::Critical);
-        assert_eq!(got.default_priority_modified, gyre_domain::TaskPriority::Low);
-        assert_eq!(got.default_priority_deleted, gyre_domain::TaskPriority::Medium);
+        assert_eq!(
+            got.default_priority_new,
+            gyre_domain::TaskPriority::Critical
+        );
+        assert_eq!(
+            got.default_priority_modified,
+            gyre_domain::TaskPriority::Low
+        );
+        assert_eq!(
+            got.default_priority_deleted,
+            gyre_domain::TaskPriority::Medium
+        );
     }
 
     #[tokio::test]

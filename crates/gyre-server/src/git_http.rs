@@ -3823,16 +3823,14 @@ mod tests {
 
     #[test]
     fn parse_spec_changes_empty_input() {
-        let changes =
-            super::parse_spec_changes_with_config("", &Default::default());
+        let changes = super::parse_spec_changes_with_config("", &Default::default());
         assert!(changes.is_empty());
     }
 
     #[test]
     fn parse_spec_changes_added_spec() {
         let input = "A\tspecs/system/new-spec.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'A');
         assert_eq!(changes[0].1, "specs/system/new-spec.md");
@@ -3842,8 +3840,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_modified_spec() {
         let input = "M\tspecs/development/architecture.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'M');
         assert_eq!(changes[0].1, "specs/development/architecture.md");
@@ -3852,8 +3849,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_deleted_spec() {
         let input = "D\tspecs/system/old-spec.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'D');
         assert_eq!(changes[0].1, "specs/system/old-spec.md");
@@ -3862,8 +3858,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_renamed_spec() {
         let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'R');
         assert_eq!(changes[0].1, "specs/system/new.md");
@@ -3874,8 +3869,7 @@ mod tests {
     fn parse_spec_changes_ignores_non_watched_paths() {
         // milestones and src changes should be ignored
         let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/system/real.md");
     }
@@ -3883,21 +3877,16 @@ mod tests {
     #[test]
     fn parse_spec_changes_development_path_watched() {
         let input = "A\tspecs/development/database-migrations.md\n";
-        let changes =
-            super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/development/database-migrations.md");
     }
 
     #[test]
     fn classify_spec_change_added() {
-        let (title, labels, priority) = super::classify_spec_change(
-            'A',
-            "specs/system/foo.md",
-            None,
-            &Default::default(),
-        )
-        .unwrap();
+        let (title, labels, priority) =
+            super::classify_spec_change('A', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Implement spec: specs/system/foo.md");
         assert!(labels.contains(&"spec-implementation".to_string()));
         assert!(labels.contains(&"auto-created".to_string()));
@@ -3906,13 +3895,9 @@ mod tests {
 
     #[test]
     fn classify_spec_change_modified() {
-        let (title, labels, priority) = super::classify_spec_change(
-            'M',
-            "specs/system/foo.md",
-            None,
-            &Default::default(),
-        )
-        .unwrap();
+        let (title, labels, priority) =
+            super::classify_spec_change('M', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Review spec change: specs/system/foo.md");
         assert!(labels.contains(&"spec-drift-review".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -3920,13 +3905,9 @@ mod tests {
 
     #[test]
     fn classify_spec_change_deleted() {
-        let (title, labels, priority) = super::classify_spec_change(
-            'D',
-            "specs/system/old.md",
-            None,
-            &Default::default(),
-        )
-        .unwrap();
+        let (title, labels, priority) =
+            super::classify_spec_change('D', "specs/system/old.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Handle spec removal: specs/system/old.md");
         assert!(labels.contains(&"spec-deprecated".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -4017,13 +3998,7 @@ mod tests {
     /// Set up a real bare repo with two pushed commits to main:
     /// one adding `specs/system/a.md`, one adding `docs/guides/b.md`.
     /// Returns (state, repo_id, tmp_dir, first_commit_sha, second_commit_sha).
-    async fn spec_lifecycle_fixture() -> (
-        Arc<crate::AppState>,
-        String,
-        TempDir,
-        String,
-        String,
-    ) {
+    async fn spec_lifecycle_fixture() -> (Arc<crate::AppState>, String, TempDir, String, String) {
         let tmp = TempDir::new().unwrap();
         let bare = tmp.path().join("repo.git");
         let status = std::process::Command::new("git")
@@ -4159,7 +4134,15 @@ mod tests {
             .unwrap()
             .path
             .clone();
-        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &Id::new("ws-test"), &updates).await;
+        super::process_spec_lifecycle(
+            &state,
+            &repo_id,
+            &repo_path,
+            "main",
+            &Id::new("ws-test"),
+            &updates,
+        )
+        .await;
 
         let tasks = state.tasks.list().await.unwrap();
         assert!(
@@ -4202,7 +4185,15 @@ mod tests {
             .unwrap()
             .path
             .clone();
-        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &Id::new("ws-test"), &updates).await;
+        super::process_spec_lifecycle(
+            &state,
+            &repo_id,
+            &repo_path,
+            "main",
+            &Id::new("ws-test"),
+            &updates,
+        )
+        .await;
 
         let tasks = state.tasks.list().await.unwrap();
         let created: Vec<&gyre_domain::Task> = tasks

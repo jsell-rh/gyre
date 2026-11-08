@@ -56,11 +56,17 @@ fn default_true() -> bool {
 }
 
 fn default_watched_paths() -> Vec<String> {
-    DEFAULT_WATCHED_PATHS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_WATCHED_PATHS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn default_ignored_paths() -> Vec<String> {
-    DEFAULT_IGNORED_PATHS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_IGNORED_PATHS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn default_priority_new() -> TaskPriority {
@@ -99,7 +105,9 @@ impl SpecLifecycleConfig {
         {
             return false;
         }
-        self.watched_paths.iter().any(|p| path.starts_with(p.as_str()))
+        self.watched_paths
+            .iter()
+            .any(|p| path.starts_with(p.as_str()))
     }
 }
 
@@ -113,7 +121,10 @@ mod tests {
         assert!(c.enabled);
         assert_eq!(
             c.watched_paths,
-            vec!["specs/system/".to_string(), "specs/development/".to_string()]
+            vec![
+                "specs/system/".to_string(),
+                "specs/development/".to_string()
+            ]
         );
         assert_eq!(
             c.ignored_paths,
@@ -158,12 +169,14 @@ mod tests {
         // Old/partial payloads must deserialize with spec defaults for
         // missing fields (serde defaults), so stored rows never lose the
         // default behavior silently.
-        let c: SpecLifecycleConfig =
-            serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        let c: SpecLifecycleConfig = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
         assert!(!c.enabled);
         assert_eq!(
             c.watched_paths,
-            vec!["specs/system/".to_string(), "specs/development/".to_string()]
+            vec![
+                "specs/system/".to_string(),
+                "specs/development/".to_string()
+            ]
         );
         assert_eq!(c.default_priority_new, TaskPriority::Medium);
     }
