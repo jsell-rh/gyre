@@ -493,6 +493,8 @@
     "adjust_metaspec": "Adjust Meta-spec",
     "increase_limit": "Increase Limit",
     "increase_trust": "Increase Trust",
+    "trust_increased": "Trust level increased",
+    "trust_increase_failed": "Could not update trust level — please try again.",
     "view_code": "View Code",
     "update_spec": "Update Spec",
     "accept": "Accept",
@@ -1007,7 +1009,8 @@
     "spec_editor_cancel": "Cancel",
     "spec_editor_predicting": "Predicting graph impact…",
     "spec_editor_predict_error": "Prediction failed: {error}",
-    "spec_editor_no_changes": "No structural changes predicted."
+    "spec_editor_no_changes": "No structural changes predicted.",
+    "large_graph_warning": "Large graph ({count} nodes) — viewport culling and zoom-level detail are active; pan/zoom may be slower than usual."
   },
   "detail_panel": {
     "title": "Title",

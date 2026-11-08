@@ -291,8 +291,28 @@
   }
 
   async function handleIncreaseTrust(n) {
-    goToWorkspaceSettings?.();
-    await handleDismiss(n);
+    const body = getBody(n);
+    // Suggested next level from the job's payload; fall back to the spec's
+    // example target (Autonomous) for notifications without a body.
+    const suggested = body.suggested_level || 'Autonomous';
+    if (!n.workspace_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'trust' } };
+    try {
+      await api.updateWorkspace(n.workspace_id, { trust_level: suggested });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.trust_increased') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.trust_increase_failed') },
+      };
+    }
   }
 
   function handleAdjustMetaSpec(n) {

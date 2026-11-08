@@ -299,6 +299,15 @@
     const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectCount);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      // If the debounce window from the last connect() attempt is still
+      // active (socket dropped < CONNECT_DEBOUNCE_MS after connecting),
+      // connect() would return early and the reconnect would be silently
+      // swallowed — killing auto-reconnect entirely. Reschedule for after
+      // the window lapses instead.
+      if (Date.now() - lastConnectAttempt < CONNECT_DEBOUNCE_MS) {
+        scheduleReconnect();
+        return;
+      }
       reconnectCount++;
       connect();
     }, delay);
