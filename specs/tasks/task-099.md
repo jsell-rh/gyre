@@ -159,13 +159,17 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
 requires. Implementation commits are in the frontmatter. Rounds 1-4 closed
-the F1-F7 and round-3 review findings; round 5 repaired the
-`80ce5b90` test regression (ws.rs fabricated-workspace fallback and
-merge-broken presence fixtures); round 6 repaired the review finding
-that candidate-changed lines violated the repo's changed-lines rustfmt
-gate (`scripts/check-rustfmt-diff.py` exit 1 in 11 files); this round
-(7, commit `30c30ca8`) resolved the rebase onto `4d6759a0` (task-084
-plus the task-077 revision), which conflicted in three files.
+the F1-F7 and round-3 review findings; round 5 repaired the `80ce5b90`
+test regression (ws.rs fabricated-workspace fallback and merge-broken
+presence fixtures); round 6 repaired the changed-lines rustfmt gate
+findings (exit 1 in 11 files → clean); round 7 resolved the rebase onto
+`4d6759a0` (three conflicts: CLI step 6 kept the candidate's real
+`push_and_sync_specs`, inert-enforcement exemptions dropped to zero
+entries, relative-path-defaults dropped the stale spawn.rs entry); this
+round (8, merge commit `57ebef611`) resolved the rebase onto `72ad2a128`
+(task-096 rollback circuit breaker head, carrying the task-193
+spec-approval-attestation lineage), which conflicted in two exemption
+files plus one semantic conflict.
 
 ### Behavior
 
@@ -190,28 +194,31 @@ plus the task-077 revision), which conflicted in three files.
   (`tenant_default_workspace()` via `WorkspaceRepository::list_by_tenant`,
   skip-and-log when unresolvable — the check-fabricated-scope-defaults
   pattern), never a fabricated `default-{tenant}` id.
-- Round-6 fix (commit `6131513c`): purely mechanical rustfmt pass over
-  the 11 files whose changed lines failed the gate plus `client.rs`
-  (formatted as a child module of `main.rs`). No semantic changes; the
-  diff collapses the `tenant_default_workspace` signature (ws.rs),
-  reflows the stray `).await;` left by the emit_telemetry
-  sync-to-async change (mcp.rs), and reflows the remaining changed
-  lines to rustfmt defaults.
-- Round-7 (rebase resolution, commit `30c30ca8`): merged base
-  `4d6759a0` into the branch and resolved the three conflicts —
-  (a) `gyre-cli/src/main.rs` step 6 kept the candidate's real
-  `push_and_sync_specs` implementation over the base's older
-  report-only block (the base contributed nothing else to the CLI;
-  bootstrap.rs/client.rs auto-merged back to the candidate versions);
-  (b) `inert-enforcement-exemptions.txt` dropped BOTH sides' entries —
-  each side had fixed the other's finding (base bound+branched the
-  `evaluate_attestation_abac` results in merge_processor.rs; candidate
-  removed the void `validate_persona` calls in api/orchestrator.rs), so
-  the merged tree has zero exempted sites and the file keeps only its
-  header; (c) `relative-path-defaults-exemptions.txt` dropped the
-  candidate's spawn.rs:600 entry — the merged spawn.rs (base's task-077
-  F6 rewrite) no longer contains the `"./repos/"` prose comment it
-  exempted.
+- Round-7 (rebase onto `4d6759a0`, commit `30c30ca8`): resolved three
+  conflicts — CLI step 6 kept the candidate's real `push_and_sync_specs`
+  over the base's report-only block; inert-enforcement exemptions dropped
+  to zero entries (each side had fixed the other's finding);
+  relative-path-defaults dropped the stale spawn.rs entry exempting prose
+  the base's task-077 rewrite had removed.
+- Round-8 (rebase onto `72ad2a128`, merge commit `57ebef611`):
+  (a) `inert-enforcement-exemptions.txt` resolved to zero entries — the
+  merged tree passes `check-inert-enforcement.sh` with NO exemptions
+  (empty-exemption probe, exit 0), because the base's
+  orchestrator.rs:187/:283 entries were already fixed by this branch's
+  rounds and the merge_processor.rs fixes survived the auto-merge;
+  (b) `fabricated-scope-defaults-exemptions.txt` resolved to the 3
+  violations the merged tree actually has (auth.rs:838 JWT fallback
+  validated before use, speculative_merge.rs:372, gate_executor.rs:111)
+  — dropped specs.rs:959 (task-193's skip-and-log fix is in the merged
+  tree) and git_http.rs:1515 (push-event workspace now resolved from the
+  repo record), lowering FROZEN_EXEMPTION_COUNT 4→3;
+  (c) semantic conflict repaired: the base's new e2e test
+  `human_and_agent_requires_both_approvals_e2e` seeded its human
+  approver without a tenant binding, which this task's F1 fail-closed
+  API-key auth rejects (403). The fixture `register_e2e_human` now binds
+  jsell to the seeded specs' tenant (ws-e2e's tenant) — the fixture
+  complies with the fail-closed contract; the security behavior is
+  untouched.
 
 ### Tests
 
@@ -223,35 +230,33 @@ plus the task-077 revision), which conflicted in three files.
   pinning skip-and-log), presence fixtures bound to the caller's tenant.
 - CLI: 11 bootstrap tests (parse/flags, slug, gates, starter kit,
   manifest shape, summary rendering, persona coverage).
-- This round changed formatting only; suites re-run to confirm no
-  behavior drift: `cargo test -p gyre-server --lib ws::` — 82 passed,
-  0 failed; `cargo test -p gyre-cli` — 131 + 1 passed, 0 failed;
-  `cargo check -p gyre-server -p gyre-cli` — exit 0.
-- Round-7 merge-resolution probes (merged tree): `cargo check -p
-  gyre-cli -p gyre-server` — exit 0; `cargo test -p gyre-cli` — 131 + 1
-  passed, 0 failed; `cargo test -p gyre-server --lib merge_processor`
-  — 60 passed, 0 failed; `cargo test -p gyre-server --lib` — 1363
-  passed, 0 failed; `check-inert-enforcement.sh` and
-  `check-relative-path-defaults.sh` — both exit 0 against the resolved
-  exemption files (proving no unexempted violation and no stale entry
-  needed).
+- This round (8) changed only the two exemption files, the
+  FROZEN_EXEMPTION_COUNT constant, and one test fixture; suites re-run
+  on the merged tree: `cargo check --all` — exit 0; `cargo test -p
+  gyre-cli` — 131 + 1 passed, 0 failed; `cargo test -p gyre-server
+  --lib` — 1418 passed, 0 failed (pre-fix: 1417 + 1 failed — the e2e
+  above, asserting left 403 / right 201 at api/specs.rs:2785).
+- Both exemption check scripts exit 0 against the resolved files, and
+  empty-exemption probes prove minimality: inert-enforcement needs
+  zero entries; fabricated-scope's 3 entries exactly match the 3
+  violations the empty-exemption probe reports.
 
 ### Verification evidence
 
 - Evidence under `/tmp/stage/review-evidence/` (source SHAs, commands,
-  exit codes, logs; see its README.md). Round-7 (rebase resolution)
-  evidence is in that directory's current contents: README.md plus the
-  five probe logs listed in it (both exemption check scripts, cargo
-  check, cli tests, merge_processor tests, server lib suite).
-- Round-7 merged base `4d6759a0` (task-084 + task-077 revision) into
-  the branch; conflicts resolved per the Behavior section. The merged
-  tree keeps the candidate's bootstrap behavior unchanged (the base
-  contributed no competing CLI code), and the exemption-file
-  resolutions are proven minimal by both check scripts exiting 0.
-- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the finding's
-  reproduction base) — exit 0, "changed lines clean (48 Rust files
-  checked)"; also exit 0 against `86a98a29` (HEAD^1, the base CI's fmt
-  job uses on merge — 32 files checked).
+  exit codes, logs; see its README.md). Round-8 (rebase onto
+  `72ad2a128`, merge commit `57ebef611`) evidence is that directory's
+  current contents: README.md plus nine probe logs — both exemption
+  check scripts (resolved files, exit 0), both empty-exemption
+  minimality probes, `cargo check --all` (exit 0), `cargo test -p
+  gyre-cli` (131 + 1 passed), `cargo test -p gyre-server --lib` (1418
+  passed), `check-rustfmt-diff.py 72ad2a128` (changed lines clean,
+  exit 0), and `check-scope-literal-defaults.sh` (exit 0, covering the
+  fixture's tenant-literal usage inside `mod tests`).
+- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the round-6
+  finding's reproduction base) — exit 0, "changed lines clean (48 Rust
+  files checked)"; also exit 0 against `86a98a29` (HEAD^1, the base CI's
+  fmt job uses on merge — 32 files checked).
 - Pre-fix reproduction: exit 1, 11 files (log `rustfmt-diff-before.log`).
 - Pre-existing on the incoming head (not introduced here, unchanged):
   `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs,
