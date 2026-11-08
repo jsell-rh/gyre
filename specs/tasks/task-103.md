@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["ad99cb8c9f68accdbb0e960cc6af9e03488bb8d0", "3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b", "cead5a881d3bdc2daf5f5135801dddf5cc6d93cd"]
+commits: ["cead5a881d3bdc2daf5f5135801dddf5cc6d93cd", "ad99cb8c9f68accdbb0e960cc6af9e03488bb8d0", "3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b"]
 ---
 
 ## Spec Excerpt
