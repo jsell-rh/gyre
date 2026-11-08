@@ -110,15 +110,23 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
         return;
     }
 
-    // Replay the existing log buffer.
-    let buffered = {
-        let logs = state.agent_logs.lock().await;
-        logs.get(&agent_id).cloned().unwrap_or_default()
-    };
-    for line in &buffered {
-        let out = format!("{}\r\n", line);
-        if sender.send(Message::Text(out)).await.is_err() {
-            return;
+    // Replay the existing log buffer. A corrupt cold segment surfaces as
+    // an error line in the stream rather than silently vanishing logs.
+    match state.agent_logs.replay(&agent_id).await {
+        Ok(buffered) => {
+            for line in &buffered {
+                let out = format!("{}\r\n", line);
+                if sender.send(Message::Text(out)).await.is_err() {
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(%agent_id, error = %e, "TTY: agent log replay failed");
+            let out = format!("[tty] log replay failed: {e}\r\n");
+            if sender.send(Message::Text(out)).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -229,12 +237,13 @@ mod tests {
         let (url, state) = start_test_server().await;
 
         // Pre-populate the log buffer for agent-1.
-        {
-            let mut logs = state.agent_logs.lock().await;
-            logs.entry("agent-1".to_string())
-                .or_default()
-                .push("[1000] hello from buffer".to_string());
-        }
+        state
+            .agent_logs
+            .append(
+                "agent-1".to_string(),
+                "[1000] hello from buffer".to_string(),
+            )
+            .await;
 
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         assert!(auth_tty(&mut ws, "tok").await);
