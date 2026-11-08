@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["b3678e2762149ba743e63c604bb618e66dd564ab"]
+commits: ["b3678e2762149ba743e63c604bb618e66dd564ab", "9248f6e0c8800bc62924c45617feccb0fde50235", "eacee766a"]
 ---
 
 ## Spec Excerpt
@@ -144,20 +144,36 @@ and the review-round TTL repair `72c5bb03`).
 
 ### Test evidence
 
-Checkpoint-resume round (branch
-`pipeline/task-134/4ecf63ad79d04047a63252562b978574-3`, head `d679e3e8`, the
-merge of recovered candidate `b3678e27` with base `7f8b5d9c`; the previous
-round died on a `git clone` infrastructure timeout before any work ran —
-evidence in
-`/tmp/stage/review-evidence/task-134-checkpoint-verification.md`). No code
-change was required: the recovered task-134 source is byte-identical to the
-checkpoint candidate across `gyre-common/src`, `gate_executor.rs`,
-`api/gates.rs`, and `tests/task134_review_probe.rs` (the merge brought only
-upstream task-156/reconciliation content), and all focused suites re-ran
-green on the merged tree — gate_executor 37/37 (including both TTL
-regression tests and both e2e review tests), task134_review_probe 7/7,
-api::gates 6/6, plus the merge-touched surfaces api::merge_requests 30/30
-and git_http 38/38. The earlier TTL mutation check (both regression tests
-FAIL against the pre-fix fixed-TTL code) is documented in the prior round's
-evidence. `cargo test --all` and the full mechanical-check suite are owned
-by verification and publication.
+Rebase-repair round (branch
+`pipeline/task-134/dc745ac59e0d4cce98c897c7169aeef3-1`, merge commit
+`eacee766a`, resolving the merge of the task-134 candidate `9248f6e0`
+with base `c5deca80`). No product behavior changed: the four conflicted
+files were resolved preserving both sides' intent — the candidate's
+`read_file_at_commit` port method and `validation_type` gate field
+against base's expanded `revert_commit` docs and base-added
+`QualityGate` test literals (two in `api/recovery.rs` completed with
+`validation_type: None` after the auto-merge left them uncompilable).
+The `fabricated-scope-defaults-exemptions.txt` conflict resolved to the
+truth of the merged tree: the auth.rs entry renumbered 773→837 (same
+pre-existing, test-pinned site — `jwt_missing_tenant_id_defaults_to_default`
+— shifted by the candidate's `mint_scoped` additions), and the
+gate_executor.rs:111 entry deleted because the candidate's gate-executor
+rewrite genuinely fixed that site (skip-and-log on unresolvable MR);
+FROZEN_EXEMPTION_COUNT lowered 4→2 to match the remaining entries. Also
+unwrapped the discarded `seed_builtin_policies` Results at the task-134
+test call sites (must-use lint; a seeding failure now fails the test
+instead of silently default-denying).
+
+All focused suites re-ran green on the merged tree: gate_executor 37/37
+(including both TTL regression tests and both e2e review tests),
+task134_review_probe 7/7, and the merge-touched surfaces
+api::gates + api::merge_requests + api::mr_timeline + merge_processor +
+api::recovery + git_http 163/163, git_integration 16/16. Mechanical
+probes pass on the merged tree: check-fabricated-scope-defaults,
+check-arch, check-mem-port-contracts, check-migration-versions,
+check-dead-message-kinds, check-scope-literal-defaults; the exemption
+freeze adds no entries relative to either merge parent. The earlier TTL
+mutation check (both regression tests FAIL against the pre-fix fixed-TTL
+code) is documented in the prior round's evidence. `cargo test --all` and
+the full mechanical-check suite are owned by verification and
+publication.
