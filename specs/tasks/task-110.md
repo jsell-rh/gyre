@@ -99,36 +99,41 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Rebase-resolution round: merge of upstream `72ad2a128` (task-096
-rollback circuit breaker) onto candidate `467c6685a`.** The branch
-arrived with an interrupted merge whose only unmerged paths were the
-two exemption ledgers,
-`scripts/fabricated-scope-defaults-exemptions.txt` and
-`scripts/warn-continue-creation-exemptions.txt` — zero Rust code in
-conflict; all other paths auto-merged. Each conflict entry was resolved
-by verifying the actual site in the merged tree, not by siding with
-either branch:
+**Rebase-resolution round 4: merge of upstream `c5deca801a` (task-105
+log compression / task-120 user-entity lineage) onto candidate
+`7e427038a`, committed as `8a9b01ee4`.** Four textual conflicts
+(schema.rs users table, postgres/sqlite user adapters, auth.rs JWT
+user resolution) resolved by union — both task-110's tenant scope +
+global_role and upstream's username/avatar_url/preferences/
+last_login_at survive, with the surviving auth function being
+`find_or_create_user_tenant(state, sub, tenant_id, preferred_username,
+...)` feeding upstream's username-derivation tail.
 
-- `specs.rs:959` (fabricated-scope) — dropped: task-193's fix (tenant
-  resolved from the workspace record, fanout skipped+logged) is in the
-  merged tree.
-- `git_http.rs:1495` (fabricated-scope) — dropped: dead entry; no
-  matchable lookup-fallback site exists in any version (task-095's
-  upstream commit `7a0bd1db7` dropped it for the same reason).
-- `auth.rs:777` (fabricated-scope) — kept at HEAD's re-anchored line:
-  the merged tree has the JWT-claims fallback at 777 (task-110 added
-  lines above; the merge did not touch auth.rs).
-- `speculative_merge.rs:372`, `gate_executor.rs:111` — kept; both sites
-  verified at exactly those lines in the merged tree. Resolved file: 3
-  entries vs frozen count 4 (no growth).
-- `abac_middleware.rs` seed + `spawn.rs:219` (warn-continue) — both
-  entries removed: both sites fail closed in the merged tree
-  (`map_err(...)?` propagation; task-077 F6 fix present).
+Two semantic collisions the auto-merge could not see were found and
+fixed as part of the resolution:
 
-The merge was committed as `a481428a6`, and the prior round's deferred
-focused-test re-run was executed at that head (the prior sandbox had
-blocked compilation; this round it succeeded). Evidence log:
-`/tmp/stage/review-evidence/task-110-rebase-round-3.md`.
+1. **Duplicate-column migration abort:** upstream's
+   `2026-10-08-000058_user_entity_profile_fields` (Diesel version
+   20261008000058) creates `users.tenant_id`/`global_role` and always
+   runs before task-110's `2026-10-09-000057_user_tenant_scope`
+   (20261009000057), which created the same columns — fresh-DB startup
+   aborted with "duplicate column name: tenant_id" (reproduced by
+   `cargo test -p gyre-adapters` before the fix). The task-110
+   migration is now reduced to its unique contribution
+   (`idx_users_tenant`), with the rebase rationale recorded in the
+   file; its down.sql drops only the index.
+2. **external_id immutability vs. the specced invitation link:**
+   upstream's port contract makes `update()` reject external_id
+   changes, which broke task-110's "SSO mode: … then account linked"
+   path. Added `UserRepository::claim_external_id(user_id,
+   new_external_id)` — the single sanctioned external_id transition,
+   failing on unknown user or an external_id owned by another user —
+   implemented in SQLite, Postgres, and mem; the auth email-link path
+   claims through it (resolution order preserved: external_id match,
+   then verified same-tenant email claim, then provisioning) and
+   stamps `last_login_at` per upstream's every-login contract.
+
+Evidence log: `/tmp/stage/review-evidence/task-110-rebase-round-4.md`.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -163,23 +168,35 @@ blocked compilation; this round it succeeded). Evidence log:
   selectors; `docs/server-config.md` documents
   `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
 
-### Test evidence (re-run at merged head `a481428a6`, this round)
+### Test evidence (re-run at merged head `8a9b01ee4`, this round)
 
+- `cargo check --all` (SKIP_WEB_BUILD=1) — clean, zero warnings.
+- `cargo test -p gyre-adapters` — 383 passed / 0 failed: includes the
+  fresh-DB migration boot (proves the duplicate-column fix), the
+  `migration_000058_backfills_unique_url_safe_usernames` regression
+  test (fixture adjusted to carry the now-dependent tenant-scope index
+  migration with its target batch), and the new
+  `claim_external_id_is_the_sanctioned_repoint` contract test
+  (repoint visible only via the new id, taken external_id rejected
+  without side effects, unknown user rejected).
+- `cargo test -p gyre-server --lib auth::` — 46 passed / 0 failed:
+  BOTH sides' suites — upstream's provisioning (username
+  derivation/sanitization, `second_login_stamps_last_login_and_
+  keeps_username`) and task-110's link tests
+  (`jwt_email_link_claims_invitation_account`, unverified-email and
+  cross-tenant negatives).
 - `cargo test -p gyre-server --lib api::invitations` — 18 passed / 0
-  failed (lifecycle suite, invitee-surface tests, HTTP 403
-  negative-authz, concurrent-claim exactly-one-winner).
-- `cargo test -p gyre-adapters invitation` — 3 passed / 0 failed
-  (round-trip single-use claim; wrong-source-status transition
-  rejected).
-- `cargo test --offline -p gyre-domain --lib invitation` — 4 passed /
-  0 failed (policy defaults, status roundtrip, expiry only when
-  pending).
-- `bash scripts/check-fabricated-scope-defaults.sh` — OK (resolved
-  exemption file matches the merged tree's actual sites).
-- `bash scripts/check-warn-continue-creation.sh` — OK (zero entries;
-  both former sites fail closed in the merged tree).
-- `bash scripts/check-task-commit-attribution.sh` — OK.
-- A loopback TCP listener is bindable in this sandbox (probe OK this
-  round, unlike earlier rounds), and the in-process HTTP-layer tests
-  above already exercise the full routing chain; a separate
-  live-server smoke remains for host verification / CI at the PR head.
+  failed; `api::users` — 14 passed / 0 failed.
+- `cargo test -p gyre-domain` — 436 passed / 0 failed.
+- All 20 mechanical guard scripts OK at the committed tree (arch,
+  abac-route-registry, mcp-write-tools, migration-versions,
+  migration-sql-portability, mem-port-contracts,
+  task-commit-attribution, and the rest of the repo's invariant
+  linters).
+- `cargo clippy` on the touched crates — no warnings in any file
+  changed this round (remaining output is the pre-existing baseline
+  shared by both parents).
+- Loopback TCP listeners are permitted in this sandbox and the
+  in-process HTTP-layer tests above exercise the full routing chain;
+  a separate live-server smoke remains for host verification / CI at
+  the PR head.
