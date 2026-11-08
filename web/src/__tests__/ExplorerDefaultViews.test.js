@@ -6,7 +6,7 @@
  * the other three swap the canvas area for their dedicated panels.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 
 // Shared mock: every api method is a cached vi.fn() defaulting to an empty
 // result; tests override the ones they exercise.
@@ -118,10 +118,18 @@ function renderWorkspaceScope() {
   });
 }
 
+// The repo-scope header also carries the Graph|Briefing arch sub-tabs
+// (ui-navigation.md §2, task-083) — a second tablist. Scope tab queries to
+// the HSI §3 view selector so both tablists can coexist.
+async function viewTabs() {
+  const selector = await screen.findByTestId('explorer-view-selector');
+  return within(selector).getAllByRole('tab');
+}
+
 describe('Explorer default views selector (HSI §3)', () => {
   it('shows the four view tabs with Boundary active by default', async () => {
     renderRepoScope();
-    const tabs = await screen.findAllByRole('tab');
+    const tabs = await viewTabs();
     expect(tabs.map((t) => t.textContent)).toEqual([
       'Boundary', 'Spec Realization', 'Change', 'System Trace',
     ]);
@@ -136,7 +144,7 @@ describe('Explorer default views selector (HSI §3)', () => {
   it('switches to the Change View and queries the timeline since last visit', async () => {
     localStorage.setItem('gyre_last_seen', JSON.stringify({ value: 1700000000, updated_at: 1 }));
     renderRepoScope();
-    await screen.findAllByRole('tab');
+    await viewTabs();
     await fireEvent.click(screen.getByRole('tab', { name: 'Change' }));
 
     await waitFor(() => {
@@ -154,7 +162,7 @@ describe('Explorer default views selector (HSI §3)', () => {
 
   it('switches to the Spec Realization View with linked nodes', async () => {
     renderRepoScope();
-    await screen.findAllByRole('tab');
+    await viewTabs();
     await fireEvent.click(screen.getByRole('tab', { name: 'Spec Realization' }));
 
     await waitFor(() => {
@@ -172,7 +180,7 @@ describe('Explorer default views selector (HSI §3)', () => {
       { id: 'mr-1', title: 'Payment retry endpoint', status: 'merged' },
     ]);
     renderRepoScope();
-    await screen.findAllByRole('tab');
+    await viewTabs();
     await fireEvent.click(screen.getByRole('tab', { name: 'System Trace' }));
 
     await waitFor(() => {
@@ -184,7 +192,7 @@ describe('Explorer default views selector (HSI §3)', () => {
 
   it('returns to the Boundary canvas when Boundary is re-selected', async () => {
     renderRepoScope();
-    await screen.findAllByRole('tab');
+    await viewTabs();
     await fireEvent.click(screen.getByRole('tab', { name: 'Change' }));
     await waitFor(() => {
       expect(document.querySelector('[data-testid="change-view"]')).toBeTruthy();
