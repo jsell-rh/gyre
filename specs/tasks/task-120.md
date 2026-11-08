@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: ["50c487140b20a7b7346ff30d4463648e31283107", "7752dd2e6f2a9f8922f8ca0dfde5ed0364bc97fb", "7d53b6d2baaaa980439b1b5da704567ac271758b", "7c52fffda67c3550bf6972774fca12bda819d916", "a3f95bbf83705f915ff76cd89fc2e7aad060f285", "cf32398a7e6284b5c41fe87a41710a34db0350e4", "3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e"]
+commits: ["50c487140b20a7b7346ff30d4463648e31283107", "7752dd2e6f2a9f8922f8ca0dfde5ed0364bc97fb", "7d53b6d2baaaa980439b1b5da704567ac271758b", "7c52fffda67c3550bf6972774fca12bda819d916", "a3f95bbf83705f915ff76cd89fc2e7aad060f285", "cf32398a7e6284b5c41fe87a41710a34db0350e4", "3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e", "75d49d4c86861d135badc2f6c414b7a2cd3fd750"]
 review: specs/reviews/task-120.md
 ---
 
@@ -110,41 +110,60 @@ per-tenant unique immutable URL-safe username derived from SSO
 `GET`/`PUT /api/v1/users/me` — is complete: six product commits plus the
 Round-1/2 repairs (rustfmt `7d53b6d2`, clippy derive-scoping `7752dd2e`,
 INTEGER→BIGINT `93913405`), the rebase repair (`c76b224d`/`7f00472c`),
+and the first version-collision renumber `000056 → 000057` (`50c48714`),
 all as reviewed in `specs/reviews/task-120.md` Round 2 (PASS).
 
-**This round — migration version-collision repair (verification finding,
-`checks.sh` exit 1):** after the rebase onto main, the repo held two
-migrations mapping to Diesel version `20261008000056` — task-120's
-`user_entity_profile_fields` and task-180's `spec_assertion_results`
-(landed on main). Diesel runs only one migration per version
-(alphabetically first wins), so task-120's migration was silently
-dropped: its columns/index would never be created on fresh databases
-while every test that constructs `SqliteStorage` on a DB already carrying
-000056 stayed green.
+**This round — merge repair (`75d49d4c8`):** merging main (`124a852be`)
+raised two source issues, both fixed:
 
-Repair: renumbered the task-120 migration directory to the next unused
-sequence — `2026-10-08-000057_user_entity_profile_fields` (task-180's
-000056 is already published on main, so it keeps the version; the
-unsynced task-120 migration moves). SQL is unchanged. Updated the one
-code-level version literal (the regression test's partition key in
-`gyre-adapters/src/sqlite/mod.rs`, now targeting `20261008000057`, with
-the pre-migration set correctly including 000056) and the 000056→000057
-comments in `sqlite/mod.rs`, `schema.rs`, and `auth.rs`.
+1. **`sqlite/mod.rs` content conflict** — the conflicting hunk held two
+   independent regression tests (task-120's username-backfill guard and
+   main's task-102 `migration_000054_folds_legacy_path_pid_into_detail`).
+   Both are kept; neither semantics changed.
+2. **Second migration version collision** — main landed task-193's
+   `2026-10-08-000057_spec_approval_attestation` under Diesel version
+   `20261008000057`, colliding with the previously renumbered
+   `..._user_entity_profile_fields` (Diesel runs only one migration per
+   version, alphabetically first — ours would again be silently
+   dropped). Renumbered to the next unused sequence:
+   `2026-10-08-000058_user_entity_profile_fields` (SQL unchanged).
+   Updated the regression test's partition key to `20261008000058`
+   (renamed to `migration_000058_backfills_unique_url_safe_usernames`;
+   its pre-migration set now correctly includes main's 000056 and 000057)
+   and the 000057→000058 comments in `sqlite/mod.rs`, `schema.rs`, and
+   `auth.rs`.
 
 ### Verification
 
 - `bash scripts/check-migration-versions.sh` → OK (no duplicate versions).
 - `bash scripts/check-migration-sql-portability.sh` → OK.
-- `cargo test -p gyre-adapters --lib` → **353 passed, 0 failed**
-  (12 ignored), including the renumbered
-  `migration_000057_backfills_unique_url_safe_usernames` regression
-  guard, `no_duplicate_migration_version_prefixes`,
+- `cargo test -p gyre-adapters --lib` → **370 passed, 0 failed** (12
+  ignored), including the renumbered
+  `migration_000058_backfills_unique_url_safe_usernames`, main's
+  `migration_000054_folds_legacy_path_pid_into_detail`,
+  `no_duplicate_migration_version_prefixes`,
   `migrations_create_previously_shadowed_columns`, and
   `migration_is_idempotent`.
-- rustfmt: the three touched Rust files are clean (pre-existing drift in
-  untouched files is out of changed-lines scope).
+- `cargo test -p gyre-server --lib` → **1387 passed, 0 failed** (the
+  merge auto-merged many server files; this confirms they compile and
+  pass together with the user-entity surface).
+- `cargo check --workspace --all-targets` → clean.
+- `python3 scripts/check-clippy-diff.py HEAD^1` → changed lines clean;
+  `python3 scripts/check-rustfmt-diff.py HEAD^1` → clean.
+- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh`,
+  `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`,
+  `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`,
+  `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`,
+  `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`,
+  `check-inert-enforcement.sh`, `check-forwarded-header-trust.sh`,
+  `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`,
+  `check-non-atomic-creation.sh`, `check-forged-scope-fields.sh`, and
+  `check-task-commit-attribution.sh` → all OK on the merged tree.
 
-Transport note (recorded per assignment): this sandbox's listener probe
-(`accept`) is not supported (errno 95, `capabilities.json`) — server-boot
-smoke over HTTP cannot run here. Host-side checks: `cargo test --all` +
+Transport note (recorded per assignment): the prior round's listener
+probe was unsupported; this sandbox's `capabilities.json` now reports
+`tcp_listener_probe: supported`. No server-boot HTTP smoke was needed
+for this round's repair — the changes are storage-layer only and covered
+by the adapter test suite above. Host-side checks: `cargo test --all` +
 GitHub CI on this exact head.
