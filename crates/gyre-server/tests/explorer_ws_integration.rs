@@ -8,7 +8,9 @@ use gyre_common::{
     graph::{GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
 };
-use gyre_ports::{ConversationMessage, LlmPort, LlmPortFactory, ToolCallingResponse, ToolDefinition};
+use gyre_ports::{
+    ConversationMessage, LlmPort, LlmPortFactory, ToolCallingResponse, ToolDefinition,
+};
 use gyre_server::{abac_middleware, build_router, build_state};
 use serde_json::json;
 use std::sync::Arc;
@@ -187,9 +189,7 @@ async fn explorer_ws_connect_and_list_views() {
     // First message after connect should be the views list (sent by client on connect,
     // but we need to send list_views explicitly since the client does it).
     _sink
-        .send(Message::Text(
-            json!({"type": "list_views"}).to_string().into(),
-        ))
+        .send(Message::Text(json!({"type": "list_views"}).to_string()))
         .await
         .unwrap();
 
@@ -220,8 +220,7 @@ async fn explorer_ws_save_and_load_view() {
             "description": "A test view",
             "query": {"scope": {"type": "all"}}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -247,9 +246,7 @@ async fn explorer_ws_save_and_load_view() {
 
     // Load it back
     sink.send(Message::Text(
-        json!({ "type": "load_view", "view_id": view_id })
-            .to_string()
-            .into(),
+        json!({ "type": "load_view", "view_id": view_id }).to_string(),
     ))
     .await
     .unwrap();
@@ -282,8 +279,7 @@ async fn explorer_ws_delete_view() {
             "description": "Will be deleted",
             "query": {"scope": {"type": "all"}}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -306,9 +302,7 @@ async fn explorer_ws_delete_view() {
 
     // Delete it
     sink.send(Message::Text(
-        json!({ "type": "delete_view", "view_id": view_id })
-            .to_string()
-            .into(),
+        json!({ "type": "delete_view", "view_id": view_id }).to_string(),
     ))
     .await
     .unwrap();
@@ -357,8 +351,7 @@ async fn explorer_ws_message_too_long() {
             "text": long_text,
             "canvas_state": {}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -385,19 +378,13 @@ async fn explorer_ws_rate_limiting() {
         "text": "hello",
         "canvas_state": {}
     });
-    sink.send(Message::Text(msg.to_string().into()))
-        .await
-        .unwrap();
+    sink.send(Message::Text(msg.to_string())).await.unwrap();
 
     // Send second message IMMEDIATELY (within MIN_MESSAGE_INTERVAL_MS=1000ms).
     // Don't wait for the first response — just fire both in quick succession.
     // Note: if the first message causes the server to close (e.g., no LLM configured),
     // the send may fail with BrokenPipe — that's acceptable in test environments.
-    if sink
-        .send(Message::Text(msg.to_string().into()))
-        .await
-        .is_err()
-    {
+    if sink.send(Message::Text(msg.to_string())).await.is_err() {
         // Server closed before second message — rate limiting can't be tested
         // without a configured LLM. This is acceptable.
         return;
@@ -521,8 +508,7 @@ async fn explorer_ws_save_view_validation() {
             "description": "Invalid query",
             "query": {"scope": {"type": "invalid_type"}}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -682,9 +668,7 @@ impl LlmPort for ScriptedLlmPort {
         _tools: &[ToolDefinition],
         _max_tokens: Option<u32>,
     ) -> anyhow::Result<ToolCallingResponse> {
-        let n = self
-            .calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let text = self
             .responses
             .get(n)
@@ -735,11 +719,9 @@ async fn explorer_ws_full_session_lifecycle() {
     let (mut sink, mut stream) = ctx.connect(&repo_id).await;
 
     // 1. Connect succeeded — the socket answers the initial protocol exchange.
-    sink.send(Message::Text(
-        json!({ "type": "list_views" }).to_string().into(),
-    ))
-    .await
-    .unwrap();
+    sink.send(Message::Text(json!({ "type": "list_views" }).to_string()))
+        .await
+        .unwrap();
     let msg = WsCtx::read_msg_skip_warnings(&mut stream).await;
     assert!(
         msg.as_ref().is_some_and(|m| m["type"] == "views"),
@@ -754,8 +736,7 @@ async fn explorer_ws_full_session_lifecycle() {
             "text": "show me the test coverage gaps",
             "canvas_state": {}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -793,7 +774,10 @@ async fn explorer_ws_full_session_lifecycle() {
         }
     }
     assert!(saw_thinking, "message turn must start with thinking status");
-    assert!(saw_text_done, "message turn must stream final text (done=true)");
+    assert!(
+        saw_text_done,
+        "message turn must stream final text (done=true)"
+    );
     assert!(saw_view_query, "message turn must produce a view_query");
 
     // 3. Clean disconnect: client sends Close, server must close the socket
@@ -850,8 +834,7 @@ async fn explorer_ws_agent_generates_view_query_from_question() {
             "text": "What would break if I change Space?",
             "canvas_state": {}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -904,7 +887,9 @@ async fn explorer_ws_self_check_loop_refines_broad_groups() {
     .to_string();
     let factory = Arc::new(ScriptedLlmFactory::new(vec![
         format!("Here is the domain overview.\n\n<view_query>{broad_query}</view_query>"),
-        format!("Refined to the core persistence helpers.\n\n<view_query>{refined_query}</view_query>"),
+        format!(
+            "Refined to the core persistence helpers.\n\n<view_query>{refined_query}</view_query>"
+        ),
     ]));
 
     let ctx = WsCtx::new_with_llm(factory.clone()).await;
@@ -921,8 +906,7 @@ async fn explorer_ws_self_check_loop_refines_broad_groups() {
             "text": "show everything in the persistence domain",
             "canvas_state": {}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -1078,7 +1062,11 @@ async fn explorer_ws_self_check_refinement_flow() {
         .unwrap();
     ctx.state
         .graph_store
-        .create_node(make_graph_node(&repo_id, "CoordinatorService", NodeType::Class))
+        .create_node(make_graph_node(
+            &repo_id,
+            "CoordinatorService",
+            NodeType::Class,
+        ))
         .await
         .unwrap();
 
@@ -1140,7 +1128,11 @@ async fn explorer_ws_self_check_sends_best_version_after_cap() {
         .unwrap();
     ctx.state
         .graph_store
-        .create_node(make_graph_node(&repo_id, "CoordinatorService", NodeType::Class))
+        .create_node(make_graph_node(
+            &repo_id,
+            "CoordinatorService",
+            NodeType::Class,
+        ))
         .await
         .unwrap();
 
@@ -1226,7 +1218,10 @@ async fn explorer_rest_saved_view_round_trip() {
 
     // Load (REST get) — the exact query comes back for the frontend to render
     let resp = client
-        .get(format!("{}/api/v1/repos/{repo_id}/views/{view_id}", ctx.base))
+        .get(format!(
+            "{}/api/v1/repos/{repo_id}/views/{view_id}",
+            ctx.base
+        ))
         .bearer_auth(TOKEN)
         .send()
         .await
@@ -1242,14 +1237,20 @@ async fn explorer_rest_saved_view_round_trip() {
 
     // Delete, then the view is gone (404 on re-load)
     let resp = client
-        .delete(format!("{}/api/v1/repos/{repo_id}/views/{view_id}", ctx.base))
+        .delete(format!(
+            "{}/api/v1/repos/{repo_id}/views/{view_id}",
+            ctx.base
+        ))
         .bearer_auth(TOKEN)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 204, "DELETE /views/:id must succeed");
     let resp = client
-        .get(format!("{}/api/v1/repos/{repo_id}/views/{view_id}", ctx.base))
+        .get(format!(
+            "{}/api/v1/repos/{repo_id}/views/{view_id}",
+            ctx.base
+        ))
         .bearer_auth(TOKEN)
         .send()
         .await
