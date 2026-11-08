@@ -41,6 +41,11 @@ pub struct ListMrsQuery {
     pub status: Option<String>,
     pub repository_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Optional cap on the number of MRs returned. When set, the response
+    /// contains the most recently created MRs, newest first. Sorting here
+    /// (rather than in adapters) keeps the cap deterministic for every
+    /// backend regardless of their list ordering.
+    pub per_page: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -737,7 +742,7 @@ pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = if let Some(ws_id) = params.workspace_id {
+    let mut mrs = if let Some(ws_id) = params.workspace_id {
         state
             .merge_requests
             .list_by_workspace(&Id::new(ws_id))
@@ -752,6 +757,13 @@ pub async fn list_mrs(
             _ => state.merge_requests.list().await?,
         }
     };
+    // per_page caps the response to the most recently created MRs, newest
+    // first. Sort + truncate before the per-MR enrichment below so dropped
+    // MRs cost no extra queries either.
+    if let Some(cap) = params.per_page {
+        mrs.sort_by_key(|mr| std::cmp::Reverse(mr.created_at));
+        mrs.truncate(cap);
+    }
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     // Enrich with task_id from agent worktree tracking (best-effort).
     for resp in &mut results {
@@ -1381,6 +1393,51 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_mrs_per_page_keeps_newest() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, oldest) = create_test_mr(app, "oldest").await;
+        let (app, middle) = create_test_mr(app, "middle").await;
+        let (app, newest) = create_test_mr(app, "newest").await;
+        // Pin distinct creation times: rapid API creates can share a second,
+        // which would make "newest first" ambiguous.
+        for (id, ts) in [
+            (oldest.clone(), 1_000u64),
+            (middle.clone(), 2_000),
+            (newest.clone(), 3_000),
+        ] {
+            let mut mr = state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(&id))
+                .await
+                .unwrap()
+                .expect("created MR must be retrievable");
+            mr.created_at = ts;
+            state.merge_requests.update(&mr).await.unwrap();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1&per_page=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "per_page caps the MR list");
+        let ids: Vec<&str> = arr.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec![newest.as_str(), middle.as_str()],
+            "per_page keeps the most recently created MRs, newest first"
+        );
     }
 
     #[tokio::test]
