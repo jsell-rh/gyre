@@ -680,6 +680,12 @@ async fn accept_tenant_invitation_claimed(
     req: &AcceptInviteRequest,
     now: u64,
 ) -> Result<AcceptInviteResponse, ApiError> {
+    // non-atomic-create:ok - user + pre-assigned memberships are created
+    // across two repositories with no cross-repo transaction facility, but
+    // the failure is fully recoverable: the caller (accept_tenant_invitation)
+    // compensates by rolling the invitation back to Pending on any error,
+    // and a retry dedups — the user is found via find_by_external_id instead
+    // of re-created, and membership creation skips existing rows.
     // Find or create the user in this tenant.
     let email = invitation.email.clone();
     let tenant_ns = format!("tenant:{}:email:{}", invitation.tenant_id, email);
@@ -937,6 +943,11 @@ pub async fn invite_to_workspace(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WorkspaceInviteRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceInvitationResponse>), ApiError> {
+    // non-atomic-create:ok - the workspace invitation is the primary
+    // durable effect; the invitee notification is an explicitly best-effort
+    // `let _ =` side channel, not a dependency of the invitation — the
+    // invitee's durable surface is GET /api/v1/users/me/invitations, so a
+    // lost notification cannot orphan the invitation.
     let ws_id = Id::new(workspace_id.clone());
     let workspace = state
         .workspaces
