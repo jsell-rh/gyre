@@ -24,6 +24,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -270,8 +271,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -1048,7 +1051,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
