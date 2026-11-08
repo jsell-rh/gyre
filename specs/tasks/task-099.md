@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "8441d58b19917b17a562a26b0eea979599c31a65", "14c20424d4ef8a06aba1e857038fe347a5fba911"]
 ---
 
 ## Spec Excerpt
@@ -158,18 +158,11 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
-requires. Implementation commits are in the frontmatter. Rounds 1-4 closed
-the F1-F7 and round-3 review findings; round 5 repaired the `80ce5b90`
-test regression (ws.rs fabricated-workspace fallback and merge-broken
-presence fixtures); round 6 repaired the changed-lines rustfmt gate
-findings (exit 1 in 11 files → clean); round 7 resolved the rebase onto
-`4d6759a0` (three conflicts: CLI step 6 kept the candidate's real
-`push_and_sync_specs`, inert-enforcement exemptions dropped to zero
-entries, relative-path-defaults dropped the stale spawn.rs entry); this
-round (8, merge commit `57ebef611`) resolved the rebase onto `72ad2a128`
-(task-096 rollback circuit breaker head, carrying the task-193
-spec-approval-attestation lineage), which conflicted in two exemption
-files plus one semantic conflict.
+requires. Implementation commits are in the frontmatter. Rounds 1-8
+closed the F1-F7 and successive review/rebase findings; this round (9,
+merge commit `8441d58b1` + fix commit `14c20424d`) resolved the merge
+onto base `414fe9aa1` (task-120 user-entity profile fields) and closed
+the four findings from the round-9 review.
 
 ### Behavior
 
@@ -181,91 +174,91 @@ files plus one semantic conflict.
   personas created and pre-approved, spec registry init, default gates,
   repo orchestrator spawn, summary with IDs, API key (shown once) and
   URLs. A failing step reports completed steps and a resume hint.
-- Server pieces: `POST /api/v1/users` (admin-only, mints an
-  authenticating API key, binds the admin to the tenant — migration
-  `000056_user_tenant_id`, fail-closed API-key auth), persona attachment
-  persisted on the agent row (migration `000057`), spawn wire without
-  duplicate keys, first-run spec-ledger push with `--force`, mem adapter
-  enforcing the SQLite uniqueness constraints, truthful orchestrator
-  launch status, starter kit (5 files, never overwrites, requires
-  `--repo-path`), dev mode flag rejection and token precedence, Protocol
-  Injection decomposed to task-101 per the round-1 F2 scope note.
-- ws.rs Activity telemetry scoped to a real workspace
-  (`tenant_default_workspace()` via `WorkspaceRepository::list_by_tenant`,
-  skip-and-log when unresolvable — the check-fabricated-scope-defaults
-  pattern), never a fabricated `default-{tenant}` id.
-- Round-7 (rebase onto `4d6759a0`, commit `30c30ca8`): resolved three
-  conflicts — CLI step 6 kept the candidate's real `push_and_sync_specs`
-  over the base's report-only block; inert-enforcement exemptions dropped
-  to zero entries (each side had fixed the other's finding);
-  relative-path-defaults dropped the stale spawn.rs entry exempting prose
-  the base's task-077 rewrite had removed.
-- Round-8 (rebase onto `72ad2a128`, merge commit `57ebef611`):
-  (a) `inert-enforcement-exemptions.txt` resolved to zero entries — the
-  merged tree passes `check-inert-enforcement.sh` with NO exemptions
-  (empty-exemption probe, exit 0), because the base's
-  orchestrator.rs:187/:283 entries were already fixed by this branch's
-  rounds and the merge_processor.rs fixes survived the auto-merge;
-  (b) `fabricated-scope-defaults-exemptions.txt` resolved to the 3
-  violations the merged tree actually has (auth.rs:838 JWT fallback
-  validated before use, speculative_merge.rs:372, gate_executor.rs:111)
-  — dropped specs.rs:959 (task-193's skip-and-log fix is in the merged
-  tree) and git_http.rs:1515 (push-event workspace now resolved from the
-  repo record), lowering FROZEN_EXEMPTION_COUNT 4→3;
-  (c) semantic conflict repaired: the base's new e2e test
-  `human_and_agent_requires_both_approvals_e2e` seeded its human
-  approver without a tenant binding, which this task's F1 fail-closed
-  API-key auth rejects (403). The fixture `register_e2e_human` now binds
-  jsell to the seeded specs' tenant (ws-e2e's tenant) — the fixture
-  complies with the fail-closed contract; the security behavior is
-  untouched.
+- Server pieces: `POST /api/v1/users` (admin-only, tenant-contained,
+  mints an authenticating API key, binds the admin to the tenant,
+  fail-closed API-key auth), persona attachment persisted on the agent
+  row, spawn wire without duplicate keys, first-run spec-ledger push,
+  mem adapter enforcing the SQLite uniqueness constraints, truthful
+  orchestrator launch status, starter kit (5 files, never overwrites,
+  requires `--repo-path`), dev mode flag rejection and token precedence,
+  Protocol Injection decomposed to task-101 per the round-1 F2 scope
+  note.
+- Merge resolution (round 9, `8441d58b1`): the task-120 side of the
+  four conflicted files is a superset of the candidate's tenant_id
+  additions (username, avatar_url, preferences, last_login_at,
+  tenant_id, global_role); schema.rs kept the candidate's
+  agents.persona_id; auth.rs keeps both the tenant binding and the
+  last_login_at stamp on SSO provisioning.
+- Review repairs (round 9, `14c20424d`):
+  - create_user tenant containment: an Admin API-key user of tenant A
+    can no longer mint an Admin (and raw API key) bound to tenant B —
+    403 unless the caller is a system principal.
+  - Truthful orchestrator resume: the Pending-persona 409 from the
+    spawn endpoint is distinguished from the already-live 409 (new
+    `PersonaPending` outcome fails the step with the server detail
+    instead of printing a false "already active" success), and step 5's
+    resume approves Pending personas rather than skipping them.
+  - Gate dedupe: the server rejects a duplicate gate name per repo
+    with 409, and bootstrap step 7 lists existing gates and skips
+    already-configured names — a re-run no longer duplicates the gate
+    set.
+  - Verified credential reuse: the step-2 fallback fires only on a
+    real 409 duplicate (a 403 or validation error fails the run), and
+    the saved token is verified via GET /api/v1/users/me — it must
+    authenticate as the requested admin AND be bound to the target
+    tenant before adoption.
+- Merge-induced semantic conflicts repaired: the candidate's
+  `2026-10-09-000056_user_tenant_id` migration is a documented no-op
+  (users.tenant_id is owned by task-120's earlier-sorting `000058`;
+  running both aborted fresh databases with "duplicate column name:
+  tenant_id"); task-120's users.rs test fixtures now bind created
+  users to the seeded tenant (tenant_id is required at creation); the
+  auth_integration API-key fixture binds its user to a tenant
+  (fail-closed API-key auth rejects unbound users).
 
 ### Tests
 
 - Server: user-creation handler tests (key authenticates as new user,
-  duplicate rejected, unknown role rejected), orchestrator
-  wire/persona/spawn-name tests, ws activity tests
-  (`ws_activity_event_emits_to_telemetry` scoped to the seeded
-  workspace, `ws_activity_event_without_tenant_workspace_skips_emission`
-  pinning skip-and-log), presence fixtures bound to the caller's tenant.
-- CLI: 11 bootstrap tests (parse/flags, slug, gates, starter kit,
-  manifest shape, summary rendering, persona coverage).
-- This round (8) changed only the two exemption files, the
-  FROZEN_EXEMPTION_COUNT constant, and one test fixture; suites re-run
-  on the merged tree: `cargo check --all` — exit 0; `cargo test -p
-  gyre-cli` — 131 + 1 passed, 0 failed; `cargo test -p gyre-server
-  --lib` — 1418 passed, 0 failed (pre-fix: 1417 + 1 failed — the e2e
-  above, asserting left 403 / right 201 at api/specs.rs:2785).
-- Both exemption check scripts exit 0 against the resolved files, and
-  empty-exemption probes prove minimality: inert-enforcement needs
-  zero entries; fabricated-scope's 3 entries exactly match the 3
-  violations the empty-exemption probe reports.
+  duplicate rejected, unknown role rejected, cross-tenant admin
+  rejected with 403 while same-tenant creation succeeds), gate
+  duplicate-name 409 test, orchestrator wire/persona/spawn-name
+  tests, ws activity tests, presence fixtures bound to the caller's
+  tenant.
+- CLI: bootstrap parse/flag, slug, gate detection, starter kit,
+  manifest shape, summary rendering, persona coverage tests, plus the
+  round-9 additions: client classification tests (Pending-persona 409
+  vs already-live 409; create_user 409 Duplicate vs 403 Other) and four
+  scripted full-flow resume tests against a mock HTTP server (resume
+  approves a Pending persona and skips existing gates while continuing
+  as the verified admin; wrong-user saved token, cross-tenant admin,
+  and a non-duplicate create_user error each fail the run with no
+  further requests).
+- Suites on the merged + repaired tree: `cargo check --all` exit 0;
+  `cargo test -p gyre-cli` 139 + 1 passed; `cargo test -p gyre-server
+  --lib` 1435 passed (pre-repair: 6 health failures from the migration
+  collision); `cargo test -p gyre-server --tests` all targets pass
+  (pre-repair: `api_key_auth_grants_access` failed 403 vs 200);
+  `cargo test -p gyre-adapters` 375 passed, 12 ignored.
+- Eleven repo lint scripts exit 0 (arch, api-auth, abac
+  route-registry/exempt-handlers, inert-enforcement,
+  fabricated-scope-defaults, scope-literal-defaults, no-em-dash,
+  mem-port-contracts, migration-versions, migration-sql-portability);
+  `check-rustfmt-diff.py 414fe9aa1` changed lines clean (33 files).
 
 ### Verification evidence
 
-- Evidence under `/tmp/stage/review-evidence/` (source SHAs, commands,
-  exit codes, logs; see its README.md). Round-8 (rebase onto
-  `72ad2a128`, merge commit `57ebef611`) evidence is that directory's
-  current contents: README.md plus nine probe logs — both exemption
-  check scripts (resolved files, exit 0), both empty-exemption
-  minimality probes, `cargo check --all` (exit 0), `cargo test -p
-  gyre-cli` (131 + 1 passed), `cargo test -p gyre-server --lib` (1418
-  passed), `check-rustfmt-diff.py 72ad2a128` (changed lines clean,
-  exit 0), and `check-scope-literal-defaults.sh` (exit 0, covering the
-  fixture's tenant-literal usage inside `mod tests`).
-- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the round-6
-  finding's reproduction base) — exit 0, "changed lines clean (48 Rust
-  files checked)"; also exit 0 against `86a98a29` (HEAD^1, the base CI's
-  fmt job uses on merge — 32 files checked).
-- Pre-fix reproduction: exit 1, 11 files (log `rustfmt-diff-before.log`).
-- Pre-existing on the incoming head (not introduced here, unchanged):
-  `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs,
-  check-assertionless-tests exit 2, check-cli-spec-parity exit 1 on the
-  spec_assist SSE display path (per round-4 stash reproduction).
+- Round-9 evidence is the current contents of `/tmp/stage/review-evidence/`
+  (README.md with source SHAs, plus cargo-check-all, cli-tests,
+  server-lib-tests, server-integration-tests, adapters-tests,
+  check-scripts, and rustfmt-diff logs, all exit 0).
+- Pre-existing on the incoming candidate head (not introduced here,
+  unchanged): `cargo clippy -p gyre-domain --lib` errors in
+  rust_extractor.rs, check-assertionless-tests exit 2,
+  check-cli-spec-parity exit 1 on the spec_assist SSE display path.
 - Round-4's live e2e (dev first-run bootstrap with `--starter-kit`,
   cross-tenant `--admin-user jsell`, failure paths) was run against
-  round-4's head; rounds 5-6 changed ws.rs test fixtures/scoping and
-  formatting only, none of which the bootstrap REST orchestration
-  exercises.
+  round-4's head; rounds 5-9 changed resume semantics, ws.rs fixtures,
+  and formatting — the round-9 resume behavior is covered by the four
+  scripted flow tests above; a fresh live e2e remains with verification.
 - Full workspace suites, all-target Clippy, and GitHub CI remain with
   verification and publication.
