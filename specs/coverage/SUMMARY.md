@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-10
+**Last updated:** 2026-11-04
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -41,7 +41,7 @@
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 37 | 1 | 0 | 2% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
+| user-management.md | 36 | 10 | 0 | 23 | 3 | 0 | 11% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **219** | **0** | **310** | **110** | **163** | **46%** |
+| **TOTAL** | **802** | **219** | **0** | **307** | **113** | **163** | **47%** |
