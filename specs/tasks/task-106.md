@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688", "6227b6e17b4f2c9c9630d82ad35a2ec6e99c2b55"]
 ---
 
 ## Spec Excerpt
@@ -75,6 +75,34 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 Automatic jj rebase on target branch movement (source-control.md §4).
 Core behavior shipped in rounds 1–5; later rounds were review, CI,
 verification-gate, base-merge, and completion-path repairs.
+
+### Spawn-response repair round (R21, commit `6227b6e17`)
+
+Repaired the single finding of review `de1eec5d`:
+
+- **F1 (minor) — response names a nonexistent directory**: the spawn
+  response's `worktree_path` always cited
+  `{repo_root}/worktrees/{branch_slug}`, but when jj provisioning
+  succeeds — the designed-for common case — the plain-git worktree is
+  NOT created and the agent's working directory is the jj workspace
+  `{repo_root}/workspaces/{agent_id}` (the value persisted to the DB
+  worktree record and listed by `GET /repos/:id/worktrees`). The REST
+  spawn response, docs/agent-protocol.md, and the MCP
+  `gyre_spawn_worker` result (which serializes the same response) all
+  reported a path that does not exist, and the API was internally
+  inconsistent. The response now returns the effective path —
+  identical to the worktree record (jj workspace when provisioned,
+  plain-git worktree otherwise); interrogation agents keep the
+  historical placeholder (they have no worktree at all).
+  `docs/agent-protocol.md` documents the semantics. New test
+  `spawn_response_worktree_path_matches_recorded_worktree` covers BOTH
+  provisioning outcomes (`ConfigurableJjOps` gained a
+  `main_checkout_init_fails` knob for the fallback case) and asserts
+  response == recorded path; the F9 spawn test now also pins the
+  response value. Mutation-verified: reverting the response to the
+  bare worktrees/ path makes both tests FAIL with the reviewer's
+  exact repro; the fix makes them PASS (transcripts in
+  `/tmp/stage/review-evidence/task-106-r21/`).
 
 ### Completion-path repair round (R20, commit `bb1099a10`)
 
@@ -168,12 +196,13 @@ no-flag-clear) makes them FAIL; the fix makes them PASS (transcripts in
 
 ### Test evidence
 
-At HEAD `bb1099a10` (R20). Probe logs + exit codes in
-`/tmp/stage/review-evidence/task-106-r20/`:
+At HEAD `6227b6e17` (R21). Probe logs + exit codes in
+`/tmp/stage/review-evidence/task-106-r21/` (R20's in `…/task-106-r20/`):
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1438 passed,
-  0 failed** (includes the 2 new R20 tests, all task-106 rebase tests,
-  and the base's task-077/095/096 suites).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1439 passed,
+  0 failed** (R21's new spawn-response test + all prior task-106 tests,
+  the base's task-077/095/096 suites, and the R20 completion-path
+  tests).
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` → **391 passed,
   0 failed** (new fixture test guard-skips here: no `jj` binary in this
   sandbox; CI's R16 leg runs it against pinned jj-vcs 0.39.0 with
