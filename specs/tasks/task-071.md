@@ -9,7 +9,7 @@ coverage_sections:
   - "explorer-implementation.md §18 ExplorerChat (Svelte)"
   - "explorer-implementation.md §19 ExplorerView (Svelte)"
   - "explorer-implementation.md §26 Phase 2: Chat + Agent"
-commits: ["318e8120f7720b70d7ca49e5c16e7eb1b33dad5d"]
+commits: ["318e8120f7720b70d7ca49e5c16e7eb1b33dad5d", "1364412d59fbc3c8cfd63c43cafe94de972afeb9"]
 ---
 
 ## Spec Excerpt
