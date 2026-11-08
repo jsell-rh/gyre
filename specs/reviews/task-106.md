@@ -47,3 +47,92 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 19
+
+Candidate: `0ebba04e` (assignment base `72ad2a128`, merged as parent of
+`a5db6ecd2`). The R18 base-merge resolution is sound: base is a true
+ancestor, the exemptions freeze holds (`git diff 72ad2a128..HEAD --
+scripts/inert-enforcement-exemptions.txt` is empty), both test suites are
+present, and the mechanical checks the candidate touches pass
+(check-ignored-tool-tests, check-inert-enforcement,
+check-relative-path-defaults, check-mem-port-contracts, check-arch,
+check-dead-message-kinds — all exit 0).
+
+Verified working (no findings):
+
+- All 13 task-106 rebase tests pass (`cargo test -p gyre-server --lib --
+  rebase` → 16 passed; full `--lib` → 1421 passed, 0 failed), including
+  the F3 gate ordering, F4/F8 deferral semantics, F12 under-load replay,
+  and the R12 F1 repo-scoped worktree selection on both trigger and
+  replay paths.
+- The R16 CI contract holds empirically: with `GYRE_JJ_TESTS_MUST_RUN=1`
+  and no jj binary, `jj_rebase_clean_after_target_moves` FAILS loudly
+  (guard panic) instead of guard-skipping to a zero-assertion pass.
+- `emit_event` signs, persists, and broadcasts; `configured_repos_path`
+  anchors the root at the process cwd; F6 legacy-row absolutization and
+  F9 branch-before-provisioning are pinned by tests that drive
+  `spawn_agent_core` with the real git adapter.
+- Pre-existing check failures are NOT candidate defects:
+  check-assertionless-tests exits 2 identically at the base (mawk 1.3.4
+  rejects the script's gawk `\s` regexes; CI uses gawk), and
+  check-conditional-test-guards' 2 violations live in
+  web/src/__tests__/WorkspaceSettings.test.js, untouched by this
+  candidate and failing identically at the base.
+
+New findings (jj 0.39.0 contracts source-verified — no jj binary is
+installable in this sandbox, so the pinned CI versions were downloaded
+from crates.io and read; excerpts in
+`/tmp/stage/review-evidence/task-106-r19/`):
+
+- **F1 (major): complete_agent's jj export path is dead in the workspace
+  layout this task ships.** `jj_bookmark_create(&wt.path,
+  &mr.source_branch, "@")` runs `jj bookmark create <source_branch> -r @`,
+  which errors ("Bookmark already exists") whenever the source branch is
+  already a local jj bookmark — and the task's own spawn path guarantees
+  exactly that: F9 `create_branch` writes the branch into the bare repo,
+  and `jj_main_checkout_init`/`jj_workspace_add` import it (jj-lib 0.39.0:
+  backing-repo bookmarks default to Tracked and merge into the LOCAL
+  bookmark; `jj git init` imports at init — git.rs:939-961, 648-651,
+  init.rs:260; jj-cli create.rs:58-72 errors on the existing local
+  bookmark). Because the create fails, the subsequent `jj git export`
+  exports the bookmark at its stale spawn-time position (export syncs
+  bookmarks/tags only, git.rs:1117-1132); the agent's working-copy work
+  at @ is reachable from no bookmark and never reaches git. For the
+  jj-provisioned new-branch spawn (the "designed-for common case": no
+  plain-git worktree is created, the workspace has no `.git`, so
+  smart-HTTP push is unavailable there), the MR complete_agent creates
+  diffs and merges an unchanged branch — the agent's completed work is
+  silently lost, and the shipped claim that the export "pushes agent work
+  back into the bare repo's refs so diff/can_merge see it" is false. No
+  test catches it: server tests inject `ConfigurableJjOps` (bookmark
+  create is an Ok no-op) and the adapter fixture test pins bookmark
+  create only on a fresh name. Fix direction: bookmark set/move semantics
+  (e.g. `jj bookmark set <name> -r @`) instead of create, or stop
+  pre-creating the git branch that shadows the bookmark name.
+- **F2 (minor): MR stats computed before the export.** In complete_agent,
+  `diff`/`can_merge` and `merge_requests.create` run before the
+  bookmark/export step, so even with F1 fixed the freshly created MR
+  carries pre-export (empty/stale) diff_stats and has_conflicts.
+- **F3 (minor): surfaced conflict state never clears.** A rebase conflict
+  sets `mr.has_conflicts = Some(true)`, but a later clean rebase of the
+  same agent does not reset it; the flag stays stale until an MR update
+  recomputes it from git refs (which cannot see in-flight jj work in this
+  layout either).
+
+Notes (not findings):
+
+- The rebase contract itself (trigger, adapter, conflict-as-state,
+  notifications, safeguards, deferral/replay, audit recording in
+  production code) is real and well tested at every layer the mem double
+  can observe; the 13 real-jj adapter fixture tests run only in the CI jj
+  leg (pinned 0.39.0 + GYRE_JJ_TESTS_MUST_RUN=1) — an installation
+  restriction here, not a code defect.
+- Rebase audit events (`record_rebase_audit`/`record_rebase_failure`)
+  have no test assertions; consider pinning them.
+
+Verdict: **needs-revision** — the §4 rebase machinery is genuinely
+implemented and verified, but F1 (source-verified against the pinned jj
+version) breaks the completion path of the very workspace layout the task
+introduced, silently dropping agent work from MRs, with F2/F3 as
+same-surface follow-ups.
