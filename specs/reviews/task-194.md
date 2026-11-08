@@ -1,0 +1,31 @@
+# Review — task-194 (Manifest-driven spec lifecycle task creation)
+
+Spec: `specs/system/spec-registry.md` §15 "Spec Lifecycle Integration" — lifecycle hooks use the manifest instead of path-prefix matching: which files trigger hooks (`auto_create_tasks`), per-spec priority override, manifest as single source of truth.
+
+Commits under review: `236056d95` (product change; cumulative diff `git diff 124a852be..6bd8fb49 -- crates/gyre-server/src/git_http.rs crates/gyre-server/src/spec_registry.rs specs/tasks/task-194.md`, +503/−17). The later branch commits (`485672672`, `6bd8fb491`) touch only task metadata/process records. Working tree at candidate `6bd8fb491` verified pristine after all probes (`git status` clean, `git diff HEAD` empty).
+
+Verdict: **complete**.
+
+## Evidence
+
+Test runs (all at candidate `6bd8fb491`, `/tmp/stage/bin/cargo`, evidence under `/tmp/stage/review-evidence/`):
+
+- **New tests pass:** `should_create_lifecycle_task_manifest_gate`, `…_defaults_section_applies`, `…_no_manifest_falls_back_to_prefixes` (3/3), `spec_lifecycle_manifest_gates_task_creation_e2e`, `spec_lifecycle_without_manifest_uses_prefix_fallback_e2e` (2/2), `parse_spec_changes_*` (8/8 incl. the new `includes_all_specs_paths`), `spec_registry::tests::{manifest_entry_for_path_resolves_with_and_without_prefix, effective_priority_entry_override_beats_defaults, effective_priority_falls_back_to_defaults_then_none}` (3/3). All exit 0.
+- **Touched-crate suite:** `cargo test -p gyre-server --lib` — **1381 passed / 0 failed**, matching the shipped claim exactly.
+- **Mutation probe (test-strength proof):** the manifest branch of `should_create_lifecycle_task` was temporarily replaced with legacy prefix matching and the suite re-run: **3 tests FAILED** (`should_create_lifecycle_task_manifest_gate`, `…_defaults_section_applies`, and the e2e, which then saw tasks for spec-a and spec-c: `["Implement spec: specs/system/spec-c.md", "Review spec change: specs/system/spec-a.md", "Review spec change: specs/system/spec-b.md"]`). The tests kill a removed manifest gate; the acceptance criterion's "FAILS if the manifest gate is removed" is satisfied by direct experiment, not by the implementer's claim. File restored and verified byte-identical afterwards.
+- **Mechanical gates on the tree:** `scripts/check-arch.sh` OK; `scripts/check-task-commit-attribution.sh` OK (product commit `236056d95` recorded in `commits:` frontmatter; metadata commits exempt by the check's own rules).
+
+Verified against the acceptance criteria:
+
+- **auto_create_tasks: false creates no task.** The e2e drives real `process_spec_lifecycle` over a real two-commit git repo whose fixture manifest marks spec-a `false`, spec-b `true` (with `priority: Critical`), and leaves spec-c unregistered: exactly one task (`Review spec change: specs/system/spec-b.md`, priority `Critical`), asserted by title AND `spec_path`; no task for spec-a/spec-c by title or spec_path. Event tier asserted too: exactly one `SpecChanged` (payload `spec_path == spec-b`) and one `TaskCreated` on the broadcast bus — so no events for excluded specs.
+- **Unregistered specs/ file creates no task.** Gate: `manifest_entry_for_path(...).map(|e| e.effective_auto_create_tasks(&m.defaults)).unwrap_or(false)` — `unwrap_or(false)` is fail-closed for unregistered files, and the e2e's spec-c plus the unit test's `unregistered.md` prove it.
+- **Manifest-less fallback preserved.** `None` branch uses `SPEC_WATCHED_PATHS` prefixes; `spec_lifecycle_without_manifest_uses_prefix_fallback_e2e` creates the watched-prefix task (priority High — the change-kind default) and not the `specs/milestones/` one, against a real manifest-less repo.
+- **Priority override is real, not hardcoded.** `SpecEntry.priority` / `ManifestDefaults.priority` are `Option<TaskPriority>` (`#[serde(default)]`, so existing manifests parse unchanged); `effective_priority()` chains entry → defaults → `None`; the task-creation path applies it via `.unwrap_or(priority)` keeping `classify_spec_change`'s change-kind default when nothing is declared. Unit tests cover all three tiers; the e2e proves the `Critical` override lands on the created task while the fallback e2e proves High is kept with no manifest.
+- **Missed non-watched-prefix case fixed.** `parse_spec_changes` now admits all `specs/` paths (eligibility moved to the manifest gate), covered by `parse_spec_changes_includes_all_specs_paths` and by the gate unit test resolving `specs/coverage/coverage-matrix.md` (non-watched prefix, registered) → true.
+- **Plan items 4/5 intact.** Auto-invalidation of stale approvals (`revoke_all_for_path` per stale path, rename → old path) runs before the gate and is unchanged; title dedup (non-Done same-title skip) and `SpecChanged`/`TaskCreated` emission fire only for specs that actually get tasks. `notify_cross_workspace_dependents` likewise.
+- **Agent instructions honored.** Single manifest reader: the only new read site is `crate::spec_registry::read_manifest` (grep confirms no second reader added); the gate is the requested pure `(Option<&SpecManifest>, char, &str)` function; renames match on the new path (diff path resolution via `manifest_entry_for_path` with `specs/`-prefix normalization, same identity `sync_spec_ledger` uses).
+
+Minor (not blocking, recorded for a future hardening pass):
+
+- A manifest that is present but **unparseable** at HEAD is treated as absent (`read_manifest` logs a warn and returns `None`), so the prefix fallback applies and tasks may be created for specs the broken manifest intended to suppress. This is the mandated task-193 helper's `Option` contract (the task explicitly required reusing it), is disclosed in the shipped notes, and fails loudly in the logs — but a fail-closed choice (no lifecycle tasks when a manifest exists but cannot be parsed) would match §15's "single source of truth" more strictly.
+- Auto-invalidation now fires for any `specs/` change (broader candidate set from `parse_spec_changes`) and does not consult the manifest's `auto_invalidate_on_change` flags. Task plan item 4 explicitly scoped invalidation out of this change ("Only the task-creation decision must become manifest-driven"), so this is per assignment, not a defect of it.
