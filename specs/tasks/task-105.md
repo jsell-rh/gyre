@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Log Retention & Compression"
-commits: ["0ef762b86b7f4426f525dcece52bb71023dbedcb", "eda138a7bcccf283512c072474e4dd07893a3640", "4597330e9528db2a379b420a8f07d2c8f8408038"]
+commits: ["9b175db00e22916c573465ab626f7bc13e7aaf32", "0ef762b86b7f4426f525dcece52bb71023dbedcb", "eda138a7bcccf283512c072474e4dd07893a3640", "4597330e9528db2a379b420a8f07d2c8f8408038"]
 ---
 
 ## Spec Excerpt
@@ -102,6 +102,10 @@ Commit `0ef762b86` fixes all three round-3 findings on the merged head (`cf1f047
 - **F1 (CI-blocking):** `format![...]` → `format!(...)` in the round-3 regression test — `clippy::nonstandard_macro_braces` on a changed line fails the CI clippy-diff gate.
 - **F2 (CI-blocking):** added the repo-established `#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.` above `AuditRepository` (same pattern as `storage.rs` / `meta_spec_repository.rs` / `spec_assertion_result_repo.rs`) — the new `compress_details_before` method's async_trait-generated warning span overlapped changed lines.
 - **F3 (observability):** `AgentLogBuffer::compress_older_than` counted the ENTIRE rebuilt cold segment, so every incremental pass re-counted already-cold lines (a daily run folding 1 line into a 10k-line segment reported 10k lines compressed, growing unboundedly over the 7–30 day window). All `AgentLogCompressionStats` fields (`lines`, `bytes_before`, `bytes_after`) now count only the lines newly folded THIS pass, matching the audit-event half of the report (which counts only newly compressed rows); field docs updated. `compress_folds_incrementally_and_keeps_new_lines_hot` now asserts the scoped counts (`lines == 1`, `bytes_before` == the new line's frame bytes) and FAILS on the pre-fix code (kill-check verified: reverting just the `lines` counting reproduces `left: 2, right: 1`).
+
+### Round 5: verification repair (rustfmt)
+
+Commit `9b175db00` fixes the single failing gate from verification finding `0237fecc` (`bash /tmp/stage/checks.sh`, exit 1): `scripts/check-rustfmt-diff.py` against base `72ad2a128d` reported changed lines 209–210, 719–720, 735–738 in `log_compression.rs` needing formatting (everything else in that run passed — clippy changed-lines clean, all mechanical checks OK, web build succeeded). The fix applies `rustfmt --edition 2021 --config skip_children=true` to the file: three whitespace-only hunks (the round-4 `decode` let-binding, `buf.append(...)` wrapping, and the `assert!(...contains(...))` wrapping in the cap-eviction test), no semantic change. Post-fix, the exact gate script exits 0: "rustfmt: changed lines clean (14 Rust files checked)". Evidence saved under `/tmp/stage/review-evidence/` (`rustfmt-fix.md`, `rustfmt-gate.txt`). Note for remote verification: this implement sandbox has no crates.io network, so Rust suites were not re-run here — the change is rustfmt-whitespace-only on previously compiling lines; the prior head's suites stand (`cargo test -p gyre-server --lib`, 1360 passed).
 
 ### Test evidence
 
