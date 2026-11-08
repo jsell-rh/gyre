@@ -1052,6 +1052,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin",
                 "realm_access": { "roles": ["admin"] }
@@ -1099,6 +1100,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -1179,6 +1181,7 @@ pub mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer",
                 "realm_access": { "roles": ["developer"] }

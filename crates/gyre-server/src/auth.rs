@@ -358,7 +358,8 @@ pub struct AuthenticatedAgent {
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
-    /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
+    /// - JWT auth: extracted from the `tenant_id` claim; a JWT without the
+    ///   claim is rejected (the scope cannot be determined, never fabricated).
     /// - All other auth methods: always "default".
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
@@ -385,7 +386,9 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
+    /// Tenant scope claim. Required: a JWT without it is rejected — the
+    /// caller's tenant scope cannot be determined and must not be fabricated
+    /// (fabricated-scope-defaults rule, task-097 F3 class).
     #[serde(default)]
     tenant_id: Option<String>,
 }
@@ -834,8 +837,16 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from the JWT claim. A missing claim
+    // means the caller's tenant scope cannot be determined: reject the
+    // credential rather than fabricate a "default" tenant identity (the
+    // fabricated-scope-defaults rule — a fabricated scope silently
+    // re-targets the operation and leaks data if a real tenant is
+    // literally named "default").
+    let tenant_id = claims
+        .tenant_id
+        .clone()
+        .ok_or_else(|| "missing tenant_id claim in JWT".to_string())?;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user.
@@ -1483,6 +1494,7 @@ mod tests {
     #[tokio::test]
     async fn valid_jwt_accepted() {
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "user-sub-001",
             "preferred_username": "alice",
             "email": "alice@example.com",
@@ -1532,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_signature_rejected() {
         // Tamper with the token by altering a byte in the signature.
-        let claims = serde_json::json!({ "sub": "user-sub-003", "preferred_username": "carol" });
+        let claims = serde_json::json!({ "tenant_id": "default", "sub": "user-sub-003", "preferred_username": "carol" });
         let mut token = sign_test_jwt(&claims, 3600);
         // Replace last char to corrupt signature.
         let last = token.pop().unwrap();
@@ -1556,6 +1568,7 @@ mod tests {
         let state = make_test_state_with_jwt();
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "new-user-sub-999",
             "preferred_username": "dave",
             "email": "dave@example.com",
@@ -1606,6 +1619,7 @@ mod tests {
         // stays human-readable, last_login_at is stamped on the first auth.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "derive-sub-1",
             "preferred_username": "Jordan.Sell@example.com",
             "email": "jordan@example.com"
@@ -1654,6 +1668,7 @@ mod tests {
         // changes preferred_username.
         let state = make_test_state_with_jwt();
         let claims1 = serde_json::json!({
+            "tenant_id": "default",
             "sub": "relogin-sub",
             "preferred_username": "alice"
         });
@@ -1683,6 +1698,7 @@ mod tests {
 
         // IdP now reports a different preferred_username for the same sub.
         let claims2 = serde_json::json!({
+            "tenant_id": "default",
             "sub": "relogin-sub",
             "preferred_username": "alice-renamed"
         });
@@ -1730,6 +1746,7 @@ mod tests {
         // falls back to the SSO subject instead of failing the login.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "opaque-sub-42",
             "preferred_username": "!!!"
         });
@@ -1769,6 +1786,7 @@ mod tests {
         // persist what the migration would have repaired.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "auth0|12345",
             "preferred_username": "!!!"
         });
@@ -1818,6 +1836,7 @@ mod tests {
             .with_state(state.clone());
 
         let first_claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "collision-sub-1",
             "preferred_username": "Jordan Sell"
         });
@@ -1838,6 +1857,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let second_claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "collision-sub-2",
             "preferred_username": "Jordan_Sell"
         });
@@ -1912,6 +1932,7 @@ mod tests {
             ("collision-sub-2", "Jordan_Sell"),
         ] {
             let claims = serde_json::json!({
+                "tenant_id": "default",
                 "sub": sub,
                 "preferred_username": preferred
             });
@@ -1996,6 +2017,7 @@ mod tests {
         }
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "role-test-sub",
             "preferred_username": "eve",
             "realm_access": { "roles": ["admin", "developer"] }
@@ -2156,7 +2178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jwt_missing_tenant_id_defaults_to_default() {
+    async fn jwt_missing_tenant_id_claim_rejected() {
         use super::AuthenticatedAgent;
 
         let state = make_test_state_with_jwt();
@@ -2165,6 +2187,9 @@ mod tests {
             auth.tenant_id
         }
 
+        // A JWT without a tenant_id claim cannot be tenant-scoped: the
+        // credential is rejected (401) instead of being silently scoped to
+        // a fabricated "default" tenant (fabricated-scope-defaults rule).
         let claims = serde_json::json!({
             "sub": "no-tenant-sub",
             "preferred_username": "henry"
@@ -2185,11 +2210,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(body.as_ref(), b"default");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

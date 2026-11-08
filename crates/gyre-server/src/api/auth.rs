@@ -130,6 +130,7 @@ mod tests {
         state.users.create(&user).await.unwrap();
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "admin-sub-1",
             "preferred_username": "admin-user",
             "realm_access": { "roles": ["admin"] }
@@ -170,6 +171,7 @@ mod tests {
         state.users.create(&user).await.unwrap();
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "dev-sub-1",
             "preferred_username": "dev-user",
             "realm_access": { "roles": ["developer"] }

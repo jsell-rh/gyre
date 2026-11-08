@@ -800,6 +800,7 @@ mod tests {
     fn admin_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
                 "realm_access": { "roles": ["admin"] }
@@ -811,6 +812,7 @@ mod tests {
     fn developer_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "dev-user",
                 "realm_access": { "roles": ["developer"] }
