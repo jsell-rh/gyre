@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
-commits: ["0766a16799c0cd414080d98b0cad5f56e561e7ee"]
+commits: ["0766a16799c0cd414080d98b0cad5f56e561e7ee", "7bb23bca676396d8434491cef270f6094a92a36f"]
 ---
 
 ## Spec Excerpt
@@ -184,3 +184,24 @@ work) into this branch conflicted in `ExplorerView.svelte` and
   unchanged (progress ready-for-review, product-surface commit 0766a167
   attributed in `commits:`); the merge commit is process-type and out of
   `scripts/check-task-commit-attribution.sh` scope. Working tree clean.
+
+### Verification repair (round 15)
+
+The verification round (repair id `b2adb23869154729979c83bca6993cd3`)
+flagged two findings in `crates/gyre-server/src/api/gates.rs` from the
+`list_spec_approvals_includes_rejection_fields` test:
+
+- **rustfmt**: line 646 `assert_eq!` exceeded the line-width limit.
+- **clippy `unused_mut`**: the `approved` binding at line 599 is never
+  mutated.
+
+Both fixed in product-surface commit
+`7bb23bca676396d8434491cef270f6094a92a36f` (reformatted the assert,
+dropped the unnecessary `mut`). No behavior change. Re-verified on the
+current head (which includes the merge of assignment base 637be718):
+`cargo fmt -p gyre-server` clean, `cargo clippy -p gyre-server --lib
+--tests` exits 0 with no gates.rs findings, and `cargo test -p
+gyre-server --lib api::gates` passes 7/7 including the rejection-fields
+round-trip. Evidence with exit codes retained under
+`/tmp/stage/review-evidence`. The commit is attributed in `commits:`
+frontmatter; acceptance criteria left unchecked for independent review.
