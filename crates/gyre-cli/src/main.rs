@@ -1892,23 +1892,67 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
             }
             Err(e) => {
-                // Resume path: the user already exists from a prior run. The
-                // API key minted then was saved to ~/.gyre/config — reuse it.
+                // Resume path — but ONLY for a real duplicate: a 409 from the
+                // server means the user already exists. Any other failure
+                // (403 from a non-admin token, validation, network) must
+                // fail the run: silently adopting whatever token sits in
+                // ~/.gyre/config would continue as the wrong principal
+                // (the config is also written by `gyre register` with
+                // agent tokens, and a matching server URL says nothing
+                // about which user the token belongs to).
+                let duplicate_detail = match &e {
+                    client::CreateUserError::Duplicate(detail) => detail.clone(),
+                    client::CreateUserError::Other(_) => return Err(step.fail(e.into())),
+                };
+                // The API key minted on the first run was saved to
+                // ~/.gyre/config — VERIFY it authenticates as the
+                // requested user before adopting it.
                 let saved = config::Config::load().ok();
-                let reuse = saved
+                let token = saved
                     .filter(|c| c.server == args.server)
                     .and_then(|c| c.token)
                     .filter(|t| !t.is_empty());
-                match reuse {
-                    Some(token) => {
-                        println!(
-                            "  Admin user '{username}' already exists - reusing saved credentials"
-                        );
-                        summary.admin_username = Some(username.to_string());
-                        client_api = client::GyreClient::new(args.server.clone(), token);
+                let resume_client = match token {
+                    Some(token) => client::GyreClient::new(args.server.clone(), token),
+                    None => {
+                        return Err(step.fail(anyhow::anyhow!(
+                            "admin user '{username}' already exists ({duplicate_detail}) \
+                             but ~/.gyre/config holds no credentials for {} — remove \
+                             the user server-side or resume with a different --admin-user",
+                            args.server
+                        )))
                     }
-                    None => return Err(step.fail(e)),
+                };
+                let me = match resume_client.me().await {
+                    Ok(me) => me,
+                    Err(err) => {
+                        return Err(step.fail(anyhow::anyhow!(
+                            "admin user '{username}' already exists but the saved \
+                             credential no longer authenticates ({err}) — mint a new \
+                             key server-side or resume with a different --admin-user"
+                        )))
+                    }
+                };
+                if me.username != username {
+                    return Err(step.fail(anyhow::anyhow!(
+                        "saved credentials authenticate as '{}', not '{username}' — \
+                         ~/.gyre/config belongs to a different user; remove it or pass \
+                         the matching token via --token",
+                        me.username
+                    )));
                 }
+                if me.tenant_id.as_deref() != Some(summary.tenant_id.as_str()) {
+                    return Err(step.fail(anyhow::anyhow!(
+                        "admin user '{username}' is bound to tenant {}, but this bootstrap \
+                         targets tenant {} — the saved credential cannot administer it; \
+                         resume with a different --admin-user",
+                        me.tenant_id.as_deref().unwrap_or("(none)"),
+                        summary.tenant_id
+                    )));
+                }
+                println!("  Admin user '{username}' already exists - reusing saved credentials");
+                summary.admin_username = Some(username.to_string());
+                client_api = resume_client;
             }
         }
     }
@@ -1978,8 +2022,24 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             .find_persona_by_slug_in_tenant(persona.slug, &summary.tenant_id)
             .await?
         {
-            Some(_) => {
-                println!("  Persona '{}' already registered - skipping", persona.slug);
+            Some(existing) => {
+                if existing.approval_status == "Approved" {
+                    println!("  Persona '{}' already registered - skipping", persona.slug);
+                } else {
+                    // A run interrupted between create_persona and
+                    // approve_persona leaves a Pending persona: spawn would
+                    // 409 on it (persona Pending, NOT "orchestrator already
+                    // live"). Approve it here so a resume converges instead
+                    // of exiting 0 with zero orchestrators.
+                    println!(
+                        "  Persona '{}' registered but {} - approving",
+                        persona.slug, existing.approval_status
+                    );
+                    client_api
+                        .approve_persona(&existing.id)
+                        .await
+                        .map_err(|e| step.fail(e))?;
+                }
             }
             None => {
                 let created = client_api
@@ -2064,21 +2124,41 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
 
     // ── Step 7: configure default gates ──
     if let Some(path) = &repo_path {
-        for gate in bootstrap::detect_default_gates(path) {
-            client_api
-                .create_gate(&summary.repo_id, gate.name, gate.gate_type, gate.command)
+        let detected = bootstrap::detect_default_gates(path);
+        if detected.is_empty() {
+            println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
+        } else {
+            // Resume: skip gates already configured for this repo. The
+            // server also rejects duplicates (409), but skipping here keeps
+            // a re-run from duplicating the gate set — every subsequent MR
+            // runs each gate once per bootstrap run otherwise.
+            let existing: std::collections::HashSet<String> = client_api
+                .list_gates(&summary.repo_id)
                 .await
-                .map_err(|e| step.fail(e))?;
-            summary.gates_configured.push(gate.name.to_string());
+                .map_err(|e| step.fail(e))?
+                .into_iter()
+                .map(|g| g.name)
+                .collect();
+            for gate in detected {
+                if existing.contains(gate.name) {
+                    println!("  Gate '{}' already configured - skipping", gate.name);
+                    continue;
+                }
+                client_api
+                    .create_gate(&summary.repo_id, gate.name, gate.gate_type, gate.command)
+                    .await
+                    .map_err(|e| step.fail(e))?;
+                summary.gates_configured.push(gate.name.to_string());
+            }
+            if summary.gates_configured.is_empty() {
+                println!("  All default gates already configured - nothing to do");
+            } else {
+                println!(
+                    "  Gates configured: {}",
+                    summary.gates_configured.join(", ")
+                );
+            }
         }
-    }
-    if summary.gates_configured.is_empty() {
-        println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
-    } else {
-        println!(
-            "  Gates configured: {}",
-            summary.gates_configured.join(", ")
-        );
     }
     step.advance("spawn repo orchestrator");
 
@@ -2146,6 +2226,19 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
         Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
             println!("  A repo orchestrator is already active for this repo - keeping it");
+        }
+        Ok(client::SpawnRepoOrchestratorOutcome::PersonaPending(detail)) => {
+            // The persona resolves but is not Approved — no orchestrator
+            // exists. Failing truthfully beats the previous false "already
+            // active" success. Step 5's resume approval fixes the tenant-
+            // scope case; a persona created outside bootstrap (repo or
+            // workspace scope, still Pending) lands here for the operator
+            // to resolve.
+            return Err(step.fail(anyhow::anyhow!(
+                "repo-orchestrator persona is not approved — no orchestrator was \
+                 spawned. Approve the persona (or re-run bootstrap) and try again. \
+                 Server detail: {detail}"
+            )));
         }
         // Unreachable: the retry loop above only breaks on a non-NameTaken
         // outcome (or an error). Kept explicit so a future refactor of the
@@ -4703,6 +4796,340 @@ mod tests {
             ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
             ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
         ])
+    }
+
+    // ── Bootstrap resume flow tests (task-099 repair) ──────────────────
+    //
+    // Scripted full-bootstrap runs against a mock HTTP server. These pin
+    // the resume semantics the review found broken: the saved-credential
+    // fallback must verify the token actually authenticates as the
+    // requested admin (wrong-identity continuation), a Pending persona
+    // from an interrupted run must be approved (not skipped — spawn 409s
+    // on it), and step 7 must not duplicate the gate set on re-run.
+
+    /// Serialize tests that touch $HOME (the resume path reads
+    /// ~/.gyre/config via Config::load).
+    static HOME_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeRestore(Option<String>);
+    impl Drop for HomeRestore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Point $HOME at `dir` until the returned guard drops. Caller must
+    /// hold HOME_GUARD.
+    fn set_home(dir: &std::path::Path) -> HomeRestore {
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir);
+        HomeRestore(previous)
+    }
+
+    /// An isolated $HOME holding a saved ~/.gyre/config for `server` with
+    /// token `token` (what a prior bootstrap or `gyre register` left
+    /// behind).
+    fn isolated_home(server: &str, token: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".gyre")).unwrap();
+        let cfg = config::Config {
+            server: server.to_string(),
+            token: token.map(|t| t.to_string()),
+            agent_id: None,
+            agent_name: None,
+        };
+        std::fs::write(
+            dir.path().join(".gyre").join("config"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn persona_list(slug: &str, status: &str) -> String {
+        format!(r#"[{{"id":"p-{slug}","slug":"{slug}","approval_status":"{status}"}}]"#)
+    }
+
+    const BOOTSTRAP_SPAWN_JSON: &str = r#"{
+        "agent": {"id":"a-1","name":"main-orchestrator","status":"active"},
+        "token": "jwt",
+        "launch_status": "running"
+    }"#;
+
+    fn bootstrap_args(server: String, repo_path: Option<String>) -> BootstrapArgs {
+        BootstrapArgs {
+            server,
+            token: "boot-tok".to_string(),
+            tenant: Some("Acme Corp".to_string()),
+            workspace: None,
+            repo: None,
+            repo_path,
+            admin_user: Some("jsell".to_string()),
+            oidc_issuer: None,
+            dev: false,
+            starter_kit: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_approves_pending_persona_and_skips_existing_gates() {
+        let _guard = HOME_GUARD.lock().unwrap();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            // create_user -> 409 duplicate: the resume path begins.
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // whoami with the saved token: verifies it IS jsell of t-1.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"jsell","tenant_id":"t-1"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"ws-1","name":"default","slug":"default"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"r-1","name":"main"}"#.to_string(),
+            ),
+            // Persona resume: approved, PENDING (approve follows), approved, approved.
+            (
+                "200 OK".to_string(),
+                persona_list("workspace-orchestrator", "Approved"),
+            ),
+            (
+                "200 OK".to_string(),
+                persona_list("repo-orchestrator", "Pending"),
+            ),
+            ("200 OK".to_string(), "{}".to_string()), // approve
+            (
+                "200 OK".to_string(),
+                persona_list("accountability", "Approved"),
+            ),
+            ("200 OK".to_string(), persona_list("security", "Approved")),
+            // Gate resume: cargo-test already configured -> only clippy is created.
+            (
+                "200 OK".to_string(),
+                r#"[{"name":"cargo-test"}]"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"name":"cargo-clippy"}"#.to_string(),
+            ),
+            ("200 OK".to_string(), BOOTSTRAP_SPAWN_JSON.to_string()),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let result = run_bootstrap(bootstrap_args(
+            base.clone(),
+            Some(repo_dir.path().to_string_lossy().to_string()),
+        ))
+        .await;
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        result.expect("verified resume bootstrap must succeed");
+        assert_eq!(
+            reqs.len(),
+            14,
+            "unexpected request count: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
+        // The saved credential is verified before adoption, then used for
+        // every subsequent call.
+        assert_eq!(reqs[3].request_line, "GET /api/v1/users/me HTTP/1.1");
+        assert!(reqs[3]
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer saved-tok"));
+        assert!(reqs[4]
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer saved-tok"));
+        // A Pending persona from an interrupted run is approved, not skipped.
+        assert_eq!(
+            reqs[8].request_line, "POST /api/v1/personas/p-repo-orchestrator/approve HTTP/1.1",
+            "Pending persona must be approved on resume"
+        );
+        // Gates: exactly one create (the missing one), for the right name.
+        let gate_posts: Vec<&client::test_http::CapturedRequest> = reqs
+            .iter()
+            .filter(|r| r.request_line == "POST /api/v1/repos/r-1/gates HTTP/1.1")
+            .collect();
+        assert_eq!(
+            gate_posts.len(),
+            1,
+            "re-run must not duplicate the gate set"
+        );
+        assert!(
+            gate_posts[0].body.contains("cargo-clippy")
+                && !gate_posts[0].body.contains("cargo-test"),
+            "only the unconfigured gate is created; body: {}",
+            gate_posts[0].body
+        );
+        assert_eq!(
+            reqs[13].request_line,
+            "POST /api/v1/repos/r-1/orchestrator/spawn HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_rejects_saved_token_for_a_different_user() {
+        let _guard = HOME_GUARD.lock().unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // The saved token belongs to a DIFFERENT user.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"someone-else","tenant_id":"t-1"}"#.to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("wrong-identity saved credential must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("someone-else") && msg.contains("jsell"),
+            "error must name the mismatch: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            4,
+            "no request may follow the failed identity verification: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_rejects_admin_bound_to_a_different_tenant() {
+        let _guard = HOME_GUARD.lock().unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // Same username, but bound to another tenant: continuing would
+            // let it administer a tenant it was never scoped to.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"jsell","tenant_id":"t-other"}"#.to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("cross-tenant saved credential must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tenant"),
+            "error must name the tenant mismatch: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            4,
+            "no request may follow the failed tenant check"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_create_user_403_fails_without_adopting_saved_credentials() {
+        let _guard = HOME_GUARD.lock().unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            // 403 is NOT "already exists": a non-admin bootstrap token
+            // must fail the run, never adopt the saved credential.
+            (
+                "403 Forbidden".to_string(),
+                "only Admin role may create users".to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("non-duplicate create_user error must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("create admin user") && msg.contains("only Admin role"),
+            "error should name the failed step and server detail: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            3,
+            "the saved credential must never be consulted for a non-duplicate error: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

@@ -803,6 +803,19 @@ pub async fn create_user(
         ));
     }
 
+    // Tenant containment (repo per-handler invariant): an Admin of one
+    // tenant must not provision a user bound to another tenant — the
+    // response hands back that user's raw API key, so a cross-tenant mint
+    // is privilege escalation, not just a data-scope bug. System
+    // principals (the global dev token) are exempt: they are the
+    // first-run bootstrap path before any admin exists.
+    if !auth.is_system_principal() && auth.tenant_id != req.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "cannot provision users for tenant {} (caller is scoped to tenant {})",
+            req.tenant_id, auth.tenant_id
+        )));
+    }
+
     let username = req.username.trim().to_string();
     // URL-safe handle contract (user-management.md §Username vs Display
     // Name): lowercase letters, digits, '-', '_'; no edges/consecutive
@@ -1402,6 +1415,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_user_rejects_cross_tenant_admin() {
+        // Per-handler containment: an Admin API-key user of one tenant must
+        // not mint a user (and its raw API key) bound to another tenant —
+        // the key in the response makes a cross-tenant mint an escalation
+        // path, not just a data-scope bug.
+        let (state, _user_id, key) = bootstrap_user("acme-admin").await;
+        let beta = gyre_domain::Tenant::new(gyre_common::Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"beta-infiltrator","tenant_id":"t-2"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-tenant user creation must be rejected with 403"
+        );
+
+        // Containment, not a blanket block: the caller's own tenant is the
+        // supported path.
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"acme-member","tenant_id":"t-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "same-tenant user creation by the tenant's own admin must succeed"
+        );
+    }
+
+    #[tokio::test]
     async fn create_user_rejects_unknown_role() {
         let resp = app()
             .oneshot(
@@ -1423,9 +1491,11 @@ mod tests {
     /// Helper: bootstrap a user via POST /api/v1/users (Admin-only) and
     /// return (state, user_id, raw_api_key). The API key authenticates as
     /// the new user, exercising the same auth extractor path production
-    /// clients use.
+    /// clients use. The user is bound to seeded tenant t-1 (task-099 F1:
+    /// tenant_id is REQUIRED at creation).
     async fn bootstrap_user(username: &str) -> (std::sync::Arc<crate::AppState>, String, String) {
         let state = test_state();
+        seed_tenant(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let resp = app
             .oneshot(
@@ -1434,7 +1504,9 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(format!(r#"{{"username":"{username}"}}"#)))
+                    .body(Body::from(format!(
+                        r#"{{"username":"{username}","tenant_id":"t-1"}}"#
+                    )))
                     .unwrap(),
             )
             .await
@@ -1586,14 +1658,19 @@ mod tests {
 
     #[tokio::test]
     async fn create_user_rejects_non_url_safe_username() {
-        let resp = app()
+        let state = test_state();
+        seed_tenant(&state).await;
+        let resp = crate::api::api_router()
+            .with_state(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"Bad Handle!"}"#))
+                    .body(Body::from(
+                        r#"{"username":"Bad Handle!","tenant_id":"t-1"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -1608,6 +1685,7 @@ mod tests {
         // seed the conflict directly: create u1, then attempt the same
         // handle through a user whose external_id differs.
         let state = test_state();
+        seed_tenant(&state).await;
         let seed = gyre_domain::User::new_sso(
             gyre_common::Id::new("seed-user-1"),
             "ext-seed",
@@ -1625,7 +1703,7 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"taken"}"#))
+                    .body(Body::from(r#"{"username":"taken","tenant_id":"t-1"}"#))
                     .unwrap(),
             )
             .await

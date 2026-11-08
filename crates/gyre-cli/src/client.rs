@@ -157,10 +157,12 @@ pub struct RepoResponse {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-#[allow(dead_code)]
 pub struct PersonaResponse {
     pub id: String,
     pub slug: String,
+    /// "Pending" | "Approved" | "Deprecated" — the resume path reads it:
+    /// a Pending persona from an interrupted run must be approved, not
+    /// skipped (spawn 409s on it).
     pub approval_status: String,
 }
 
@@ -168,6 +170,46 @@ pub struct PersonaResponse {
 pub struct CreateUserResponse {
     pub user: CreateUserUser,
     pub api_key: CreatedApiKey,
+}
+
+/// Error from [`GyreClient::create_user`]: a 409 duplicate (the user
+/// already exists — bootstrap's resume path) or any other failure. The
+/// split exists so the resume logic cannot mistake a 403 (non-admin
+/// token), a 400 (validation), or a network error for "already exists"
+/// and silently adopt a saved credential.
+#[derive(Debug)]
+pub enum CreateUserError {
+    /// HTTP 409: duplicate external_id or username. Carries the response
+    /// body (names the conflicting user).
+    Duplicate(String),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for CreateUserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateUserError::Duplicate(body) => write!(f, "user already exists: {body}"),
+            CreateUserError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for CreateUserError {}
+
+/// GET /api/v1/users/me — the principal the current token authenticates
+/// as. `username` and `tenant_id` drive the bootstrap resume verification.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CurrentUser {
+    pub username: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+}
+
+/// One row of GET /api/v1/repos/:id/gates — the name is all the bootstrap
+/// resume path needs (skip gates already configured for the repo).
+#[derive(Deserialize, Debug, Clone)]
+pub struct GateSummary {
+    pub name: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -1354,7 +1396,16 @@ impl GyreClient {
     /// POST /api/v1/users - create the admin user bound to a tenant; the
     /// response contains the API key exactly once. `tenant_id` is REQUIRED
     /// by the server (task-099 F1: the user is scoped at creation).
-    pub async fn create_user(&self, username: &str, tenant_id: &str) -> Result<CreateUserResponse> {
+    ///
+    /// A 409 is reported as [`CreateUserError::Duplicate`] (the user already
+    /// exists — bootstrap's resume path); every other failure is
+    /// [`CreateUserError::Other`] so the caller cannot mistake a 403 or a
+    /// validation error for "already exists".
+    pub async fn create_user(
+        &self,
+        username: &str,
+        tenant_id: &str,
+    ) -> Result<CreateUserResponse, CreateUserError> {
         let body = serde_json::json!({ "username": username, "tenant_id": tenant_id });
         let resp = self
             .client
@@ -1363,13 +1414,65 @@ impl GyreClient {
             .json(&body)
             .send()
             .await
+            .context("connecting to Gyre server")
+            .map_err(CreateUserError::Other)?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .context("reading create user response")
+            .map_err(CreateUserError::Other)?;
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(CreateUserError::Duplicate(text));
+        }
+        if !status.is_success() {
+            return Err(CreateUserError::Other(anyhow::anyhow!(
+                "create user failed (HTTP {status}): {text}"
+            )));
+        }
+        serde_json::from_str(&text)
+            .context("parsing create user response")
+            .map_err(CreateUserError::Other)
+    }
+
+    /// GET /api/v1/users/me - resolve the caller the token authenticates
+    /// as. Used by the bootstrap resume path to VERIFY a saved credential
+    /// before adopting it: a matching server URL in ~/.gyre/config says
+    /// nothing about which principal the token belongs to (the config is
+    /// also written by `gyre register` with agent tokens).
+    pub async fn me(&self) -> Result<CurrentUser> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/users/me", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
             .context("connecting to Gyre server")?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("create user failed (HTTP {status}): {text}");
+            anyhow::bail!("whoami failed (HTTP {status}): {text}");
         }
-        serde_json::from_str(&text).context("parsing create user response")
+        serde_json::from_str(&text).context("parsing whoami response")
+    }
+
+    /// GET /api/v1/repos/:id/gates - list the repo's configured quality
+    /// gates (bootstrap resume path: step 7 skips names already configured
+    /// so a re-run cannot duplicate the gate set).
+    pub async fn list_gates(&self, repo_id: &str) -> Result<Vec<GateSummary>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/repos/{repo_id}/gates", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list gates failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing gate list")
     }
 
     /// POST /api/v1/workspaces - create a workspace under a tenant.
@@ -1526,6 +1629,15 @@ impl GyreClient {
         let status = resp.status();
         let text = resp.text().await?;
         if status == reqwest::StatusCode::CONFLICT {
+            // Two distinct 409s: a live orchestrator already holds the
+            // repo slot (resume path — keep it), OR the repo-orchestrator
+            // persona resolves but is not Approved. The latter is NOT a
+            // resume success: no orchestrator exists, and pretending one
+            // is active reports fake completion (the server's message
+            // names the persona and its status; the caller surfaces it).
+            if text.contains("approve it before spawning") {
+                return Ok(SpawnRepoOrchestratorOutcome::PersonaPending(text));
+            }
             return Ok(SpawnRepoOrchestratorOutcome::AlreadyLive);
         }
         if status == reqwest::StatusCode::BAD_REQUEST && text.contains("already exists") {
@@ -1623,15 +1735,21 @@ impl GyreClient {
 }
 
 /// Outcome of `spawn_repo_orchestrator`: fresh spawn, a live orchestrator
-/// already exists for the repo (HTTP 409 — bootstrap resume path), or the
-/// requested name is held by a LIVE agent elsewhere (HTTP 400 name
-/// collision — agent names are unique server-wide, so a second tenant
-/// bootstrapping a same-named repo hits this; the caller retries with a
-/// suffixed name).
+/// already exists for the repo (HTTP 409 "already active" — bootstrap
+/// resume path), the requested name is held by a LIVE agent elsewhere
+/// (HTTP 400 name collision — agent names are unique server-wide, so a
+/// second tenant bootstrapping a same-named repo hits this; the caller
+/// retries with a suffixed name), or the repo-orchestrator persona
+/// resolves but is Pending (HTTP 409 with the persona detail — a
+/// bootstrap interrupted between persona creation and approval hits
+/// this; it is a failure, not a resume success).
 pub enum SpawnRepoOrchestratorOutcome {
     Spawned(SpawnOrchestratorResponse),
     AlreadyLive,
     NameTaken,
+    /// The repo-orchestrator persona exists but is not Approved; carries
+    /// the server's conflict body verbatim.
+    PersonaPending(String),
 }
 
 /// Test-only helpers for spinning up real loopback HTTP servers that
@@ -1791,6 +1909,87 @@ mod tests {
     fn auth_header_format() {
         let c = GyreClient::new("http://localhost:3333".to_string(), "mytoken".to_string());
         assert_eq!(c.auth_header(), "Bearer mytoken");
+    }
+
+    // ── Bootstrap resume classification tests ─────────────────────────
+    //
+    // The resume path must not mistake one server signal for another:
+    // a 409 from the orchestrator spawn endpoint is either "a live
+    // orchestrator already holds the repo slot" (resume success) or "the
+    // repo-orchestrator persona is Pending" (NO orchestrator exists —
+    // reporting success there was fake completion), and a create_user
+    // failure is only resumable when it is a 409 duplicate (a 403 from a
+    // non-admin token is not "already exists").
+
+    #[tokio::test]
+    async fn spawn_repo_orchestrator_pending_persona_409_is_not_already_live() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "persona 'repo-orchestrator' resolves in scope Tenant(\"t-1\") but is Pending; \
+             approve it before spawning its orchestrator",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let outcome = api
+            .spawn_repo_orchestrator("r-1", Some("main-orchestrator"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, SpawnRepoOrchestratorOutcome::PersonaPending(_)),
+            "a Pending-persona 409 must not be classified as AlreadyLive \
+             (no orchestrator exists — that was the fake-completion bug)"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_repo_orchestrator_live_slot_409_is_already_live() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "a repo orchestrator is already active for repo r-1",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let outcome = api
+            .spawn_repo_orchestrator("r-1", Some("main-orchestrator"))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SpawnRepoOrchestratorOutcome::AlreadyLive));
+    }
+
+    #[tokio::test]
+    async fn create_user_classifies_409_as_duplicate() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "user with external id local:jsell already exists (id u-1)",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let err = api.create_user("jsell", "t-1").await.unwrap_err();
+        match err {
+            CreateUserError::Duplicate(body) => {
+                assert!(body.contains("already exists"), "body: {body}")
+            }
+            other => panic!("409 must classify as Duplicate, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_non_duplicate_error_is_not_resumable() {
+        // A 403 (non-admin token) is NOT "already exists": the resume
+        // path must fail the run, not adopt a saved credential.
+        let (base, _rx) =
+            spawn_mock_http_server("403 Forbidden", "only Admin role may create users");
+        let api = GyreClient::new(base, "tok".to_string());
+        let err = api.create_user("jsell", "t-1").await.unwrap_err();
+        match err {
+            CreateUserError::Other(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("HTTP 403") && msg.contains("only Admin role"),
+                    "error should carry the server detail: {msg}"
+                );
+            }
+            CreateUserError::Duplicate(_) => {
+                panic!("403 must not classify as Duplicate")
+            }
+        }
     }
 
     #[test]
