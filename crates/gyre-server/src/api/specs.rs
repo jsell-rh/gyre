@@ -154,6 +154,10 @@ pub struct RevokeSpecApprovalRequest {
 pub struct ListSpecsQuery {
     /// Filter by spec kind, e.g. "meta:persona"
     pub kind: Option<String>,
+    /// Filter by owning workspace (ui-navigation.md §2/§10): only entries
+    /// scoped to this workspace — directly via `workspace_id`, or via their
+    /// owning repo — are returned. Without it, all ledger entries are listed.
+    pub workspace_id: Option<String>,
 }
 
 pub async fn list_specs(
@@ -191,6 +195,21 @@ pub async fn list_specs(
         }
     }
 
+    // repo_id → workspace_id, for entries whose workspace_id was never
+    // backfilled but whose owning repo places them in a workspace.
+    let repo_workspaces: HashMap<String, String> = if params.workspace_id.is_some() {
+        state
+            .repos
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.id.to_string(), r.workspace_id.to_string()))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     let mut specs: Vec<SpecLedgerResponse> = state
         .spec_ledger
         .list_all()
@@ -199,10 +218,26 @@ pub async fn list_specs(
         .into_iter()
         .filter(|e| {
             if let Some(kind_filter) = &params.kind {
-                e.kind.as_deref() == Some(kind_filter.as_str())
-            } else {
-                true
+                if e.kind.as_deref() != Some(kind_filter.as_str()) {
+                    return false;
+                }
             }
+            if let Some(ws) = &params.workspace_id {
+                // A scoped listing must only return entries the workspace
+                // owns: either directly (workspace_id) or through the owning
+                // repo. Entries with no resolvable scope belong to no
+                // workspace and are excluded rather than attributed to one.
+                let in_workspace = e.workspace_id.as_deref() == Some(ws.as_str())
+                    || (e.workspace_id.is_none()
+                        && e.repo_id
+                            .as_deref()
+                            .and_then(|r| repo_workspaces.get(r).map(String::as_str))
+                            == Some(ws.as_str()));
+                if !in_workspace {
+                    return false;
+                }
+            }
+            true
         })
         .map(|mut e| {
             e.linked_tasks = task_map.get(&e.path).cloned().unwrap_or_default();
@@ -278,11 +313,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            let short_sha = if e.current_sha.len() >= 8 {
-                &e.current_sha[..8]
-            } else {
-                &e.current_sha
-            };
+            // Char-boundary-safe truncation (task-095 F4 class): never slice
+            // a runtime string at a constant byte index.
+            let short_sha: String = e.current_sha.chars().take(8).collect();
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
@@ -948,25 +981,44 @@ pub async fn reject_spec(
     // workspace Admin/Developer members.
     if let Some(ref ws_id) = entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve the tenant from the workspace record. A lookup failure
+        // means the tenant scope cannot be determined: skip the
+        // tenant-scoped notification fanout and log — never fabricate a
+        // "default" scope identity (task-097 F3; same pattern as
+        // emit_reconciliation_completed in lib.rs).
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => {
+                let tenant_id = ws.tenant_id.to_string();
+                if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                    for member in &members {
+                        if matches!(
+                            member.role,
+                            gyre_domain::WorkspaceRole::Admin
+                                | gyre_domain::WorkspaceRole::Developer
+                                | gyre_domain::WorkspaceRole::Owner
+                        ) {
+                            crate::notifications::notify(
+                                state.as_ref(),
+                                ws_id.clone(),
+                                member.user_id.clone(),
+                                gyre_common::NotificationType::SpecRejected,
+                                format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                                tenant_id.clone(),
+                            )
+                            .await;
+                        }
+                    }
                 }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "reject_spec: workspace {ws_id} not found; skipping spec-rejected notifications"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "reject_spec: failed to resolve tenant for workspace {ws_id}: {e}; skipping spec-rejected notifications"
+                );
             }
         }
     }
@@ -2015,6 +2067,141 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn list_specs_honors_workspace_id_scope() {
+        let state = test_state();
+
+        // repo-a lives in ws-a: resolves entries whose workspace_id was never
+        // backfilled but whose owning repo places them in a workspace.
+        let repo = gyre_domain::Repository {
+            id: gyre_common::Id::new("repo-a"),
+            name: "repo-a".to_string(),
+            path: "/repos/repo-a".to_string(),
+            workspace_id: gyre_common::Id::new("ws-a"),
+            default_branch: "main".to_string(),
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+        };
+        state.repos.create(&repo).await.unwrap();
+
+        let seed_spec = |state: &std::sync::Arc<crate::AppState>,
+                         path: &str,
+                         workspace_id: Option<&str>,
+                         repo_id: Option<&str>| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    state
+                        .spec_ledger
+                        .save(&SpecLedgerEntry {
+                            path: path.to_string(),
+                            title: format!("Spec {path}"),
+                            owner: "user:jsell".to_string(),
+                            kind: None,
+                            current_sha: "b".repeat(40),
+                            approval_mode: "human_only".to_string(),
+                            approval_status: ApprovalStatus::Pending,
+                            linked_tasks: vec![],
+                            linked_mrs: vec![],
+                            drift_status: "unknown".to_string(),
+                            created_at: 1700000000,
+                            updated_at: 1700000000,
+                            repo_id: repo_id.map(|s| s.to_string()),
+                            workspace_id: workspace_id.map(|s| s.to_string()),
+                        })
+                        .await
+                        .unwrap();
+                })
+            });
+        };
+        seed_spec(&state, "system/ws-a.md", Some("ws-a"), None);
+        seed_spec(&state, "system/ws-b.md", Some("ws-b"), None);
+        seed_spec(&state, "system/repo-scoped.md", None, Some("repo-a"));
+        seed_spec(&state, "system/unscoped.md", None, None);
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // ws-a sees its own entry plus the repo-scoped one resolved via repo-a.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-a")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let paths: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["system/repo-scoped.md", "system/ws-a.md"]);
+
+        // ws-b sees only its own entry — no cross-workspace bleed.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-b")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let paths: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["system/ws-b.md"]);
+
+        // A workspace with no specs gets an empty scoped result, and the
+        // unscoped listing is unchanged (all four entries).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-c")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.as_array().unwrap().is_empty());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_spec_not_found() {
         let resp = app()
             .oneshot(
@@ -2983,6 +3170,163 @@ specs:
             .unwrap()
             .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Rejected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_notification_uses_workspace_tenant() {
+        let state = test_state();
+
+        // Workspace with a real tenant identity. The seeded spec carries a
+        // repo_id, which the legacy code misused as the notification tenant
+        // (and fabricated "default" when absent) — task-097 F3.
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-x"),
+            tenant_id: gyre_common::Id::new("tenant-x"),
+            name: "ws-x".to_string(),
+            slug: "ws-x".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let admin = gyre_domain::WorkspaceMembership {
+            id: gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: gyre_common::Id::new("admin1"),
+            workspace_id: gyre_common::Id::new("ws-x"),
+            role: gyre_domain::WorkspaceRole::Admin,
+            invited_by: gyre_common::Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(1_000_000),
+            created_at: 1_000_000,
+        };
+        state.workspace_memberships.create(&admin).await.unwrap();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/ws-scoped.md".to_string(),
+                        title: "WS Scoped".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "c".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("repo-x".to_string()),
+                        workspace_id: Some("ws-x".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "superseded" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fws-scoped.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &gyre_common::Id::new("admin1"),
+                Some(&gyre_common::Id::new("ws-x")),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1, "Admin should receive the notification");
+        assert_eq!(
+            notifs[0].notification_type,
+            gyre_common::NotificationType::SpecRejected
+        );
+        // The tenant scope is the workspace's real tenant — not the repo id
+        // and not a fabricated "default" identity.
+        assert_eq!(notifs[0].tenant_id, "tenant-x");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_skips_notifications_when_workspace_unresolvable() {
+        let state = test_state();
+
+        // Spec whose workspace_id does not resolve to any workspace record:
+        // the tenant scope cannot be determined, so the notification fanout
+        // must be skipped — never filed under a fabricated "default" tenant.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/orphaned.md".to_string(),
+                        title: "Orphaned".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "d".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: Some("ws-missing".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "orphaned" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Forphaned.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The rejection itself succeeded; no notification was fabricated.
+        let recent = state.notifications.list_recent(10).await.unwrap();
+        assert!(
+            recent
+                .iter()
+                .all(|n| n.notification_type != gyre_common::NotificationType::SpecRejected),
+            "unresolvable workspace must skip the notification fanout, not file it under a fabricated tenant"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
