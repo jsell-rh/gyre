@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §15"
-commits: [236056d95]
+commits: ["236056d9510cffefda2c3143321b5b92ba8bb142"]
 ---
 
 ## Spec Excerpt
