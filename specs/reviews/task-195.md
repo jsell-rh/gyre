@@ -1,0 +1,34 @@
+# Review — task-195 (Manifest-driven gate selection for MRs referencing a spec)
+
+Spec: `specs/system/spec-registry.md` §16 Agent Gates Integration ("The `gates:` field in the manifest feeds the gate chain… Forge spawns security gate agent and accountability gate agent for this MR") + §Agent Approver / Gate Schema (`persona`, `min_attestation_level` default 1, optional `stack_hash`).
+Commits under review (scoping per `commits:` frontmatter): `bb9dfd83c` (implementation + tests), `0f1297d17` (task/coverage bookkeeping).
+Base: `124a852be`. Verdict: **complete**.
+
+## Verification (independent, this checkout at candidate `0f1297d17`)
+
+- `cargo test -p gyre-server --lib gate_executor` → **39 passed, 0 failed** (evidence: `/tmp/stage/review-evidence/gate_executor_tests.txt`).
+- `cargo test -p gyre-server --lib` (full touched crate) → **1387 passed, 0 failed** — matches the shipped claim exactly (evidence: `gyre_server_lib_tests.txt`).
+- `bash scripts/check-arch.sh` → OK; `bash scripts/check-task-commit-attribution.sh` → OK (evidence: `check_arch.txt`).
+- **Mutation probe A (sourcing):** replacing the body tail of `resolve_manifest_gates_for_mr` with `Vec::new()` → `trigger_gates_runs_manifest_gates_for_spec_ref_mr` and `trigger_gates_dedupes_manifest_gate_covered_by_repo_gate` **FAIL** — the wiring tests are genuinely anchored to manifest-gate sourcing, not incidental behavior (evidence: `mutation_probe.txt`).
+- **Mutation probe B (stub regression):** routing constrained gates to the legacy `run_agent_review_gate_stub` instead of `run_persona_review_gate` → all six `persona_gate_*` tests **FAIL** — regression to the auto-pass stub is killed (evidence: `mutation_probe.txt`).
+- Source restored after both probes (`git status --porcelain` empty; suite re-run green). `cargo build --all` is not runnable under this sandbox's cargo wrapper (workspace-wide invocations rejected); the touched-crate test compile covers compilation of every changed file — the verifier should run the workspace build.
+
+## What was checked and found real
+
+- **Selection is a pure helper as required:** `manifest_gates_for_mr(Option<&SpecManifest>, Option<&str>) -> Vec<ManifestGateSpec>` (gate_executor.rs:84) — normalizes `specs/`-prefixed and bare (no-`@sha`) spec_ref paths against manifest entry paths, dedupes repeated personas within an entry (first wins), defaults `min_attestation_level` to 1, carries `stack_hash`. Empty for no manifest / no spec_ref / no matching entry / no gates — exactly the plan's step 5.
+- **Sourcing reuses task-193's reader:** `resolve_manifest_gates_for_mr` (gate_executor.rs:136) calls `crate::spec_registry::read_manifest(repo.path, "HEAD")` — no second manifest reader. The HEAD-vs-spec-SHA deviation from the plan's preferred option is correct and documented in-code: the SHA in `spec_ref` is the spec file's **blob** SHA (set by `sync_spec_ledger` via `git rev-parse <commit>:<path>`), which is not a treeish and cannot address `specs/manifest.yaml`; HEAD is the same policy source task-193's `resolve_new_approval_status` uses.
+- **Union, don't replace:** repo-level `quality_gates` all still run; manifest gates are skipped when their persona is already covered by a repo gate's `personas/<name>.md` path — no double-spawn, repo gate wins (tested: `trigger_gates_dedupes_manifest_gate_covered_by_repo_gate` asserts exactly one security-persona execution, the repo gate's).
+- **No parallel results table:** manifest gates materialize as ordinary `AgentReview` `QualityGate`s with deterministic ids `manifest-gate:<repo>:<spec_path>:<persona>`, deliberately not persisted to the quality-gates store (persisting would make every other MR in the repo run them — correct call). Their `GateResult` rows flow through `check_gates_for_mr`, where unknown gate ids default to `required = true` (gate_executor.rs:1471-1477): Failed blocks with `Err`, Pending/Running holds with `Ok(false)` — both asserted in tests.
+- **Real persona path, not the stub:** `run_agent_review_gate` routes constraint-carrying gates to `run_persona_review_gate`, which passes only on an `Approved` review from an agent whose persona (KV `agent_personas` — the same source the pre-existing `build_agent_context` reads) matches the gate persona, whose attestation level (via task-193's `derive_attestation_level`, never invented) meets `min_attestation_level`, and — when pinned — whose `stack_fingerprint` matches `stack_hash` exactly. `ChangesRequested` from the persona fails fast; no qualifying review within the gate timeout **fails** (never auto-passes). Mutation probe B confirms the tests kill any stub regression.
+- **Constraints are enforced, not recorded-and-dropped:** below-minimum attestation and stack-hash mismatch each fail the gate with a message naming the violated constraint (tested).
+- **No regression / no spurious gates:** MR without `spec_ref` and repo without `specs/manifest.yaml` at HEAD each run exactly the repo-level gates (tested against real temp git repos).
+- **Diff surface is in scope:** only `gate_executor.rs`, `specs/coverage/system/spec-registry.md` (row 16 → implemented, honestly noting "awaiting independent review/audit for verified"), and `specs/tasks/task-195.md`. No gates weakened, no exemption files touched, no scripts modified.
+
+## Observations (pre-existing platform gaps, not defects in this diff — recorded for follow-up)
+
+1. **No reviewer agent is spawned.** The spec's "Forge spawns security gate agent and accountability gate agent for this MR" is realized as *enforcement* (the gate demands and verifies a persona-constrained Approved review, fail-closed on timeout), not as an actual agent spawn. The manifest gate schema carries no command, and the platform has no persona-carrying spawn path (`SpawnAgentRequest` and agent JWT claims have no persona field), so a spawn mechanism would have to be invented platform-wide. Note the candidate is strictly stricter than the status quo: repo-level `AgentReview` gates without commands previously **auto-passed** via the stub; manifest gates now block until a qualifying review exists or fail. A future task should add persona attribution + gate-agent spawning to close the spec's spawn language fully.
+2. **`agent_personas` is test-populated only** (pre-existing: `build_agent_context` reads the same cache, constraint_check.rs:964 at base). Consequence in a default production deployment: a manifest persona gate finds no qualifying reviewer and fails after the gate timeout — fail-closed and merge-blocking, the safe direction; no enforcement is bypassed. Agent→persona attribution is a platform-level gap outside this task's scope.
+
+Findings: none — the task's acceptance criteria are met with production enforcement, and every criterion's test is mutation-verified.
+
+— Reviewer, independent review of candidate `0f1297d17` against base `124a852be`
