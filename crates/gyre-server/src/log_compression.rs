@@ -206,8 +206,8 @@ impl ColdSegment {
     /// Decode the cold segment into lines. A corrupt segment is a hard
     /// error — log data must not silently vanish.
     fn decode(&self) -> Result<Vec<String>> {
-        let raw = zstd::decode_all(self.bytes.as_slice())
-            .context("decompress agent log cold segment")?;
+        let raw =
+            zstd::decode_all(self.bytes.as_slice()).context("decompress agent log cold segment")?;
         decode_frames(&raw)
     }
 }
@@ -716,8 +716,11 @@ mod tests {
         let t = now();
         let old_ts = t - 10 * DAY;
         for i in 0..MAX_LINES_PER_AGENT {
-            buf.append("agent-1".to_string(), format!("[{}] cold line {}", old_ts, i))
-                .await;
+            buf.append(
+                "agent-1".to_string(),
+                format!("[{}] cold line {}", old_ts, i),
+            )
+            .await;
         }
         buf.compress_older_than(t - 7 * DAY).await.unwrap();
         // Whole buffer is now one cold segment at the cap, hot is empty.
@@ -732,10 +735,8 @@ mod tests {
         // ...oldest cold line evicted, the rest of the cold segment intact.
         assert!(!lines[0].contains("cold line 0"), "oldest line must go");
         assert!(lines[0].contains("cold line 1"));
-        assert!(lines[MAX_LINES_PER_AGENT - 2].contains(&format!(
-            "cold line {}",
-            MAX_LINES_PER_AGENT - 1
-        )));
+        assert!(lines[MAX_LINES_PER_AGENT - 2]
+            .contains(&format!("cold line {}", MAX_LINES_PER_AGENT - 1)));
 
         // Appending more keeps evicting from the cold front: the cap
         // holds and every fresh line survives.
