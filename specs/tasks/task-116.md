@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["a293e2998889f272af1be1afbf0ee265db02d50d"]
+commits: ["a293e2998889f272af1be1afbf0ee265db02d50d", "206f7d9dfc31d7072ef2ffd04f1122507b4d4661"]
 ---
 
 ## Spec Excerpt
@@ -268,6 +268,29 @@ check-task-commit-attribution — all OK. Evidence:
 
 `cargo test --all` and exact-head GitHub CI are owned by the verification
 stage per assignment constraints.
+
+### Verification repair (clippy changed-lines gate, commit 206f7d9df)
+
+The verification run (`bash /tmp/stage/checks.sh`, exit 1) failed on one
+gate: `scripts/check-clippy-diff.py` against assignment base `c5deca801`
+flagged two lints on changed lines in `prompt_assembly.rs` —
+`clippy::ptr_arg` on `sort_by_kind` (`&mut Vec<MetaSpec>` → `&mut
+[MetaSpec]`; both call sites coerce) and
+`clippy::cloned_ref_to_slice_refs` in `set_sha_changes_with_content_and_order`
+(`&[s1.clone()]` → `std::slice::from_ref(&s1)`; identical hashed bytes).
+Both fixes are semantics-preserving — the same 2-line diff, no behavior
+change. The run's stale-exemption WARN for the four
+`/api/v1/meta-specs-registry*` routes is upstream baseline noise (base
+`c5deca801` carries the exemption lines while also resolving the routes;
+this branch removed them and the base merge `7b647b5fe` keeps the
+removal) and is non-fatal — `check-abac-route-registry.sh` exits 0 at
+HEAD.
+
+Post-fix probes: `check-clippy-diff.py c5deca801` — exit 0, "changed
+lines clean (13 Rust files, 1020 existing warnings outside changes)";
+`check-rustfmt-diff.py c5deca801` — clean; `cargo test -p gyre-server
+--lib prompt_assembly` — 10 passed, 0 failed. Evidence:
+`/tmp/stage/review-evidence/task116-clippy-repair.md`.
 
 ## Agent Instructions
 
