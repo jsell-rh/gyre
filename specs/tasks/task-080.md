@@ -9,7 +9,7 @@ progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §31 Integration Tests"
   - "explorer-implementation.md §32 Visual Tests"
-commits: ["2f14f11f85cfffacad1670a262d84280225d38a1", "d4c1bd0ddc855dbf40b76e4ec138fc0ac3c10a11", "da74a27ff27141e98d6b79532ced8730ba494ba8", "659f64e8e32cc4317f9b3b78f39b58c3561d1d3e", "ce4f2044ec7273c5ed57fb198f54b92fdb3aff06"]
+commits: ["ce4f2044ec7273c5ed57fb198f54b92fdb3aff06", "2f14f11f85cfffacad1670a262d84280225d38a1", "d4c1bd0ddc855dbf40b76e4ec138fc0ac3c10a11", "da74a27ff27141e98d6b79532ced8730ba494ba8", "659f64e8e32cc4317f9b3b78f39b58c3561d1d3e"]
 ---
 
 ## Spec Excerpt
