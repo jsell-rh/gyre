@@ -6,7 +6,7 @@ depends_on:
 progress: complete
 coverage_sections:
   - "explorer-implementation.md §28 Phase 4: Polish"
-commits: ["293246b7cdc399e1313b7dd2981c4508b05c7715"]
+commits: ["293246b7cdc399e1313b7dd2981c4508b05c7715", "59e8fe82d4011bc48a33e47078d08f85a2d0d9a4"]
 ---
 
 ## Spec Excerpt
