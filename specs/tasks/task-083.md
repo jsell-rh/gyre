@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["bbb7aa61f860f3f4e73b862a2aa35061e87e1c32", "c69d9fd546809cfac5195d7663526f5c24848ea1", "4cef86db1b2fe6c0dc182068ea8c0ed0a789a15b", "af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["bbb7aa61f860f3f4e73b862a2aa35061e87e1c32", "c69d9fd546809cfac5195d7663526f5c24848ea1", "4cef86db1b2fe6c0dc182068ea8c0ed0a789a15b", "af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "c42b8f85a57eaa431c67a83b2ad6e3900c5a908c"]
 ---
 
 ## Authority and Scope
@@ -201,6 +201,26 @@ is claimed here, per section, with the verifying evidence below.
   Agent-Rules guard regression (`WorkspaceHomeRulesFailure.test.js`):
   7 files, 119 tests, 0 failures (evidence retained under
   `/tmp/stage/review-evidence/`).
+- Baseline rebase resolution (`c42b8f85a`, merging `124a852be` task-193
+  spec-approval-attestation): the new baseline carries duplicate fixes for
+  the same two `api/specs.rs` legacy-debt sites this branch fixed in
+  `6cf4a224`, which collided textually. Resolved by taking the baseline's
+  variants — `spec_index` now truncates via
+  `e.current_sha.get(..8).unwrap_or(&e.current_sha)` (equivalent
+  char-boundary-safe truncation to the `chars().take(8)` this branch
+  shipped) and `reject_spec`'s skip-and-log tenant resolution is
+  unchanged in behavior; the exemptions file keeps the baseline's
+  provenance comment and stays at 4 entries with `FROZEN_EXEMPTION_COUNT`
+  = 4. Post-merge focused probe: `cargo test -p gyre-server --lib
+  api::specs::tests` → 58 passed / 0 failed (54 from the `6cf4a224` round
+  plus task-193's 4 new tests; the three task-083 regressions
+  `list_specs_honors_workspace_id_scope`,
+  `reject_spec_notification_uses_workspace_tenant`,
+  `reject_spec_skips_notifications_when_workspace_unresolvable` all pass);
+  `check-byte-slice-truncation.sh` → OK;
+  `check-fabricated-scope-defaults.sh` → OK. `web/dist` restored to HEAD
+  after the cargo run's build.rs side-effect; not committed (executor
+  owns generated assets).
 - `web/dist` was not rebuilt or committed here (the executor restores
   generated assets from the assignment base and final integration
   rebuilds them remotely); full suites, all-target Clippy, and exact-head
