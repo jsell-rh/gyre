@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "d9e778536dbe74b3c980ada432a17d6407d61e98"]
 ---
 
 ## Spec Excerpt
@@ -121,9 +121,10 @@ Implementation commits `02966511`...`2b26880` (merge repair `c79542d8`),
 review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 (round 4), the `6a9739e`/`722179f0` base merges (`976b339a`,
 `7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
-from merged sources), and the round-4 base merge `a2bdf9a2` carry the
-work below. Evidence is saved under `/tmp/stage/review-evidence/`
-(per-round subdirectories; round 4 in `round4/`).
+from merged sources), the round-4 base merge `a2bdf9a2`, and the
+round-5 base merge `d9e7785` carry the work below. Evidence is saved
+under `/tmp/stage/review-evidence/` (per-round subdirectories;
+rounds 4–5 in `round4/` and `round5-merge-repair/`).
 
 ### Behavior
 
@@ -255,6 +256,24 @@ Round 4 (`e5b481de`, finding from review of `536c76ad`):
   `docker_run_args_enforce_security_defaults` and both stub tests
   (transcript in `round4/mutation-check.log`, exit 101).
 
+Round 5 (`d9e7785`, base merge `72ad2a128` — task-096/task-077
+upstream):
+
+- **Rebase repair only, no behavior change.** Conflicts resolved by
+  keeping BOTH sides' independent test suites and doc text:
+  `spawn.rs` keeps the backend-aware lifecycle tests and base's
+  task-077 F6 fail-closed interrogation-policy test (merged test
+  imports); `workspaces.rs` keeps the compute-target binding tests
+  and base's task-077 trust-transition tests; the
+  `docs/api-reference.md` workspaces/{id} row combines the
+  `compute_target_id` and `trust_level` descriptions.
+  `check-abac-route-registry.sh` takes the tighter frozen count on
+  each axis (exemptions 50 = HEAD/merged file count; duplicates 17 =
+  base/merged resolver count). One auto-merge semantic artifact fixed
+  in `mem.rs`: `test_state_failing_policy_creates`/`_lists` (base
+  additions) were updated to the merged 6-arg `test_state_inner` with
+  a paired `ws_store`, like every other test-state builder.
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -267,6 +286,15 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   mutation-killing argv/stub tests); `cargo test -p gyre-server --lib
   api::spawn` -> **39 passed, 0 failed**;
   `check-rustfmt-diff.py`/`check-clippy-diff.py` vs `HEAD^1` -> clean.
+- Round 5 (`d9e7785`, merge repair): full `cargo test -p
+  gyre-server --lib` -> **1413 passed, 0 failed**; `cargo test -p
+  gyre-adapters compute --lib` -> **39 passed, 0 failed** (4 ignored);
+  web vitest `WorkspaceSettings.test.js` -> **71 passed**;
+  `cargo fmt --check` and `cargo clippy -p gyre-server --lib
+  --all-targets` -> clean; abac-route-registry, arch,
+  abac-exempt-handlers, mcp-write-tools, migration-versions,
+  task-commit-attribution gates -> exit 0 (logs in
+  `round5-merge-repair/`).
 - Earlier rounds (`d404a439`): `cargo test -p gyre-server --lib
   compute_target` -> **24 passed**; web vitest on the merged sources
   -> **1624 passed, 41 skipped, 0 failed** (65 files); enforced static
