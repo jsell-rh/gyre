@@ -5,7 +5,7 @@ depends_on:
   - task-029
 progress: complete
 coverage_sections: []
-commits: []
+commits: ["91abab172430c3037cd7e5ed5d97589933232839"]
 ---
 
 ## Spec Excerpt
@@ -73,3 +73,56 @@ When working on this task:
 ## Git Commits
 
 Implemented as part of the explorer-canvas branch prior to task decomposition.
+
+## Shipped
+
+The shortcut implementation shipped with the explorer-canvas branch
+(`ExplorerView.svelte` `onWindowKeydown`, wired via
+`<svelte:window onkeydown>`). This assignment closed the missing
+acceptance criterion "Test verifies shortcut behavior" with
+`web/src/__tests__/ExplorerViewShortcuts.test.js` (commit `91abab172`),
+which renders the full ExplorerView tree and exercises the real event
+wiring. No production code changed in this round; the executor-restored
+task contract is preserved and only this progress record and the
+frontmatter bookkeeping were updated.
+
+### Behavior
+
+- **Escape cascade** (`ExplorerView.svelte` `onWindowKeydown`): closes
+  the spec editor first, then the query editor, then the detail panel,
+  then clears `activeViewQuery` — trace mode ("Trace from here") is an
+  interactive view query with `_trace: true`, so Escape exits it.
+- **`/`** focuses the `.chat-input` chat input with `preventDefault()`
+  so no "/" is typed; falls back to the concept search input when the
+  chat is hidden.
+- **isTyping guard**: shortcuts are suppressed when the event target is
+  an INPUT/TEXTAREA/SELECT/contentEditable element.
+- `ExplorerCanvas.svelte` additionally handles Cmd+K (global search),
+  Tab/Shift+Tab (node cycling), and its own canvas-scoped Escape cascade
+  (search overlay → context menu → active query → breadcrumb → fit).
+
+### Test evidence
+
+Focused probe on this branch (head `62fd7a20b`, after the assigned base
+merge): `npx vitest run src/__tests__/ExplorerViewShortcuts.test.js` —
+6/6 tests pass, exit 0 (saved under
+`/tmp/stage/review-evidence/task-038-focused-test.txt`). The suite
+renders the full ExplorerView tree (graph load, ExplorerCanvas with
+mocked canvas context, ExplorerChat with mocked WebSocket):
+
+- `/` focuses the chat input (mocked WS session brought to `ready` so
+  the input is enabled) and `defaultPrevented` is true.
+- `/` while the concept search input is focused: no preventDefault, no
+  focus steal.
+- Escape clears the active view query set through the Risk heat map
+  toolbar button; the annotation disappears and the toolbar overlay
+  flag resets.
+- Escape exits trace mode: the manual query editor runs the exact query
+  object the "Trace from here" context action produces; the canvas draws
+  the numbered step badges (1/2, asserted on mocked canvas draw calls)
+  while the trace is active, and after Escape node labels still redraw
+  but no step badges. Cascade verified: the first Escape closes only the
+  query editor.
+- Escape closes the detail panel opened through the canvas-scoped
+  search flow (canvas `/` → search → result click → detail panel).
+- Escape inside a text input does not clear the active view query.

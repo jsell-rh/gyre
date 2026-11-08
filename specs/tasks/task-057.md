@@ -97,3 +97,47 @@ When working on this task:
 - fix(explorer): rewrite visual regression tests to use real UI interactions (TASK-057)
 - fix(process): prevent duplicate visual baselines and stale mechanism claims (TASK-057)
 - fix(explorer): distinct mid-zoom baseline and accurate blast radius comments (TASK-057)
+
+## Shipped
+
+### Implementation state
+
+The full TASK-057 implementation is present on this branch via squashed PR #627
+(commit d7940e857), which carries the original four TASK-057 commits and the
+R1→R3 review history (specs/reviews/task-057.md records the R3 pass), plus the
+task-065 forced-font determinism fixes that make baselines environment-independent:
+
+- `web/tests/e2e/explorer-visual.spec.js` — 15 visual regression tests covering
+  all four spec scenarios: semantic zoom at 3 zoom levels, view query rendering
+  (groups, callouts, narrative markers), all 5 filter presets, and blast radius
+  tiered coloring + dimming. All queries applied via the real View Query Editor
+  UI; route interception registered before navigation; deterministic mock graph
+  (34 nodes, 55 edges) with committed woff2 font fixtures.
+- 15 committed baseline screenshots, all with unique content hashes.
+- Four mechanical guards: `check-identical-baselines.sh`,
+  `check-stale-mechanism-claims-js.sh`, `check-phantom-test-apis-js.sh`,
+  `check-playwright-route-lifecycle.sh`.
+
+### This round's change
+
+`web/playwright.config.js` gained `chromiumSandbox: false` and a
+`--no-zygote` launch arg. Without these, chromium cannot start inside
+restricted containers: the zygote pre-fork dies with
+`FATAL:sandbox/linux/services/credentials.cc:365 Check failed: Operation not
+permitted`, every GPU process launch fails (error_code=1002), and the browser
+exits with SIGTRAP — all 15 visual tests failed before the fix. The flags only
+change process launch topology, not rendering: the committed baselines match
+in this environment without regeneration, and normal CI runners are unaffected.
+
+### Test evidence (this sandbox, chromium headless shell 1208 = locked
+@playwright/test 1.58.2 revision)
+
+- `npx playwright test explorer-visual` → 15/15 passed, exit 0
+- `npx playwright test` (full e2e suite) → 64/64 passed, exit 0
+  (15 visual + 49 app.spec.js)
+- All four TASK-057 mechanical guards → exit 0
+- Server: SKIP_WEB_BUILD=1 debug build of gyre-server on port 2222, committed
+  web/dist, `/health` 200; evidence in /tmp/stage/review-evidence
+
+No baselines were regenerated — the committed baselines matched rendering in
+this environment as-is.
