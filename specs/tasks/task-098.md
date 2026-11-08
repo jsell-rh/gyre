@@ -3,7 +3,7 @@ title: "Platform Model Secrets Admin API + MCP + CLI"
 spec_ref: "platform-model.md §7 Admin API"
 depends_on:
   - task-097
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
