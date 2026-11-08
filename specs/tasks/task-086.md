@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: ["7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6"]
+commits: ["7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "2bd17bd305cf9d91c6e16b401c4201acaddecb25"]
 ---
 
 ## Spec Excerpt
@@ -67,7 +67,9 @@ Read `specs/system/human-system-interface.md` §3 "Design Principle: The Built S
 
 Both liveness layers of HSI §3 are implemented in production frontend code
 (product surface in commit c17b6c95; review repairs in commits a3ad5d02 —
-repo scoping — and 7da87564 — the canvas-load timeline query below).
+repo scoping — and 7da87564 — the canvas-load timeline query below; upstream
+rebase resolution in merge commit 2bd17bd3 — both liveness and upstream's
+causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`).
 
 ### Layer 1 — SDLC activity
 
@@ -177,7 +179,12 @@ repo scoping — and 7da87564 — the canvas-load timeline query below).
   `per_page` caps the list to the most recently created MRs, newest
   first, with distinct pinned timestamps; full module
   `api::merge_requests::` 31/31 passed.
-- Full suite: `npm test` in `web/` — 67 files, 1672 passed / 41 skipped,
-  exit 0 (locked deps via `npm ci`).
+- Full suite: `npm test` in `web/` — after the upstream rebase merge
+  (2bd17bd3, resolving additive conflicts in ExplorerView/ExplorerCanvas so
+  the liveness imports/props and upstream's `focusRequest`/`windowEscape`/
+  causal-trace wiring all survive together): 74 files, 1783 passed /
+  41 skipped, exit 0 (locked deps via `npm ci`). The four conflict regions
+  were all additive (both sides' features kept); no liveness behavior was
+  weakened by the merge.
 - Evidence (commands, SHAs, exit codes, output) saved under
   `/tmp/stage/review-evidence/task-086-*.txt` for executor retention.
