@@ -504,6 +504,13 @@ pub async fn post_meta_spec_preview(
     let allowed = auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !allowed {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/meta-specs/preview",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "Admin or Developer role required to run meta-spec preview".to_string(),
         ));
@@ -1384,6 +1391,8 @@ pub async fn list_meta_specs_registry(
     // is ABAC-exempt, so the handler is the only authorization surface —
     // any authenticated agent must not enumerate cross-workspace governance.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may list the meta-specs registry".to_string(),
         ));

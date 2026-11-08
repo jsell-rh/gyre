@@ -448,6 +448,11 @@ pub async fn approve_spec(
         && !auth.roles.contains(&gyre_domain::UserRole::Agent)
         && auth.agent_id != "system"
     {
+        // task-104: every live role-check rejection must be audited. The
+        // minimum approving role is Agent (Admin > Developer > Agent all
+        // pass), so the required role is expressed as Agent-or-above.
+        crate::rbac::record_rbac_denied(&state, &auth, "Agent", "POST /api/v1/specs/:path/approve")
+            .await;
         return Err(ApiError::Forbidden(
             "ReadOnly users cannot approve specs".to_string(),
         ));
@@ -1032,6 +1037,13 @@ pub async fn reject_spec(
         || auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !is_authorized {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/specs/:path/reject",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin or Developer roles can reject specs".to_string(),
         ));

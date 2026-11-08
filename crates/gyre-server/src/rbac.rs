@@ -316,4 +316,180 @@ mod tests {
         assert_eq!(e.detail["endpoint"], "POST /api/v1/tenants");
         assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
     }
+
+    async fn assert_one_rbac_denied(state: &crate::AppState, required_role: &str, endpoint: &str) {
+        let events = rbac_denied_events(state).await;
+        assert_eq!(events.len(), 1, "one rbac_denied event for {endpoint}");
+        let e = &events[0];
+        assert_eq!(e.detail["required_role"], required_role);
+        assert_eq!(e.detail["endpoint"], endpoint);
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+    }
+
+    #[tokio::test]
+    async fn uninstrumented_role_guards_record_rbac_denied_audit_event() {
+        // Review repair (task-104 round 8): five pure role guards rejected
+        // with 403 while recording no rbac_denied event, contradicting the
+        // spec trigger "Role check rejects request". Each sub-case gets a
+        // fresh state so the recorded event count is exactly one.
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "dev-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // 1. Reviewer's probe: Developer JWT listing the meta-specs registry
+        //    (ABAC-exempt route — the handler guard is the only auth surface).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/meta-specs-registry")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/meta-specs-registry").await;
+        }
+
+        // 2. ReadOnly caller running a meta-spec preview (Admin-or-Developer).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-1/meta-specs/preview")
+                        .header("Authorization", format!("Bearer {}", readonly_jwt()))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(
+                &state,
+                "Admin or Developer",
+                "POST /api/v1/workspaces/:id/meta-specs/preview",
+            )
+            .await;
+        }
+
+        // 3. ReadOnly caller approving a spec (minimum approving role: Agent).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                        .header("Authorization", format!("Bearer {}", readonly_jwt()))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "sha": "a".repeat(40)
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "Agent", "POST /api/v1/specs/:path/approve").await;
+        }
+
+        // 4. Agent caller rejecting a spec (Admin-or-Developer required).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/specs/system%2Fdesign-principles.md/reject")
+                        .header("Authorization", format!("Bearer {}", agent_jwt()))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({ "reason": "out of scope" }))
+                                .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(
+                &state,
+                "Admin or Developer",
+                "POST /api/v1/specs/:path/reject",
+            )
+            .await;
+        }
+
+        // 5. Agent caller setting an MR to Approved (human-only escape from
+        //    the supervised trust gate; the guard is a live role check).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            // create_mr has no auth extractor, so seed the MR without a token.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "repository_id": "repo-1",
+                                "title": "agent approval probe",
+                                "source_branch": "feat/x",
+                                "target_branch": "main"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let mr_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("Authorization", format!("Bearer {}", agent_jwt()))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({ "status": "approved" }))
+                                .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "non-Agent", "PUT /api/v1/merge-requests/:id/status")
+                .await;
+        }
+    }
 }
