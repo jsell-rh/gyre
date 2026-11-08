@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
+commits: ["e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3", "aa73b69a563fedd2c99929831aca325cfc1d3dc5"]
 ---
 
 ## Spec Excerpt
@@ -84,7 +84,10 @@ Policy in commits `a1ff51f2cd964fa606e58eee76baaf73435a5be3` and
 `e67c467191726aa1e3510cd15c2ea0ee044362b5`, re-verified after merging the
 assignment base `7da7bbfff69da433592962a911abe23677d5ac3a` (the merge kept
 the rollout implementation byte-identical; only `api/meta_specs.rs`
-combined it with base's task-077 per-handler admin gates).
+combined it with base's task-077 per-handler admin gates), then repaired
+in commit `aa73b69a563fedd2c99929831aca325cfc1d3dc5` after the
+verification gate (`checks.sh`, base `124a852bedb4e5759bf143b6c2683df6eeb03849`)
+failed on three lint findings — none behavioral:
 
 ### Spec fidelity
 
@@ -146,10 +149,31 @@ still wanted, that is a spec amendment request, not a code gap.
   event, and is registered in the ABAC route resolver (`meta_spec`
   resource) — no new exemptions.
 
+### Verification repair
+
+- rustfmt violations on changed lines in 7 rollout files (sqlite adapter,
+  domain `lib.rs`/`meta_spec.rs`, `api/meta_specs.rs`, `api/repos.rs`,
+  server `lib.rs`, `reconciliation.rs`) — fixed by `cargo fmt --all`, which
+  touched exactly the 8 flagged files (7 + the ports file below),
+  formatting-only diff.
+- `clippy::double_must_use` at `gyre-ports/src/rollout_policy.rs` — the
+  `async_trait` macro expansion artifact; fixed with the repo's established
+  trait-level `#[allow(clippy::double_must_use)]` pattern (same as
+  `meta_spec_repository.rs`, `spec_assertion_result_repo.rs`, `storage.rs`).
+- `unused_must_use` at `api/meta_specs.rs` — the
+  `block_on(seed_builtin_policies(...))` result in
+  `put_rollout_policy_requires_admin` was discarded; now
+  `.expect("seed built-in policies")`, matching every sibling test.
+
+Post-repair, both diff-scoped gates pass on this branch:
+`check-rustfmt-diff.py` → "changed lines clean (20 Rust files checked)";
+`check-clippy-diff.py` → "changed lines clean (20 Rust files, 1096 existing
+warnings outside changes)".
+
 ### Test evidence
 
-Focused probes re-run post-merge on this branch (head `3025e601a`, output
-retained at `/tmp/stage/review-evidence/task-157-probes.txt`):
+Focused probes re-run post-repair (head `aa73b69a5`, output retained at
+`/tmp/stage/review-evidence/task-157-repair-*.txt`):
 
 - `cargo test -p gyre-domain meta_spec` — 6 passed: spec default,
   wire-name round-trips, priority mapping/round-trip, full JSON shape.
