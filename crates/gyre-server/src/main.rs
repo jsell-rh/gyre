@@ -47,8 +47,11 @@ async fn main() -> Result<()> {
     bootstrap_default_tenant(&state).await;
 
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
+    // Fails closed: if any built-in policy (incl. the immutable
+    // builtin:require-human-spec-approval Deny, HSI §2) cannot be persisted,
+    // refuse to start rather than serve with a partially seeded policy set.
     abac_middleware::init_resolver();
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state).await?;
 
     // Seed built-in meta-specs on first startup (agent-runtime spec §2).
     seed_builtin_meta_specs(&state).await;
@@ -99,9 +102,15 @@ async fn main() -> Result<()> {
     info!(%addr, "listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        // Attach the socket peer address to every request so handlers can
+        // resolve forensic source IPs from the transport (task-102 F3,
+        // CWE-348) instead of trusting caller-controlled forwarded headers.
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     info!("gyre-server stopped");
     // _telemetry_guard drops here, flushing buffered OTel spans.

@@ -36,6 +36,14 @@ beforeEach(() => {
     shadowBlur: 0,
     setLineDash: vi.fn(),
     getLineDash: vi.fn(() => []),
+    // Evaluative lens draw path (badge chips, glow rings, gradients). Without
+    // these the evaluative canvas layer throws inside the render loop.
+    roundRect: vi.fn(),
+    clip: vi.fn(),
+    ellipse: vi.fn(),
+    strokeText: vi.fn(),
+    createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    filter: '',
   };
   HTMLCanvasElement.prototype.getContext = vi.fn(() => mockCtx);
   global.ResizeObserver = class ResizeObserver {
