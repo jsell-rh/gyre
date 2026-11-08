@@ -2,10 +2,10 @@
 title: "Manifest-driven spec lifecycle task creation (auto_create_tasks, per-spec policy)"
 spec_ref: "spec-registry.md §15 Spec Lifecycle Integration"
 depends_on: [task-193]
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §15"
-commits: []
+commits: [236056d95]
 ---
 
 ## Spec Excerpt
@@ -58,3 +58,25 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 - Do NOT weaken the test into asserting only that some task exists — assert the specific inclusion/exclusion by title/path.
 - Do NOT hardcode a priority; only apply an override when the manifest declares one.
 - Run only touched-crate tests plus `scripts/check-arch.sh`; skip formatters and the full suite.
+
+## Shipped
+
+§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95` (assignment base `124a852be`).
+
+### Behavior
+
+- `process_spec_lifecycle` (`git_http.rs`) reads `specs/manifest.yaml` at the pushed HEAD via task-193's `crate::spec_registry::read_manifest` (single reader, reused) and gates every task-creation decision on it. A manifest present but unparseable is treated as absent (`read_manifest` logs and returns `None` → prefix fallback).
+- New pure gate `should_create_lifecycle_task(Option<&SpecManifest>, status_char, path)` in `git_http.rs`: with a manifest, a task is created only when the changed file resolves to a manifest entry whose effective `auto_create_tasks` (per-entry override, else the `defaults:` section) is true; unregistered `specs/…` files create no task (manifest is the single source of truth). With no manifest at HEAD, the legacy `specs/system/` + `specs/development/` prefix fallback applies (logged at debug) — no regression for manifest-less repos.
+- New `manifest_entry_for_path()` in `spec_registry.rs` resolves diff paths (`specs/system/foo.md`) to entries using the same `specs/`-relative identity `sync_spec_ledger` uses; renames match on the new path.
+- `parse_spec_changes` now admits all `specs/` changes (eligibility decided by the manifest), fixing the missed case of manifest-registered specs under non-watched prefixes.
+- Per-spec priority: optional `priority` field on `SpecEntry` and `ManifestDefaults` with `effective_priority()` — entry override, else `defaults:`, else the `classify_spec_change` change-kind default. No priority is hardcoded; an override applies only when declared.
+- Auto-invalidation of stale approvals, title dedup, and `SpecChanged`/`TaskCreated` emission are unchanged and now fire only for specs that actually get tasks.
+
+### Test evidence
+
+- `should_create_lifecycle_task_manifest_gate`, `…_defaults_section_applies`, `…_no_manifest_falls_back_to_prefixes` (pure unit tests): per-entry `false` excludes, `true` includes, unregistered excluded, non-watched-prefix registered included, defaults section applies, manifest-less fallback preserved.
+- `spec_lifecycle_manifest_gates_task_creation_e2e`: drives `process_spec_lifecycle` against a real git repo; a diff touching spec-a (`auto_create_tasks: false`), spec-b (`true`, `priority: Critical`) and unregistered spec-c yields exactly one task — `Review spec change: specs/system/spec-b.md` with priority `Critical` — and exactly one `SpecChanged` (payload spec_path == spec-b) + one `TaskCreated` on the broadcast bus; nothing for spec-a/spec-c by title and spec_path.
+- `spec_lifecycle_without_manifest_uses_prefix_fallback_e2e`: manifest-less repo still creates the watched-prefix task (priority defaults to High, no override).
+- Mutation check: replacing the manifest branch of the gate with prefix matching makes 3 tests fail (both gate unit tests + the e2e, which then sees tasks for spec-a and spec-c) — the tests kill a removed manifest gate.
+- `spec_registry::tests`: `manifest_entry_for_path_resolves_with_and_without_prefix`, `effective_priority_entry_override_beats_defaults`, `effective_priority_falls_back_to_defaults_then_none`.
+- Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1381 passed / 0 failed; `bash scripts/check-arch.sh` passed.
