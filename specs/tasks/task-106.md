@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["a5db6ecd23b6f6dda24cb90e682a5214cee3a5ad", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
 ---
 
 ## Spec Excerpt
@@ -73,39 +73,41 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4).
-Production behavior is unchanged since round 5; later rounds were
-review, compile, CI, and verification-gate repairs.
+Task-106 production behavior is unchanged since round 5; later rounds
+were review, compile, CI, verification-gate, and base-merge repairs.
 
-### Verification repair round (R17, commit `bf2c2308`)
+### Base-merge resolution round (R18, commit `a5db6ecd`)
 
-The executor verification run (attempt `b0106e8a`, `bash
-/tmp/stage/checks.sh`, EXIT 1) failed on two gates with one root cause:
-the R13/R14 repair had re-pinned the two pre-existing task-077-owned
-`evaluate_attestation_abac` exemption entries in
-`scripts/inert-enforcement-exemptions.txt` (base pins 1457/1479 →
-2022/2044) after task-106 insertions shifted the sites' line numbers.
+Merged assignment base `72ad2a128` (task-096 head, carrying the
+task-095/096/077 upstream work) into the task branch and resolved the
+three content conflicts. Task-106 behavior is unchanged; the conflicts
+were between task-106's R17 exemption workaround and the base's real
+fixes for the same sites:
 
-- The **exemption freeze** forbids entries the assignment base does not
-  contain — "including replacement entries that leave the count
-  unchanged" — so the re-pinned lines counted as new exemptions.
-- The **upstream-verifier pass** runs `check-inert-enforcement.sh` with
-  the entire `scripts/` tree restored from the base (verifier overlay),
-  so the base's line-pinned entries no longer matched the shifted
-  sites: 2 inert-site errors.
-
-Repair (no behavior change): the two baseline sites now carry the
-checker's documented inline `// enforcement:ok — task-077 F5 baseline
-site` markers at the exact call lines in `merge_processor.rs`
-(drift-immune; honored by both the base and candidate versions of the
-check script), and the corresponding file entries are deleted
-(deletion is the sanctioned direction; same two sites, count
-unchanged, fixes still owned by task-077's revision round). A
-`#[rustfmt::skip]` on the second call keeps its trailing marker on the
-call line, where the checker matches it and where rustfmt would
-otherwise relocate the comment below the opening paren.
+- `scripts/inert-enforcement-exemptions.txt` — taken verbatim from the
+  base. The base's task-095 verification repair fixed the two
+  task-077-owned `evaluate_attestation_abac` discard sites **for real**
+  (the decision now fails the queue entry on Deny), which supersedes
+  the R17 inline-marker workaround: the `// enforcement:ok` markers,
+  the `#[rustfmt::skip]`, and the file entries are all dropped. The
+  exemptions file is byte-identical to the base, so the exemption
+  freeze holds trivially.
+- `merge_processor.rs` — took the base's task-095 improvements
+  (spec-keyed `revert_breaker_key`, `RevertResult::Conflict` handling
+  in group revert, `{spec_carry}` remediation text, gating attestation
+  ABAC); kept **both** test suites in the tests module (the 13
+  task-106 rebase tests and the base's task-077/HSI trust-hold tests,
+  which start after the same shared TASK-095 test).
+- `api/spawn.rs` — kept task-106's jj-workspace-path canonicalization
+  (prefers `{repo.path}/jj-main` workspaces, falls back to the
+  plain-git worktree); unioned the test-module imports so both sides'
+  tests compile.
 
 ### Prior repair rounds (behavior-preserving)
 
+- **R17 (`bf2c2308`)**: inline `enforcement:ok` markers replacing
+  re-pinned exemption entries (superseded by R18 — the base fixed the
+  sites for real).
 - **R16 (`e088a007`)**: CI test job installs pinned jj-vcs 0.39.0 and
   runs `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`;
   `jj_fixture_guard()` panics on a missing jj under that env var so a
@@ -156,26 +158,27 @@ otherwise relocate the comment below the opening paren.
 
 ### Test evidence
 
-At HEAD `bf2c2308` (R17 verification repair). This round's probe logs +
-exit codes in `/tmp/stage/review-evidence/task-106-r17/`:
+At HEAD `a5db6ecd` (R18 base-merge resolution). This round's probe logs
++ exit codes in `/tmp/stage/review-evidence/task-106-r18/`:
 
-- `bash scripts/check-inert-enforcement.sh` (candidate exemptions
-  file) → **EXIT 0**.
-- Upstream-overlay simulation: `git restore --source=<base> --worktree
-  -- scripts/` then `bash scripts/check-inert-enforcement.sh` →
-  **EXIT 0** — the exact condition that failed in the verification run
-  (base's line-pinned exemptions against the merged tree) now passes
-  via the inline markers, which the base script version honors.
-- Exemption-freeze simulation (entries vs assignment base
-  `66a5fc67`, every `scripts/*-exemptions.txt`): **no added entries** —
-  only deletions, the sanctioned direction.
-- `rustfmt --edition 2021 --check crates/gyre-server/src/merge_processor.rs`
-  → **clean** (the `#[rustfmt::skip]` keeps the marked statement
-  rustfmt-stable).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → **EXIT 0** (comment-
-  and-attribute-only change; the R11 `cargo test -p gyre-server --lib`
-  1293/1293 evidence stands, and R16's real-jj CI leg runs the 13
-  fixture tests on every push).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1421 passed,
+  0 failed** (was 1293 pre-merge; the increase is the base's
+  task-077/095/096 tests now in the tree). Includes all 13 task-106
+  rebase tests and all task-077 trust-hold tests.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` → **EXIT 0**.
+- `bash scripts/check-inert-enforcement.sh` → **EXIT 0** (the base's
+  real fix means the two attestation sites are no longer violations at
+  all — stronger than the R17 marker suppression).
+- Exemptions freeze: `git diff 72ad2a128 --
+  scripts/inert-enforcement-exemptions.txt` → **empty** (file identical
+  to the assignment base; no growth in any direction).
+- `cargo fmt --check` on both resolved Rust files → **EXIT 0**.
+- `cargo test -p gyre-adapters --lib jj_ops` → 17 passed; jj_ops.rs was
+  untouched by this merge. The 13 real-jj fixture tests guard-skip
+  here because no `jj` binary exists in this sandbox (CI's R16 leg
+  runs them against pinned jj-vcs 0.39.0 with
+  `GYRE_JJ_TESTS_MUST_RUN=1`) — an installation restriction for remote
+  verification, not a code defect.
 
 All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
 `web/dist/`): npm registry tarball fetches are blocked from this sandbox
