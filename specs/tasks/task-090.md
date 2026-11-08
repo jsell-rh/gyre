@@ -172,4 +172,36 @@ the actual PNG captured by the failing CI run, the full
 unchanged), and the full e2e suite passes (65/65). Evidence retained at
 /tmp/stage/review-evidence (controller-side).
 
+### Review repair: stale committed dist (attempt a54b5cb1)
+
+Independent review found candidate HEAD's committed `web/dist` byte-identical
+to the pre-task-090 BASE bundle: pipeline checkpoint commit `86b6f3006` had
+reverted the verified task-090 assets (`index-QXRGsaeH.js`), so a
+`SKIP_WEB_BUILD=1` build of that commit would serve a UI with no lens
+features, and the regenerated e2e baseline was inconsistent with the
+committed dist.
+
+Resolution: `web/dist` is a generated artifact owned by the executor — it is
+restored from the assignment base at checkpoint and rebuilt + published
+remotely at final integration — so the remedy is the final-integration
+rebuild, not a dist commit on this branch. What this assignment verified
+(reproduced the finding, then closed its source-side premise):
+
+- HEAD source carries the complete task-090 diff (`lens-rendering.js`,
+  ExplorerCanvas/ExplorerView changes, three new test files, regenerated
+  baseline); only `web/dist` differs from the verified state, and only via
+  the checkpoint's file rename.
+- A fresh `npx vite build` of HEAD source (locked deps, temp outDir — the
+  committed `web/dist` untouched) produces `index-QXRGsaeH.js` with sha256
+  `4c80cc8079634201f2366b8cbe4d36ec4f0d6caa89648eede22409966e22db08`,
+  **byte-identical** to the verified `54c0b32ab` asset, containing all lens
+  feature markers (gate/spec joins, `?lens=` URL persistence, coverage
+  legend). The remote rebuild therefore deterministically restores the
+  task-090 UI and makes the regenerated e2e baseline consistent again.
+- Focused lens suites re-run at HEAD: 5 files, 209/209 passed.
+- Evidence: `/tmp/stage/review-evidence/dist-rebuild-verification.md`
+  (commands, SHAs, exit codes) plus the temp-dir build output.
+
+No verifier weakened, no exemption added, `web/dist` not committed.
+
 Acceptance criteria left unchecked for independent review.
