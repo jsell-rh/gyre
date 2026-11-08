@@ -3,7 +3,7 @@ title: "HSI Explorer Three Lenses (Structural, Evaluative, Observable)"
 spec_ref: "human-system-interface.md §3 Three Lenses"
 depends_on:
   - task-065
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
 commits: ["00d6497aa6e3258482053be801849ed2e5dcdc3e", "47fca19981be89efbc6dc8ddf687f6dcf9a7f86f", "f51574568c6c3ebdd025d42892ddb27a423129eb", "7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee"]
