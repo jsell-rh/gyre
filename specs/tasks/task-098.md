@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: ["010df9cd36dc3f81ae136173b522caaa7b3d4a84"]
+commits: ["010df9cd36dc3f81ae136173b522caaa7b3d4a84", "dce3f8d1b", "3ed1b9a36"]
 ---
 
 ## Spec Excerpt
@@ -92,10 +92,10 @@ Read `specs/system/platform-model.md` §7 "MCP Integration" and "Admin API" sect
 
 Implemented on top of the task-097 `SecretRepository` port. The task-098
 source was recovered from an interrupted worker lease as checkpoint
-`010df9cd3` (behavior and prior gate/repair rounds described below); this
-round resolved the outstanding rebase onto the assignment base `4d6759a0b`
-(HSI Policies UI + meta-spec sweep) as merge commit `dce3f8d1b`. No
-behavior was added in the merge round.
+`010df9cd3` (behavior below). Two rebase rounds followed: first onto
+assignment base `4d6759a0b` (merge `dce3f8d1b`), then onto the current
+assignment base `72ad2a12` (merge `3ed1b9a36`, described below). No
+behavior was added in either merge round.
 
 ### Behavior
 
@@ -131,66 +131,74 @@ behavior was added in the merge round.
   Admin/Owner members of the owning workspace via `SecretExpiring`
   notifications, with duplicate suppression and 24h dismissal windows.
 
-### Rebase-resolution round (`dce3f8d1b`)
+### Rebase-resolution rounds (`dce3f8d1b`, `3ed1b9a36`)
 
-All conflicts were additive both-sides features and were resolved by
-keeping both sides:
+Both rebases were additive both-sides features, resolved by keeping both
+sides. The `3ed1b9a36` round (onto base `72ad2a12`, which added the
+workspace `repos` tab and tenant `workspaces` tab alongside task-096
+rollback circuit-breaker and task-095 budget-call work) resolved:
 
-- `jobs.rs` / `main.rs`: both the task-098 `secret_rotation_check` job and
-  the upstream `meta_spec_conformance_sweep` job are registered and
-  spawned.
-- `WorkspaceSettings.svelte`: `TAB_IDS` merged to 9 tabs — upstream
-  `policies` tab alongside the task-098 `secrets` tab; both panels and
-  their locale keys verified present in the merged tree.
-- `WorkspaceSettings.test.js`: the "renders all tabs" count corrected
-  from 8 to 9 — a semantic conflict the textual merge missed (the merged
-  label list already asserted both `Policies` and `Secrets`, so the stale
-  count would fail on the correct component).
-- `conditional-test-guard-exemptions.txt`: re-pointed the two pre-existing
-  WorkspaceSettings guard entries to their merge-shifted line numbers
-  (same guards, zero new entries).
-- `web/dist`: left as the executor-restored assignment-base state
-  (byte-identical to `4d6759a0b`); final integration rebuilds and
+- `jobs.rs` / `main.rs` (auto-merged): the task-098
+  `secret_rotation_check` job, the upstream `meta_spec_conformance_sweep`
+  job, and upstream additions are all registered and spawned.
+- `WorkspaceSettings.svelte` (conflict): `TAB_IDS` merged to 10 tabs —
+  upstream `repos` tab alongside the task-098 `secrets` tab (and the
+  earlier `policies` tab); both tab panels and their locale keys verified
+  present in the merged tree.
+- `web/src/locales/en.json` (conflict): `workspace_settings.tabs` keeps
+  both `secrets` and `repos`; `tenant_settings.tabs` keeps both `secrets`
+  and `workspaces`.
+- `WorkspaceSettings.test.js` (semantic conflict the textual merge
+  missed): "renders all tabs" count corrected 9 → 10 — the merged label
+  list already asserted both `Repos` and `Secrets`, so the stale count
+  would fail on the correct component. `TenantSettings.test.js` header
+  comment updated to 8 tabs.
+- `conditional-test-guard-exemptions.txt`: re-pointed the two
+  pre-existing WorkspaceSettings guard entries to merge-shifted line
+  numbers (same guards, zero new entries).
+- `web/dist`: carried at the assignment-base state via the merge (the
+  candidate did not modify dist); final integration rebuilds and
   publishes those assets remotely.
+
+The earlier `dce3f8d1b` round resolved the analogous conflicts against
+`4d6759a0b` (policies tab, meta-spec sweep job).
 
 ### Test evidence
 
-All suites below run green on the merged tree at `dce3f8d1b`
-(probe logs under `/tmp/stage/review-evidence/`, prefixed `repair-`):
+All suites below run green on the merged tree at `3ed1b9a36`
+(probe logs under `/tmp/stage/review-evidence/`, prefixed `repair3-` for
+this round):
 
 - `cargo check -p gyre-server` — clean (SKIP_WEB_BUILD=1, committed dist)
-- `cargo check -p gyre-adapters -p gyre-cli --tests` — clean
 - `cargo test -p gyre-server --lib -- mcp secret` — 104 passed / 0 failed
   (api::secrets CRUD lifecycle, admin-only, cross-tenant rejection;
   secret_rotation expiry/dedup; mcp incl. `secrets://names` cascade
   names-only, `secrets://status` expiry reporting, no-agent-scope error
   path; abac secrets_routes_are_admin_only)
 - `cargo test -p gyre-server --lib -- jobs` — 11/11 (covers the
-  conflicted `jobs.rs` registration path)
+  merged `jobs.rs` registration path)
 - `cargo test -p gyre-adapters secret` — 17/17 (encryption at rest, wrong
   key/tamper failures, cascade resolution, finer-scope override, expiry
   exclusion, tenant isolation)
 - `cargo test -p gyre-cli --bin gyre secret` — 6/6 (arg parsing incl.
   unknown-scope rejection)
 - vitest focused settings suites (WorkspaceSettings, TenantSettings,
-  RepoSettings, SecretsPanel) — 4 files, 170 passed / 0 failed
+  RepoSettings, SecretsPanel) — 4 files, 175 passed / 0 failed
 - Mechanical gates on the merged tree: check-arch,
   check-abac-route-registry, check-mcp-write-tools,
   check-migration-versions, check-dead-message-kinds,
-  check-mem-port-contracts, check-in-memory-state-stores,
-  check-byte-slice-truncation, check-conditional-test-guards,
+  check-conditional-test-guards, check-task-commit-attribution — all
+  pass. (The prior round additionally ran check-mem-port-contracts,
+  check-in-memory-state-stores, check-byte-slice-truncation,
   check-dependent-scope-resolution, check-fail-open-ref-resolution,
   check-scope-literal-defaults, check-fabricated-scope-defaults,
   check-lossy-secret-conversion, check-inert-enforcement,
   check-relative-path-defaults, check-forwarded-header-trust,
-  check-forged-scope-fields, check-task-commit-attribution,
-  check-abac-exempt-handlers, check-migration-sql-portability,
-  check-non-atomic-creation, check-warn-continue-creation,
-  check-unwritten-store-fields — all pass.
-  check-unnamed-tuple-carriers reports the same 3 pre-existing hits as
-  both merge parents (otlp_receiver.rs:238, mem.rs ConvMap,
-  git_http.rs accumulate_chain_constraints; check not CI-wired); the
-  merge adds zero new carriers.
+  check-forged-scope-fields, check-abac-exempt-handlers,
+  check-migration-sql-portability, check-non-atomic-creation,
+  check-warn-continue-creation, check-unwritten-store-fields — all
+  passing on `dce3f8d1b`; this round's merge touches none of those
+  patterns beyond the files already covered above.)
 
 Full workspace suites, all-target Clippy, and GitHub CI are left to the
 verification stage per assignment scope.
