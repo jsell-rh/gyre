@@ -43,3 +43,96 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 9 (candidate fc0c901cf, base 72ad2a128 — post round-8 rebase record)
+
+Verdict: **needs-revision**. Evidence under `/tmp/stage/review-evidence/`
+(README.md indexes every probe, command, exit code, and log).
+
+Verified working:
+
+- All 15 mechanical check scripts exit 0 on the merged tree (arch, ABAC
+  route registry + exempt handlers, fabricated-scope, inert-enforcement,
+  scope-literal, migration versions + SQL portability, MCP write tools,
+  forged-scope-fields, in-memory state stores, unbounded HTTP).
+- `cargo check -p gyre-cli -p gyre-server` exit 0; `cargo test -p gyre-cli`
+  131+1 passed; `cargo test -p gyre-server --lib` 1418 passed, 0 failed —
+  matching the shipped claims.
+- Live e2e (SQLite-backed debug server built from the candidate tree):
+  `gyre bootstrap --dev ... --starter-kit` executes all 9 steps for real —
+  tenant dev, workspace default, repo, 4 personas pre-approved, starter kit
+  written, **1 spec registered via real git push + server-side ledger
+  sync**, 3 gates detected from Cargo.toml + check-arch.sh, orchestrator
+  spawn attempted with a **truthful launch_failed report** (round-3 F3 fix
+  validated), summary with IDs/URLs, exit 0. Resume re-run reuses
+  tenant/workspace/repo/personas. Non-dev run (`--tenant "Acme Corp"
+  --admin-user jsell`) mints the admin, saves the real key to
+  ~/.gyre/config (raw bytes verified; only the SHA-256 hash is persisted),
+  and authenticates subsequent steps as jsell.
+- auth.rs F1 fail-closed API-key tenant binding, ws.rs telemetry scoping,
+  git_http system-principal slug fallback, spec-ledger push sync: all
+  verified sound in code and tests; no fabricated scopes, no fail-open
+  `resolve_ref` patterns.
+
+Findings:
+
+- [-] **R9-F1 (major, security — live-confirmed): `create_user` has no
+  tenant containment, so any tenant's Admin API-key user can mint an Admin
+  user in any other tenant and receive the raw key.** Reproduced against
+  the candidate server: jsell (Admin API-key user of "Acme Corp", created
+  by this task's own bootstrap) called `POST /api/v1/users` with
+  `tenant_id` = a different tenant's id → HTTP 201 + a working API key
+  authenticating as an Admin of that tenant (`probe-escalation.log`). The
+  handler (`users.rs:767-772`) checks only `roles.contains(Admin)` and
+  tenant existence; the ABAC priority-900 policy then allows the new
+  Admin everywhere (`subject.global_role` derives from `roles.first()`,
+  `abac_middleware.rs:923`). This violates the repo's per-handler
+  containment invariant (AGENTS.md) and the exact pattern the same diff
+  applies in `orchestrator.rs:628` and `repos.rs` `sync_specs` (which has
+  the test `sync_specs_rejects_api_key_user_named_system_from_other_tenant`),
+  and contradicts the task's own F1 rationale (auth.rs: "fabricating a
+  tenant here made API-key admins global superusers across tenants").
+  Fix: `if !auth.is_system_principal() && auth.tenant_id != req.tenant_id
+  { Forbidden }` (preserves the dev-token bootstrap caller).
+- [-] **R9-F2 (major, false success — server half live-confirmed): any 409
+  on repo-orchestrator spawn is mapped to `AlreadyLive`, but the server
+  also returns 409 for a Pending persona when no orchestrator exists.**
+  Live: spawn with an unapproved repo-orchestrator persona → HTTP 409
+  "persona 'repo-orchestrator' resolves in scope ... but is Pending"
+  (`probe-pending-persona.log`); `client.rs:1526-1529` maps every 409 to
+  `AlreadyLive`, and `run_bootstrap` then prints "already active ...
+  keeping it" and exits 0. The persona resume check (`main.rs:1978`)
+  skips existing personas without reading `approval_status` (deserialized
+  at `client.rs:164`, never used), so a bootstrap interrupted between
+  persona create and approve re-runs to exit-0 success with zero
+  orchestrators and a permanently Pending persona. Fix: distinguish the
+  two 409s and approve Pending personas on resume (or fail the step).
+- [-] **R9-F3 (moderate — live-confirmed): gates are duplicated on
+  bootstrap re-run.** Step 7 re-creates gates unconditionally and
+  `create_gate` has no duplicate guard; after one re-run, `quality_gates`
+  holds 2 rows per gate per repo (sqlite query in README.md), so every
+  subsequent MR runs each gate once per bootstrap run. Steps 1/3/4/5 all
+  resume-skip; step 7 does not.
+- [-] **R9-F4 (minor): the credential-reuse fallback (`main.rs:1893-1913`)
+  fires on ANY `create_user` error and adopts any same-server token from
+  ~/.gyre/config regardless of user identity, printing a false "already
+  exists - reusing saved credentials"** (e.g. on a 403 from a non-admin
+  token, or when re-running with a different `--admin-user` than the saved
+  config). Fix: restrict to duplicate-external-id errors and verify the
+  saved token via GET /users/me.
+- Non-blocking notes: `global_role = TenantAdmin` is set but not persisted
+  (reads back Member; authorization uses the persisted `roles` vec, so no
+  functional impact); user create + key mint are non-atomic (a key-mint
+  failure orphans the username with no re-mint path); the mem adapter does
+  not guard `users`/`api_keys` uniqueness (the port traits document no such
+  constraint; the handler guards `external_id` pre-insert, leaving only a
+  TOCTOU). Agent-token tenant hardcoding ("default") and the pre-existing
+  `create_repo`/presence scope gaps are on the base, not this diff.
+
+Summary: the bootstrap orchestration is real and the prior rounds' fixes
+held up under live probing, but R9-F1 is a live-confirmed cross-tenant
+privilege escalation in the endpoint this task added, and R9-F2 turns an
+interrupted run into checked-off success with no orchestrator. Revision
+required.
+
+— Reviewer, 2026-11-08 (round 9)
