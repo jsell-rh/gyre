@@ -89,6 +89,7 @@ diesel::table! {
         atomic_group -> Nullable<Text>,
         workspace_id -> Text,
         reverted_at -> Nullable<BigInt>,
+        merge_commit_sha -> Nullable<Text>,
         revert_commit_sha -> Nullable<Text>,
         spec_ref -> Nullable<Text>,
     }
@@ -168,6 +169,10 @@ diesel::table! {
     }
 }
 
+// users: full User entity per user-management.md §User Entity (task-120).
+// username is UNIQUE (migration 000058 idx_users_username); preferences is a
+// JSON blob (UserPreferences domain type); last_login_at is stamped on each
+// authentication; tenant_id is the nullable tenant scope column.
 diesel::table! {
     users (id) {
         id -> Text,
@@ -180,6 +185,12 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        username -> Text,
+        avatar_url -> Nullable<Text>,
+        preferences -> Nullable<Text>,
+        last_login_at -> Nullable<BigInt>,
+        tenant_id -> Nullable<Text>,
+        global_role -> Text,
     }
 }
 
@@ -249,6 +260,7 @@ diesel::table! {
         resource_id -> Nullable<Text>,
         outcome -> Text,
         detail -> Text,
+        detail_zstd -> Nullable<Binary>,
         source_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
         timestamp -> BigInt,
@@ -571,6 +583,8 @@ diesel::table! {
         approver_type -> Text,
         approver_id -> Text,
         persona -> Nullable<Text>,
+        attestation_level -> Nullable<Integer>,
+        stack_hash -> Nullable<Text>,
         approved_at -> BigInt,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,

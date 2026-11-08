@@ -4,27 +4,54 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
+  import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import Briefing from './Briefing.svelte';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
+  // HSI §3 Default Views (task-088): Spec Realization, Change, System Trace.
+  // Boundary is the default explorer view (canvas drill-down), so it has no
+  // dedicated component — the ExplorerCanvas IS the Boundary View.
+  import SpecRealizationView from './explorer/SpecRealizationView.svelte';
+  import ChangeView from './explorer/ChangeView.svelte';
+  import SystemTraceView from './explorer/SystemTraceView.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
+  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null, archSubTab = undefined, onArchSubTabChange = undefined } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
+
+  // ── Architecture sub-tabs (ui-navigation.md §2, repo scope) ─────────────
+  // Control-bar sub-tabs at repo scope: Graph (default) | Briefing (the
+  // repo-scoped narrative via ?repo_id= — HSI §1.5 repo-scope Briefing row).
+  // Controlled from App when the `archSubTab` prop is provided (drawer
+  // Briefing clicks must switch the sub-tab even when the Architecture tab
+  // is already active); `localArchSubTab` is the standalone fallback.
+  let localArchSubTab = $state('graph');
+  let activeArchSubTab = $derived(archSubTab !== undefined ? archSubTab : localArchSubTab);
+
+  function setArchSubTab(sub) {
+    localArchSubTab = sub;
+    onArchSubTabChange?.(sub);
+  }
 
   // ── Workspace-scope repo list ──────────────────────────────────────────
   let wsRepos = $state([]);
   let wsReposLoading = $state(true);
   let wsReposError = $state(null);
+  // HSI §3 Boundary View Level 1: per-repo type/endpoint counts from the
+  // workspace knowledge graph + cross-repo dependency chips.
+  let wsRepoStats = $state({});   // repoId → { types, endpoints }
+  let wsRepoDeps = $state({});    // repoId → [{ name, target_repo_id }]
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -38,6 +65,18 @@
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
 
+  // ── HSI §3 Default Views: view selector ───────────────────────────────
+  // Boundary (default) | Spec Realization | Change | System Trace.
+  // Boundary is the ExplorerCanvas C4 drill-down (workspace repo cards →
+  // packages → modules → code items); the other three are dedicated panels.
+  const EXPLORER_VIEWS = [
+    { id: 'boundary', label: 'Boundary' },
+    { id: 'spec-realization', label: 'Spec Realization' },
+    { id: 'change', label: 'Change' },
+    { id: 'system-trace', label: 'System Trace' },
+  ];
+  let explorerViewMode = $state('boundary');
+
   // Graph data quality warnings (e.g., missing LSP toolchains)
   let graphWarnings = $state([]);
   let graphWarningsDismissed = $state(false);
@@ -50,6 +89,11 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
+  // Causal trace step focus: clicking a step in the detail panel pans/zooms
+  // the canvas to that node (explorer-canvas.md §6 step 6). The nonce lets
+  // repeated clicks on the same step re-trigger the camera move.
+  let traceFocusRequest = $state(null);
+  let traceFocusNonce = 0;
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -184,6 +228,14 @@
 
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
+  // HSI §3 Layer 1: MR gate evaluation records for the current repo —
+  // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
+  let gateRecords = $state([]);
+  // HSI §3 Layer 1: recent ArchitecturalDelta records (last hour only) for
+  // the fading highlight rings. Loaded on canvas load so the rings do not
+  // depend on the collapsed-by-default Architecture-Insights panel; the
+  // insights panel's full timeline (a superset) takes precedence once live.
+  let livenessTimeline = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -741,6 +793,21 @@
     }
   });
 
+  // Read initial Architecture sub-tab from URL params (set by goToRepoTab
+  // context — same convention as the Code tab's subTab param).
+  // The param is intentionally NOT deleted after reading: App's
+  // setRepoArchSubTab keeps the ?subTab= URL param mirroring the rendered
+  // sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing"), so
+  // reload/copy of the current URL must keep opening the same sub-tab.
+  $effect(() => {
+    if (scopeType !== 'repo') return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSubTab = params.get('subTab');
+    if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
+      setArchSubTab(initialSubTab);
+    }
+  });
+
   async function loadWsRepos() {
     wsReposLoading = true;
     wsReposError = null;
@@ -754,6 +821,65 @@
     } finally {
       wsReposLoading = false;
     }
+    loadWsBoundaryStats();
+  }
+
+  /** HSI §3 Boundary View Level 1 — enrich the workspace repo cards with
+   *  type/endpoint counts (from the aggregated workspace knowledge graph)
+   *  and cross-repo dependency chips. Best-effort: failures leave the cards
+   *  without counts rather than breaking the repo list. */
+  async function loadWsBoundaryStats() {
+    if (!scope.workspaceId) return;
+    try {
+      const g = await api.workspaceGraph(scope.workspaceId);
+      const stats = {};
+      for (const n of g?.nodes ?? []) {
+        const rid = n.repo_id;
+        if (!rid) continue;
+        if (!stats[rid]) stats[rid] = { types: 0, endpoints: 0 };
+        const t = String(n.node_type ?? '').toLowerCase();
+        if (['type', 'interface', 'trait', 'class', 'enum'].includes(t)) stats[rid].types += 1;
+        if (t === 'endpoint') stats[rid].endpoints += 1;
+      }
+      wsRepoStats = stats;
+    } catch {
+      wsRepoStats = {};
+    }
+    // Cross-repo dependency chips per repo (names resolved against the list).
+    const deps = {};
+    await Promise.all(
+      wsRepos.map(async (repo) => {
+        try {
+          const edges = await api.repoDependencies(repo.id);
+          deps[repo.id] = (Array.isArray(edges) ? edges : []).map((e) => ({
+            target_repo_id: e.target_repo_id,
+            name:
+              wsRepos.find((r) => r.id === e.target_repo_id)?.name ??
+              e.target_artifact ??
+              e.target_repo_id,
+          }));
+        } catch {
+          deps[repo.id] = [];
+        }
+      })
+    );
+    wsRepoDeps = deps;
+  }
+
+  /** Switch the Explorer view (HSI §3 view selector). Resetting to Boundary
+   *  restores the canvas drill-down exactly as it was (canvas state is kept
+   *  in explorerCanvasState, so nothing is lost while other views are shown). */
+  function setExplorerView(mode) {
+    explorerViewMode = mode;
+    pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  /** Navigate from another view (Change / Spec Realization) to a node's
+   *  implementation details in the Boundary View. */
+  function navigateToBoundaryNode(node) {
+    explorerViewMode = 'boundary';
+    explorerCanvasState = { ...explorerCanvasState, selectedNode: node };
+    detailNode = node;
   }
 
   /** Read the drilled repo name from the current URL (?repo=name), or null.
@@ -856,14 +982,17 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; livenessTimeline = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
+    gateRecords = [];
+    livenessTimeline = null;
     graphWarnings = [];
     graphWarningsDismissed = false;
+    perfWarningDismissed = false;
     try {
       graph = await api.repoGraph(repoId);
       // Surface data quality warnings from the API (e.g., missing LSP toolchains)
@@ -874,6 +1003,12 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+      // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
+      loadGateData(repoId);
+      // Load recent ArchitecturalDelta records for the fading change rings
+      // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
+      // load must not gate.
+      loadLivenessTimeline(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -919,7 +1054,7 @@
   async function loadTraceData(repoId) {
     try {
       // Find the most recent MR for this repo that has trace data
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 5 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       for (const mr of mrList) {
         try {
@@ -931,6 +1066,49 @@
         } catch { /* no trace for this MR, try next */ }
       }
     } catch { /* trace loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
+   * Each MR's spec_ref links its gate results to the graph nodes the spec
+   * governs; the Evaluative lens colors edges green (all passed) / red (any
+   * failed). Best-effort and non-blocking, like trace loading.
+   */
+  async function loadGateData(repoId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      const records = [];
+      for (const mr of mrList) {
+        if (!mr?.spec_ref) continue;
+        try {
+          const gates = await api.mrGates(mr.id);
+          if (Array.isArray(gates) && gates.length > 0) {
+            records.push({ mrId: mr.id, spec_ref: mr.spec_ref, gates });
+          }
+        } catch { /* no gates for this MR, skip */ }
+      }
+      gateRecords = records;
+    } catch { /* gate loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load the repo's recent ArchitecturalDelta records on
+   * canvas load so the fading highlight rings have a data source in the
+   * default view (the Architecture-Insights panel that owns the full
+   * timeline is collapsed by default). The query is bounded to the recent-
+   * change window (since = now − 1h, no until) so the payload stays small;
+   * computeRecentChanges re-applies the same window, and the insights
+   * panel's full timeline supersedes this slice once loaded. Best-effort
+   * and non-blocking, like trace/gate loading.
+   */
+  async function loadLivenessTimeline(repoId) {
+    try {
+      const since = Math.floor((Date.now() - RECENT_CHANGE_WINDOW_MS) / 1000);
+      const timeline = await api.repoGraphTimeline(repoId, since);
+      if (selectedRepoId !== repoId) return; // stale — user switched repos
+      livenessTimeline = Array.isArray(timeline) ? timeline : [];
+    } catch { /* recent-change rings are best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -1026,6 +1204,19 @@
   onDestroy(() => {
     clearTimeout(debounceTimer);
     ghostOverlays = [];
+  });
+
+  // ── Large graph performance warning (explorer-implementation.md §28 Phase 4) ──
+  // Graphs above 10k nodes are the spec's "large graph" threshold: rendering
+  // stays correct (viewport culling + zoom-level LOD) but interaction can
+  // degrade, so the user is told why instead of guessing.
+  const LARGE_GRAPH_THRESHOLD = 10000;
+  let perfWarningDismissed = $state(false);
+  let largeGraphWarning = $derived.by(() => {
+    if (perfWarningDismissed) return null;
+    const count = effectiveGraph?.nodes?.length ?? 0;
+    if (count <= LARGE_GRAPH_THRESHOLD) return null;
+    return $t('explorer_view.large_graph_warning', { values: { count: count.toLocaleString() } });
   });
 
   // ── Toolchain warning: detect missing call edges ──────────────────
@@ -1200,6 +1391,23 @@
                 {#if repo.description}
                   <span class="ws-repo-description">{repo.description}</span>
                 {/if}
+                <!-- HSI §3 Boundary View Level 1: type/endpoint counts from the
+                     workspace knowledge graph (C4 container card). -->
+                <span class="ws-repo-counts">
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.types ?? 0} types</span>
+                  <span class="ws-repo-count-sep">·</span>
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.endpoints ?? 0} endpoints</span>
+                </span>
+                {#if wsRepoDeps[repo.id]?.length}
+                  <span class="ws-repo-deps" title="Cross-repo dependencies">
+                    {#each wsRepoDeps[repo.id].slice(0, 4) as dep}
+                      <span class="ws-repo-dep-chip">→ {dep.name}</span>
+                    {/each}
+                    {#if wsRepoDeps[repo.id].length > 4}
+                      <span class="ws-repo-dep-more">+{wsRepoDeps[repo.id].length - 4}</span>
+                    {/if}
+                  </span>
+                {/if}
               </div>
             </div>
             <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
@@ -1226,6 +1434,29 @@
         <h1 class="page-title">{scopeType === 'repo' || showingRepoGraph ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
         {#if scopeType !== 'repo' && !showingRepoGraph}
           <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        {/if}
+
+        {#if scopeType === 'repo'}
+          <!-- Control-bar sub-tabs (ui-navigation.md §2): Graph (default) |
+               Briefing (repo-scoped narrative, HSI §1.5). -->
+          <div class="arch-subtabs" role="tablist" aria-label={$t('explorer_view.arch_subtabs_label')}>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'graph'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'graph'}
+              onclick={() => setArchSubTab('graph')}
+              data-testid="arch-subtab-graph"
+            >{$t('explorer_view.sub_tabs.graph')}</button>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'briefing'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'briefing'}
+              onclick={() => setArchSubTab('briefing')}
+              data-testid="arch-subtab-briefing"
+            >{$t('explorer_view.sub_tabs.briefing')}</button>
+          </div>
         {/if}
       </div>
       <div class="header-right">
@@ -1291,9 +1522,24 @@
     </div>
 
 
-    <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
+    <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
+        <!-- HSI §3 view selector: Boundary | Spec Realization | Change | System Trace -->
+        <div class="explorer-view-tabs" role="tablist" aria-label="Explorer view" data-testid="explorer-view-selector">
+          {#each EXPLORER_VIEWS as v (v.id)}
+            <button
+              type="button"
+              role="tab"
+              class="view-tab"
+              class:active={explorerViewMode === v.id}
+              aria-selected={explorerViewMode === v.id}
+              onclick={() => setExplorerView(v.id)}
+            >{v.label}</button>
+          {/each}
+        </div>
+
+        {#if explorerViewMode === 'boundary'}
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -1356,13 +1602,20 @@
             </span>
           {/if}
         {/if}
+        {/if}
       </div>
     {/if}
 
     <!-- Main content -->
     <div class="explorer-body">
       <div class="explorer-body-main">
-        {#if !selectedRepoId}
+        {#if scopeType === 'repo' && activeArchSubTab === 'briefing' && scope.repoId}
+          <!-- Briefing sub-tab (ui-navigation.md §2): repo-scoped narrative —
+               HSI §1.5 repo-scope Briefing row (?repo_id= filter). -->
+          <div class="arch-briefing-wrap" data-testid="arch-briefing">
+            <Briefing workspaceId={scope.workspaceId} repoId={scope.repoId} scope="repo" />
+          </div>
+        {:else if !selectedRepoId}
           <div class="empty-state-wrap">
             {#if scopeType === 'repo'}
               <!-- Repo scope: repo ID will be set by the auto-select effect -->
@@ -1394,17 +1647,37 @@
         {:else if graph}
           <div class="explorer-split">
             <div class="explorer-canvas-area">
-              {#if missingCallEdgesWarning}
-                <div class="toolchain-warning" role="alert">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                  <span>{missingCallEdgesWarning}</span>
-                  <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
+              {#if missingCallEdgesWarning || largeGraphWarning}
+                <div class="canvas-warning-stack">
+                  {#if missingCallEdgesWarning}
+                    <div class="toolchain-warning" role="alert">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      <span>{missingCallEdgesWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
+                  {#if largeGraphWarning}
+                    <div class="toolchain-warning perf-warning" role="status" data-testid="large-graph-warning">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                      <span>{largeGraphWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { perfWarningDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss performance warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
                 </div>
               {/if}
+              {#if explorerViewMode === 'boundary'}
+              <!-- windowEscape={false}: ExplorerView owns the window-level Escape
+                   cascade (onWindowKeydown: spec editor → query editor → detail panel →
+                   active view query) and already exits trace mode through it; a second
+                   window Escape listener in the canvas would clear the trace on the same
+                   keypress that closes an overlay above it. -->
               <ExplorerCanvas
                 repoId={selectedRepoId}
+                rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
@@ -1439,9 +1712,12 @@
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
-                timeline={graphTimeline ?? []}
+                focusRequest={traceFocusRequest}
+                windowEscape={false}
+                timeline={graphTimeline ?? livenessTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                {gateRecords}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;
@@ -1451,8 +1727,27 @@
                 onTimelineMarkerClick={(_delta) => {}}
                 {timelineDeltaStats}
               />
-              <!-- Architecture Insights — collapsible panel inside canvas area -->
-              {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+              {:else if explorerViewMode === 'spec-realization'}
+                <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
+                <SpecRealizationView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onOpenSpec={(path) => openSpecEditor(path)}
+                  onSelectNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'change'}
+                <!-- HSI §3 Change View: architectural deltas since last visit -->
+                <ChangeView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onNavigateToNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'system-trace'}
+                <!-- HSI §3 System Trace View: SDLC timeline for an MR -->
+                <SystemTraceView repoId={selectedRepoId} />
+              {/if}
+              <!-- Architecture Insights — collapsible panel inside canvas area (Boundary view only) -->
+              {#if explorerViewMode === 'boundary' && selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
                 <div class="arch-insights-overlay">
                   <div class="arch-insights-toggle">
                     <button
@@ -1644,6 +1939,17 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
+                  onTraceStepNavigate={(step) => {
+                    // Show the step's node in the detail panel and pan/zoom
+                    // the canvas to it (explorer-canvas.md §6 step 6). The
+                    // step list is carried onto the target so the panel
+                    // keeps showing the full clickable trace across
+                    // navigation clicks.
+                    const target = traceStepTargetNode(detailNode, step, graph.nodes ?? []);
+                    if (target) detailNode = target;
+                    traceFocusNonce += 1;
+                    traceFocusRequest = { nodeId: step.nodeId, nonce: traceFocusNonce };
+                  }}
                   onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
@@ -1987,9 +2293,8 @@
             {/if}
           </div>
         {/if}
-
-        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
       </div>
+        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
     </div>
   </div>
 {/if}
@@ -2083,6 +2388,35 @@
     white-space: nowrap;
   }
 
+  /* HSI §3 Boundary View Level 1: type/endpoint counts + dep chips on cards */
+  .ws-repo-counts {
+    display: inline-flex;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .ws-repo-count-sep { color: var(--color-border); }
+
+  .ws-repo-deps {
+    display: inline-flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .ws-repo-dep-chip {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    border-radius: var(--radius-full, 999px);
+    padding: 0 var(--space-2);
+  }
+
+  .ws-repo-dep-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
   .ws-repo-explore {
     font-size: var(--text-sm);
     color: var(--color-link);
@@ -2121,6 +2455,46 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
+  }
+
+  /* Control-bar sub-tabs at repo scope (ui-navigation.md §2): Graph | Briefing */
+  .arch-subtabs {
+    display: flex;
+    gap: 0;
+    border-bottom: none;
+    margin-top: var(--space-2);
+  }
+
+  .arch-subtab-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted, var(--color-text));
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .arch-subtab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .arch-subtab-btn:not(.active):hover {
+    color: var(--color-text);
+  }
+
+  .arch-subtab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .arch-briefing-wrap {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
   }
 
   .header-right {
@@ -2303,6 +2677,41 @@
     background: var(--color-surface-elevated);
     flex-shrink: 0;
     flex-wrap: wrap;
+  }
+
+  /* HSI §3 view selector tabs (Boundary | Spec Realization | Change | System Trace) */
+  .explorer-view-tabs {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    padding: 2px;
+    flex-shrink: 0;
+  }
+
+  .view-tab {
+    border: none;
+    background: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .view-tab:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .view-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    box-shadow: inset 0 -2px 0 var(--color-focus);
+    font-weight: 600;
   }
 
   .search-input-wrap {
@@ -2839,8 +3248,12 @@
     position: relative;
   }
 
-  .toolchain-warning {
+  .canvas-warning-stack {
     position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    max-width: 600px;
+  }
+  .toolchain-warning {
     display: flex; align-items: center; gap: 8px;
     padding: 6px 14px; background: rgba(120, 53, 15, 0.85); border: 1px solid rgba(245, 158, 11, 0.4);
     border-radius: 8px; font-size: 11px; color: #fbbf24; max-width: 600px;
