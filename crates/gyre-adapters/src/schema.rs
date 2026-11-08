@@ -571,6 +571,8 @@ diesel::table! {
         approver_type -> Text,
         approver_id -> Text,
         persona -> Nullable<Text>,
+        attestation_level -> Nullable<Integer>,
+        stack_hash -> Nullable<Text>,
         approved_at -> BigInt,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
