@@ -17,10 +17,9 @@ use gyre_ports::{
     AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
-    SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};

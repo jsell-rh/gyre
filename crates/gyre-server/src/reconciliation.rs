@@ -904,10 +904,14 @@ async fn merge_pending_rollout(
 /// completed (§7 Rolling: "Wait for each batch to complete before starting
 /// the next").
 ///
-/// A batch is in flight while the workspace has ANY non-terminal
-/// reconciliation task — the batch boundary is "no open reconciliation
-/// work", so an earlier wave's still-running tasks also hold the next batch
-/// back (a workspace still reconciling is not ready for more).
+/// A batch is in flight while the workspace has any non-terminal
+/// reconciliation task CARRYING a spawning signal (task_type) — the
+/// batch boundary is "no open active reconciliation work", so an
+/// earlier wave's still-running tasks also hold the next batch back (a
+/// workspace still reconciling is not ready for more). §7 Background
+/// tasks (no task_type, parked in Backlog by design) do NOT count: they
+/// are inert until the repo orchestrator engages them and must not stall
+/// the rollout's batches.
 ///
 /// The policy is re-read on every advance: if the admin switched the
 /// workspace to a non-Rolling strategy mid-rollout, the remainder is flushed
@@ -951,7 +955,14 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         return;
     }
 
-    // A batch is in flight while any non-terminal reconciliation task exists.
+    // A batch is in flight while any non-terminal reconciliation task
+    // carrying a spawning signal (task_type) exists. §7 Background tasks
+    // are created WITHOUT a task_type and sit in Backlog by design —
+    // until the repo orchestrator engages them, potentially forever —
+    // so they must not hold the rollout's next batch hostage. The gate
+    // counts the rollout's own in-flight work only, consistent with
+    // `run_reconciliation`, which starts a new wave's first batch
+    // without any in-flight check.
     let open_reconciliation = state
         .tasks
         .list_by_workspace(workspace_id)
@@ -959,6 +970,7 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         .map(|tasks| {
             tasks.iter().any(|t| {
                 t.labels.iter().any(|l| l == RECONCILIATION_LABEL)
+                    && t.task_type.is_some()
                     && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
             })
         })
@@ -1738,6 +1750,37 @@ mod tests {
         }
     }
 
+    /// Drive only the ACTIVE reconciliation tasks (those carrying a
+    /// task_type — the rollout's own in-flight work) to Done, leaving
+    /// inert §7 Background tasks (no task_type, parked in Backlog)
+    /// untouched. Used by the Background-history stall regression: the
+    /// parked tasks must stay open to exercise the gate.
+    async fn finish_active_reconciliation_tasks(state: &Arc<AppState>, ws_id: &Id) {
+        let tasks = state.tasks.list_by_workspace(ws_id).await.unwrap();
+        for mut t in tasks {
+            if !t.labels.iter().any(|l| l == RECONCILIATION_LABEL) {
+                continue;
+            }
+            if t.task_type.is_none() {
+                continue; // inert Background task: leave parked
+            }
+            if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
+                continue;
+            }
+            if t.status == TaskStatus::Backlog {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+            }
+            if t.status == TaskStatus::Blocked {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+            }
+            if t.status == TaskStatus::InProgress {
+                t.transition_status(TaskStatus::Review).unwrap();
+            }
+            t.transition_status(TaskStatus::Done).unwrap();
+            state.tasks.update(&t).await.unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn unset_policy_is_the_spec_default() {
         let state = test_state();
@@ -2127,6 +2170,137 @@ mod tests {
             "Background-flushed tasks must not carry the Delegation spawning signal"
         );
         assert!(pending_rollout_state(&state, "ws-sw-bg").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_history_does_not_stall_rolling_rollout() {
+        // Regression (review c9dc5a11): the next-batch gate in
+        // `maybe_advance_rolling_rollout` used to count ANY non-terminal
+        // reconciliation-labeled task as "batch in flight" — including
+        // §7 Background tasks, which are created WITHOUT a task_type and
+        // sit in Backlog by design until the repo orchestrator engages
+        // them (potentially forever). A workspace with Background
+        // history therefore stalled a later Rolling rollout indefinitely:
+        // batch 1 completed, but the advance saw the inert Backlog tasks
+        // as in-flight work and never created the next batch (and the
+        // strategy-switch flush, living inside the same advance, never
+        // ran either). The gate must count only the rollout's own
+        // in-flight work — reconciliation tasks carrying a task_type.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-bg-hist").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-bg-hist-{i}"), "ws-bg-hist").await;
+        }
+        // Background wave parks 3 inert Backlog tasks (no task_type).
+        let bg_spec = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-bg-hist",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Background,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+        let bg_summary =
+            run_reconciliation(&state, &ws.id, std::slice::from_ref(&bg_spec.name)).await;
+        assert_eq!(bg_summary.tasks_created, 3);
+        let parked = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(parked.len(), 3);
+        assert!(parked.iter().all(|t| t.task_type.is_none()));
+
+        // Admin switches to Rolling; a new wave (different meta-spec, so
+        // distinct titles) starts under it: batch 1 created, 2 deferred.
+        set_policy(
+            &state,
+            "ws-bg-hist",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+        let roll_spec = make_meta_spec(&state, "code-reviewer", 2).await;
+        let summary =
+            run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.name)).await;
+        assert_eq!(summary.tasks_created, 1);
+        assert_eq!(
+            pending_rollout_state(&state, "ws-bg-hist").await.unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Finish ONLY the rolling batch-1 task; the inert Background
+        // tasks stay open in Backlog (the stall condition).
+        finish_active_reconciliation_tasks(&state, &ws.id).await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+
+        // §7 Rolling: "Wait for each batch to complete before starting the
+        // next" — batch 1 completed, so the next batch must be created
+        // despite the 3 inert Background tasks still being open.
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .collect::<Vec<_>>();
+        let active = open.iter().filter(|t| t.task_type.is_some()).count();
+        let inert = open.iter().filter(|t| t.task_type.is_none()).count();
+        assert_eq!(
+            active, 1,
+            "batch 2 must be created after batch 1 completes despite Background history"
+        );
+        assert_eq!(
+            inert, 3,
+            "the parked Background tasks must remain untouched in Backlog"
+        );
+        assert_eq!(
+            pending_rollout_state(&state, "ws-bg-hist").await.unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Draining the remaining batches finishes the rollout (batch size
+        // 1 → two more advances), each proceeding despite the parked
+        // Background tasks. Batch 2 completes → the last batch (3) is
+        // created and nothing remains deferred.
+        finish_active_reconciliation_tasks(&state, &ws.id).await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        assert!(
+            pending_rollout_state(&state, "ws-bg-hist").await.is_none(),
+            "batch 2 completion must create the final batch and drain the remainder"
+        );
+        let active = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .filter(|t| t.task_type.is_some())
+            .count();
+        assert_eq!(
+            active, 1,
+            "batch 3 (the last) must be created after batch 2 completes"
+        );
+
+        // Batch 3 completes → the rollout is done: no deferred work left,
+        // and only the inert Background tasks remain open (their
+        // engagement is the repo orchestrator's call, §7).
+        finish_active_reconciliation_tasks(&state, &ws.id).await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        assert!(pending_rollout_state(&state, "ws-bg-hist").await.is_none());
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .collect::<Vec<_>>();
+        assert_eq!(open.len(), 3);
+        assert!(open.iter().all(|t| t.task_type.is_none()));
     }
 
     /// KvJsonStore wrapper whose `kv_get` fails while `fail_reads` is set —
