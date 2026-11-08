@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §6 Causal Flow Trace (Structural Lens Feature)"
-commits: ["fc4824f48beeccfa184cef78c0ef3591beb3bf74", "88197c55e960ab3f7a1405044de6e016657d155e", "3474c9305d43cbb375da658914d84ec162f2ae9d", "3cb7e9848ae663d5f8e6230daba3cdb7a54cd0d1", "e72c00a839b565abf02a68793a0c1ad7f87e7fb0", "540d2e6706d24a191f03df3d97623219b5a95944", "67005b8905fa1c5da5d089b1215972f4effb0c86"]
+commits: ["9764aa88b9bbc0781c39a03104db3fdcc5330472", "fc4824f48beeccfa184cef78c0ef3591beb3bf74", "88197c55e960ab3f7a1405044de6e016657d155e", "3474c9305d43cbb375da658914d84ec162f2ae9d", "3cb7e9848ae663d5f8e6230daba3cdb7a54cd0d1", "e72c00a839b565abf02a68793a0c1ad7f87e7fb0", "540d2e6706d24a191f03df3d97623219b5a95944", "67005b8905fa1c5da5d089b1215972f4effb0c86"]
 ---
 
 ## Spec Excerpt
