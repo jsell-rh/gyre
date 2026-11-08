@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b"]
+commits: ["3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b", "ad99cb8c9"]
 ---
 
 ## Spec Excerpt
@@ -71,10 +71,14 @@ All 7 agent lifecycle audit events from observability.md §Audit Event Types
 are real, typed `AuditEventType` variants with production emission points,
 persistent storage via the `AuditRepository` port, live SSE broadcast, and
 CEF severity mapping. Product commit:
-`3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b`, preserved unchanged through
-this contract-repair round (no production code changed this round; only this
-task document's workflow fields were restored after the executor reset it to
-the assigned contract text).
+`3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b`.
+
+This round repaired the verification finding
+`2b5e29b31c5f482d9b530bdc8b37c611` (rustfmt changed-lines violations in
+the task's sources plus a `clippy::needless_borrow` at the `emit_spawned`
+call site) in commit `ad99cb8c9` — formatting only plus one borrow fix
+(`&state` → `state` in `spawn_agent_core`, whose `state` is already
+`&Arc<AppState>`); no behavior change.
 
 ### Behavior
 
@@ -141,4 +145,22 @@ Focused runs on this round's checkout, all exit 0:
   `siem::tests::cef_agent_lifecycle_severities`.
 - Full workspace suites, all-target clippy, and CI are owned by the
   verification stage; evidence for this round retained at
-  `/tmp/stage/review-evidence/task-103-contract-repair-round.txt`.
+  `/tmp/stage/review-evidence/task-103-verification-repair.txt`.
+
+### Verification-repair evidence (this round)
+
+All on this round's checkout, exit 0:
+
+- `python3 scripts/check-rustfmt-diff.py 72ad2a128...` -- "changed lines
+  clean (9 Rust files checked)".
+- `cargo clippy -p gyre-server --all-targets -- -W clippy::all` -- the
+  changed-line `needless_borrow` at spawn.rs:1203 is gone; remaining
+  spawn.rs warnings (lines 348, 353, 1174, 1194) verified pre-existing vs
+  base via the `check-clippy-diff.py` changed-lines algorithm, so the diff
+  gate passes. `gyre-domain` clippy likewise shows only pre-existing
+  warnings (audit.rs:133 is task-102's constructor, unchanged vs base).
+- `cargo test -p gyre-domain --lib audit` -- 8 passed.
+- `cargo test -p gyre-server --lib --` filtered to the lifecycle emission
+  tests -- 26 passed, 0 failed (spawn/complete/admin kill/admin reassign/
+  heartbeat/stale-detector emission, pid-liveness quality tests, CEF
+  severities, jti uniqueness).
