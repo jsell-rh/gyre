@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "0253032b90e47bd0607bde5c973d17b81afc5786"]
+commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "935a15413cf42ca28dd5c971ffe081079d16ea23"]
 ---
 
 ## Spec Excerpt
@@ -253,7 +253,7 @@ Evidence: `check-relative-path-defaults.sh` exits 0 with no spawn.rs
   9bef21a4 contains only the deletion (retained under
   /tmp/stage/review-evidence/relative-path-fix.txt).
 
-### Rebase-repair round: reconcile with base c5deca801 (commit 0253032b90e47bd0607bde5c973d17b81afc5786)
+### Rebase-repair round: reconcile with base c5deca801 (commit 935a15413cf42ca28dd5c971ffe081079d16ea23)
 
 The controller rebased the branch onto a new base (the task-105 lineage:
   audit detail compression, log compression background job, task-095
@@ -306,7 +306,7 @@ The controller rebased the branch onto a new base (the task-105 lineage:
 
 ### Test evidence
 
-- This round (0253032b90e47bd0607bde5c973d17b81afc5786): `cargo test -p gyre-server --lib`: 1468
+- This round (935a15413cf42ca28dd5c971ffe081079d16ea23): `cargo test -p gyre-server --lib`: 1468
   passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
   67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 379 passed,
   0 failed (includes the analytics adapter tests and the duplicate-
