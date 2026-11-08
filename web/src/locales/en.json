@@ -493,6 +493,8 @@
     "adjust_metaspec": "Adjust Meta-spec",
     "increase_limit": "Increase Limit",
     "increase_trust": "Increase Trust",
+    "trust_increased": "Trust level increased",
+    "trust_increase_failed": "Could not update trust level — please try again.",
     "view_code": "View Code",
     "update_spec": "Update Spec",
     "accept": "Accept",
