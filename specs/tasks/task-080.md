@@ -5,7 +5,7 @@ depends_on:
   - task-069
   - task-070
   - task-065
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §31 Integration Tests"
   - "explorer-implementation.md §32 Visual Tests"
