@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
-commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52", "46fac1eb03211ed1ab8bdb2f554b38cf3d1f5df4"]
+commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52"]
 ---
 
 ## Spec Excerpt
