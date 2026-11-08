@@ -171,6 +171,10 @@ diesel::table! {
     }
 }
 
+// users: full User entity per user-management.md §User Entity (task-120).
+// username is UNIQUE (migration 000058 idx_users_username); preferences is a
+// JSON blob (UserPreferences domain type); last_login_at is stamped on each
+// authentication; tenant_id is the nullable tenant scope column.
 diesel::table! {
     users (id) {
         id -> Text,
@@ -185,7 +189,12 @@ diesel::table! {
         locale -> Nullable<Text>,
         // TASK-099 F1: tenant binding; nullable for legacy OIDC users
         // (the auth extractor fail-closes on unbound users).
+        username -> Text,
+        avatar_url -> Nullable<Text>,
+        preferences -> Nullable<Text>,
+        last_login_at -> Nullable<BigInt>,
         tenant_id -> Nullable<Text>,
+        global_role -> Text,
     }
 }
 
