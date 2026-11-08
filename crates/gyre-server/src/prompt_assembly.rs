@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use gyre_common::Id;
 use gyre_domain::agent::MetaSpecUsed;
-use gyre_domain::task::Task;
 use gyre_domain::meta_spec::{
     MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
 };
+use gyre_domain::task::Task;
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
@@ -380,11 +380,7 @@ pub async fn detect_stale_pins(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     let mut stale_count = 0u32;
     for binding in bindings {
-        let Some(ms) = state
-            .meta_specs
-            .get_by_id(&binding.meta_spec_id)
-            .await?
-        else {
+        let Some(ms) = state.meta_specs.get_by_id(&binding.meta_spec_id).await? else {
             // Referenced meta-spec deleted — the delete guard blocks this for
             // new deletes, but historical rows may exist. Nothing to compare.
             continue;
@@ -540,6 +536,7 @@ mod tests {
             required,
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
+            approved_content_hash: None,
             approved_at: Some(1),
             created_by: "system".to_string(),
             created_at: 1,
@@ -558,12 +555,56 @@ mod tests {
     async fn injection_order_tenant_before_workspace_before_bindings() {
         let state = test_state();
         // Required tenant: standard + persona (deliberately unsorted insert order).
-        state.meta_specs.create(&make_ms("ms-std", "test-coverage", MetaSpecKind::Standard, true, MetaSpecScope::Global, None)).await.unwrap();
-        state.meta_specs.create(&make_ms("ms-per", "default-worker", MetaSpecKind::Persona, true, MetaSpecScope::Global, None)).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "ms-std",
+                "test-coverage",
+                MetaSpecKind::Standard,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "ms-per",
+                "default-worker",
+                MetaSpecKind::Persona,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
         // Required workspace.
-        state.meta_specs.create(&make_ms("ws-per", "team-persona", MetaSpecKind::Persona, true, MetaSpecScope::Workspace, Some("ws-1"))).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "ws-per",
+                "team-persona",
+                MetaSpecKind::Persona,
+                true,
+                MetaSpecScope::Workspace,
+                Some("ws-1"),
+            ))
+            .await
+            .unwrap();
         // Optional, bound.
-        state.meta_specs.create(&make_ms("opt-sec", "security", MetaSpecKind::Persona, false, MetaSpecScope::Global, None)).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "opt-sec",
+                "security",
+                MetaSpecKind::Persona,
+                false,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
 
         state
             .meta_spec_bindings
@@ -581,7 +622,12 @@ mod tests {
         let names: Vec<&str> = set.sections.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["default-worker", "test-coverage", "team-persona", "security"],
+            vec![
+                "default-worker",
+                "test-coverage",
+                "team-persona",
+                "security"
+            ],
             "tenant (kind-ordered) → workspace → bindings"
         );
         assert_eq!(set.sections[0].source, "required-tenant");
@@ -594,20 +640,83 @@ mod tests {
     async fn kind_ordering_within_band() {
         let state = test_state();
         // Insert in reverse kind order.
-        state.meta_specs.create(&make_ms("p4", "proc", MetaSpecKind::Process, true, MetaSpecScope::Global, None)).await.unwrap();
-        state.meta_specs.create(&make_ms("p3", "std", MetaSpecKind::Standard, true, MetaSpecScope::Global, None)).await.unwrap();
-        state.meta_specs.create(&make_ms("p2", "principle", MetaSpecKind::Principle, true, MetaSpecScope::Global, None)).await.unwrap();
-        state.meta_specs.create(&make_ms("p1", "persona", MetaSpecKind::Persona, true, MetaSpecScope::Global, None)).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "p4",
+                "proc",
+                MetaSpecKind::Process,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "p3",
+                "std",
+                MetaSpecKind::Standard,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "p2",
+                "principle",
+                MetaSpecKind::Principle,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "p1",
+                "persona",
+                MetaSpecKind::Persona,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
 
         let set = assemble_prompt_set(&state, &make_task(None)).await;
         let kinds: Vec<&str> = set.sections.iter().map(|s| s.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["meta:persona", "meta:principle", "meta:standard", "meta:process"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "meta:persona",
+                "meta:principle",
+                "meta:standard",
+                "meta:process"
+            ]
+        );
     }
 
     #[tokio::test]
     async fn required_meta_spec_in_bindings_deduped() {
         let state = test_state();
-        state.meta_specs.create(&make_ms("r1", "req-persona", MetaSpecKind::Persona, true, MetaSpecScope::Global, None)).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "r1",
+                "req-persona",
+                MetaSpecKind::Persona,
+                true,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
         state
             .meta_spec_bindings
             .create(&MetaSpecBinding {
@@ -621,14 +730,25 @@ mod tests {
             .unwrap();
 
         let set = assemble_prompt_set(&state, &make_task(Some("specs/foo.md"))).await;
-        assert_eq!(set.sections.len(), 1, "required meta-spec bound by spec must appear once");
+        assert_eq!(
+            set.sections.len(),
+            1,
+            "required meta-spec bound by spec must appear once"
+        );
         assert_eq!(set.sections[0].source, "required-tenant");
     }
 
     #[tokio::test]
     async fn pinned_old_version_uses_historical_content() {
         let state = test_state();
-        let mut ms = make_ms("v-ms", "sec", MetaSpecKind::Persona, false, MetaSpecScope::Global, None);
+        let mut ms = make_ms(
+            "v-ms",
+            "sec",
+            MetaSpecKind::Persona,
+            false,
+            MetaSpecScope::Global,
+            None,
+        );
         state.meta_specs.create(&ms).await.unwrap();
         // Edit: v2.
         ms.prompt = "v2 prompt".to_string();
@@ -651,7 +771,10 @@ mod tests {
 
         let set = assemble_prompt_set(&state, &make_task(Some("specs/foo.md"))).await;
         assert_eq!(set.sections.len(), 1);
-        assert_eq!(set.sections[0].prompt, "prompt for sec", "pinned v1 content, not current v2");
+        assert_eq!(
+            set.sections[0].prompt, "prompt for sec",
+            "pinned v1 content, not current v2"
+        );
         assert_eq!(set.sections[0].used.version, 1);
         assert_eq!(set.sections[0].used.content_hash, "hash-sec");
     }
@@ -659,7 +782,18 @@ mod tests {
     #[tokio::test]
     async fn missing_pinned_version_skips_binding() {
         let state = test_state();
-        state.meta_specs.create(&make_ms("v-ms", "sec", MetaSpecKind::Persona, false, MetaSpecScope::Global, None)).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "v-ms",
+                "sec",
+                MetaSpecKind::Persona,
+                false,
+                MetaSpecScope::Global,
+                None,
+            ))
+            .await
+            .unwrap();
         state
             .meta_spec_bindings
             .create(&MetaSpecBinding {
@@ -673,7 +807,10 @@ mod tests {
             .unwrap();
 
         let set = assemble_prompt_set(&state, &make_task(Some("specs/foo.md"))).await;
-        assert!(set.sections.is_empty(), "unresolvable pin must be skipped, not wrong-version injected");
+        assert!(
+            set.sections.is_empty(),
+            "unresolvable pin must be skipped, not wrong-version injected"
+        );
     }
 
     #[tokio::test]
@@ -681,10 +818,24 @@ mod tests {
         let state = test_state();
         // A required meta-spec whose edit reset approval to Pending must not
         // inject (agent-runtime §2: re-approval is a human gate).
-        let mut pending = make_ms("pending-req", "unapproved-persona", MetaSpecKind::Persona, true, MetaSpecScope::Global, None);
+        let mut pending = make_ms(
+            "pending-req",
+            "unapproved-persona",
+            MetaSpecKind::Persona,
+            true,
+            MetaSpecScope::Global,
+            None,
+        );
         pending.approval_status = MetaSpecApprovalStatus::Pending;
         state.meta_specs.create(&pending).await.unwrap();
-        let mut rejected = make_ms("rejected-req", "rejected-standard", MetaSpecKind::Standard, true, MetaSpecScope::Workspace, Some("ws-1"));
+        let mut rejected = make_ms(
+            "rejected-req",
+            "rejected-standard",
+            MetaSpecKind::Standard,
+            true,
+            MetaSpecScope::Workspace,
+            Some("ws-1"),
+        );
         rejected.approval_status = MetaSpecApprovalStatus::Rejected;
         state.meta_specs.create(&rejected).await.unwrap();
 
@@ -692,7 +843,10 @@ mod tests {
         assert!(
             set.sections.is_empty(),
             "Pending/Rejected required meta-specs must not inject; got {:?}",
-            set.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+            set.sections
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -702,7 +856,14 @@ mod tests {
         // Optional meta-spec bound to the spec, but its edit reset approval
         // to Pending: the binding must not inject any version (fail closed
         // pending human review).
-        let mut pending = make_ms("pending-opt", "sec", MetaSpecKind::Persona, false, MetaSpecScope::Global, None);
+        let mut pending = make_ms(
+            "pending-opt",
+            "sec",
+            MetaSpecKind::Persona,
+            false,
+            MetaSpecScope::Global,
+            None,
+        );
         pending.approval_status = MetaSpecApprovalStatus::Pending;
         state.meta_specs.create(&pending).await.unwrap();
         state
@@ -721,17 +882,34 @@ mod tests {
         assert!(
             set.sections.is_empty(),
             "binding to an unapproved meta-spec must be skipped; got {:?}",
-            set.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+            set.sections
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
     #[tokio::test]
     async fn workspace_required_scoped_to_other_workspace_excluded() {
         let state = test_state();
-        state.meta_specs.create(&make_ms("other-ws", "other-team", MetaSpecKind::Persona, true, MetaSpecScope::Workspace, Some("ws-OTHER"))).await.unwrap();
+        state
+            .meta_specs
+            .create(&make_ms(
+                "other-ws",
+                "other-team",
+                MetaSpecKind::Persona,
+                true,
+                MetaSpecScope::Workspace,
+                Some("ws-OTHER"),
+            ))
+            .await
+            .unwrap();
 
         let set = assemble_prompt_set(&state, &make_task(None)).await;
-        assert!(set.sections.is_empty(), "required meta-spec of another workspace must not inject");
+        assert!(
+            set.sections.is_empty(),
+            "required meta-spec of another workspace must not inject"
+        );
     }
 
     #[tokio::test]
@@ -742,15 +920,30 @@ mod tests {
             prompt: "x".into(),
             scope: "global".into(),
             source: "required-tenant",
-            used: MetaSpecUsed { id: Id::new("1"), kind: "meta:persona".into(), content_hash: "h1".into(), version: 1, required: true, scope: "global".into() },
+            used: MetaSpecUsed {
+                id: Id::new("1"),
+                kind: "meta:persona".into(),
+                content_hash: "h1".into(),
+                version: 1,
+                required: true,
+                scope: "global".into(),
+            },
         };
         let mut s2 = s1.clone();
         s2.used.content_hash = "h2".into();
-        assert_ne!(prompt_set_sha(&[s1.clone()]), prompt_set_sha(&[s2]), "hash must reflect content_hash");
+        assert_ne!(
+            prompt_set_sha(&[s1.clone()]),
+            prompt_set_sha(&[s2]),
+            "hash must reflect content_hash"
+        );
 
         let mut s3 = s1.clone();
         s3.name = "b".into();
-        assert_ne!(prompt_set_sha(&[s1.clone(), s3.clone()]), prompt_set_sha(&[s3, s1]), "hash must reflect order");
+        assert_ne!(
+            prompt_set_sha(&[s1.clone(), s3.clone()]),
+            prompt_set_sha(&[s3, s1]),
+            "hash must reflect order"
+        );
     }
 
     #[tokio::test]
@@ -762,10 +955,19 @@ mod tests {
             spec_path: Some("specs/foo.md".to_string()),
             set_sha: "abc".to_string(),
             assembled_at: 42,
-            meta_specs_used: vec![MetaSpecUsed { id: Id::new("1"), kind: "meta:persona".to_string(), content_hash: "h".to_string(), version: 3, required: true, scope: "global".to_string() }],
+            meta_specs_used: vec![MetaSpecUsed {
+                id: Id::new("1"),
+                kind: "meta:persona".to_string(),
+                content_hash: "h".to_string(),
+                version: 3,
+                required: true,
+                scope: "global".to_string(),
+            }],
         };
         store_prompt_set_record(&state, &rec).await;
-        let loaded = load_prompt_set_record(&state, "ag-1").await.expect("record must load");
+        let loaded = load_prompt_set_record(&state, "ag-1")
+            .await
+            .expect("record must load");
         assert_eq!(loaded.set_sha, "abc");
         assert_eq!(loaded.meta_specs_used.len(), 1);
         assert_eq!(loaded.meta_specs_used[0].version, 3);

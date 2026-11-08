@@ -477,10 +477,10 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "trust_suggestion_check".to_string(),
-                description:
-                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
-             notifications for Admin/Owner members when criteria are met (HSI §2)"
-                        .to_string(),
+                description: "Queries 30-day gate failures and MR reverts per workspace; creates \
+             TrustSuggestion notifications for Admin/Owner members when both counts \
+             are 0 and trust can escalate (HSI §2)"
+                    .to_string(),
                 interval_secs: 86400,
                 enabled: true,
                 run_at_utc_hour: None,
@@ -511,15 +511,39 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "meta_spec_stale_pin_check".to_string(),
-                description:
-                    "Detects specs pinning old meta-spec versions and creates priority-6 \
+                description: "Detects specs pinning old meta-spec versions and creates priority-6 \
                      MetaSpecDrift notifications (agent-runtime §2)"
-                        .to_string(),
+                    .to_string(),
                 interval_secs: 3600,
                 enabled: true,
                 run_at_utc_hour: None,
             },
             |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+        )
+        .await;
+
+    // Register meta-spec conformance sweep job (runs daily,
+    // meta-spec-reconciliation.md §10). Interval is configurable via
+    // GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_conformance_sweep".to_string(),
+                description: "Sweeps all workspaces for meta-spec drift between the active \
+                     meta-spec set and provenance-recorded set SHAs (§10)"
+                    .to_string(),
+                interval_secs: std::env::var("GYRE_META_SPEC_SWEEP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::reconciliation::SWEEP_INTERVAL_SECS),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
         )
         .await;
 
