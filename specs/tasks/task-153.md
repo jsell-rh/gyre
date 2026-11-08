@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
-commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52"]
+commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52", "46fac1eb03211ed1ab8bdb2f554b38cf3d1f5df4"]
 ---
 
 ## Spec Excerpt
@@ -134,39 +134,45 @@ Tests are written at two levels:
   filtered aggregation, limit-ignored aggregation, entity_type/workspace
   filter restriction, non-matching query aggregates nothing.
 
-### Execution status (round 10 — checkpoint recovery)
+### Execution status (round 11 — rebase repair onto c5deca80)
 
-The worker lease expired after round 9; the source was recovered as
-checkpoint commit fe303595 and merged with the current base 7f8b5d9c
-(merge e572e17d). Integrity was verified this round by diffing every
-task-153 product file between the round-9 head 6da69d14 and the recovered
-HEAD: all of them are byte-identical, so the implementation described
-above — including the round-9 rustfmt repair of the gyre-ports re-export —
-is intact. The only task-file difference added by the recovery itself is a
-one-line `#[allow(clippy::double_must_use)]` on the `SearchPort` trait
-(async_trait generates must_use futures), which is rustfmt-clean.
+The assigned repair was a merge of the round-10 head 3b4da7bd with the
+current base c5deca80 that conflicted in `docs/api-reference.md` only.
+Resolved semantically: kept this task's four search-endpoint rows
+(including `suggest`, `facets`, and the `facet_counts` response shape)
+and took the base's TASK-077 policy-row additions, which the candidate
+side had not carried. No other conflicts.
 
-Because the original frontmatter SHAs (6da69d14, 60493e27, 27503257,
-774499be) are unreachable after checkpoint recovery, the task's `commits:`
-list was refreshed to the recovered scoped commit
-`fe3035959c9d4690a122719a6220b6bd835f0b52` via the controller's
-attribution tool (commit 586a322b).
+Integrity verified by diffing every task-153 product file between
+3b4da7bd and the merge head 46fac1eb0: `gyre-ports/src/search.rs`,
+`gyre-server/src/api/search.rs`, `api/mod.rs`, and all three adapter
+search files (`sqlite/search.rs`, `postgres/search.rs`, `mem_search.rs`)
+are byte-identical — the implementation described above is intact. The
+base's own upstream changes to shared files (e.g.
+`seed_builtin_policies` now returning `Result`) auto-merged cleanly and
+the upstream side had already adapted `search_wiring.rs` to them; the
+ABAC resolver entries for both new routes remain (abac_middleware.rs
+lines 373-374).
+
+History note: earlier frontmatter SHAs became unreachable after the
+round-9 lease expiry; the list was refreshed then to the recovered
+scoped commit fe303595 (via commit 586a322b), and now also records the
+round-11 merge commit 46fac1eb0 that carries the conflict resolution.
 
 This sandbox still cannot reach crates.io (no registry cache, no vendored
-deps, no prebuilt target/ — HTTP 000 to index/static.crates.io), so the
+deps, no prebuilt target/ — HTTP 000 to static.crates.io), so the
 suites above could not be executed here — an infrastructure restriction,
 not a code defect. Remote verification must run:
 
     cargo test -p gyre-server --test search_wiring
     cargo test -p gyre-adapters search
 
-Offline checks that ran this round against the recovered HEAD and pass
-(raw logs in /tmp/stage/review-evidence/*-round10.*):
+Offline checks that ran this round against the merge head and pass
+(raw logs in /tmp/stage/review-evidence/*-round11.*):
 
-- `python3 scripts/check-rustfmt-diff.py 7f8b5d9c` — exit 0, changed Rust
-  lines clean.
-- `scripts/check-task-commit-attribution.sh` — OK after the attribution
-  refresh above.
-- `scripts/check-abac-route-registry.sh` — OK; both new routes resolve in
-  the ABAC registry (abac_middleware.rs:378-379).
+- `python3 scripts/check-rustfmt-diff.py c5deca80` — exit 0, changed
+  Rust lines clean (9 files).
+- `scripts/check-task-commit-attribution.sh` — OK.
+- `scripts/check-abac-route-registry.sh` — OK; both new routes resolve
+  in the ABAC registry.
 - `scripts/check-arch.sh` — OK.
