@@ -5,11 +5,11 @@ depends_on:
   - task-069
   - task-070
   - task-065
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §31 Integration Tests"
   - "explorer-implementation.md §32 Visual Tests"
-commits: ["ce4f2044ec7273c5ed57fb198f54b92fdb3aff06", "2f14f11f85cfffacad1670a262d84280225d38a1", "d4c1bd0ddc855dbf40b76e4ec138fc0ac3c10a11", "da74a27ff27141e98d6b79532ced8730ba494ba8", "659f64e8e32cc4317f9b3b78f39b58c3561d1d3e"]
+commits: ["ce4f2044ec7273c5ed57fb198f54b92fdb3aff06", "2f14f11f85cfffacad1670a262d84280225d38a1", "d4c1bd0ddc855dbf40b76e4ec138fc0ac3c10a11", "da74a27ff27141e98d6b79532ced8730ba494ba8", "659f64e8e32cc4317f9b3b78f39b58c3561d1d3e", "9f7cc5250f2cc58d337ed43158388238a400680e"]
 ---
 
 ## Spec Excerpt
@@ -81,11 +81,13 @@ Read `crates/gyre-server/src/explorer_ws.rs` for the WebSocket protocol implemen
 
 ## Shipped
 
-**Status: implemented — all four §31 integration-test scenarios and all four §32 visual-test scenarios have real, passing, mutation-verified tests on the current head: the 15-test mainline+task-080 inventory in `explorer_ws_integration.rs` and the 16-test Playwright suite in `explorer-visual.spec.js`. Deterministic gates (rustfmt, clippy) are clean on the changed lines.**
+**Status: implemented — all four §31 integration-test scenarios and all four §32 visual-test scenarios have real, passing, mutation-verified tests on the current head: the 15-test inventory in `explorer_ws_integration.rs` and the 16-test Playwright suite in `explorer-visual.spec.js`. Deterministic gates (rustfmt, clippy) are clean on the changed lines.**
 
-### Review repair (this round, commit ce4f2044e): clean-disconnect check passed on a hang
+### CI repair (this round, commit 9f7cc5250): stale filter-preset baselines from the reconcile merge
 
-Independent review proved the clean-disconnect check at the end of `explorer_ws_full_session_lifecycle` treated the tokio timeout as success: the bare `Err(_)` (Elapsed) arm set `closed = true`, so a server holding the socket for the full 5s deadline (no Close reply, no stream end) passed the disconnect assertion vacuously — reproduced by parking the server's idle-loop Close/None arm on `std::future::pending`, which left the test green. The fix (test-only) splits the terminal arm: a stream error (`Ok(Some(Err(_)))`) still counts as closed, but `Err(_)` (Elapsed) now breaks without setting `closed`, so the assertion "server must close the explorer session after the client sends Close" fails on a hang. Only a Close reply, stream end, or stream error count as closed. Re-verified by the same mutation: the parked-server mutation now fails the test at the final assertion; the unmutated server still passes; the full suite is 15/15.
+E2E run 42466473984 failed `filter_preset_buttons_show_correct_subsets` at candidate head 4ea64f4de with a pure size mismatch (expected 919x397, received 919x363). Root cause: the reconcile merge introduced the two task-080 filter-preset baselines recorded against the assignment-base dist, which predates task-083's spec-required Graph | Briefing control-bar sub-tab — the same 34px header change that c69d9fd54 had already regenerated every other explorer baseline for on main. The two new baselines escaped that regeneration because they were introduced on the task branch, not main. No production code was wrong; the specced UI (ui-navigation.md §2/§3) renders correctly at 919x363.
+
+The baselines were regenerated against the exact current head: debug server build of 4ea64f4de serving the committed `web/dist` (unchanged between base and head, contains the sub-tab bar), chromium revision 1208 (the same revision CI uses). Local rendering is proven identical to the CI gate environment: all 12 baselines c69d9fd54 took from the CI run's own actual screenshots pass unchanged in this sandbox, so the locally regenerated baselines are the same rendering CI produces. Re-verified after the fix: the failing test passes; full `explorer-visual` suite 16/16; two consecutive regenerations byte-identical (run-to-run deterministic); baseline-swap mutation (endpoints↔types) still fails at threshold 0.05, so the baselines remain non-interchangeable; the in-test behavioral assertions (visible-canvas-change counts per preset transition, which fail when dimming breaks regardless of baselines) are unchanged and pass. Evidence: `/tmp/stage/review-evidence/` (`reproduce-ci-failure.log`, `explorer-visual-full-suite-baseline-repair.log`).
 
 ### §31 Integration Tests (crates/gyre-server/tests/explorer_ws_integration.rs)
 
@@ -102,19 +104,20 @@ The Playwright suite (deterministic mock graph + forced-webfont environment, bas
 
 ### Repair history (condensed)
 
-- **Clean-disconnect vacuous pass** (this round, ce4f2044e): timeout-as-success in the lifecycle test's disconnect loop fixed; mutation now fails the test — see above.
+- **Stale reconcile-merge baselines** (this round, 9f7cc5250): the two filter-preset baselines added by the reconcile merge predated task-083's sub-tab bar (919x397 vs 919x363); regenerated against the exact current head — see above.
+- **Clean-disconnect vacuous pass** (ce4f2044e): timeout-as-success in the lifecycle test's disconnect loop fixed; mutation now fails the test.
 - **rustfmt + clippy** (2f14f11f): removed 13 useless `.to_string().into()` conversions and applied `cargo fmt`; gates clean on the file since.
 - **Preset visual tests could not fail** (d4c1bd0dd): pixelmatch threshold tightened to 0.05 and baseline-independent behavioral assertions (≥20,000 visibly-changed pixels per preset transition) added, after review proved the tests passed with `nodeFilterOpacity()` dimming disabled and the baselines interchangeable at the default 0.2 threshold.
 - **Restored mainline tests** (da74a27ff): merge resolution had silently dropped `explorer_ws_self_check_refinement_flow` and `explorer_ws_self_check_sends_best_version_after_cap`; both restored onto the `ScriptedLlmFactory` infrastructure.
 
-### Test evidence (current head, after this round's disconnect fix)
+### Test evidence (current head 9f7cc5250, after this round's baseline repair)
 
-- `cargo test -p gyre-server --test explorer_ws_integration`: **15 passed, 0 failed** — evidence: `/tmp/stage/review-evidence/explorer-ws-integration-disconnect-fix.log`.
-- Mutation re-check (this round): parking the server's idle-loop Close/None arm on `std::future::pending` **fails** `explorer_ws_full_session_lifecycle` at the disconnect assertion (was green before the fix) — evidence: `/tmp/stage/review-evidence/disconnect-fix-notes.md`.
-- `cargo fmt --check -p gyre-server`: **exit 0** (evidence: `rustfmt-disconnect-fix.log`); `cargo clippy -p gyre-server --test explorer_ws_integration`: **exit 0, zero warnings for the file** (evidence: `clippy-disconnect-fix-full.log`).
-- Playwright `explorer-visual` full suite (prior round; no web files touched this round): **all 16 tests pass** — evidence: `explorer-visual-full-suite-postrepair.log`.
+- Playwright `explorer-visual` full suite: **16/16 passed** — evidence: `/tmp/stage/review-evidence/explorer-visual-full-suite-baseline-repair.log`. The previously failing `filter_preset_buttons_show_correct_subsets` reproduced locally (same 919x397 vs 919x363 size mismatch as run 42466473984, evidence: `reproduce-ci-failure.log`) before the fix and passes after.
+- Baseline-swap mutation re-check (this round): endpoints↔types baseline swap **fails** the test at threshold 0.05 — the regenerated baselines are not interchangeable.
+- Run-to-run determinism: two consecutive `--update-snapshots` regenerations produce byte-identical PNGs (sha256 checked).
+- `cargo test -p gyre-server --test explorer_ws_integration` (prior round, no Rust changes this round): **15 passed, 0 failed**.
 - `cd web && npm ci && npm test` (vitest, prior round): **1737 passed, 0 failed**.
-- Retained mutation checks: `nodeFilterOpacity()` → `1.0` fails `filter_preset_buttons_show_correct_subsets` (behavioral assertion 19,225 < 20,000) and `canvas-filters.test.js` (unit); baseline swaps fail at threshold 0.05; `MAX_REFINEMENT_TURNS = 0` fails the self-check test; the best-version test fails if the `best_view_query` tracker stops preferring the attempt with the fewest actionable warnings.
+- Retained mutation checks: `nodeFilterOpacity()` → `1.0` fails `filter_preset_buttons_show_correct_subsets` (behavioral assertion) and `canvas-filters.test.js` (unit); `MAX_REFINEMENT_TURNS = 0` fails the self-check test; the best-version test fails if the `best_view_query` tracker stops preferring the attempt with the fewest actionable warnings.
 
 ### Sandbox restrictions (for remote verification, not code defects)
 
