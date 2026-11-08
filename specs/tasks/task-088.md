@@ -241,3 +241,17 @@ Mutation probe repeated at the merged head: hiding the view-selector
 tablist fails zoom_level_0 (919x361 expected vs 919x363 received), so the
 regenerated baselines pin the merged toolbar with both tablists. The
 toolbar, blast-radius-tiered and full-page baselines are unchanged.
+
+### Verification repair — commit attribution (d4e72e32)
+
+The verification run (attempt 25cab2624, `checks.sh` exit 1) failed only
+`check-task-commit-attribution.sh`: integration commit `d4e72e32`'s
+subject references both task-088 and task-083, and the gate requires the
+SHA in **every** referenced task's `commits:` frontmatter — it was
+recorded here but not in task-083's. Fixed by recording the full SHA in
+`specs/tasks/task-083.md`'s `commits:` frontmatter (the gate's sanctioned
+fix; the frozen exemption file was not touched) with a provenance bullet
+in that task's Shipped notes explaining the cross-attribution. Focused
+probe: `bash scripts/check-task-commit-attribution.sh` failed with
+exactly this one violation before the change and passes after (exit 0);
+no product code changed in this round.
