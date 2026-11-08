@@ -544,10 +544,9 @@ describe('WorkspaceSettings', () => {
       await new Promise(r => setTimeout(r, 0));
       // Table should appear
       const table = container.querySelector('[data-testid="members-table"]');
-      if (table) {
-        const rows = table.querySelectorAll('[data-testid="member-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(table).toBeTruthy();
+      const rows = table.querySelectorAll('[data-testid="member-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
 
     it('shows empty state when no members', async () => {
@@ -719,10 +718,9 @@ describe('WorkspaceSettings', () => {
       await openAuditTab(container);
       await new Promise(r => setTimeout(r, 0));
       const list = container.querySelector('[data-testid="audit-list"]');
-      if (list) {
-        const rows = list.querySelectorAll('[data-testid="audit-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(list).toBeTruthy();
+      const rows = list.querySelectorAll('[data-testid="audit-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
   });
 

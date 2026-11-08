@@ -12,6 +12,7 @@ use gyre_common::{Id, Secret, SecretScope};
 /// Tenant isolation: every method filters by `tenant_id` in addition to any
 /// scope filter, so a secret stored for one tenant is invisible to another.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SecretRepository: Send + Sync {
     /// Create a secret with the given plaintext `value`.
     ///

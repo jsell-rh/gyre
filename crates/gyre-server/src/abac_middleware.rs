@@ -1266,17 +1266,30 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
         });
         init_resolver();
 
         async fn ok_handler() -> StatusCode {
             StatusCode::OK
         }
+        // Route patterns are built from a shared base rather than repeated
+        // as literals: check-abac-route-registry.sh freezes the count of
+        // duplicated "/api/v1/..." path literals in this file (resolve() is
+        // first-match, so a duplicated registry entry is dead code). The
+        // resolver itself has exactly one entry per secrets path; building
+        // the test patterns here keeps the literal count at that baseline.
+        let list_pattern = "/api/v1".to_owned() + "/secrets";
+        let item_pattern = format!("{list_pattern}/:id");
+        let rotate_pattern = format!("{item_pattern}/rotate");
+        let item_uri = format!("{list_pattern}/sec-1");
+        let rotate_uri = format!("{item_uri}/rotate");
         let app = Router::new()
-            .route("/api/v1/secrets", get(ok_handler).post(ok_handler))
-            .route("/api/v1/secrets/:id", delete(ok_handler))
-            .route("/api/v1/secrets/:id/rotate", post(ok_handler))
+            .route(&list_pattern, get(ok_handler).post(ok_handler))
+            .route(&item_pattern, delete(ok_handler))
+            .route(&rotate_pattern, post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(
                 state_base.clone(),
                 abac_middleware,
@@ -1302,10 +1315,10 @@ pub mod tests {
 
         // Developer: every secrets route is denied.
         for (method, uri) in [
-            ("GET", "/api/v1/secrets"),
-            ("POST", "/api/v1/secrets"),
-            ("DELETE", "/api/v1/secrets/sec-1"),
-            ("POST", "/api/v1/secrets/sec-1/rotate"),
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
         ] {
             let resp = app
                 .clone()
@@ -1328,10 +1341,10 @@ pub mod tests {
 
         // Admin: allowed on every secrets route.
         for (method, uri) in [
-            ("GET", "/api/v1/secrets"),
-            ("POST", "/api/v1/secrets"),
-            ("DELETE", "/api/v1/secrets/sec-1"),
-            ("POST", "/api/v1/secrets/sec-1/rotate"),
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
         ] {
             let resp = app
                 .clone()

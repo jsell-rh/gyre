@@ -7,7 +7,7 @@
  *   - General tab: repo name display-only, editable fields, save button
  *   - Gates tab: loads api.repoGates, shows gate cards
  *   - Policies tab: loads api.repoSpecPolicy, renders toggles
- *   - Budget tab: loads api.repoBudget
+ *   - Budget tab: loads api.workspaceBudget (workspace-level; no per-repo budget endpoint)
  *   - Audit tab: filter + refresh, calls api.auditEvents with repo_id
  *   - Danger Zone: archive confirm dialog, delete confirm dialog with name typing
  *   - Keyboard navigation on inner tab bar
@@ -199,10 +199,9 @@ describe('RepoSettings', () => {
       await openGatesTab(container);
       await new Promise(r => setTimeout(r, 0));
       const list = container.querySelector('[data-testid="gates-list"]');
-      if (list) {
-        const cards = list.querySelectorAll('[data-testid="gate-card"]');
-        expect(cards.length).toBe(2);
-      }
+      expect(list).toBeTruthy();
+      const cards = list.querySelectorAll('[data-testid="gate-card"]');
+      expect(cards.length).toBe(2);
     });
 
     it('shows empty state when no gates', async () => {
@@ -241,11 +240,10 @@ describe('RepoSettings', () => {
       await openPoliciesTab(container);
       await new Promise(r => setTimeout(r, 0));
       const form = container.querySelector('[data-testid="spec-policy-form"]');
-      if (form) {
-        expect(container.querySelector('[data-testid="toggle-require-spec-ref"]')).toBeTruthy();
-        expect(container.querySelector('[data-testid="toggle-require-approval"]')).toBeTruthy();
-        expect(container.querySelector('[data-testid="toggle-stale-warning"]')).toBeTruthy();
-      }
+      expect(form).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-spec-ref"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-approval"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-stale-warning"]')).toBeTruthy();
     });
   });
 
@@ -272,21 +270,18 @@ describe('RepoSettings', () => {
       await openBudgetTab(container);
       await new Promise(r => setTimeout(r, 0));
       const card = container.querySelector('[data-testid="repo-budget-card"]');
-      if (card) {
-        const bar = container.querySelector('[data-testid="repo-budget-bar"]');
-        expect(bar).toBeTruthy();
-      }
+      expect(card).toBeTruthy();
+      expect(container.querySelector('[data-testid="repo-budget-bar"]')).toBeTruthy();
     });
 
     it('shows unavailable message on api error', async () => {
-      api.repoBudget.mockRejectedValue(new Error('Not found'));
+      api.workspaceBudget.mockRejectedValue(new Error('Not found'));
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openBudgetTab(container);
       await new Promise(r => setTimeout(r, 0));
       const msg = container.querySelector('[data-testid="budget-unavailable"]');
-      if (msg) {
-        expect(msg.textContent).toContain('unavailable');
-      }
+      expect(msg).toBeTruthy();
+      expect(msg.textContent).toContain('unavailable');
     });
   });
 
@@ -328,10 +323,9 @@ describe('RepoSettings', () => {
       await openAuditTab(container);
       await new Promise(r => setTimeout(r, 0));
       const list = container.querySelector('[data-testid="repo-audit-list"]');
-      if (list) {
-        const rows = list.querySelectorAll('[data-testid="audit-row"]');
-        expect(rows.length).toBe(2);
-      }
+      expect(list).toBeTruthy();
+      const rows = list.querySelectorAll('[data-testid="audit-row"]');
+      expect(rows.length).toBe(2);
     });
   });
 

@@ -1835,9 +1835,13 @@ async fn main() -> Result<()> {
                     secret_type,
                     expires_at,
                 } => {
-                    let target =
-                        resolve_secret_scope(&api, scope.as_deref(), workspace_name.as_deref(), repo.as_deref())
-                            .await?;
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
                     let req = client::CreateSecretRequest {
                         name,
                         scope: target.scope.clone(),
@@ -1856,9 +1860,13 @@ async fn main() -> Result<()> {
                     workspace_name,
                     repo,
                 } => {
-                    let target =
-                        resolve_secret_scope(&api, scope.as_deref(), workspace_name.as_deref(), repo.as_deref())
-                            .await?;
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
                     let secrets = api
                         .list_secrets(&target.scope, target.scope_id.as_deref())
                         .await?;
@@ -1873,9 +1881,13 @@ async fn main() -> Result<()> {
                     workspace_name,
                     repo,
                 } => {
-                    let target =
-                        resolve_secret_scope(&api, scope.as_deref(), workspace_name.as_deref(), repo.as_deref())
-                            .await?;
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
                     let id = find_secret_id_by_name(&api, &target, &name).await?;
                     api.delete_secret(&id).await?;
                     println!("Secret '{name}' deleted from {}", target.describe());
@@ -1889,9 +1901,13 @@ async fn main() -> Result<()> {
                     repo,
                     expires_at,
                 } => {
-                    let target =
-                        resolve_secret_scope(&api, scope.as_deref(), workspace_name.as_deref(), repo.as_deref())
-                            .await?;
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
                     let id = find_secret_id_by_name(&api, &target, &name).await?;
                     let rotated = api.rotate_secret(&id, &new_value, expires_at).await?;
                     println!("Secret '{}' rotated in {}", rotated.name, target.describe());
@@ -2371,9 +2387,7 @@ async fn resolve_secret_scope(
                 scope_id: Some(repo_id),
             })
         }
-        other => anyhow::bail!(
-            "unknown scope '{other}' (expected workspace, repo, or tenant)"
-        ),
+        other => anyhow::bail!("unknown scope '{other}' (expected workspace, repo, or tenant)"),
     }
 }
 
@@ -2418,7 +2432,10 @@ fn print_secret(secret: &client::SecretResponse) {
     println!("Secret '{}' ({})", secret.name, secret.secret_type);
     println!("  ID:              {}", secret.id);
     println!("  Scope:           {} ({})", secret.scope, secret.scope_id);
-    println!("  Created:         {}", fmt_secret_epoch(Some(secret.created_at)));
+    println!(
+        "  Created:         {}",
+        fmt_secret_epoch(Some(secret.created_at))
+    );
     println!("  Expires:         {}", fmt_secret_epoch(secret.expires_at));
     println!(
         "  Last rotated:    {}",
@@ -2432,7 +2449,12 @@ fn print_secret_table(secrets: &[client::SecretResponse]) {
         println!("No secrets in this scope.");
         return;
     }
-    let name_w = secrets.iter().map(|s| s.name.len()).max().unwrap_or(4).max(4);
+    let name_w = secrets
+        .iter()
+        .map(|s| s.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
     let type_w = secrets
         .iter()
         .map(|s| s.secret_type.len())
@@ -4946,13 +4968,7 @@ mod tests {
 
     #[test]
     fn cli_secret_list_workspace_parses() {
-        let args = Cli::try_parse_from([
-            "gyre",
-            "secret",
-            "list",
-            "--workspace-name",
-            "platform",
-        ]);
+        let args = Cli::try_parse_from(["gyre", "secret", "list", "--workspace-name", "platform"]);
         assert!(args.is_ok());
         if let Commands::Secret {
             command:
@@ -5006,14 +5022,8 @@ mod tests {
             panic!("Expected Secret Rotate");
         }
 
-        let args = Cli::try_parse_from([
-            "gyre",
-            "secret",
-            "delete",
-            "--scope",
-            "tenant",
-            "API_KEY",
-        ]);
+        let args =
+            Cli::try_parse_from(["gyre", "secret", "delete", "--scope", "tenant", "API_KEY"]);
         assert!(args.is_ok());
         if let Commands::Secret {
             command: SecretCommands::Delete { name, scope, .. },
@@ -5028,15 +5038,8 @@ mod tests {
 
     #[test]
     fn cli_secret_set_rejects_unknown_scope() {
-        let args = Cli::try_parse_from([
-            "gyre",
-            "secret",
-            "set",
-            "--scope",
-            "galaxy",
-            "API_KEY",
-            "v",
-        ]);
+        let args =
+            Cli::try_parse_from(["gyre", "secret", "set", "--scope", "galaxy", "API_KEY", "v"]);
         // Parsing succeeds (the value is a free-form string); the scope is
         // validated at resolution time. This pins that behavior so the error
         // message stays a runtime diagnostic, not a clap panic.

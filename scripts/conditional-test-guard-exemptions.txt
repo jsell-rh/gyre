@@ -7,15 +7,8 @@ web/src/__tests__/AppShell.test.js:716
 web/src/__tests__/AppShell.test.js:733
 web/src/__tests__/AppShell.test.js:748
 web/src/__tests__/MetaSpecs.test.js:1196
-web/src/__tests__/RepoSettings.test.js:202
-web/src/__tests__/RepoSettings.test.js:244
-web/src/__tests__/RepoSettings.test.js:275
-web/src/__tests__/RepoSettings.test.js:287
-web/src/__tests__/RepoSettings.test.js:331
 web/src/__tests__/SearchBar.test.js:204
 web/src/__tests__/SearchBar.test.js:277
 web/src/__tests__/SearchBar.test.js:283
 web/src/__tests__/SearchBar.test.js:329
 web/src/__tests__/SpecDetailCanvas.test.js:194
-web/src/__tests__/WorkspaceSettings.test.js:547
-web/src/__tests__/WorkspaceSettings.test.js:722
