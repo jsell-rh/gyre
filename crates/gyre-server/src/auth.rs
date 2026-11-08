@@ -1529,8 +1529,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        credential_revoked, test_helpers::*, track_session, AuthenticatedAgent, WsTicketStore,
-        SESSION_TOUCH_THROTTLE_SECS, SESSION_TTL_SECS,
+        authenticate_token, credential_revoked, test_helpers::*, track_session, AuthenticatedAgent,
+        WsTicketStore, SESSION_TOUCH_THROTTLE_SECS, SESSION_TTL_SECS,
     };
     use crate::mem::test_state;
     use gyre_domain::UserRole;
@@ -3067,6 +3067,148 @@ mod tests {
         assert!(
             credential_revoked(&state, &user_id, "cred-ret").await,
             "retention cleanup must not re-authorize a signed-out credential"
+        );
+    }
+
+    /// The WebSocket/TTY auth path (`authenticate_token` — ws.rs and tty.rs
+    /// present a raw token from the client's Auth message, with no HTTP
+    /// headers) must enforce "sign out everywhere": a credential whose
+    /// every session has been revoked is rejected there too, not only on
+    /// the HTTP extractor path.
+    ///
+    /// The signed-out credential never authenticated over WS before the
+    /// revoke-all (its only session row is an HTTP device), so the WS
+    /// path's ("", "") device pair has no revoked row of its own — only
+    /// the credential-wide `credential_revoked` check can reject it.
+    /// Removing that check (or both session checks) from
+    /// `authenticate_token` makes this test fail: the stolen key would
+    /// mint a fresh WS session and authenticate.
+    #[tokio::test]
+    async fn ws_auth_rejects_signed_out_everywhere_credential() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Control: a live credential authenticates on the WS path (proves
+        // the Err below comes from revocation, not from broken setup).
+        let live_user = User::new(Id::new("ws-live-user"), "ext-ws-live", "ws-live", 1000);
+        state.users.create(&live_user).await.unwrap();
+        let live_key = "gyre_ws_live_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(live_key), &live_user.id, "ws-live-key")
+            .await
+            .unwrap();
+        assert!(
+            authenticate_token(live_key, &state).await.is_ok(),
+            "control: a live credential must authenticate on the WS path"
+        );
+
+        // Victim: authenticated only from an HTTP device, then signed out
+        // everywhere. The WS device pair ("", "") has no session row, so
+        // the per-device check alone would mint a fresh one.
+        let victim = User::new(Id::new("ws-victim-user"), "ext-ws-victim", "ws-victim", 1000);
+        state.users.create(&victim).await.unwrap();
+        let victim_key = "gyre_ws_victim_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(victim_key), &victim.id, "ws-victim-key")
+            .await
+            .unwrap();
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-victim-http"),
+            victim.id.clone(),
+            &super::hash_api_key(victim_key),
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+        state
+            .sessions
+            .revoke_all_for_user(&victim.id)
+            .await
+            .unwrap();
+
+        // "Sign out everywhere" must hold on the WS path as well: the key
+        // cannot open a WebSocket even from a device (the WS ("", "")
+        // pair) that never presented it before.
+        assert!(
+            authenticate_token(victim_key, &state).await.is_err(),
+            "a signed-out-everywhere credential must be rejected by the WS auth path"
+        );
+    }
+
+    /// Per-device revocation on the WS path: a WS session that has been
+    /// revoked rejects `authenticate_token` even though the credential
+    /// still has other live sessions (so the credential-wide check alone
+    /// would allow it). Removing the `track_session` rejection from
+    /// `authenticate_token` (or both checks) makes this test fail.
+    #[tokio::test]
+    async fn ws_auth_rejects_revoked_ws_device_session() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let victim = User::new(Id::new("ws-device-user"), "ext-ws-device", "ws-device", 1000);
+        state.users.create(&victim).await.unwrap();
+        let raw_key = "gyre_ws_device_key";
+        let credential_hash = super::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&credential_hash, &victim.id, "ws-device-key")
+            .await
+            .unwrap();
+
+        // First WS presentation mints the ("", "") session row.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_ok(),
+            "live credential must authenticate on the WS path"
+        );
+        let ws_session = state
+            .sessions
+            .list_for_user(&victim.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.ip_address.is_empty() && s.user_agent.is_empty())
+            .expect("WS presentation must mint a ('', '') session row");
+
+        // A sibling HTTP session stays live, so the credential as a whole
+        // is NOT signed out everywhere (the credential-wide check passes).
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-device-http"),
+            victim.id.clone(),
+            &credential_hash,
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+
+        // Revoke only the WS device's session.
+        state
+            .sessions
+            .revoke(&ws_session.id, &victim.id)
+            .await
+            .unwrap();
+
+        // The WS path must reject: this device's session is revoked, even
+        // though the credential still has a live HTTP session.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_err(),
+            "a revoked WS device session must be rejected even while \
+             sibling sessions stay live"
         );
     }
 }

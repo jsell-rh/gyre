@@ -1869,6 +1869,253 @@ mod tests {
         );
     }
 
+    /// GET /users/me/sessions lists only ACTIVE sessions: a revoked
+    /// session and an expired session must not appear, even though both
+    /// rows persist in the store (revoked rows are the durable sign-out
+    /// record and are never deleted; expired rows await retention
+    /// cleanup). Removing the active-only filter from `list_my_sessions`
+    /// makes this test fail.
+    #[tokio::test]
+    async fn my_session_listing_excludes_revoked_and_expired_sessions() {
+        let (state, user_id, raw_key) = bootstrap_user("listing-user").await;
+
+        // Two live devices authenticate.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // A long-expired row for a third device, seeded directly: the row
+        // exists in the store but must never surface in the active
+        // listing (expiry is not activity).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-listing-expired"),
+            Id::new(user_id.clone()),
+            "cred-listing-expired",
+            "10.3.3.3",
+            "gyre-old/1.0",
+            now - 7200,
+            now - 60,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        // List from the web device: exactly the two live sessions — the
+        // expired row is absent.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        let ids: Vec<&str> = sessions
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "only the two live sessions may be listed, got {sessions:?}"
+        );
+        assert!(
+            !ids.contains(&"sess-listing-expired"),
+            "an expired session must not appear in the active listing"
+        );
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Revoke the CLI device's session — from the web device, so the
+        // listing request below still authenticates.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{cli_session_id}"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // List again from the web device: the revoked CLI session is gone
+        // — only the web device's own session remains.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a revoked session must not appear in the active listing, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions[0]["user_agent"],
+            "gyre-web/1.0",
+            "the remaining listed session must be the live web device"
+        );
+    }
+
+    /// The TenantAdmin listing (GET /users/:user_id/sessions) applies the
+    /// same active-only filter: revoked and expired rows of the target
+    /// user must not appear. Removing the filter from
+    /// `list_user_sessions` makes this test fail.
+    #[tokio::test]
+    async fn admin_session_listing_excludes_revoked_and_expired_sessions() {
+        let (state, user_id, raw_key) = bootstrap_user("admin-listing-user").await;
+
+        // Two live devices authenticate.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", ua)
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // A long-expired row for a third device.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-admin-listing-expired"),
+            Id::new(user_id.clone()),
+            "cred-admin-listing-expired",
+            "10.4.4.4",
+            "gyre-old/1.0",
+            now - 7200,
+            now - 60,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        // Admin lists the target user's sessions: exactly the two live
+        // ones; the expired row is absent.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            2,
+            "admin listing must show only the two live sessions, got {sessions:?}"
+        );
+        let ids: Vec<&str> = sessions
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            !ids.contains(&"sess-admin-listing-expired"),
+            "an expired session must not appear in the admin active listing"
+        );
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Admin revokes the CLI device's session, then lists again: the
+        // revoked session no longer appears.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/{user_id}/sessions/{cli_session_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a revoked session must not appear in the admin active listing, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions[0]["user_agent"],
+            "gyre-web/1.0",
+            "the remaining listed session must be the live web device"
+        );
+    }
+
     #[tokio::test]
     async fn revoke_cannot_target_another_users_session() {
         let (state, victim_key) = provision_user_with_key().await;
