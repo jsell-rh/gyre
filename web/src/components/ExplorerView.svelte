@@ -1036,7 +1036,11 @@
 
     // Gate outcomes per spec path from recent MRs.
     try {
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 50 });
+      // GET /api/v1/merge-requests scopes by `repository_id` (ListMrsQuery:
+      // status / repository_id / workspace_id — no repo_id, no per_page), so
+      // the list must be requested repo-scoped and the 50-MR recency
+      // window applied client-side after sorting.
+      const mrs = await api.mergeRequests({ repository_id: repoId });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       // Most recent first: the latest MR with concluded gates decides a
       // spec path's status; older MRs for the same path are ignored.
@@ -1044,7 +1048,7 @@
         const at = Number(a?.created_at ?? 0) || 0;
         const bt = Number(b?.created_at ?? 0) || 0;
         return bt - at;
-      });
+      }).slice(0, 50);
       const byPath = {};
       for (const mr of sorted) {
         const specRef = mr?.spec_ref;

@@ -163,6 +163,25 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
   });
 
+  it('loads evaluative gate data repo-scoped (repository_id, not the ignored repo_id param)', async () => {
+    window.history.pushState({}, '', '/workspaces/ws-1/explorer');
+    primeApiMocks();
+    const { container } = render(ExplorerView, {
+      props: { scope: { type: 'workspace', workspaceId: 'ws-1' } },
+    });
+    await drillIntoRepo(container);
+
+    // loadEvaluativeData fires on graph load. GET /api/v1/merge-requests
+    // only accepts repository_id / workspace_id / status (ListMrsQuery);
+    // a repo_id (or per_page) param is silently ignored, and with no
+    // recognized scope the handler returns ALL tenant MRs — attributing
+    // other repos' gate outcomes to this repo's evaluative overlay.
+    // The gate-status join must therefore be requested repository_id-scoped.
+    await waitFor(() => {
+      expect(api.mergeRequests).toHaveBeenCalledWith({ repository_id: 'repo-1' });
+    });
+  });
+
   it('the observable lens is disabled with a coming-soon tooltip', async () => {
     window.history.pushState({}, '', '/workspaces/ws-1/explorer');
     primeApiMocks();
