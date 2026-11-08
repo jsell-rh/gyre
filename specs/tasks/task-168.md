@@ -61,11 +61,11 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 ## Shipped
 
 All three coverage sections are implemented in production code (earlier
-checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, the
-`5e617c7`/`4443b66`/`219780c` repairs, and this round's base merge — see
-Repair rounds). Current head: `40b0f8e1` (assignment base `66a5fc67`
-merged; all evidence below re-run on that tree, logs under
-`/tmp/stage/review-evidence/`, suffix `base66a5fc67`).
+checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
+`5e617c7`/`4443b66`/`219780c`/`40b0f8e` repair rounds — see Repair rounds).
+Current tree: merge of assignment base `124a852` at `25fe58fa` plus the
+process commit recording this round (all evidence re-run on that tree, logs
+under `/tmp/stage/review-evidence/`, suffix `base124a852`).
 
 ### Git push rejection for archived repos (§API Summary)
 
@@ -76,84 +76,84 @@ merged; all evidence below re-run on that tree, logs under
   git). `git_receive_pack` (POST) keeps a defense-in-depth 403 before the
   packfile is processed; clone/fetch (`git-upload-pack`) still works on
   archived repos — read-only, not invisible.
-- Evidence on the current tree: unit tests
-  `info_refs_receive_pack_archived_repo_returns_err_pkt_line`,
-  `receive_pack_archived_repo_returns_403`,
-  `info_refs_upload_pack_archived_repo_still_serves_clone_advertisement`
-  (4/4 passed, `cargo-lib-archived-base66a5fc67.log`), and integration test
+- Evidence on the current tree: git_http unit tests 41/41 passed
+  (`cargo-git-http-base124a852.log`, includes the three archived-repo
+  pkt-line/403/clone-still-works tests), and integration test
   `push_to_archived_repo_rejected` in `crates/gyre-server/tests/git_integration.rs`
   which runs a **real `git push`** against a live server and asserts the push
   fails with an "archived" reason (1/1 passed,
-  `cargo-integration-archived-push-base66a5fc67.log`).
+  `cargo-integration-archived-push-base124a852.log`).
 
 ### Admin workspace-scope Repos tab (§Admin → Workspace Scope → Repos Tab)
 
-- `WorkspaceSettings.svelte` gains a `repos` tab: table of all workspace repos
+- `WorkspaceSettings.svelte` has a `repos` tab: table of all workspace repos
   with name, Active/Archived status badge, active agent count, and last-activity
   timestamp; "+ New Repo" and "Import Repo" buttons with creation/mirror forms;
   clicking a repo navigates to repo scope via the `goToRepo` context.
 - Evidence: `web/src/__tests__/WorkspaceSettings.test.js` +
-  `web/src/__tests__/RepoSettings.test.js` — 114/114 vitest tests pass on the
-  current tree (`vitest-task168-repair-base66a5fc67.log`).
+  `web/src/__tests__/RepoSettings.test.js` — 132/132 vitest tests pass on the
+  current tree (`vitest-task168-repair-base124a852.log`).
 
 ### Repo-scope Gates panel (§Gates — Admin → Repo Scope → Gates)
 
-- `RepoSettings.svelte` gains a Gates panel: lists gates via
+- `RepoSettings.svelte` has a Gates panel: lists gates via
   `GET /api/v1/repos/:id/gates` ordered by `position`, per-gate enabled toggle,
   configuration fields (test/lint command, required approvals, reviewer
   persona, timeout), "+ Add Gate" with gate-type selector, and drag-to-reorder
   saving positions via `PUT /api/v1/repos/:id/gates/:gate_id`.
 - Backend: `PUT /api/v1/repos/:id/gates/:gate_id` (`gates::update_gate`) with
   per-gate-type field validation; gate ordering via the `position` column
-  (migration `2026-10-08-000057_gate_position`, SQLite + PostgreSQL portable)
+  (migration `2026-10-08-000058_gate_position`, SQLite + PostgreSQL portable)
   enforced in both adapters and the mem store.
 - Evidence: gates API unit tests (position ordering, update validation) —
-  11/11 passed on the current tree (`cargo-lib-gates-base66a5fc67.log`).
+  11/11 passed on the current tree (`cargo-gates-base124a852.log`).
 
 ### Repair rounds
 
 - `5e617c7`: resolved base `110180fb` (only generated `web/dist` conflicts);
   retargeted a fabricated-scope exemption line number (count unchanged).
 - `4443b66`: resolved base `2f215b1e` — renumbered our migration to
-  `2026-10-08-000057_gate_position` after main landed `000056_spec_assertion_results`
-  (duplicate Diesel versions silently never run), and rebuilt the then-stale
-  `web/dist` from the merged source.
+  sequence `000057` after main landed `000056_spec_assertion_results`.
 - `219780c`: resolved base `1d9547de`; formatted rustfmt changed-lines
   violations and deleted the obsolete `git_http.rs` fabricated-scope exemption
   (the base fixed the site itself; frozen count 5 → 4).
-- **This round (head `40b0f8e1`)**: resolved assignment base `66a5fc67`.
-  The merge brought only additive main-side work (task-075 TS call graph,
-  task-102 audit envelope, trusted-proxy) — `git diff 15ebaff0 HEAD` over
-  every task-168 source file is empty, so all task-168 source survived
-  byte-for-byte; base-side changes since the merge base touched none of our
-  files (only `middleware.rs` +1, imported cleanly).
+- `40b0f8e`: resolved base `66a5fc67` — additive main-side work only; all
+  task-168 source survived byte-for-byte.
+- **This round (merge `25fe58fa`)**: resolved assignment base `124a852`
+  (task-193 spec approval attestation). Conflicts resolved:
+  `mr_timeline.rs`/`merge_processor.rs` test literals keep our
+  `QualityGate.position` field on the base's reindentation; the exemptions
+  file keeps our deletion of the `git_http.rs` ws_id entry (site fixed in
+  `219780c`); `WorkspaceSettings.svelte` `TAB_IDS` is the **union** — base's
+  `policies` tab (task-084) plus our `repos` tab — with the tab-count test
+  updated 8 → 9 (it already asserted both `Policies` and `Repos` labels).
+  Renumbered `2026-10-08-000057_gate_position` → `000058` after base landed
+  `000057_spec_approval_attestation` (duplicate Diesel versions silently
+  never run). rustfmt clean on both resolved Rust files.
 - **Review finding `fddd589d` (stale committed `web/dist`)**: acknowledged and
   verified at the source level. `web/dist` is a generated artifact — in this
   runtime the executor restores it from the assignment base and final
   integration rebuilds and publishes it remotely, so it is deliberately not
   committed here. The task-168 UI is fully present in `web/src` (the source
-  RustEmbed/build.rs build from): a fresh build triggered by
-  `crates/gyre-server/build.rs` (`npm ci` + vite) from this exact merged source
-  succeeded and produced `index-BQYVRA1x.js`
-  (sha256 `80aa6b06…`, `web-build-base66a5fc67.log`) containing all four
-  reviewed markers (`ws-repos-tab`, `gate-toggle`, `gate-edit-form`,
-  `updateRepoGate`) — the same bundle hash as the prior verification round's
-  fresh build. The default `cargo build -p gyre-server` path therefore embeds
-  the Repos tab and Gates panel; a `SKIP_WEB_BUILD=1` build against a stale
-  dist is a deployment concern owned by the pipeline's remote publication
-  stage, which rebuilds dist from this source.
+  RustEmbed/build.rs build from): the `cargo check -p gyre-server` in this
+  round triggered `crates/gyre-server/build.rs` (`npm ci` + vite) from this
+  exact merged source and the web build succeeded, embedding the Repos tab
+  and Gates panel. A `SKIP_WEB_BUILD=1` build against a stale dist is a
+  deployment concern owned by the pipeline's remote publication stage, which
+  rebuilds dist from this source.
 
 ### Invariants
 
-All 17 mechanical invariant checks pass at head `40b0f8e1` on the merged
-tree (`invariants-base66a5fc67.log` + per-check logs) — `check-arch`,
-`check-abac-route-registry`, `check-migration-versions`,
-`check-migration-sql-portability`, `check-mem-port-contracts`,
-`check-inert-enforcement`, `check-dead-message-kinds`,
-`check-fabricated-scope-defaults` (frozen count 4),
-`check-byte-slice-truncation`, `check-relative-path-defaults`,
-`check-fail-open-ref-resolution`, `check-lossy-secret-conversion`,
-`check-scope-literal-defaults`, `check-forwarded-header-trust`,
-`check-in-memory-state-stores`, `check-unbounded-external-http`,
-`check-forged-scope-fields` — plus `check-task-commit-attribution.sh`
-(`inv-check-task-commit-attribution.log`).
+All 17 mechanical invariant checks pass at merge head `25fe58fa` on the merged
+tree (`invariants-base124a852.log` + per-check logs under
+`/tmp/stage/review-evidence/`) — `check-arch`,
+`check-abac-route-registry`, `check-migration-versions` (no duplicates
+after the `000058` renumber), `check-migration-sql-portability`,
+`check-mem-port-contracts`, `check-inert-enforcement`,
+`check-dead-message-kinds`, `check-fabricated-scope-defaults`
+(3 entries, frozen count 4), `check-byte-slice-truncation`,
+`check-relative-path-defaults`, `check-fail-open-ref-resolution`,
+`check-lossy-secret-conversion`, `check-scope-literal-defaults`,
+`check-forwarded-header-trust`, `check-in-memory-state-stores`,
+`check-unbounded-external-http`, `check-forged-scope-fields` — plus
+`check-task-commit-attribution.sh` (passed post-commit).
