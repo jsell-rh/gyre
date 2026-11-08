@@ -3,10 +3,10 @@ title: "Implement budget enforcement actions: warn/graceful-stop with grace, kil
 spec_ref: "platform-model.md §Enforcement Behavior"
 depends_on:
   - task-190
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: []
+commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "e3fcff260507bd39490ea2fe1a64152e90a7ff5f1"]
 ---
 
 ## Spec Excerpt
@@ -71,3 +71,78 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 - This shares subject with task-119 (agent-runtime §4). Implement enforcement once here as the canonical path; task-119 should consume it, not fork it.
 - Verify the merge-queue pause mechanism (for `QueuePause`) and the kill path by reading the relevant handlers before editing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+Budget enforcement is now real end-to-end (platform-model.md §5 Enforcement
+Behavior): the task-190 counters drive the specced actions on every usage
+recording.
+
+### Enum + persistence
+
+`BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause, serde
+snake_case) lives in `gyre-domain/src/budget.rs` and is re-exported.
+`BudgetConfig.enforcement_action: Option<...>` (None = spec default: 80% Warn,
+100% GracefulStop) is threaded through migration `000058` (portable
+`ALTER TABLE ... ADD COLUMN enforcement_action TEXT`), the SQLite and Postgres
+`budget_configs` row mappings, and the budget API (`SetBudgetRequest` /
+`BudgetResponse`). Overwriting a config with the field absent clears the
+column (upsert).
+
+### Enforcement path
+
+`check_and_enforce_budget` (single helper, invoked only from
+`record_llm_call_usage` after `record_budget_usage` — no per-call-site
+threshold logic):
+
+- Computes the higher utilization across `max_tokens_per_day` /
+  `max_cost_per_day` (None and zero limits guarded).
+- **≥ 80%, < 100%:** emits `MessageKind::BudgetWarning` per active agent
+  (workspace event tier, persisted) and one `NotificationType::BudgetWarning`
+  (priority 7) per unique spawner via `notifications::notify`. No kill.
+- **≥ 100%:** default `GracefulStop` — emits `MessageKind::BudgetExhausted`
+  per active agent, then a `tokio::spawn` grace timer (default 60s,
+  injectable via `check_and_enforce_budget_with_grace` so tests use 0).
+  After the grace, still-`Active` agents are killed through the shared
+  `kill_agent` helper extracted from `admin_kill_agent` (admin handler
+  migrated to it — clean cutover): transition to `Dead`, process kill,
+  budget active-agent counter decremented (only when the agent held an
+  `Active` slot — no double release), **worktree/branch records preserved**,
+  and a reassignment task `"Agent hit budget limit on {task-id}, needs
+  reassignment or budget increase"` created (`parent_task_id`-linked, High
+  priority) plus an `AgentEscalation` notification to the spawner.
+- Overrides: `HardKill` kills inline (no timer); `QueuePause` pauses every
+  workspace repo's merge queue via the existing merge-processor pause
+  mechanism (kv `merge_queue_pause` + `MergeQueuePaused` event) without
+  killing; `Warn` at 100% warns only.
+- Emission is driven solely by computed utilization and de-duplicated per
+  daily period via a persisted kv marker (`budget_enforcement` namespace)
+  keyed to `period_start` — after the midnight counter reset the thresholds
+  can fire again; repeated tool calls never re-spam.
+
+### Test evidence
+
+All commands and outputs in `/tmp/stage/review-evidence/task-191-evidence.md`.
+`cargo test -p gyre-server --lib api::budget` — 17 pass, including the
+acceptance tests that fail if enforcement is removed: 85% warning
+(message + notification, agent alive, no re-fire on subsequent calls),
+below-threshold silence, ≥100% graceful stop (agent `Dead`, counter 0,
+worktree record intact, reassignment task referencing the task id, no
+re-fire), HardKill inline (no timer), QueuePause (kv pause state set, agent
+alive), cost-limit crossing, serde round-trips, and API/SQLite persistence.
+Admin kill tests (33) pass after the helper cutover; full touched-crate
+suites pass (`gyre-server` 1383, `gyre-adapters` 369+12 ignored,
+`gyre-domain` 426); `check-arch.sh` and all mechanical check scripts pass;
+clippy is clean in the touched files.
+
+### Notes for review
+
+- `record_llm_call_usage` now takes `&Arc<AppState>` (needed to hand the
+  grace timer a `'static` state); all five call sites already passed `&state`
+  from an `Arc`, and `mcp.rs handle_spec_assist` was widened to `&Arc` — no
+  behavior change.
+- Enforcement is workspace-level (per the task plan); tenant/repo-level
+  configurability remains unthreaded (repo-level `budget` field is absent —
+  coverage row 5 note).
+- Shared subject with task-119 (agent-runtime §4): this is the canonical
+  enforcement path; task-119 should consume `check_and_enforce_budget`.
