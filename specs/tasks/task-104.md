@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
+commits: ["ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a"]
 ---
 
 ## Spec Excerpt
@@ -83,6 +83,16 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (commit `ac5f88365`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
 
+### Verification repair (round 7, commit `8e6ed8ecc`): gate findings on candidate `6336881de`
+
+Verification finding `0a67d2762112405b8b1110b32debeb81` (checks.sh exit 1) had three failure classes, all repaired without touching any task-104 emission behavior:
+
+- **fabricated-scope-defaults / exemption freeze**: the legacy auth.rs JWT `claims.tenant_id` use-site fallback (exempted at line 773 in base `c5deca801a`) was renumbered to 1041 by this branch's AuthSuccess/AuthFailure wiring. The exemption freeze reads a renumbered entry as a new entry, and the upstream verifier overlay flags the renumbered site as unexempted. Fixed per the task-103 precedent (`cead5a881`, same site on its own branch): the "absent claim = default tenant" single-tenant IdP contract is now the claim's serde schema default (`#[serde(default = "default_tenant_claim")]` applied at deserialization), not a use-site `unwrap_or` fallback. Behavior unchanged and test-pinned (`jwt_missing_tenant_id_defaults_to_default`). Exemption entry deleted, `FROZEN_EXEMPTION_COUNT` lowered 3→2.
+- **clippy-diff vs base**: `siem.rs` `assert_eq!(.., true)` bool comparison (now `assert!`); `abac_middleware.rs` unused `Result` from `block_on(seed_builtin_policies)` in the task-104 ABAC denial test (now `.expect("seed built-in policies")`, matching sibling tests).
+- **rustfmt-diff vs base**: unformatted changed lines in `auth.rs`, `git_http.rs`, and the task-104 RbacDenied role-guard call sites; `cargo fmt --all` applied (formatting-only diff).
+
+Verified on this checkout: `check-fabricated-scope-defaults.sh` passes with both the candidate and the base (overlay-simulated) script version; arch/scope-literal/inert-enforcement/lossy-secret checks OK; `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --all-targets` has zero findings in any touched file; focused tests 28 passed / 0 failed (JWT tenant resolution 7, CEF severity 4, task-104 audit-event suite 17). Evidence: `/tmp/stage/review-evidence/task-104-verification-repair-*.log`.
+
 ### Review repair (round 5, commit `ca905fe43`): git-declined ref updates no longer record GitPushAccepted
 
 The review found that the post-receive block emitted `git_push_accepted` (outcome=Success) for every *requested* ref update whenever receive-pack exited 0 — but receive-pack reports per-ref rejections (non-fast-forward, stale client, `receive.denyNonFastForwards`, lock contention) in its report-status stream, not via exit status. A stale-client push was therefore audited (and SIEM-forwarded at severity 3) as an accepted push with a commit SHA that never became the branch head.
@@ -127,4 +137,5 @@ Focused tests drive real behavior: a real smart-HTTP push with a configured gate
 
 - Rounds 1–2 (original candidate `bad0e3114` / merge head `4c6319db3`): implementation `ac5f88365`, preserved unchanged through merges of bases `233664cf8` (task-087) and `72ad2a128` (task-096); exemption-file conflicts resolved with upstream site fixes holding and `FROZEN_EXEMPTION_COUNT` lowered 4→3.
 - Round 5 (merge of base `414fe9aa1b`, task-120 — merge commit `13a71b428`): fixed the review finding above in `ca905fe43`; no other task-104 file touched.
-- Round 6 (this repair, merge of base `c5deca801a`, task-105 — merge commit `0aad7a51a`): rebase conflict resolved in `specs/coverage/system/observability.md`; only the Coverage summary line conflicted (task-105's upstream commit `cd430c8b1` left a stale `6/9` fraction whose own parenthetical already summed to 7). Resolved to `8/9 (0 n/a, 0 not-started, 1 task-assigned, 5 implemented, 3 verified)`, recomputed row-by-row from the merged table (row 5 implemented via task-104, row 9 implemented via task-105; convention coverage = implemented + verified). No task-104 source file touched by the merge. Post-merge probes at `0aad7a51a`: `cargo test -p gyre-server --lib` 1443 passed / 0 failed (evidence: `/tmp/stage/review-evidence/task-104-rebase-repair.md`).
+- Round 6 (merge of base `c5deca801a`, task-105 — merge commit `0aad7a51a`): rebase conflict resolved in `specs/coverage/system/observability.md`; only the Coverage summary line conflicted (task-105's upstream commit `cd430c8b1` left a stale `6/9` fraction whose own parenthetical already summed to 7). Resolved to `8/9 (0 n/a, 0 not-started, 1 task-assigned, 5 implemented, 3 verified)`, recomputed row-by-row from the merged table (row 5 implemented via task-104, row 9 implemented via task-105; convention coverage = implemented + verified). No task-104 source file touched by the merge. Post-merge probes at `0aad7a51a`: `cargo test -p gyre-server --lib` 1443 passed / 0 failed (evidence: `/tmp/stage/review-evidence/task-104-rebase-repair.md`).
+- Round 7 (verification repair of candidate `6336881de`, finding `0a67d2762`): gate findings above fixed in `8e6ed8ecc` on head `6336881de`; no merge involved, no task-104 emission logic changed.
