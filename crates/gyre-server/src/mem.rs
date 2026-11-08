@@ -993,10 +993,18 @@ pub struct MemUserRepository {
 #[async_trait]
 impl UserRepository for MemUserRepository {
     async fn create(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        // Port contract: fail if id, external_id, or username already exists.
+        let mut store = self.store.lock().await;
+        if store.values().any(|u| {
+            u.id == user.id || u.external_id == user.external_id || u.username == user.username
+        }) {
+            anyhow::bail!(
+                "user already exists for username {}, external_id {}",
+                user.username,
+                user.external_id
+            );
+        }
+        store.insert(user.id.to_string(), user.clone());
         Ok(())
     }
 
@@ -1014,15 +1022,62 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_username(&self, username: &str) -> Result<Option<User>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|u| u.username == username)
+            .cloned())
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
 
     async fn update(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: username and external_id are immutable after creation.
+        if let Some(existing) = store.get(user.id.as_str()) {
+            if existing.username != user.username {
+                anyhow::bail!(
+                    "username is immutable: cannot change {} to {}",
+                    existing.username,
+                    user.username
+                );
+            }
+            if existing.external_id != user.external_id {
+                anyhow::bail!(
+                    "external_id is immutable: cannot change {} to {}",
+                    existing.external_id,
+                    user.external_id
+                );
+            }
+        } else {
+            anyhow::bail!("cannot update user {}: not found", user.id);
+        }
+        store.insert(user.id.to_string(), user.clone());
+        Ok(())
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if another user already owns the new
+        // external_id, or the target user does not exist.
+        if let Some(owner) = store
+            .values()
+            .find(|u| u.external_id == new_external_id && u.id != *user_id)
+        {
+            anyhow::bail!(
+                "external_id already owned by user {}",
+                owner.id
+            );
+        }
+        let user = store
+            .get_mut(user_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("cannot claim external_id for user {user_id}: not found"))?;
+        user.external_id = new_external_id.to_string();
         Ok(())
     }
 
@@ -1199,49 +1254,78 @@ impl CostRepository for MemCostRepository {
     }
 }
 
+/// One stored audit event. Once the log-compression job compresses an
+/// event's detail (observability.md §Log Retention & Compression), the
+/// raw JSON lives only in `detail_zstd` and `event.detail` is `Null` —
+/// mirroring the SQLite/Postgres adapters, where compression blanks the
+/// `detail` column and stores the zstd payload in `detail_zstd`.
+struct MemAuditEntry {
+    event: AuditEvent,
+    detail_zstd: Option<Vec<u8>>,
+}
+
+impl MemAuditEntry {
+    /// Materialize the domain event, decompressing the detail payload
+    /// when compressed. A corrupt compressed payload is a hard error —
+    /// same contract as the DB adapters.
+    fn materialize(&self) -> Result<AuditEvent> {
+        let mut event = self.event.clone();
+        if let Some(z) = &self.detail_zstd {
+            let raw = zstd::decode_all(z.as_slice())
+                .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
+            event.detail = serde_json::from_slice(&raw)
+                .map_err(|e| anyhow::anyhow!("parse compressed audit detail: {e}"))?;
+        }
+        Ok(event)
+    }
+}
+
 #[derive(Default)]
 pub struct MemAuditRepository {
-    store: Arc<Mutex<Vec<AuditEvent>>>,
+    store: Arc<Mutex<Vec<MemAuditEntry>>>,
 }
 
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
-        self.store.lock().await.push(event.clone());
+        self.store.lock().await.push(MemAuditEntry {
+            event: event.clone(),
+            detail_zstd: None,
+        });
         Ok(())
     }
 
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
-        let mut events: Vec<AuditEvent> = store
-            .iter()
-            .filter(|e| {
-                filter
-                    .agent_id
-                    .as_ref()
-                    .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
-                    && filter
+        let mut events: Vec<AuditEvent> =
+            store
+                .iter()
+                .filter(|e| {
+                    filter.agent_id.as_ref().is_none_or(|a| {
+                        e.event.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
+                    }) && filter
                         .event_type
                         .as_ref()
-                        .is_none_or(|t| e.event_type.as_str() == *t)
-                    && filter
-                        .workspace_id
-                        .as_ref()
-                        .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
-                    && filter
-                        .user_id
-                        .as_ref()
-                        .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
-                    && filter
-                        .resource_type
-                        .as_ref()
-                        .is_none_or(|rt| e.resource_type == *rt)
-                    && filter.outcome.is_none_or(|o| e.outcome == o)
-                    && filter.since.is_none_or(|s| e.timestamp >= s)
-                    && filter.until.is_none_or(|u| e.timestamp <= u)
-            })
-            .cloned()
-            .collect();
+                        .is_none_or(|t| e.event.event_type.as_str() == *t)
+                        && filter.workspace_id.as_ref().is_none_or(|w| {
+                            e.event
+                                .workspace_id
+                                .as_ref()
+                                .is_some_and(|id| id.as_str() == w)
+                        })
+                        && filter.user_id.as_ref().is_none_or(|u| {
+                            e.event.user_id.as_ref().is_some_and(|id| id.as_str() == u)
+                        })
+                        && filter
+                            .resource_type
+                            .as_ref()
+                            .is_none_or(|rt| e.event.resource_type == *rt)
+                        && filter.outcome.is_none_or(|o| e.event.outcome == o)
+                        && filter.since.is_none_or(|s| e.event.timestamp >= s)
+                        && filter.until.is_none_or(|u| e.event.timestamp <= u)
+                })
+                .map(MemAuditEntry::materialize)
+                .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(filter.limit);
         Ok(events)
@@ -1256,7 +1340,7 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut counts: HashMap<String, u64> = HashMap::new();
         for e in store.iter() {
-            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+            *counts.entry(e.event.event_type.as_str()).or_insert(0) += 1;
         }
         let mut result: Vec<(String, u64)> = counts.into_iter().collect();
         result.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1267,9 +1351,9 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut events: Vec<AuditEvent> = store
             .iter()
-            .filter(|e| e.timestamp > since)
-            .cloned()
-            .collect();
+            .filter(|e| e.event.timestamp > since)
+            .map(MemAuditEntry::materialize)
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         events.truncate(limit);
         Ok(events)
@@ -1278,8 +1362,33 @@ impl AuditRepository for MemAuditRepository {
     async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        store.retain(|e| e.timestamp >= cutoff_secs);
+        store.retain(|e| e.event.timestamp >= cutoff_secs);
         Ok((before - store.len()) as u64)
+    }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<gyre_ports::audit::CompressionStats> {
+        let mut store = self.store.lock().await;
+        let mut stats = gyre_ports::audit::CompressionStats::default();
+        for e in store.iter_mut() {
+            if (stats.compressed as usize) >= limit {
+                break;
+            }
+            if e.detail_zstd.is_some() || e.event.timestamp >= cutoff_secs {
+                continue;
+            }
+            let raw = serde_json::to_vec(&e.event.detail)?;
+            let compressed = zstd::encode_all(raw.as_slice(), 3)?;
+            stats.compressed += 1;
+            stats.bytes_before += raw.len() as u64;
+            stats.bytes_after += compressed.len() as u64;
+            e.detail_zstd = Some(compressed);
+            e.event.detail = serde_json::Value::Null;
+        }
+        Ok(stats)
     }
 }
 
@@ -3527,7 +3636,7 @@ fn test_state_inner(
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(crate::log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{User, UserRole};
+use gyre_domain::{GlobalRole, User, UserPreferences, UserRole};
 use gyre_ports::{ApiKeyRepository, UserRepository};
 use std::sync::Arc;
 
@@ -19,16 +19,6 @@ fn json_to_roles(s: &str) -> Vec<UserRole> {
     strs.iter().filter_map(|s| UserRole::from_str(s)).collect()
 }
 
-fn parse_global_role(s: &str) -> gyre_domain::GlobalRole {
-    use gyre_domain::GlobalRole;
-    match s {
-        "TenantAdmin" => GlobalRole::TenantAdmin,
-        // Unknown or legacy values (including the pre-migration default)
-        // read back as Member — the safe scope, never a silent escalation.
-        _ => GlobalRole::Member,
-    }
-}
-
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = users)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -43,33 +33,55 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    username: String,
+    avatar_url: Option<String>,
+    preferences: Option<String>,
+    last_login_at: Option<i64>,
     tenant_id: Option<String>,
     global_role: String,
 }
 
 impl From<UserRow> for User {
     fn from(r: UserRow) -> Self {
-        let mut u = User::new(
+        let preferences = r
+            .preferences
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let global_role = match r.global_role.as_str() {
+            "TenantAdmin" => GlobalRole::TenantAdmin,
+            _ => GlobalRole::Member,
+        };
+        let mut u = User::new_sso(
             Id::new(r.id.clone()),
             r.external_id.clone(),
+            r.username.clone(),
             r.name.clone(),
             r.created_at as u64,
         );
         u.email = r.email;
         u.roles = json_to_roles(&r.roles);
         u.updated_at = r.updated_at as u64;
-        if let Some(dn) = r.display_name {
-            u.display_name = dn;
-        }
-        if let Some(tz) = r.timezone {
-            u.timezone = tz;
-        }
-        if let Some(loc) = r.locale {
-            u.locale = loc;
-        }
+        u.display_name = r.display_name.unwrap_or_else(|| r.name.clone());
+        u.timezone = r.timezone.unwrap_or_else(|| "UTC".to_string());
+        u.locale = r.locale.unwrap_or_else(|| "en".to_string());
+        u.avatar_url = r.avatar_url;
+        u.preferences = preferences;
+        u.last_login_at = r.last_login_at.map(|v| v as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
-        u.global_role = parse_global_role(&r.global_role);
+        u.global_role = global_role;
         u
+    }
+}
+
+fn prefs_to_json(prefs: &UserPreferences) -> String {
+    serde_json::to_string(prefs).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn global_role_to_str(role: &GlobalRole) -> &'static str {
+    match role {
+        GlobalRole::TenantAdmin => "TenantAdmin",
+        GlobalRole::Member => "Member",
     }
 }
 
@@ -86,8 +98,12 @@ struct UserRecord<'a> {
     display_name: Option<&'a str>,
     timezone: Option<&'a str>,
     locale: Option<&'a str>,
+    username: &'a str,
+    avatar_url: Option<&'a str>,
+    preferences: String,
+    last_login_at: Option<i64>,
     tenant_id: Option<&'a str>,
-    global_role: &'a str,
+    global_role: String,
 }
 
 #[derive(Insertable)]
@@ -106,6 +122,28 @@ impl UserRepository for SqliteStorage {
         let u = user.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if id, external_id, or username already
+            // exists. username is enforced by idx_users_username; the
+            // explicit checks give a precise error instead of a raw
+            // constraint violation.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::id
+                        .eq(u.id.as_str())
+                        .or(users::external_id.eq(u.external_id.as_str()))
+                        .or(users::username.eq(u.username.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check duplicate user")?;
+            if let Some(existing_id) = dup {
+                anyhow::bail!(
+                    "user already exists (conflicting id {existing_id}) for username {}, external_id {}",
+                    u.username,
+                    u.external_id
+                );
+            }
             let roles = roles_to_json(&u.roles);
             let record = UserRecord {
                 id: u.id.as_str(),
@@ -118,8 +156,12 @@ impl UserRepository for SqliteStorage {
                 display_name: Some(u.display_name.as_str()),
                 timezone: Some(u.timezone.as_str()),
                 locale: Some(u.locale.as_str()),
+                username: &u.username,
+                avatar_url: u.avatar_url.as_deref(),
+                preferences: prefs_to_json(&u.preferences),
+                last_login_at: u.last_login_at.map(|v| v as i64),
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
-                global_role: u.global_role.as_str(),
+                global_role: global_role_to_str(&u.global_role).to_string(),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -160,6 +202,21 @@ impl UserRepository for SqliteStorage {
         .await?
     }
 
+    async fn find_by_username(&self, username: &str) -> Result<Option<User>> {
+        let pool = Arc::clone(&self.pool);
+        let uname = username.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = users::table
+                .filter(users::username.eq(uname.as_str()))
+                .first::<UserRow>(&mut *conn)
+                .optional()
+                .context("find user by username")?;
+            Ok(result.map(User::from))
+        })
+        .await?
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
@@ -178,10 +235,32 @@ impl UserRepository for SqliteStorage {
         let u = user.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: username and external_id are immutable after
+            // creation (user-management.md §Username vs Display Name).
+            let existing: Option<UserRow> = users::table
+                .find(u.id.as_str())
+                .first::<UserRow>(&mut *conn)
+                .optional()
+                .context("load user for update")?;
+            let existing = existing
+                .ok_or_else(|| anyhow::anyhow!("cannot update user {}: not found", u.id))?;
+            if existing.username != u.username {
+                anyhow::bail!(
+                    "username is immutable: cannot change {} to {}",
+                    existing.username,
+                    u.username
+                );
+            }
+            if existing.external_id != u.external_id {
+                anyhow::bail!(
+                    "external_id is immutable: cannot change {} to {}",
+                    existing.external_id,
+                    u.external_id
+                );
+            }
             let roles = roles_to_json(&u.roles);
             diesel::update(users::table.find(u.id.as_str()))
                 .set((
-                    users::external_id.eq(&u.external_id),
                     users::name.eq(&u.display_name),
                     users::email.eq(u.email.as_deref()),
                     users::roles.eq(&roles),
@@ -189,11 +268,47 @@ impl UserRepository for SqliteStorage {
                     users::display_name.eq(Some(u.display_name.as_str())),
                     users::timezone.eq(Some(u.timezone.as_str())),
                     users::locale.eq(Some(u.locale.as_str())),
+                    users::avatar_url.eq(u.avatar_url.as_deref()),
+                    users::preferences.eq(prefs_to_json(&u.preferences)),
+                    users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
-                    users::global_role.eq(u.global_role.as_str()),
+                    users::global_role.eq(global_role_to_str(&u.global_role)),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let user_id = user_id.clone();
+        let new_external_id = new_external_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if another user already owns the new
+            // external_id, or the target user does not exist.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::external_id
+                        .eq(new_external_id.as_str())
+                        .and(users::id.ne(user_id.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check external_id owner")?;
+            if let Some(owner) = dup {
+                anyhow::bail!("external_id already owned by user {owner}");
+            }
+            let updated = diesel::update(users::table.find(user_id.as_str()))
+                .set(users::external_id.eq(new_external_id.as_str()))
+                .execute(&mut *conn)
+                .context("claim external_id")?;
+            if updated == 0 {
+                anyhow::bail!("cannot claim external_id for user {user_id}: not found");
+            }
             Ok(())
         })
         .await?
@@ -383,6 +498,156 @@ mod tests {
             .unwrap();
         assert!(found.roles.contains(&UserRole::Admin));
         assert!(found.roles.contains(&UserRole::Developer));
+    }
+
+    #[tokio::test]
+    async fn user_entity_fields_round_trip() {
+        // user-management.md §User Entity: every new column must survive a
+        // create → find cycle. Before task-120 the adapter dropped username,
+        // avatar_url, preferences, last_login_at, tenant_id, and global_role
+        // on every round-trip (UserRow/UserRecord lacked the columns).
+        let (_tmp, s) = setup();
+        let mut u = User::new_sso(Id::new("u1"), "ext-1", "jsell", "Jordan Sell", 1000);
+        u.avatar_url = Some("https://example.com/a.png".to_string());
+        u.tenant_id = Some(Id::new("tenant-a"));
+        u.global_role = GlobalRole::TenantAdmin;
+        u.last_login_at = Some(1999);
+        u.preferences.ui_density = gyre_domain::UiDensity::Compact;
+        u.preferences.code_font_size = 16;
+        u.preferences.diff_view = gyre_domain::DiffView::Unified;
+        u.preferences.theme = gyre_domain::Theme::Dark;
+        u.preferences.activity_feed_scope = gyre_domain::FeedScope::All;
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let found = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.username, "jsell", "username must persist");
+        assert_eq!(found.display_name, "Jordan Sell");
+        assert_eq!(
+            found.avatar_url.as_deref(),
+            Some("https://example.com/a.png")
+        );
+        assert_eq!(found.tenant_id, Some(Id::new("tenant-a")));
+        assert_eq!(found.global_role, GlobalRole::TenantAdmin);
+        assert_eq!(found.last_login_at, Some(1999));
+        assert_eq!(
+            found.preferences, u.preferences,
+            "preferences must persist as JSON"
+        );
+
+        // find_by_username resolves the unique handle.
+        let by_name = s.find_by_username("jsell").await.unwrap().unwrap();
+        assert_eq!(by_name.id, u.id);
+        assert!(s.find_by_username("nobody").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn username_unique_across_users() {
+        // Spec: username is unique. A second user with the same handle must
+        // be rejected by create (port contract + idx_users_username).
+        let (_tmp, s) = setup();
+        let a = User::new_sso(Id::new("u1"), "ext-1", "jsell", "Jordan Sell", 1000);
+        let b = User::new_sso(Id::new("u2"), "ext-2", "jsell", "Other Person", 1000);
+        UserRepository::create(&s, &a).await.unwrap();
+        let err = UserRepository::create(&s, &b).await;
+        assert!(err.is_err(), "duplicate username must be rejected");
+    }
+
+    #[tokio::test]
+    async fn username_immutable_on_update() {
+        // Spec: username is immutable after creation. update() must reject
+        // a handle change even when everything else is valid.
+        let (_tmp, s) = setup();
+        let mut u = User::new_sso(Id::new("u1"), "ext-1", "jsell", "Jordan Sell", 1000);
+        UserRepository::create(&s, &u).await.unwrap();
+        u.username = "renamed".to_string();
+        let err = UserRepository::update(&s, &u).await;
+        assert!(err.is_err(), "username change must be rejected");
+
+        // external_id is equally immutable.
+        let mut u2 = User::new_sso(Id::new("u2"), "ext-2", "alice", "Alice", 1000);
+        UserRepository::create(&s, &u2).await.unwrap();
+        u2.username = "alice".to_string();
+        u2.external_id = "ext-hacked".to_string();
+        assert!(UserRepository::update(&s, &u2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn claim_external_id_is_the_sanctioned_repoint() {
+        // Port contract: update() rejects external_id changes, but the
+        // invitation account-link (user-management.md §Tenant-Level User
+        // Onboarding: "SSO mode: ... then account linked") must re-point a
+        // local-mode account's external_id at the SSO subject. The claim
+        // transition is the only sanctioned path — and it must refuse to
+        // steal an external_id another user already owns, or the claim
+        // would create the duplicate external_id the create() contract
+        // exists to prevent.
+        let (_tmp, s) = setup();
+        let invited = make_user("u-inv", "tenant:acme:email:a@x.com", "alice");
+        UserRepository::create(&s, &invited).await.unwrap();
+        let other = make_user("u-other", "keycloak-sub-other", "bob");
+        UserRepository::create(&s, &other).await.unwrap();
+
+        // Claim succeeds and is visible through the new external_id only.
+        UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-alice")
+            .await
+            .unwrap();
+        let claimed = s
+            .find_by_external_id("keycloak-sub-alice")
+            .await
+            .unwrap()
+            .expect("account re-pointed to SSO subject");
+        assert_eq!(claimed.id, invited.id);
+        assert!(
+            s.find_by_external_id("tenant:acme:email:a@x.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "old namespaced external_id must no longer resolve"
+        );
+
+        // Claiming an external_id owned by another user is rejected, and
+        // the rejected claim must not have touched either account.
+        let err = UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-other").await;
+        assert!(err.is_err(), "claim must refuse a taken external_id");
+        assert_eq!(
+            s.find_by_external_id("keycloak-sub-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            invited.id
+        );
+
+        // Unknown user is rejected (no silent no-op).
+        assert!(
+            UserRepository::claim_external_id(&s, &Id::new("u-missing"), "keycloak-sub-x")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_persists_login_stamp_and_preferences() {
+        // record_login + preferences updates must persist through update().
+        let (_tmp, s) = setup();
+        let mut u = User::new_sso(Id::new("u1"), "ext-1", "jsell", "Jordan Sell", 1000);
+        UserRepository::create(&s, &u).await.unwrap();
+        u.record_login(2500);
+        u.preferences.theme = gyre_domain::Theme::Dark;
+        u.display_name = "J. Sell".to_string();
+        UserRepository::update(&s, &u).await.unwrap();
+        let found = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.last_login_at, Some(2500));
+        assert_eq!(found.updated_at, 2500);
+        assert_eq!(found.preferences.theme, gyre_domain::Theme::Dark);
+        assert_eq!(found.display_name, "J. Sell");
+        assert_eq!(found.username, "jsell", "username untouched by update");
     }
 
     #[tokio::test]
