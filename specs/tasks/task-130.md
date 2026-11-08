@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
+commits: ["78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0", "afb1d86bd28b8fa8732a60d64f58ab8c86d83288"]
 ---
 
 ## Spec Excerpt
@@ -83,9 +83,17 @@ Read `specs/system/platform-model.md` §1 Token Scoping for the full spec. Curre
 
 ## Shipped
 
-Implemented `platform-model.md` §1 Token Scoping end-to-end. This round repairs the two findings of review 92601fb6d780421cbda4ca4b576d31ac (candidate 15798cf5): the `gyre_list_mrs` no-target fallback silently listed every MR across all tenants, and the worker-tool scope arm never bound the caller-chosen `agent_id` target to the caller's repo.
+Implemented `platform-model.md` §1 Token Scoping end-to-end. This round is the rebase repair onto base `c5deca801` (merge commit `afb1d86bd`, parents `106be8dd5` + `c5deca801`): the candidate's scope-format change met base's newer spec-approval-attestation feature mid-tree, producing three exemption-file conflicts plus two semantic breaks the auto-merge could not see. Earlier review findings (review 92601fb6: list_mrs fallback leak, worker-tool target binding) remain fixed as described below.
 
-### This round: list_mrs fallback clamped, worker-tool targets bound (commit 78ac5caf)
+### This round: rebase onto c5deca801 (merge afb1d86bd)
+
+**Exemption-file conflicts.** Each side had fixed sites the other still exempted; every resolution was verified against the merged tree, not picked by side: kept base's deletion of the task-087 `traces.rs:150` entry (span-payload tenant containment is present in the merged traces.rs, with its cross-tenant test) and of the `specs.rs`/`git_http.rs` fabricated-scope entries (both fixes present in the merged tree); kept ours' deletion of the task-093 `orchestrator.rs` entries (`spawn_*_orchestrator_core` tenant containment from this task is present); kept base's deletion of the `relative-path-defaults` `spawn.rs`/`gyre-cli main.rs` entries (both sites gone in the merged tree). Re-pointed, never added: the fabricated-scope `auth.rs` entry to :936 (base's :773 is stale after our auth.rs growth) and six scope-literal entries for merge line drift (same sites; 22 entries, count unchanged). All three corresponding check scripts re-run green on the merged tree.
+
+**Semantic break 1 — stale `scope`-string agent detection.** Base's spec-approve handler (migration 000057 feature) detected Gyre agent JWTs via `claims["scope"] == "agent"` — a string compare that never matches this task's `Vec<String>` scope format, so agent approvals were silently recorded as human and `agent_only` specs stayed Pending (4 base-side e2e tests failed). Replaced with the §1 array-based detection (non-empty scope list, identical to `is_agent_jwt` in mcp.rs); Keycloak user JWTs (no scope array) and legacy UUID tokens (no claims) keep the human path.
+
+**Semantic break 2 — old-signature mint call.** Base's `register_e2e_agent` test helper called the pre-task 11-arg `mint_with_workload`; updated to the 17-arg hierarchy signature with tenant/workspace/repo from the seeded e2e fixture ("default"/"ws-e2e"/"repo-e2e"/"e2e-repo") and `attestation_level: Some(level)` matching the helper's registered attestation.
+
+### Prior round: list_mrs fallback clamped, worker-tool targets bound (commit 78ac5caf)
 
 **F1 — gyre_list_mrs no-arg fallback.** `validate_tool_scope`'s `gyre_list_mrs` arm returned `Ok(())` when `repository_id` was absent on the false assumption that the handler rejects the missing field; `handle_list_mrs` treats it as optional and fell back to the shared unfiltered `merge_requests.list()` store. A worker token scoped to a single repo calling `tools/call gyre_list_mrs {}` silently received every MR across all workspaces/tenants. Now: the gate requires a single repo scope for repo-tier tokens (`check_repo_scope(None, read)`) and rejects workspace-tier tokens with a clear "pass repository_id" error (they carry no repo to clamp to); `handle_list_mrs` takes the caller and clamps the fallback listing to the caller's signed `repo_id` claim via `list_by_repo` — never the unfiltered store (unscoped ABAC-governed callers keep the pre-existing full listing). The with-arg path is unchanged (already denied for foreign repos).
 
@@ -95,7 +103,15 @@ Implemented `platform-model.md` §1 Token Scoping end-to-end. This round repairs
 
 `AgentJwtClaims` (auth.rs) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, and `scope: Vec<String>`, minted from real hierarchy context in spawn.rs / orchestrator.rs / stale_agents.rs; `with_hierarchy_from_claims` mirrors all hierarchy fields (including tenant) from signature-verified claims on every JWT-resolved path. `validate_tool_scope` runs before dispatch on every `tools/call` for scoped tokens (worker/spawn/workspace/task-tool tiers as described below); mismatch returns a `PERMISSION_DENIED` JSON-RPC error naming the target. Non-scope-list callers keep the ABAC/RBAC path. Residual (unchanged): worker mint passes persona/attestation_level as None (no persona input on spawn; attestation recorded post-spawn).
 
-### Test evidence (this round, head 78ac5caf)
+### Test evidence (this round, head afb1d86bd)
+
+- `cargo test -p gyre-server --lib`: **1445 passed / 0 failed** (was 1317 at 78ac5caf — base added the spec-approval-attestation suite; the 4 initially-failing e2e tests now pass with the detection fix). Log: /tmp/stage/review-evidence/lib-test-full.log.
+- Integration suites touched by the merge: auth_integration 21/21, m18_oidc_integration 8/8, e2e_ralph_loop 1/1, api_integration 66/66. Log: /tmp/stage/review-evidence/integration-tests.log.
+- Static gates green on the merged head (log: /tmp/stage/review-evidence/static-gates.log): check-arch, check-abac-exempt-handlers, check-abac-route-registry, check-fabricated-scope-defaults, check-scope-literal-defaults (default and `crates` invocations), check-relative-path-defaults, check-forged-scope-fields, check-forwarded-header-trust, check-lossy-secret-conversion, check-in-memory-state-stores, check-unbounded-external-http, check-byte-slice-truncation, check-dead-message-kinds, check-migration-versions, check-mcp-write-tools, check-inert-enforcement, check-task-commit-attribution, check-mem-port-contracts, check-migration-sql-portability.
+- Advisory checks that fail on the merged head (assertionless-tests, cli-spec-parity, llm-endpoint-hygiene, mcp-wrapper-parity, silent-result-discard, type-simplification, unnamed-tuple-carriers, hardcoded-defaults, conditional-test-guards) were verified to fail identically on base `c5deca801` — pre-existing, not introduced by this merge. Several other scripts abort with awk dialect errors in this sandbox (mawk vs gawk); environment, not repo.
+- Known pre-existing flake, untouched by this task: `api::scim::tests::scim_delete_user` under full-suite parallelism (process-global `GYRE_SCIM_TOKEN` env mutation, scim.rs:451/574); passes in isolation.
+
+### Prior-round test evidence (head 78ac5caf)
 
 - New discriminating tests (mcp.rs):
   - `mcp_scope_worker_list_mrs_no_repo_clamped_to_own_repo` — MRs seeded in r-1 (own), r-2 (sibling repo, same workspace), r-x (other workspace); worker of r-1 calling `gyre_list_mrs {}` sees ONLY the r-1 MR (kills the F1 leak: fails if the unfiltered fallback returns), explicit own repo still passes.
