@@ -292,6 +292,19 @@ pub async fn archive_repo(
                 )
                 .await;
             }
+            // meta-spec-reconciliation.md §11: cancellation of the last open
+            // reconciliation / drift-review task completes the wave.
+            if task.labels.iter().any(|l| {
+                l == crate::reconciliation::RECONCILIATION_LABEL
+                    || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+            }) {
+                crate::reconciliation::maybe_emit_reconciliation_completed(
+                    &state,
+                    &task.workspace_id,
+                )
+                .await;
+                crate::reconciliation::maybe_emit_drift_resolved(&state, &task.workspace_id).await;
+            }
         }
     }
 
@@ -576,6 +589,10 @@ pub async fn create_mirror_repo(
                         divergence_ports,
                         extract_results_repo,
                         notification_scope,
+                        Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                            kv: Arc::clone(&state_for_extract.kv_store),
+                            metrics: Arc::clone(&state_for_extract.metrics),
+                        }),
                     )
                     .await;
                 }
@@ -667,6 +684,10 @@ pub async fn sync_mirror(
                 divergence_ports,
                 Arc::clone(&state.spec_assertion_results),
                 notification_scope,
+                Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                    kv: Arc::clone(&state.kv_store),
+                    metrics: Arc::clone(&state.metrics),
+                }),
             )
             .await;
         }

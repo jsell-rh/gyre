@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "0253032b90e47bd0607bde5c973d17b81afc5786"]
 ---
 
 ## Spec Excerpt
@@ -253,23 +253,67 @@ Evidence: `check-relative-path-defaults.sh` exits 0 with no spawn.rs
   9bef21a4 contains only the deletion (retained under
   /tmp/stage/review-evidence/relative-path-fix.txt).
 
+### Rebase-repair round: reconcile with base c5deca801 (commit 0253032b90e47bd0607bde5c973d17b81afc5786)
+
+The controller rebased the branch onto a new base (the task-105 lineage:
+  audit detail compression, log compression background job, task-095
+  revert-conflict handling, auth on the MR status endpoint); the merge
+  left 15 content conflicts, all resolved semantically — never by
+  re-adding exemptions or dropping a fix:
+
+- **recovery.rs** — took base's task-095 evolution (`?gates=false`
+  skip, MR/repo ownership check, revert of the MR's recorded
+  `merge_commit_sha`, `RevertResult::Conflict` → 409). It preserves
+  the fail-closed properties this branch shipped: `main_green=false`
+  with a warn when the default-branch HEAD does not resolve.
+- **repos.rs / mcp.rs** — union of both sides: task-146's
+  `task.status_changed` analytics recording at repo-archive
+  cancellation and in MCP `update_task` AND base's reconciliation
+  wave-completion hooks at the same trigger points.
+- **merge_processor.rs** — kept task-146's attestation-ABAC denial
+  path through `fail_queue_entry` (records the
+  `merge_queue.processed` event); took base's
+  `revert_breaker_key`/`trip_circuit_breaker` signature,
+  `RevertResult` matching, and `spec_carry` remediation text;
+  restored base's
+  `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`
+  regression test (initially dropped by a side-taking resolution) and
+  updated the circuit-breaker test to base's new call signature.
+- **mem.rs / sqlite/audit.rs** — took base's audit-event-envelope
+  restructure (`MemAuditEntry::materialize`); kept
+  `AnalyticsQueryFilter` in the mem imports.
+- **specs.rs / spawn.rs** — kept task-146's `truncate_bytes`, spec
+  tenant-fanout fix, `spec.approved` emission, and the
+  relative-path-literal-free comment.
+- **Migration collision (recurring class)** — this branch's
+  `2026-10-08-000057_analytics_scope_columns` collided with base's
+  `2026-10-08-000057_spec_approval_attestation` (Diesel runs only one
+  migration per version; the analytics scope columns were silently
+  missing on fresh DBs — 8 adapter test failures incl. the
+  `no_duplicate_migration_version_prefixes` guard). Renumbered to
+  `2026-10-08-000059_analytics_scope_columns`; content unchanged.
+- **Exemption files** — kept this branch's deletions (orchestrator
+  spawn containment, gate_executor GateFailure, specs.rs fanout all
+  fixed for real); diffs vs base contain only deletions/comment
+  updates, never new entries.
+- **MR analytics tests** — base added an `AuthenticatedAgent`
+  requirement to `PUT /merge-requests/:id/status`; the two task-146
+  analytics tests now send the same `Bearer test-token` header the
+  base's own tests use (assertion strength unchanged).
+- `specs/coverage/SUMMARY.md` TOTAL recomputed from the merged
+  per-file rows (802 / 219 / 0 / 302 / 118 / 163 / 48%). web/dist is
+  byte-identical to base (this branch never modified it).
+
 ### Test evidence
 
-- This round (ab8c41a2): `check-relative-path-defaults.sh`: OK (no
-  exemption entry for spawn.rs present);
-  `check-task-commit-attribution.sh`: OK after recording the commit;
-  `cargo fmt --check -p gyre-server`: clean. Comment-only code change —
-  no behavior surface affected.
-- Prior round (6a3ce040): `cargo test -p gyre-adapters --lib`: 348 passed,
-  0 failed (includes the previously failing analytics adapter tests and
-  the `no_duplicate_migration_version_prefixes` guard);
-  `check-migration-versions.sh`, `check-migration-sql-portability.sh` all
-  pass (evidence under /tmp/stage/review-evidence).
-- `cargo test -p gyre-server --lib`: 1293 passed, 0 failed (includes
-  the 11 new/extended trigger-point regression tests).
-- `cargo test -p gyre-server --test api_integration`: 67 passed, 0 failed.
-- `cargo fmt --check -p gyre-server`: clean.
-- Earlier rounds (unchanged, see commits 38c2c5e/dc13ede3):
-  `cargo test -p gyre-ports -p gyre-domain -p gyre-common`: 483 passed;
-  adapter test `analytics_query_filtered_all_params` green on
-  SQLite/Postgres/mem.
+- This round (0253032b90e47bd0607bde5c973d17b81afc5786): `cargo test -p gyre-server --lib`: 1468
+  passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
+  67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 379 passed,
+  0 failed (includes the analytics adapter tests and the duplicate-
+  version guard); `cargo test -p gyre-ports -p gyre-domain -p
+  gyre-common`: 557 passed, 0 failed; all 19 `scripts/check-*.sh`
+  gates pass (incl. migration versions/portability, fabricated-scope,
+  relative-path, inert-enforcement, abac-exempt-handlers,
+  task-commit-attribution); `cargo clippy --all --all-targets` and
+  `cargo fmt --check` clean. Evidence retained under
+  /tmp/stage/review-evidence.

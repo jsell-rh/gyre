@@ -23,6 +23,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -34,6 +35,7 @@ pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
+pub mod reconciliation;
 pub mod retention;
 pub mod siem;
 pub(crate) mod signing;
@@ -52,6 +54,7 @@ pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
 pub mod trust_suggestion;
+pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
@@ -64,8 +67,8 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
-    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
     ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
     GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
@@ -267,8 +270,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -307,6 +312,12 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Trusted reverse-proxy networks for forensic source-IP resolution
+    /// (task-102 F3 / CWE-348). Populated from `GYRE_TRUSTED_PROXIES`
+    /// (comma-separated CIDRs / bare IPs). Empty (the default) = every
+    /// connection is direct: the socket peer is always the source and
+    /// forwarded headers are ignored.
+    pub trusted_proxies: trusted_proxy::TrustedProxies,
     /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
     pub commit_signatures: commit_signatures::CommitSignatureStore,
     /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
@@ -327,6 +338,8 @@ pub struct AppState {
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §Budget Tracking).
+    pub budget_calls: Arc<dyn BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -923,7 +936,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
@@ -979,6 +992,7 @@ pub fn build_state(
             })
             .unwrap_or_default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: trusted_proxy::TrustedProxies::from_env(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
@@ -1006,6 +1020,10 @@ pub fn build_state(
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
+        ),
+        budget_calls: store!(
+            dyn BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
         ),
         search: store!(
             dyn gyre_ports::SearchPort,
@@ -1524,6 +1542,7 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
             approved_at: Some(now),
+            approved_content_hash: Some(sha256_hex(prompt)),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,

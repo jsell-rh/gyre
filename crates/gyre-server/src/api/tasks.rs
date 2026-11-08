@@ -341,6 +341,21 @@ pub async fn transition_task_status(
         )
         .await;
 
+    // meta-spec-reconciliation.md §11: ReconciliationCompleted /
+    // MetaSpecDriftResolved fire when the last open reconciliation /
+    // drift-review task for a workspace reaches terminal status.
+    if matches!(
+        task.status,
+        gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+    ) && task.labels.iter().any(|l| {
+        l == crate::reconciliation::RECONCILIATION_LABEL
+            || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+    }) {
+        crate::reconciliation::maybe_emit_reconciliation_completed(&state, &task.workspace_id)
+            .await;
+        crate::reconciliation::maybe_emit_drift_resolved(&state, &task.workspace_id).await;
+    }
+
     // Auto-track status transition as analytics event
     super::analytics::record_task_status_changed(&state, &task, &old_status).await;
 
