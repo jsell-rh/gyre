@@ -1,6 +1,7 @@
 //! Post-merge recovery protocol endpoints (platform-model.md §6).
 //!
 //! GET  /api/v1/repos/:id/status            — main health + queue pause state
+//!                                           (?gates=false skips gate execution)
 //! PUT  /api/v1/repos/:id/queue/pause       — manual merge queue pause
 //! PUT  /api/v1/repos/:id/queue/resume      — manual merge queue resume
 //! POST /api/v1/repos/:id/revert/:mr_id     — manual revert of a merged MR
@@ -12,7 +13,7 @@
 //! `gate_executor::run_post_merge_gates`).
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -38,6 +39,15 @@ pub struct PauseRequest {
     pub reason: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct RepoStatusQuery {
+    /// "false" skips post-merge gate execution: the response reports queue
+    /// pause state only, with `main_green: None`. Dashboards that render the
+    /// pause state for many repos use this to avoid running gate commands
+    /// (which can take minutes) on every page load.
+    pub gates: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct QueueStatusResponse {
     pub repo_id: String,
@@ -46,7 +56,8 @@ pub struct QueueStatusResponse {
     /// Pause reason, if paused.
     pub pause_reason: Option<String>,
     /// Whether the repo's default branch HEAD passes post-merge validation.
-    /// None when no post-merge gates are configured.
+    /// None when no post-merge gates are configured or when gate execution
+    /// was skipped (`?gates=false`).
     pub main_green: Option<bool>,
     /// Post-merge gate configs currently set for this repo.
     pub post_merge_gates: Vec<PostMergeGateDto>,
@@ -190,10 +201,12 @@ pub async fn resume_queue(
 /// GET /api/v1/repos/:id/status — main health and merge queue state.
 ///
 /// Runs post-merge validation against the default branch HEAD to compute
-/// `main_green` (None when no gates are configured).
+/// `main_green` (None when no gates are configured). Pass `?gates=false` to
+/// skip gate execution and report queue pause state only.
 pub async fn repo_status(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    Query(query): Query<RepoStatusQuery>,
 ) -> Result<Json<QueueStatusResponse>, ApiError> {
     let repo = state
         .repos
@@ -220,29 +233,32 @@ pub async fn repo_status(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
+    let skip_gates = query
+        .gates
+        .as_deref()
+        .map(|g| g.eq_ignore_ascii_case("false") || g == "0")
+        .unwrap_or(false);
+
     // main_green: run post-merge gates against current default-branch HEAD.
-    let main_green = if gates.is_empty() {
+    // Fail CLOSED (task-095 R3-F3): when the HEAD ref does not resolve there
+    // is no tree to validate — report `main_green: false` with the failure in
+    // `pause_reason` context, never a green reading from an unvalidated tree.
+    let main_green = if skip_gates || gates.is_empty() {
         None
     } else {
-        let head_sha = crate::git_refs::resolve_ref(
+        match crate::git_refs::resolve_ref(
             &repo.path,
             &format!("refs/heads/{}", repo.default_branch),
         )
         .await
-        .ok_or_else(|| {
-            // Fail closed: an unresolvable default-branch ref means repo
-            // state cannot be determined — reporting it as an empty SHA
-            // would turn "cannot determine state" into "state is fine".
-            ApiError::Internal(anyhow::anyhow!(
-                "cannot resolve default branch '{}' of repo {repo_id}",
-                repo.default_branch
-            ))
-        })?;
-        Some(
-            crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
-                .await
-                .is_ok(),
-        )
+        {
+            Some(head_sha) => Some(
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                    .await
+                    .is_ok(),
+            ),
+            None => Some(false),
+        }
     };
 
     Ok(Json(QueueStatusResponse {
@@ -282,27 +298,53 @@ pub async fn revert_mr(
         )));
     }
 
-    // Resolve the merge commit: the target branch HEAD (the merge landed it).
-    let merge_sha =
-        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.target_branch))
-            .await
-            .ok_or_else(|| {
-                // Fail closed: reverting against an unresolvable target
-                // branch would pass an empty SHA to git revert — turning
-                // "cannot determine the merge commit" into a bogus revert
-                // attempt on no commit at all.
-                ApiError::InvalidInput(format!(
-                    "cannot resolve target branch '{}' of repo {repo_id}; \
-                     cannot determine the merge commit to revert",
-                    mr.target_branch
-                ))
-            })?;
+    // The MR must belong to the repo in the path: a mismatch would revert
+    // one repo's history while marking another repo's MR (task-095 R3-F1).
+    if mr.repository_id != repo.id {
+        return Err(ApiError::Forbidden(format!(
+            "merge request {mr_id} does not belong to repo {repo_id}"
+        )));
+    }
 
-    let revert_commit_sha = state
+    // Revert the MR's OWN merge commit, recorded at merge time (task-095
+    // R3-F1). The current target-branch HEAD is NOT the MR's merge commit
+    // once any later merge or revert landed.
+    let Some(merge_sha) = mr.merge_commit_sha.clone() else {
+        return Err(ApiError::Conflict(format!(
+            "merge request {mr_id} has no recorded merge commit (merged before task-095 R3-F1?) — \
+             cannot identify which commit to revert"
+        )));
+    };
+
+    let revert_commit_sha = match state
         .git_ops
         .revert_commit(&repo.path, &repo.default_branch, &merge_sha)
         .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("revert failed: {e}")))?;
+    {
+        Ok(gyre_domain::RevertResult::Success { revert_commit_sha }) => revert_commit_sha,
+        // The inverse patch collides with later changes on the branch.
+        // The branch is untouched — surface the conflict to the caller
+        // instead of destroying later merges (task-095 R4-F1).
+        Ok(gyre_domain::RevertResult::Conflict { message }) => {
+            return Err(ApiError::Conflict(message));
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(anyhow::anyhow!("revert failed: {e}")));
+        }
+    };
+
+    // Manual reverts count toward the circuit breaker (task-095 R3-F1):
+    // the breaker keyed on the resubmission-stable key fires after 3
+    // reverts of the same work no matter who initiated them.
+    if let Ok(revert_count) = crate::merge_processor::increment_revert_count(&state, &mr).await {
+        if revert_count >= 3 {
+            if let Err(e) =
+                crate::merge_processor::trip_circuit_breaker(&state, repo.id.as_str(), &mr).await
+            {
+                tracing::error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
+            }
+        }
+    }
 
     // Steps 4–7 of the recovery protocol (mark Reverted, RevertNotification,
     // remediation task, gate-result invalidation).
@@ -404,4 +446,372 @@ pub async fn set_post_merge_gates(
         StatusCode::OK,
         Json(PostMergeGatesResponse { repo_id, gates }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::{test_state, test_state_with_git_ops, ConfigurableGitOps};
+    use axum::body::Body;
+    use axum::Router;
+    use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, Repository};
+    use http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn app(state: Arc<AppState>) -> Router {
+        crate::api::api_router().with_state(state)
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn seed_repo(state: &Arc<AppState>, name: &str) -> Repository {
+        let repo = Repository::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-1"),
+            name,
+            format!("/tmp/gyre-recovery-tests/{name}.git"),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        repo
+    }
+
+    /// MR driven to `Merged` through the real state machine, with an
+    /// optional recorded merge commit (task-095 R3-F1).
+    async fn seed_merged_mr(
+        state: &Arc<AppState>,
+        repo_id: &Id,
+        mr_id: &str,
+        merge_sha: Option<&str>,
+    ) -> MergeRequest {
+        let mut mr = MergeRequest::new(
+            Id::new(mr_id),
+            repo_id.clone(),
+            "Merged MR",
+            "feat/x",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.merge_commit_sha = merge_sha.map(|s| s.to_string());
+        state.merge_requests.create(&mr).await.unwrap();
+        mr
+    }
+
+    async fn post_revert(app: &Router, repo_id: &str, mr_id: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/revert/{mr_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// R3-F1: the manual revert must revert the MR's OWN recorded merge
+    /// commit — not whatever the target branch HEAD happens to be after
+    /// later merges landed.
+    #[tokio::test]
+    async fn manual_revert_reverts_recorded_merge_commit() {
+        let git = Arc::new(ConfigurableGitOps::default());
+        let recorded = git.revert_calls.clone();
+        let state = test_state_with_git_ops(git);
+        let repo = seed_repo(&state, "revert-sha").await;
+        seed_merged_mr(
+            &state,
+            &repo.id,
+            "mr-sha",
+            Some("a1b2c3d4e5f60718293a4b5c6d7e8f9011223344"),
+        )
+        .await;
+
+        let resp = post_revert(&app(state.clone()), repo.id.as_str(), "mr-sha").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["revert_commit_sha"],
+            "revert-of-a1b2c3d4e5f60718293a4b5c6d7e8f9011223344"
+        );
+        // The double saw exactly the MR's merge commit as the revert target.
+        assert_eq!(
+            *recorded.lock(),
+            vec!["a1b2c3d4e5f60718293a4b5c6d7e8f9011223344".to_string()],
+            "revert_commit must be called with the recorded merge sha"
+        );
+
+        // §6 step 4: side effects applied — MR marked Reverted.
+        let mr = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sha"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr.status, MrStatus::Reverted);
+        assert_eq!(
+            mr.revert_commit_sha.as_deref(),
+            Some("revert-of-a1b2c3d4e5f60718293a4b5c6d7e8f9011223344")
+        );
+    }
+
+    /// R4-F1: when the MR's inverse patch conflicts with later changes on
+    /// the branch, the manual revert must surface a 409 and apply NO side
+    /// effects — the branch is untouched and the MR stays Merged.
+    #[tokio::test]
+    async fn manual_revert_conflict_is_409_without_side_effects() {
+        let git = ConfigurableGitOps {
+            revert_conflicts: true,
+            ..Default::default()
+        };
+        let recorded = git.revert_calls.clone();
+        let state = test_state_with_git_ops(Arc::new(git));
+        let repo = seed_repo(&state, "revert-conflict").await;
+        seed_merged_mr(
+            &state,
+            &repo.id,
+            "mr-conflict",
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+
+        let resp = post_revert(&app(state.clone()), repo.id.as_str(), "mr-conflict").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // The revert WAS attempted (target sha recorded)…
+        assert_eq!(
+            *recorded.lock(),
+            vec!["1111111111111111111111111111111111111111".to_string()]
+        );
+        // …but the MR must remain Merged — no half-applied state.
+        let mr = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-conflict"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr.status, MrStatus::Merged);
+        assert!(mr.revert_commit_sha.is_none());
+        // And no remediation task was created.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        assert!(
+            tasks.is_empty(),
+            "conflicting revert must not create remediation tasks"
+        );
+    }
+    /// R3-F1: without a recorded merge commit there is no valid commit to
+    /// revert — reject explicitly instead of reverting a guessed HEAD.
+    #[tokio::test]
+    async fn manual_revert_without_recorded_merge_commit_is_conflict() {
+        let git = Arc::new(ConfigurableGitOps::default());
+        let recorded = git.revert_calls.clone();
+        let state = test_state_with_git_ops(git);
+        let repo = seed_repo(&state, "revert-nosha").await;
+        seed_merged_mr(&state, &repo.id, "mr-nosha", None).await;
+
+        let resp = post_revert(&app(state.clone()), repo.id.as_str(), "mr-nosha").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(recorded.lock().is_empty(), "no revert may be attempted");
+    }
+
+    /// R3-F1: an MR belonging to another repo must not be revertable
+    /// through this repo's path (would revert repo A's history while
+    /// marking repo B's MR).
+    #[tokio::test]
+    async fn manual_revert_rejects_foreign_repo_mr() {
+        let git = Arc::new(ConfigurableGitOps::default());
+        let recorded = git.revert_calls.clone();
+        let state = test_state_with_git_ops(git);
+        let repo_a = seed_repo(&state, "revert-a").await;
+        let repo_b = seed_repo(&state, "revert-b").await;
+        seed_merged_mr(
+            &state,
+            &repo_a.id,
+            "mr-foreign",
+            Some("aabbccddeeff00112233445566778899aabbccdd"),
+        )
+        .await;
+
+        let resp = post_revert(&app(state.clone()), repo_b.id.as_str(), "mr-foreign").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(recorded.lock().is_empty(), "no revert may be attempted");
+    }
+
+    /// R3-F1: manual reverts count toward the circuit breaker. Previously
+    /// the breaker only incremented in the automatic recovery path, so 3
+    /// manual reverts never tripped it.
+    #[tokio::test]
+    async fn manual_revert_counts_toward_circuit_breaker() {
+        let git = Arc::new(ConfigurableGitOps::default());
+        let state = test_state_with_git_ops(git);
+        let repo = seed_repo(&state, "revert-breaker").await;
+        let mr = seed_merged_mr(
+            &state,
+            &repo.id,
+            "mr-brk",
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .await;
+
+        // Two prior reverts of the same work already counted (namespace
+        // literal mirrors merge_processor::REVERT_COUNTS_NS).
+        state
+            .kv_store
+            .kv_set("revert_counts", "mr:mr-brk", "2".to_string())
+            .await
+            .unwrap();
+        // A queue entry already waiting — a trip must remove it.
+        state
+            .merge_queue
+            .enqueue(&MergeQueueEntry::new(
+                Id::new("entry-brk"),
+                mr.id.clone(),
+                100,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let resp = post_revert(&app(state.clone()), repo.id.as_str(), "mr-brk").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Third revert → breaker tripped: queue entry removed permanently…
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-brk"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Cancelled,
+            "breaker trip must remove the MR's queue entries"
+        );
+        // …and a Critical human escalation exists.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        assert!(
+            tasks
+                .iter()
+                .any(|t| t.priority == gyre_domain::TaskPriority::Critical
+                    && t.labels.contains(&"circuit-breaker".to_string())),
+            "manual 3rd revert must create the circuit-breaker escalation task, got {:?}",
+            tasks.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
+    }
+
+    /// R3-F3: main_green is the boolean a human uses to decide whether to
+    /// resume the queue. When the HEAD ref cannot be resolved there is no
+    /// tree to validate — it must read `false`, never a green default from
+    /// the server-cwd gate fallback.
+    #[tokio::test]
+    async fn repo_status_main_green_fails_closed_when_head_unresolvable() {
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        // A plain directory — NOT a git repo — so refs/heads/main cannot
+        // resolve, while a gate would still "pass" in the server cwd.
+        let path = dir.path().join("unresolvable.git");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let repo = Repository::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-1"),
+            "unresolvable",
+            path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // A gate whose command always exits 0: if it ever RAN (server-cwd
+        // fallback), main would read green.
+        state
+            .quality_gates
+            .save(&QualityGate {
+                id: Id::new("gate-failclosed"),
+                repo_id: repo.id.clone(),
+                name: "always-pass".to_string(),
+                gate_type: GateType::TestCommand,
+                command: Some("true".to_string()),
+                required_approvals: None,
+                persona: None,
+                required: true,
+                gate_phase: GatePhase::PostMerge,
+                timeout_secs: Some(10),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{}/status", repo.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["main_green"],
+            serde_json::json!(false),
+            "unresolvable HEAD must report main_green: false (fail closed), got {body}"
+        );
+    }
+
+    /// `?gates=false` reports queue pause state without executing post-merge
+    /// gate commands — dashboards use it to render pause state for many repos
+    /// without running minute-long gate commands on every page load. The
+    /// gate below exits non-zero when executed: `main_green: null` (not
+    /// `false`) proves the gate never ran.
+    #[tokio::test]
+    async fn repo_status_gates_false_skips_gate_execution() {
+        let state = test_state();
+        let repo = seed_repo(&state, "status-skip-gates").await;
+        state
+            .quality_gates
+            .save(&QualityGate {
+                id: Id::new("gate-skip"),
+                repo_id: repo.id.clone(),
+                name: "always-fail".to_string(),
+                gate_type: GateType::TestCommand,
+                command: Some("false".to_string()),
+                required_approvals: None,
+                persona: None,
+                required: true,
+                gate_phase: GatePhase::PostMerge,
+                timeout_secs: Some(10),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{}/status?gates=false", repo.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["main_green"],
+            serde_json::json!(null),
+            "?gates=false must skip gate execution (main_green null), got {body}"
+        );
+        assert_eq!(body["queue_paused"], serde_json::json!(false));
+    }
 }
