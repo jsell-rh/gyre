@@ -2189,6 +2189,34 @@ describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
     return strokes;
   }
 
+  /** Capture stroke colors of EDGE strokes only, discriminated by path
+   *  geometry so node rings cannot satisfy the assertions.
+   *
+   *  Edges are drawn via drawArrow: beginPath, moveTo, exactly one lineTo,
+   *  no curves, then stroke. Gate/spec rings and node borders go through
+   * roundRect, whose path contains quadraticCurveTo calls — so a stroke
+   * whose path has exactly one lineTo and zero quadraticCurveTo segments
+   * is an edge (arrow shaft), never a ring. This is what makes the test
+   * differential for the per-spec gate EDGE coloring specifically: the
+   * ring shares the gate colors but is excluded by path shape. */
+  function captureEdgeStrokes() {
+    const edgeStrokes = [];
+    let path = { lineTo: 0, quadraticCurveTo: 0 };
+    const resetPath = () => { path = { lineTo: 0, quadraticCurveTo: 0 }; };
+    mockCtx.beginPath.mockImplementation(resetPath);
+    mockCtx.moveTo.mockImplementation(() => {});
+    mockCtx.lineTo.mockImplementation(() => { path.lineTo++; });
+    mockCtx.quadraticCurveTo.mockImplementation(() => { path.quadraticCurveTo++; });
+    mockCtx.stroke.mockImplementation(() => {
+      // drawArrow shaft: one straight segment, no rounded corners
+      if (path.lineTo === 1 && path.quadraticCurveTo === 0) {
+        edgeStrokes.push(mockCtx.strokeStyle);
+      }
+      resetPath();
+    });
+    return edgeStrokes;
+  }
+
   /** Install a QUEUED requestAnimationFrame mock and return a flush function.
    *
    *  The file-level beforeEach mock invokes the callback synchronously, which
@@ -2286,6 +2314,60 @@ describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
     flush();
     const countGreen = (arr) => arr.filter(c => c === '#22c55e').length;
     expect(countGreen(passStrokes)).toBeGreaterThan(countGreen(baseline));
+  });
+
+  it('evaluative lens colors the edge leaving a governed node by per-spec gate status (edge strokes in isolation)', () => {
+    // The per-spec gate join (gateStatusByNodeId ← gateStatusBySpec) colors
+    // the EDGE leaving a governed node. Rings share the gate colors, so this
+    // test captures edge strokes only, discriminated by path geometry (see
+    // captureEdgeStrokes): removing the edge-coloring block in drawEdges
+    // fails here even though the node ring keeps its red/green.
+    //
+    // Fixture shape mirrors the liveness gate-edge tests: all leaves share
+    // one qualified-name tree ('app.svc.*') so their tree-group is large
+    // enough at initial fit zoom for the leaves (and their edges) to render.
+    // g1 is governed by specs/system/auth.md; the g2→g3 edge leaves an
+    // ungoverned node and must keep its structural color.
+    const GATE_NODES = [
+      { id: 'g1', node_type: 'function', name: 'create_user', qualified_name: 'app.svc.create_user', file_path: 'app/svc.py', spec_path: 'specs/system/auth.md', spec_confidence: 'none', test_node: false, test_coverage: 0.85 },
+      { id: 'g2', node_type: 'function', name: 'get_user', qualified_name: 'app.svc.get_user', file_path: 'app/svc.py', spec_confidence: 'none', test_node: false },
+      { id: 'g3', node_type: 'function', name: 'bill', qualified_name: 'app.svc.bill', file_path: 'app/svc.py', spec_path: 'specs/system/billing.md', spec_confidence: 'none', test_node: false },
+      { id: 'g4', node_type: 'function', name: 'fill1', qualified_name: 'app.svc.fill1', file_path: 'app/svc.py', spec_confidence: 'none', test_node: false },
+      { id: 'g5', node_type: 'function', name: 'fill2', qualified_name: 'app.svc.fill2', file_path: 'app/svc.py', spec_confidence: 'none', test_node: false },
+      { id: 'g6', node_type: 'function', name: 'fill3', qualified_name: 'app.svc.fill3', file_path: 'app/svc.py', spec_confidence: 'none', test_node: false },
+    ];
+    const GATE_EDGES = [
+      { id: 'gle1', source_id: 'g1', target_id: 'g2', edge_type: 'calls' },
+      { id: 'gle2', source_id: 'g2', target_id: 'g3', edge_type: 'calls' },
+    ];
+    const flush = installQueuedRaf();
+
+    // Baseline: no gate data → no gate-colored edge strokes at all
+    const baselineEdges = captureEdgeStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: GATE_NODES, edges: GATE_EDGES, lens: 'evaluative' },
+    });
+    flush();
+    expect(baselineEdges).not.toContain('#ef4444');
+    expect(baselineEdges).not.toContain('#22c55e');
+
+    // Failed gate on g1's governing spec → the g1→g2 edge turns red, while
+    // the g2→g3 edge (ungoverned source) keeps its structural calls color
+    const failEdges = captureEdgeStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: GATE_NODES, edges: GATE_EDGES, lens: 'evaluative', gateStatusBySpec: { 'specs/system/auth.md': 'fail' } },
+    });
+    flush();
+    expect(failEdges).toContain('#ef4444');
+    expect(failEdges).toContain('#60a5fa');
+
+    // Passed gate → the same edge turns green
+    const passEdges = captureEdgeStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: GATE_NODES, edges: GATE_EDGES, lens: 'evaluative', gateStatusBySpec: { 'specs/system/auth.md': 'pass' } },
+    });
+    flush();
+    expect(passEdges).toContain('#22c55e');
   });
 
   it('evaluative lens draws spec approval icons: ✓ approved, ⏳ pending, ✗ rejected', () => {
