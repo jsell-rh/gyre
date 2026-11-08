@@ -18,8 +18,21 @@ pub struct AuditQueryFilter {
     pub limit: usize,
 }
 
+/// Outcome of one audit-detail compression pass (observability.md §Log
+/// Retention & Compression — the `log-compression` background job).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompressionStats {
+    /// Rows newly compressed in this pass.
+    pub compressed: u64,
+    /// Sum of the raw `detail` JSON byte lengths for those rows.
+    pub bytes_before: u64,
+    /// Sum of the compressed payload byte lengths for those rows.
+    pub bytes_after: u64,
+}
+
 /// Port for recording and querying audit events.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait AuditRepository: Send + Sync {
     async fn record(&self, event: &AuditEvent) -> Result<()>;
 
@@ -38,4 +51,19 @@ pub trait AuditRepository: Send + Sync {
     /// Hard-delete events with timestamp < cutoff_secs. Returns the number of rows purged.
     /// Used by the nightly retention job (business-continuity.md §5).
     async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64>;
+
+    /// Zstd-compress the `detail` JSON of up to `limit` events with
+    /// `timestamp < cutoff_secs` that are not yet compressed
+    /// (observability.md §Log Retention & Compression: the
+    /// `log-compression` background job compresses details once they age
+    /// past 7 days). Compressed rows stay fully readable — every read path
+    /// (`query`, `since_timestamp`) decompresses transparently, so SIEM
+    /// forwarding receives the original detail. Idempotent: rows that are
+    /// already compressed are skipped, so a second pass compresses nothing
+    /// new. Returns the count and byte totals for observability logging.
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<CompressionStats>;
 }

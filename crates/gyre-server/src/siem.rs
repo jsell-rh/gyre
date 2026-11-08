@@ -510,4 +510,87 @@ mod tests {
         assert_eq!(TargetType::from_str("webhook"), Some(TargetType::Webhook));
         assert_eq!(TargetType::from_str("unknown"), None);
     }
+
+    #[tokio::test]
+    async fn forward_cycle_sends_decompressed_detail_for_compressed_events() {
+        // observability.md §Log Retention & Compression: SIEM forwarding
+        // must receive the original detail payload even after the
+        // log-compression job has zstd-compressed the stored row. The
+        // forwarder reads through `since_timestamp`, which decompresses
+        // in the adapter — this test proves the wire payload.
+        use crate::mem::test_state;
+        use tokio::io::AsyncReadExt;
+
+        let state = test_state();
+
+        // Local syslog receiver.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut chunk))
+                    .await
+                {
+                    Ok(Ok(0)) | Err(_) => break,
+                    Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+                    Ok(Err(e)) => panic!("read error: {e}"),
+                }
+            }
+            buf
+        });
+
+        state
+            .siem_store
+            .add(SiemTarget {
+                id: "t1".to_string(),
+                name: "local-syslog".to_string(),
+                target_type: TargetType::Syslog,
+                config: serde_json::json!({
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "format": "json"
+                }),
+                enabled: true,
+            })
+            .await;
+
+        // One event, aged past the 7-day compression threshold, then
+        // compressed by the same port call the job uses.
+        let detail = serde_json::json!({
+            "path": "/etc/shadow",
+            "mode": "read",
+            "pid": 4321
+        });
+        let event = make_event("e-compressed", AuditEventType::FileAccess);
+        let mut event = event;
+        event.detail = detail.clone();
+        event.timestamp = 100;
+        gyre_ports::AuditRepository::record(&*state.audit, &event)
+            .await
+            .unwrap();
+        let stats = gyre_ports::AuditRepository::compress_details_before(&*state.audit, 200, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.compressed, 1,
+            "event must be compressed before forwarding"
+        );
+
+        run_forward_cycle(&state).await.unwrap();
+
+        let received = receiver.await.unwrap();
+        let text = String::from_utf8(received).unwrap();
+        assert!(text.contains("file_access"), "got: {text}");
+        assert!(
+            text.contains("\"path\":\"/etc/shadow\""),
+            "forwarded payload must carry the decompressed detail: {text}"
+        );
+        assert!(text.contains("\"pid\":4321"), "got: {text}");
+
+        // The cursor advanced past the forwarded event.
+        assert!(state.siem_store.last_forwarded_ts().await >= event.timestamp);
+    }
 }
