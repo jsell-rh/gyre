@@ -67,6 +67,7 @@ vi.mock('../lib/api.js', () => ({
     approveSpec: vi.fn().mockResolvedValue({}),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
@@ -241,6 +242,33 @@ describe('Inbox', () => {
     });
   });
 
+  it('trust_suggestion: Increase Trust updates the workspace trust level and resolves', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-trust',
+        notification_type: 'trust_suggestion',
+        priority: 8,
+        title: 'Consider increasing trust level',
+        body: JSON.stringify({
+          gate_failures: 0,
+          mr_reverts: 0,
+          period_days: 30,
+          current_level: 'Guided',
+          suggested_level: 'Autonomous',
+        }),
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Consider increasing trust level/ });
+    await fireEvent.click(header);
+    const increaseBtn = await findByText('Increase Trust');
+    await fireEvent.click(increaseBtn);
+    await waitFor(() => {
+      expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', { trust_level: 'Autonomous' });
+      expect(api.resolveNotification).toHaveBeenCalledWith('notif-trust');
+    });
+  });
+
   it('calls approveSpec when Approve is clicked', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -358,6 +386,39 @@ describe('Inbox', () => {
     expect(removeCell.textContent).toContain('old server line');
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
+  });
+
+  it('renders spec assertion failure card with View Code / Update Spec actions (system-explorer §9)', async () => {
+    const assertNotif = makeNotification({
+      id: 'notif-assert',
+      notification_type: 'SpecAssertionFailure',
+      priority: 9,
+      title: 'Spec assertion failures: 2 assertion(s) failed',
+      body: JSON.stringify({
+        repo_id: 'repo-1',
+        spec_path: 'system/architecture.md',
+        commit_sha: 'abc123',
+        failures: [
+          { spec_path: 'system/architecture.md', line: 3, explanation: 'Found unwanted DependsOn edge to "gyre-adapters"' },
+        ],
+      }),
+      entity_ref: 'system/architecture.md',
+      repo_id: 'repo-1',
+    });
+    api.myNotifications.mockResolvedValue([assertNotif]);
+    const { findByText, findByRole, container } = render(Inbox);
+    // Card renders with the failure title.
+    expect(await findByText(/Spec assertion failures/)).toBeTruthy();
+    // PascalCase type is normalized so the danger styling + label apply.
+    await waitFor(() => {
+      expect(container.textContent).not.toContain('SpecAssertionFailure');
+    });
+    // Actions live in the expanded accordion body — expand the card first.
+    const header = await findByRole('button', { name: /Expand: Spec assertion failures/ });
+    await fireEvent.click(header);
+    // Both §9 actions are offered.
+    expect(await findByRole('button', { name: 'View Code' })).toBeTruthy();
+    expect(await findByRole('button', { name: 'Update Spec' })).toBeTruthy();
   });
 
   // ── Entity references in expanded items open the detail panel ─────────

@@ -23,11 +23,52 @@ def check_sets(pr):
     return pending, failed, infrastructure
 
 
+def reconcile_checks(run, url, head, pr):
+    """Resolve contradictory Actions statuses using source-bound terminal evidence.
+
+    A conclusion alone never overrides a pending check. Require its completed
+    job and completed current workflow attempt, on this exact PR head.
+    """
+    repo = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/\d+', url).group(1)
+    checks, evidence, workflows = [], [], {}
+    terminal = {'SUCCESS','FAILURE','NEUTRAL','SKIPPED','CANCELLED','TIMED_OUT','STALE','ERROR'}
+    for original in pr.get('statusCheckRollup') or []:
+        check = dict(original)
+        match = re.fullmatch(r'https://github.com/' + re.escape(repo) +
+                            r'/actions/runs/(\d+)/job/(\d+)', check.get('detailsUrl') or '')
+        if (match and check.get('status') != 'COMPLETED' and
+                check.get('conclusion') in terminal and check.get('completedAt')):
+            ident, job_id = map(int,match.groups())
+            if ident not in workflows:
+                workflows[ident] = json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+            workflow = workflows[ident]
+            job = json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_id}',timeout=30).stdout)
+            if (workflow.get('id') == ident and workflow.get('head_sha') == head
+                    and workflow.get('status') == 'completed' and workflow.get('conclusion')
+                    and job.get('id') == job_id and job.get('run_id') == ident
+                    and job.get('head_sha') == head and job.get('name') == check.get('name')
+                    and job.get('run_attempt') == workflow.get('run_attempt')
+                    and isinstance(job.get('run_attempt'),int)
+                    and job.get('completed_at') == check['completedAt']
+                    and (job.get('conclusion') or '').upper() == check['conclusion']):
+                check['status'] = 'COMPLETED'
+                evidence.append({'check':check['name'],'run':ident,'job':job_id,
+                                 'head':head,'attempt':job['run_attempt'],'conclusion':check['conclusion']})
+        checks.append(check)
+    return pr | {'statusCheckRollup':checks}, evidence
+
+
+def merge_conflict(pr):
+    return (pr.get('state') == 'OPEN' and pr.get('mergeStateStatus') == 'DIRTY'
+            and pr.get('mergeable') == 'CONFLICTING'
+            and bool(re.fullmatch(r'[a-f0-9]{40}',pr.get('baseRefOid') or '')))
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     pr = json.loads(run('gh', 'pr', 'view', url, '--json',
-                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit', timeout=30).stdout)
+                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit,baseRefOid,mergeable', timeout=30).stdout)
     if pr['headRefOid'] != head:
         raise RuntimeError('PR head changed outside the recorded verification')
     if pr['state'] == 'MERGED':
@@ -36,6 +77,15 @@ def observe(run, url, head, base, directory):
         return {'status': 'closed'}
     checks = pr.get('statusCheckRollup') or []
     (directory / 'github-checks.json').write_text(json.dumps(pr, indent=2))
+    # Conflicts require source repair even when CI is green, absent, or still
+    # running. Recheck both refs and conflict state before handing off.
+    if merge_conflict(pr):
+        return {'status':'merge_conflict','head':head,'base':pr['baseRefOid'],
+                'verified_base':base,'pr':url,'merge_state':'DIRTY',
+                'check_summary':[{key:check.get(key) for key in ('name','status','conclusion','context','state')} for check in checks],
+                'detail':'The published PR conflicts with its current target branch. Resolve the merge against current main, preserving the retained implementation. Inspect all unmerged paths, resolve source conflicts, regenerate conflicting build artifacts from the resolved source, and obtain fresh independent review and verification.'}
+    pr, reconciled = reconcile_checks(run,url,head,pr)
+    (directory / 'github-check-reconciliation.json').write_text(json.dumps(reconciled,indent=2))
     pending, failed, infrastructure = check_sets(pr)
     if (pending and not failed) or not checks:
         return {'status': 'pending'}

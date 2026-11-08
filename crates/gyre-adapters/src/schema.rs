@@ -731,6 +731,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     secrets,
     breaking_changes,
     dependency_policies,
+    spec_assertion_results,
 );
 
 diesel::table! {
@@ -872,6 +873,7 @@ diesel::table! {
         approval_status -> Text,
         approved_by -> Nullable<Text>,
         approved_at -> Nullable<BigInt>,
+        approved_content_hash -> Nullable<Text>,
         created_by -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
@@ -1002,5 +1004,21 @@ diesel::table! {
         require_cascade_tests -> Integer,
         auto_create_update_tasks -> Integer,
         updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    spec_assertion_results (id) {
+        id -> Text,
+        repo_id -> Text,
+        spec_path -> Text,
+        line -> Integer,
+        assertion_type -> Text,
+        assertion_text -> Text,
+        params_json -> Text,
+        passed -> Bool,
+        explanation -> Text,
+        commit_sha -> Text,
+        checked_at -> BigInt,
     }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
 // Mock canvas context
@@ -36,6 +36,14 @@ beforeEach(() => {
     shadowBlur: 0,
     setLineDash: vi.fn(),
     getLineDash: vi.fn(() => []),
+    // Evaluative lens draw path (badge chips, glow rings, gradients). Without
+    // these the evaluative canvas layer throws inside the render loop.
+    roundRect: vi.fn(),
+    clip: vi.fn(),
+    ellipse: vi.fn(),
+    strokeText: vi.fn(),
+    createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    filter: '',
   };
   HTMLCanvasElement.prototype.getContext = vi.fn(() => mockCtx);
   global.ResizeObserver = class ResizeObserver {
@@ -95,16 +103,22 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle (filter presets removed per spec)', () => {
+  it('renders toolbar with lens toggle and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const buttons = container.querySelectorAll('.tb-btn');
-    // 3 lens buttons (Structural, Evaluative, Observable)
-    expect(buttons.length).toBeGreaterThanOrEqual(3);
-    const labels = Array.from(buttons).map(b => b.textContent.trim());
-    expect(labels.some(l => l.includes('Structural'))).toBe(true);
-    expect(labels.some(l => l.includes('Evaluative'))).toBe(true);
+    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
+    expect(lensButtons.length).toBe(3);
+    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    expect(lensLabels[0]).toContain('Structural');
+    expect(lensLabels[1]).toContain('Evaluative');
+    expect(lensLabels[2]).toContain('Observable');
+    // Filter presets (explorer-implementation.md §25 Phase 1)
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
+    expect(filterLabels).toEqual(['All', 'Endpoints', 'Types', 'Calls', 'Dependencies']);
+    // All is active by default
+    expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
   it('renders lens toggle with structural active', () => {
@@ -160,6 +174,26 @@ describe('ExplorerCanvas', () => {
     });
     const annotation = container.querySelector('.annotation-title');
     expect(annotation?.textContent).toContain('Test View');
+  });
+
+  it('all scope: {{count}} resolves to total node count, not "?"', () => {
+    // spec view-query-grammar.md §2 "all" = show everything — the result set
+    // is every node, so the annotation templates resolve against the full
+    // graph. Regresses if the all branch falls through to null (count '?',
+    // group_count '0').
+    const query = {
+      scope: { type: 'all' },
+      annotation: { title: 'Graph: {{count}} nodes', description: 'across {{group_count}} groups' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    // 7 nodes across api / api.handlers / domain / tests (qualified names:
+    // api, api.handlers.create_user, api.handlers.get_user, domain,
+    // domain.User, tests.test_create_user → 4 distinct parents + 'api' itself
+    // as a root added to the parents set)
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('Graph: 7 nodes');
+    expect(container.querySelector('.annotation-desc')?.textContent).toContain('4 groups');
   });
 
   it('calls canvas getContext on render', () => {
@@ -240,6 +274,73 @@ describe('ExplorerCanvas — view queries', () => {
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Test coverage gaps');
   });
 
+  it('draws highlight.matched.label on matched nodes with the matched color', () => {
+    // spec view-query-grammar.md §3: highlight.matched = color + label for
+    // nodes in the result set. Flat fixture: one package directly containing
+    // the untested function, so the matched leaf is drawn at initial fit zoom
+    // (a deeper tree keeps the parent group in summary mode at test zoom).
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
+    };
+    // Capture fillStyle at each fillText call — asserting mockCtx.fillStyle
+    // after render would only see the LAST assignment (tautological).
+    const drawn = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      drawn.push({ text, fillStyle: mockCtx.fillStyle });
+    });
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    // The matched leaf itself is drawn (same LOD guards as the label branch):
+    // proves this fixture exercises the draw path, unlike a deep tree whose
+    // matched leaf stays collapsed inside a tree-group summary.
+    expect(drawn.some(d => d.text === 'get_user')).toBe(true);
+    // The label is drawn with fillStyle set to the configured matched color
+    const labelCalls = drawn.filter(d => d.text === 'Untested');
+    expect(labelCalls.length).toBeGreaterThan(0);
+    expect(labelCalls.every(d => d.fillStyle === '#ef4444')).toBe(true);
+  });
+
+  it('does not draw highlight label when emphasis has no label', () => {
+    // Same flat fixture as the positive test: the matched leaf IS drawn
+    // (asserted below), so the label branch's guards are exercised — the
+    // absence of the label is meaningful, not a fixture artifact.
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444' } }, dim_unmatched: 0.3 },
+    };
+    const texts = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      texts.push(text);
+    });
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    // The matched leaf is drawn: the draw path (and its LOD guards) executed.
+    expect(texts.includes('get_user')).toBe(true);
+    // No label is drawn without emphasis.highlight.matched.label — and no
+    // fallback label sneaks in: every drawn text is a real string (deleting
+    // the hlLabel guard would draw `undefined` here and fail this).
+    expect(texts.includes('Untested')).toBe(false);
+    expect(texts.every(t => typeof t === 'string')).toBe(true);
+  });
+
+
   it('renders filter scope with node_types', () => {
     const query = {
       scope: { type: 'filter', node_types: ['endpoint'] },
@@ -273,6 +374,30 @@ describe('ExplorerCanvas — view queries', () => {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
+  });
+
+  it('diff scope: {{count}} resolves against real commit fields in the component', () => {
+    // Behavioral test of the component's own diff resolution (not the mirror
+    // helper): reads created_sha/last_modified_sha — the fields
+    // GraphNodeResponse actually serializes. If the component reverts to the
+    // old dead field (last_commit_sha), the result set is null and the count
+    // renders as '?'.
+    const nodesWithSha = NODES.map(n => {
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: nodesWithSha, edges: EDGES, activeQuery: query },
+    });
+    // fn1 matches to_commit via last_modified_sha and is not unchanged at
+    // from_commit; fn2 is unchanged at from_commit (both shas prefix-match);
+    // every other node never matches to_commit.
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('1 changed');
   });
 
   it('renders diff scope query', () => {
@@ -400,9 +525,43 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     }
 
     if (scope.type === 'diff') {
+      // Mirrors ExplorerCanvas.svelte diff scope, which mirrors the server
+      // resolver (gyre-domain view_query_resolver.rs Scope::Diff). Reads the
+      // fields GraphNodeResponse actually serializes: created_sha,
+      // last_modified_sha, created_at, last_modified_at. There is no
+      // last_commit_sha field in production data.
+      const fromCommit = (scope.from_commit ?? '').toLowerCase();
+      const toCommit = (scope.to_commit ?? '').toLowerCase();
+      if (!fromCommit || !toCommit) return new Set();
+      const epochRef = (s) => {
+        const m = /^~(\d+)$/.exec(s);
+        return m ? Number(m[1]) : null;
+      };
+      const fromTs = epochRef(fromCommit);
+      const toTs = epochRef(toCommit);
       const matched = new Set();
-      for (const n of nodes) {
-        if (n.last_commit_sha && n.last_commit_sha !== scope.from_commit) matched.add(n.id);
+      if (fromTs !== null && toTs !== null) {
+        // Temporal diff: created or modified within (fromTs, toTs]
+        for (const n of nodes) {
+          const created = n.created_at ?? 0;
+          const modified = n.last_modified_at ?? 0;
+          if ((created > fromTs && created <= toTs) || (modified > fromTs && modified <= toTs)) {
+            matched.add(n.id);
+          }
+        }
+      } else {
+        // SHA diff: to_commit must be a >=7-char prefix of created_sha or
+        // last_modified_sha; nodes unchanged at from_commit (BOTH shas match
+        // from) are excluded.
+        const shaMatches = (sha, target) => {
+          if (!sha || target.length < 7) return false;
+          return String(sha).toLowerCase().startsWith(target);
+        };
+        for (const n of nodes) {
+          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
+          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
+          if (matchesTo && !unchangedAtFrom) matched.add(n.id);
+        }
       }
       return matched;
     }
@@ -509,14 +668,60 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     expect(matched.has('fn2')).toBe(false); // no call connection to User
   });
 
-  it('diff scope: highlights nodes with different commit SHA', () => {
-    const nodesWithCommit = [
-      ...NODES.map(n => ({ ...n, last_commit_sha: n.id === 'fn1' ? 'newsha' : 'abc123' })),
-    ];
-    const matched = resolveQueryMatch(nodesWithCommit, EDGES, { type: 'diff', from_commit: 'abc123' });
+  it('diff scope (SHA): nodes modified at to_commit, excluding unchanged at from_commit', () => {
+    // Fields GraphNodeResponse actually serializes: created_sha/last_modified_sha
+    const nodesWithSha = NODES.map(n => {
+      // fn1: modified at to_commit, created elsewhere -> included
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      // fn2: created AND last-modified at from_commit (both shas prefix-match
+      // from) -> excluded even though created_sha also matches to_commit
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' });
 
-    expect(matched.has('fn1')).toBe(true); // different SHA
-    expect(matched.has('fn2')).toBe(false); // same SHA
+    expect(matched.has('fn1')).toBe(true); // last_modified_sha matches to_commit prefix
+    expect(matched.has('fn2')).toBe(false); // unchanged at from_commit -> excluded
+    expect(matched.has('type1')).toBe(false); // never matched to_commit
+  });
+
+  it('diff scope (SHA): requires >=7-char to_commit prefix', () => {
+    // 'c0ffee' is only 6 chars: below the false-positive guard, so no match
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' });
+    expect(matched.size).toBe(0);
+  });
+
+  it('diff scope (temporal): nodes created or modified within (from, to]', () => {
+    const nodesWithTs = [
+      ...NODES.map(n => ({ ...n, created_at: 100, last_modified_at: 100 })),
+      { ...NODES[2], created_at: 100, last_modified_at: 150 }, // fn1 modified inside (100,200]
+      { ...NODES[3], created_at: 150, last_modified_at: 100 }, // fn2 created inside range
+      { ...NODES[5], created_at: 100, last_modified_at: 250 }, // type1 modified after to
+    ];
+    const matched = resolveQueryMatch(nodesWithTs, EDGES, { type: 'diff', from_commit: '~100', to_commit: '~200' });
+    expect(matched.has('fn1')).toBe(true);
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('type1')).toBe(false);
+    expect(matched.has('pkg1')).toBe(false); // created_at = 100 is NOT > fromTs (half-open)
+    expect(matched.has('test1')).toBe(false);
+  });
+
+  it('diff scope: missing to_commit resolves to no nodes', () => {
+    // The old client implementation read a nonexistent field (last_commit_sha)
+    // and ignored to_commit; with real data it matched nothing. The component
+    // requires both commits, mirroring the server resolver.
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
+    expect(matched.size).toBe(0);
   });
 
   it('returns empty set for focus scope with non-existent node', () => {
@@ -797,6 +1002,33 @@ describe('ExplorerCanvas — lens switching', () => {
     const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
     expect(legendLabels).toContain('OK span');
     expect(legendLabels).toContain('Error span');
+  });
+
+  it('clicking a filter preset switches active preset and updates aria-pressed', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const [all, endpoints, types, calls, dependencies] = filterButtons;
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+
+    // Endpoints preset: no endpoint nodes in fixture, but toggle still switches
+    await fireEvent.click(endpoints);
+    expect(endpoints.getAttribute('aria-pressed')).toBe('true');
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(calls);
+    expect(calls.getAttribute('aria-pressed')).toBe('true');
+    expect(endpoints.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(types);
+    expect(types.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(dependencies);
+    expect(dependencies.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(all);
+    expect(all.getAttribute('aria-pressed')).toBe('true');
   });
 });
 
@@ -1382,15 +1614,20 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is visually disabled with tooltip', () => {
+  it('observable button is aria-disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const obsBtn = container.querySelector('.tb-btn-observable');
     expect(obsBtn).toBeTruthy();
-    expect(obsBtn.disabled).toBe(true);
+    // Lens stays disabled (spec: grayed out until production telemetry integration)
     expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.title).toMatch(/disabled.*pending production/i);
+    expect(obsBtn.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (not a native disabled button) and shows the notice banner
+    await fireEvent.click(obsBtn);
+    const banner = container.querySelector('.observable-banner');
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain('OpenTelemetry collector');
   });
 });
 
@@ -1704,6 +1941,119 @@ describe('ExplorerCanvas -- interactive query template storage', () => {
 
     expect(resolved.scope.node).toBe('create_user');
     expect(resolved.annotation.title).toBe('Blast radius: create_user');
+  });
+});
+
+// ── Filter preset node dimming (task-065 F1) ────────────────────────────
+//
+// The aria-pressed test above only pins toolbar toggling — the dimming math
+// in filterOpacity (now nodeFilterOpacity in canvas-filters.js) had no
+// component-level pin: a mutation reverting the 'dependencies' case to
+// unconditional dimming passed the whole suite. These render the component
+// per filter and read ctx.globalAlpha at each leaf label fillText — the
+// composed draw opacity (semantic-zoom fade × filter dimming). The zoom fade
+// factor is identical for every leaf in the fixture, so participant vs
+// non-participant ratios isolate the filter term exactly.
+
+describe('ExplorerCanvas — filter preset node dimming (draw path)', () => {
+  // Multi-segment qualified names: graph nodes land as LEAF cells inside one
+  // shared tree-group (layoutLeafNodes path), all visible at initial fit zoom.
+  // 'ep' (endpoint) and 'ty' (type) give the endpoints/types presets a lit
+  // reference; part1/part2/lone1/lone2 are functions.
+  const DN = (id, node_type = 'function') => ({
+    id, node_type, name: id, qualified_name: `app.svc.${id}`,
+    file_path: 'app/svc.py', line_start: 0, line_end: 0,
+    visibility: 'public', spec_confidence: 'none', test_node: false,
+  });
+  const DIM_NODES = [
+    DN('part1'), DN('part2'), DN('lone1'), DN('lone2'),
+    DN('ep', 'endpoint'), DN('ty', 'type'),
+  ];
+  // part1—part2 calls; part1—lone1 depends_on; lone2/ep/ty isolated.
+  const DIM_EDGES = [
+    { id: 'de1', source_id: 'part1', target_id: 'part2', edge_type: 'calls' },
+    { id: 'de2', source_id: 'part1', target_id: 'lone1', edge_type: 'depends_on' },
+  ];
+  const ALL_LABELS = ['part1', 'part2', 'lone1', 'lone2', 'ep', 'ty'];
+
+  // Returns map label → array of globalAlpha values captured at the label
+  // fillText call (drawLeafNode label, not the node-type sub-label).
+  function renderCapturingLeafLabelAlphas(filter) {
+    const labelAlphas = new Map();
+    mockCtx.fillText = vi.fn(function (text) {
+      const t = String(text);
+      if (ALL_LABELS.includes(t)) {
+        if (!labelAlphas.has(t)) labelAlphas.set(t, []);
+        labelAlphas.get(t).push(mockCtx.globalAlpha);
+      }
+    });
+    const rendered = render(ExplorerCanvas, {
+      props: { nodes: DIM_NODES, edges: DIM_EDGES, filter },
+    });
+    return { labelAlphas, rendered };
+  }
+
+  it('renders the fixture with all six leaf labels visible under filter=all (fixture sanity)', () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('all');
+    for (const t of ALL_LABELS) {
+      expect(labelAlphas.get(t)?.length, `leaf ${t} must draw its label`).toBeGreaterThan(0);
+    }
+  });
+
+  it("filter='dependencies': calls and depends_on participants stay lit, isolated node dims to 1/10 (task-065 F1 — unconditional dimming regression)", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('dependencies');
+    const part1 = labelAlphas.get('part1');
+    const lone2 = labelAlphas.get('lone2');
+    expect(part1?.length).toBeGreaterThan(0);
+    expect(lone2?.length).toBeGreaterThan(0);
+    // Participants (calls part1/part2, depends_on part1/lone1) share the
+    // zoom-fade factor; the dimmed node is exactly filterOpacity 0.1 vs 1.0.
+    expect(lone2[0] / part1[0]).toBeCloseTo(0.1, 5);
+    // lone1 participates via depends_on only — must ALSO stay lit under
+    // dependencies even though it has no calls edge (the F1 fix).
+    const lone1 = labelAlphas.get('lone1');
+    expect(lone1[0] / part1[0]).toBeCloseTo(1.0, 5);
+    const part2 = labelAlphas.get('part2');
+    expect(part2[0] / part1[0]).toBeCloseTo(1.0, 5);
+  });
+
+  it("filter='calls': calls participants stay lit; depends_on-only and isolated nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('calls');
+    const part1 = labelAlphas.get('part1');
+    expect(part1?.length).toBeGreaterThan(0);
+    // lone1 is a depends_on participant but NOT a calls participant → dims.
+    expect(labelAlphas.get('lone1')[0] / part1[0]).toBeCloseTo(0.1, 5);
+    expect(labelAlphas.get('lone2')[0] / part1[0]).toBeCloseTo(0.1, 5);
+    expect(labelAlphas.get('part2')[0] / part1[0]).toBeCloseTo(1.0, 5);
+  });
+
+  it("filter='endpoints': endpoint node stays lit, function nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('endpoints');
+    const ep = labelAlphas.get('ep');
+    expect(ep?.length).toBeGreaterThan(0);
+    // All function nodes (including calls participants — the filter is
+    // node-type-based, not edge-based) dim.
+    for (const t of ['part1', 'part2', 'lone1', 'lone2', 'ty']) {
+      expect(labelAlphas.get(t)[0] / ep[0]).toBeCloseTo(0.1, 5);
+    }
+  });
+
+  it("filter='types': type node stays lit, function nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('types');
+    const ty = labelAlphas.get('ty');
+    expect(ty?.length).toBeGreaterThan(0);
+    for (const t of ['part1', 'part2', 'lone1', 'lone2', 'ep']) {
+      expect(labelAlphas.get(t)[0] / ty[0]).toBeCloseTo(0.1, 5);
+    }
+  });
+
+  it("filter='all': no dimming — all leaves share the same draw opacity", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('all');
+    const part1 = labelAlphas.get('part1');
+    expect(part1?.length).toBeGreaterThan(0);
+    for (const t of ['part2', 'lone1', 'lone2', 'ep', 'ty']) {
+      expect(labelAlphas.get(t)[0] / part1[0]).toBeCloseTo(1.0, 5);
+    }
   });
 });
 
