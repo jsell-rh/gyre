@@ -362,7 +362,8 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
+    /// Tenant scope claim. Absent = the bootstrap default tenant
+    /// (`system_principal_tenant`; hierarchy-enforcement.md §1).
     #[serde(default)]
     tenant_id: Option<String>,
 }
@@ -834,8 +835,14 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from JWT claim. An absent claim
+    // resolves to the bootstrap default tenant via the documented
+    // contract helper (system_principal_tenant) — the same scope every
+    // server-originated principal resolves to, not a fabricated identity.
+    let tenant_id = claims
+        .tenant_id
+        .clone()
+        .unwrap_or_else(system_principal_tenant);
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user. The validated tenant claim binds the user
