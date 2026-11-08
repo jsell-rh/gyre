@@ -82,6 +82,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Log compression (observability.md §Log Retention & Compression) —
+    // daily by default, configurable via GYRE_LOG_COMPRESSION_INTERVAL.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        gyre_server::log_compression::JOB_NAME.to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
