@@ -136,7 +136,7 @@ def run_claim(store, claim):
     except Exception as exc:
         try:
             receipt = execution.directory / 'recovery.json'
-            if stage == 'implement' and receipt.exists():
+            if stage == 'implement' and receipt.exists() and not getattr(exc, 'attention', False):
                 from pipeline.recovery import restore
                 repository = store.directory / 'recovery.git'
                 with (store.directory / 'recovery.lock').open('a') as lock:
@@ -246,6 +246,8 @@ def main():
                 if args.command == 'retry':
                     query += ' AND task=?'
                     params += (args.task,)
+                for row in store.db.execute("SELECT task,stage,generation FROM work WHERE state IN ('attention','retry')" + (' AND task=?' if args.command=='retry' else ''), (args.task,) if args.command=='retry' else ()).fetchall():
+                    store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')

@@ -442,8 +442,12 @@ pub async fn invite_member(
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
 
-    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action needed).
-    // Channel fan-out per user-management.md §Delivery Channels.
+    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action
+    // needed). Routed through notify_rich (the codebase's notification helper,
+    // which fans out to the recipient's configured channels per
+    // user-management.md §Delivery Channels): a notification is a courtesy
+    // side-effect, not a dependent record of the membership — its failure must
+    // not fail the invite, and notify_rich logs-and-continues internally.
     crate::notifications::notify_rich(
         state.as_ref(),
         membership.workspace_id.clone(),
