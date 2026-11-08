@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: ["7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6"]
+commits: ["7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "c4d00719c31c58e592d02f91371ea9608a0f9ad0"]
 ---
 
 ## Spec Excerpt
@@ -69,7 +69,9 @@ Both liveness layers of HSI §3 are implemented in production frontend code
 (product surface in commit c17b6c95; review repairs in commits a3ad5d02 —
 repo scoping — and 7da87564 — the canvas-load timeline query below; upstream
 rebase resolution in merge commit 2bd17bd3 — both liveness and upstream's
-causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`).
+causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`;
+verification repair in commit c4d00719 — a rustfmt-only fix to the
+`per_page` test's pinned-timestamp loop, described under Test evidence).
 
 ### Layer 1 — SDLC activity
 
@@ -178,7 +180,8 @@ causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`).
 - Server: `api::merge_requests::tests::list_mrs_per_page_keeps_newest` —
   `per_page` caps the list to the most recently created MRs, newest
   first, with distinct pinned timestamps; full module
-  `api::merge_requests::` 31/31 passed.
+  `api::merge_requests::` 32/32 passed (`cargo test -p gyre-server --lib
+  api::merge_requests`, exit 0, after the rustfmt repair below).
 - Full suite: `npm test` in `web/` — after the upstream rebase merge
   (2bd17bd3, resolving additive conflicts in ExplorerView/ExplorerCanvas so
   the liveness imports/props and upstream's `focusRequest`/`windowEscape`/
@@ -186,5 +189,13 @@ causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`).
   41 skipped, exit 0 (locked deps via `npm ci`). The four conflict regions
   were all additive (both sides' features kept); no liveness behavior was
   weakened by the merge.
+- Verification repair (c4d00719) — the verification gate's rustfmt check
+  failed on changed line 1407 of `crates/gyre-server/src/api/merge_requests.rs`
+  (the pinned-timestamp array literal in the `per_page` test exceeded the
+  line-width budget). `cargo fmt -p gyre-server` reformats that one loop;
+  no behavior change, and `cargo fmt --check` is clean afterwards. All
+  other gate failures in that run: none — every other check in the log
+  passed and the web build itself succeeded (the Svelte a11y/unused-CSS
+  lines in the log tail are pre-existing non-fatal warnings).
 - Evidence (commands, SHAs, exit codes, output) saved under
   `/tmp/stage/review-evidence/task-086-*.txt` for executor retention.
