@@ -604,6 +604,13 @@ pub(crate) async fn spawn_agent_core(
     };
     let branch_slug = req.branch.replace('/', "-");
     let worktree_path = format!("{}/worktrees/{}", repo_root, branch_slug);
+    // Response value for `worktree_path`: the directory the agent
+    // actually works in, i.e. the same path persisted to the worktree
+    // record. When jj provisioning succeeds the plain-git worktree is
+    // NOT created — the agent's directory is the jj workspace — so
+    // reporting `worktree_path` there names a nonexistent directory
+    // (review de1eec5d F1). Set below alongside `jj_change_id`.
+    let response_worktree_path;
     let jj_main_checkout_path = format!("{}/jj-main", repo_root);
     let jj_workspace_path = format!("{}/workspaces/{}", repo_root, agent.id);
     let jj_workspace_name = format!("agent-{}", agent.id);
@@ -763,6 +770,12 @@ pub(crate) async fn spawn_agent_core(
         } else {
             worktree_path.clone()
         };
+        // The response must report the same path the worktree record
+        // persists — the agent's actual working directory (jj workspace
+        // when provisioned, plain-git worktree otherwise). The bare
+        // `worktree_path` names a directory that is never created when
+        // jj provisioning succeeded (review de1eec5d F1).
+        response_worktree_path = effective_path.clone();
         let wt = AgentWorktree::new(
             new_id(),
             agent.id.clone(),
@@ -794,6 +807,9 @@ pub(crate) async fn spawn_agent_core(
 
         change_id
     } else {
+        // Interrogation agents are read-only with no worktree at all;
+        // keep the historical placeholder path in the response.
+        response_worktree_path = worktree_path.clone();
         None
     };
 
@@ -1387,7 +1403,7 @@ pub(crate) async fn spawn_agent_core(
             r
         },
         token,
-        worktree_path,
+        worktree_path: response_worktree_path,
         clone_url,
         branch: req.branch,
         compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
@@ -2486,6 +2502,164 @@ mod tests {
             "jj-provisioned agent must record the jj workspace path, got {}",
             wts[0].path
         );
+
+        // Review de1eec5d F1: the spawn RESPONSE must report the same
+        // path — the jj workspace, not the plain-git worktree directory
+        // that is never created when jj provisioning succeeded.
+        assert_eq!(
+            resp.worktree_path, wts[0].path,
+            "response worktree_path must equal the recorded worktree path"
+        );
+    }
+
+    /// Review de1eec5d F1: `worktree_path` in the spawn response must
+    /// name the directory the agent actually works in — the value
+    /// persisted to the worktree record. When jj provisioning succeeds
+    /// the plain-git worktree is NOT created (the jj workspace is the
+    /// agent's working directory), so the historical response path
+    /// (`{repo}/worktrees/{branch}`) named a nonexistent directory and
+    /// the API was internally inconsistent with GET /repos/:id/worktrees.
+    /// Covers both provisioning outcomes: jj workspace when provisioned,
+    /// plain-git worktree when jj fails. Fails on the pre-fix behavior
+    /// (response always cites the worktrees/ path) for the provisioned
+    /// case.
+    #[tokio::test]
+    async fn spawn_response_worktree_path_matches_recorded_worktree() {
+        let git = std::sync::Arc::new(gyre_adapters::git2_ops::Git2OpsAdapter::new());
+
+        // Case 1: jj provisioning succeeds — response and record both
+        // name the jj workspace.
+        {
+            let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+            let state = crate::mem::test_state_with_jj_and_git_ops(jj.clone(), git.clone());
+            let dir = tempfile::tempdir().unwrap();
+            let bare = dir.path().join("repo.git");
+            let bare_str = bare.to_str().unwrap().to_string();
+            git.init_bare(&bare_str).await.unwrap();
+            git.create_initial_commit(&bare_str, "main").await.unwrap();
+            let mut repo = gyre_domain::Repository::new(
+                Id::new("repo-f1a"),
+                Id::new("ws-1"),
+                "f1a-repo",
+                bare_str.clone(),
+                1000,
+            );
+            repo.default_branch = "main".to_string();
+            state.repos.create(&repo).await.unwrap();
+            let mut task = gyre_domain::Task::new(Id::new("task-f1a"), "f1a task", 1000);
+            task.task_type = Some(gyre_domain::TaskType::Implementation);
+            task.workspace_id = Id::new("ws-1");
+            state.tasks.create(&task).await.unwrap();
+            let auth = crate::auth::AuthenticatedAgent {
+                agent_id: "spawner".to_string(),
+                user_id: None,
+                roles: vec![],
+                tenant_id: "default".to_string(),
+                jwt_claims: None,
+                deprecated_token_auth: false,
+            };
+            let req = crate::api::spawn::SpawnAgentRequest {
+                name: "f1a-worker".to_string(),
+                repo_id: "repo-f1a".to_string(),
+                task_id: "task-f1a".to_string(),
+                branch: "feat/jj-provisioned".to_string(),
+                parent_id: None,
+                compute_target_id: None,
+                disconnected_behavior: None,
+                loop_config: None,
+                agent_type: None,
+                conversation_sha: None,
+            };
+            let resp = spawn_agent_core(&state, req, &auth)
+                .await
+                .expect("spawn must succeed");
+
+            let wts = state
+                .worktrees
+                .find_by_agent(&Id::new(&resp.agent.id))
+                .await
+                .unwrap();
+            assert_eq!(wts.len(), 1);
+            assert_eq!(
+                resp.worktree_path, wts[0].path,
+                "jj-provisioned: response must report the recorded jj workspace path"
+            );
+            assert!(
+                resp.worktree_path.contains("/workspaces/"),
+                "jj-provisioned: response must name the jj workspace, got {}",
+                resp.worktree_path
+            );
+        }
+
+        // Case 2: jj provisioning fails — response and record both name
+        // the plain-git worktree (which IS created on this path).
+        {
+            let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+            *jj.main_checkout_init_fails.lock() = true;
+            let state = crate::mem::test_state_with_jj_and_git_ops(jj.clone(), git.clone());
+            let dir = tempfile::tempdir().unwrap();
+            let bare = dir.path().join("repo.git");
+            let bare_str = bare.to_str().unwrap().to_string();
+            git.init_bare(&bare_str).await.unwrap();
+            git.create_initial_commit(&bare_str, "main").await.unwrap();
+            let mut repo = gyre_domain::Repository::new(
+                Id::new("repo-f1b"),
+                Id::new("ws-1"),
+                "f1b-repo",
+                bare_str.clone(),
+                1000,
+            );
+            repo.default_branch = "main".to_string();
+            state.repos.create(&repo).await.unwrap();
+            let mut task = gyre_domain::Task::new(Id::new("task-f1b"), "f1b task", 1000);
+            task.task_type = Some(gyre_domain::TaskType::Implementation);
+            task.workspace_id = Id::new("ws-1");
+            state.tasks.create(&task).await.unwrap();
+            let auth = crate::auth::AuthenticatedAgent {
+                agent_id: "spawner".to_string(),
+                user_id: None,
+                roles: vec![],
+                tenant_id: "default".to_string(),
+                jwt_claims: None,
+                deprecated_token_auth: false,
+            };
+            let req = crate::api::spawn::SpawnAgentRequest {
+                name: "f1b-worker".to_string(),
+                repo_id: "repo-f1b".to_string(),
+                task_id: "task-f1b".to_string(),
+                branch: "feat/plain/fallback".to_string(),
+                parent_id: None,
+                compute_target_id: None,
+                disconnected_behavior: None,
+                loop_config: None,
+                agent_type: None,
+                conversation_sha: None,
+            };
+            let resp = spawn_agent_core(&state, req, &auth)
+                .await
+                .expect("spawn must succeed");
+
+            let wts = state
+                .worktrees
+                .find_by_agent(&Id::new(&resp.agent.id))
+                .await
+                .unwrap();
+            assert_eq!(wts.len(), 1);
+            assert_eq!(
+                resp.worktree_path, wts[0].path,
+                "plain-git fallback: response must report the recorded worktree path"
+            );
+            assert!(
+                resp.worktree_path.contains("/worktrees/feat-plain-fallback"),
+                "plain-git fallback: response must name the created worktree (branch slashes dashed), got {}",
+                resp.worktree_path
+            );
+            assert!(
+                std::path::Path::new(&resp.worktree_path).exists(),
+                "plain-git fallback: the reported path must exist on disk, got {}",
+                resp.worktree_path
+            );
+        }
     }
 
     /// Task-106 R19 F1+F2: on completion of a jj-workspace agent, the

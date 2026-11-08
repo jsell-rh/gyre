@@ -481,6 +481,9 @@ pub struct ConfigurableJjOps {
     pub workspace_add_revisions: parking_lot::Mutex<Vec<String>>,
     /// `"{main_checkout_path}:{git_repo_path}"` per call.
     pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
+    /// When true, `jj_main_checkout_init` fails — lets tests exercise
+    /// the spawn flow's plain-git worktree fallback.
+    pub main_checkout_init_fails: parking_lot::Mutex<bool>,
     pub git_export_calls: parking_lot::Mutex<Vec<String>>,
     /// `jj_bookmark_set` calls as `(repo_path, name, change_id)` in order
     /// (task-106 R19 F1: the completion path must SET the imported
@@ -573,6 +576,9 @@ impl JjOpsPort for ConfigurableJjOps {
         self.main_checkout_init_calls
             .lock()
             .push(format!("{main_checkout_path}:{git_repo_path}"));
+        if *self.main_checkout_init_fails.lock() {
+            return Err(anyhow::anyhow!("programmed jj main checkout init failure"));
+        }
         Ok(())
     }
 
