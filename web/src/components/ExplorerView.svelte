@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -50,6 +51,11 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
+  // Causal trace step focus: clicking a step in the detail panel pans/zooms
+  // the canvas to that node (explorer-canvas.md §6 step 6). The nonce lets
+  // repeated clicks on the same step re-trigger the camera move.
+  let traceFocusRequest = $state(null);
+  let traceFocusNonce = 0;
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -864,6 +870,7 @@
     traceData = null;
     graphWarnings = [];
     graphWarningsDismissed = false;
+    perfWarningDismissed = false;
     try {
       graph = await api.repoGraph(repoId);
       // Surface data quality warnings from the API (e.g., missing LSP toolchains)
@@ -1026,6 +1033,19 @@
   onDestroy(() => {
     clearTimeout(debounceTimer);
     ghostOverlays = [];
+  });
+
+  // ── Large graph performance warning (explorer-implementation.md §28 Phase 4) ──
+  // Graphs above 10k nodes are the spec's "large graph" threshold: rendering
+  // stays correct (viewport culling + zoom-level LOD) but interaction can
+  // degrade, so the user is told why instead of guessing.
+  const LARGE_GRAPH_THRESHOLD = 10000;
+  let perfWarningDismissed = $state(false);
+  let largeGraphWarning = $derived.by(() => {
+    if (perfWarningDismissed) return null;
+    const count = effectiveGraph?.nodes?.length ?? 0;
+    if (count <= LARGE_GRAPH_THRESHOLD) return null;
+    return $t('explorer_view.large_graph_warning', { values: { count: count.toLocaleString() } });
   });
 
   // ── Toolchain warning: detect missing call edges ──────────────────
@@ -1394,17 +1414,36 @@
         {:else if graph}
           <div class="explorer-split">
             <div class="explorer-canvas-area">
-              {#if missingCallEdgesWarning}
-                <div class="toolchain-warning" role="alert">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                  <span>{missingCallEdgesWarning}</span>
-                  <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
+              {#if missingCallEdgesWarning || largeGraphWarning}
+                <div class="canvas-warning-stack">
+                  {#if missingCallEdgesWarning}
+                    <div class="toolchain-warning" role="alert">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      <span>{missingCallEdgesWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
+                  {#if largeGraphWarning}
+                    <div class="toolchain-warning perf-warning" role="status" data-testid="large-graph-warning">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                      <span>{largeGraphWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { perfWarningDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss performance warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
                 </div>
               {/if}
+              <!-- windowEscape={false}: ExplorerView owns the window-level Escape
+                   cascade (onWindowKeydown: spec editor → query editor → detail panel →
+                   active view query) and already exits trace mode through it; a second
+                   window Escape listener in the canvas would clear the trace on the same
+                   keypress that closes an overlay above it. -->
               <ExplorerCanvas
                 repoId={selectedRepoId}
+                rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
@@ -1439,6 +1478,8 @@
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
+                focusRequest={traceFocusRequest}
+                windowEscape={false}
                 timeline={graphTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
@@ -1644,6 +1685,17 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
+                  onTraceStepNavigate={(step) => {
+                    // Show the step's node in the detail panel and pan/zoom
+                    // the canvas to it (explorer-canvas.md §6 step 6). The
+                    // step list is carried onto the target so the panel
+                    // keeps showing the full clickable trace across
+                    // navigation clicks.
+                    const target = traceStepTargetNode(detailNode, step, graph.nodes ?? []);
+                    if (target) detailNode = target;
+                    traceFocusNonce += 1;
+                    traceFocusRequest = { nodeId: step.nodeId, nonce: traceFocusNonce };
+                  }}
                   onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
@@ -2839,8 +2891,12 @@
     position: relative;
   }
 
-  .toolchain-warning {
+  .canvas-warning-stack {
     position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    max-width: 600px;
+  }
+  .toolchain-warning {
     display: flex; align-items: center; gap: 8px;
     padding: 6px 14px; background: rgba(120, 53, 15, 0.85); border: 1px solid rgba(245, 158, 11, 0.4);
     border-radius: 8px; font-size: 11px; color: #fbbf24; max-width: 600px;

@@ -829,7 +829,7 @@ async fn find_or_create_user(
     // identifier (RFC 7519 StringOrURI; Auth0 subjects contain '|'), not a
     // URL-safe string, and the handle contract (validate_username) must hold
     // for every persisted username. When neither sanitizes (e.g. a purely
-    // numeric-keypad subject), use migration 000057's escape hatch for
+    // numeric-keypad subject), use migration 000058's escape hatch for
     // unsanitizable names: "u-<row id>", URL-safe and unique by the freshly
     // generated primary key.
     // sanitize_username is lossy — distinct IdP handles ("Jordan Sell" /
@@ -850,7 +850,7 @@ async fn find_or_create_user(
             // Every Err means the base handle is already taken (the walk
             // probes the base first), so falling back to the subject
             // verbatim would fail create() and reproduce the lockout.
-            // Instead mirror migration 000057's escape hatch for
+            // Instead mirror migration 000058's escape hatch for
             // unsanitizable names: "u-<row id>", URL-safe and unique by
             // the freshly generated primary key.
             tracing::warn!(
@@ -886,7 +886,7 @@ async fn find_or_create_user(
 
 /// Derive a globally-unique handle for a freshly provisioned user.
 ///
-/// Mirrors migration 000057's dedup pass 1: the first user keeps the base
+/// Mirrors migration 000058's dedup pass 1: the first user keeps the base
 /// handle, later colliding users get deterministic numeric suffixes
 /// (base-2, base-3, ...). An exhausted suffix space bails and the caller
 /// assigns a generated `u-<id>` handle (unique by the fresh primary key).

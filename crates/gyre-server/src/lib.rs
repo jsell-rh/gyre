@@ -34,6 +34,7 @@ pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
+pub mod reconciliation;
 pub mod retention;
 pub mod siem;
 pub(crate) mod signing;
@@ -52,6 +53,7 @@ pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
 pub mod trust_suggestion;
+pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
@@ -307,6 +309,12 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Trusted reverse-proxy networks for forensic source-IP resolution
+    /// (task-102 F3 / CWE-348). Populated from `GYRE_TRUSTED_PROXIES`
+    /// (comma-separated CIDRs / bare IPs). Empty (the default) = every
+    /// connection is direct: the socket peer is always the source and
+    /// forwarded headers are ignored.
+    pub trusted_proxies: trusted_proxy::TrustedProxies,
     /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
     pub commit_signatures: commit_signatures::CommitSignatureStore,
     /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
@@ -979,6 +987,7 @@ pub fn build_state(
             })
             .unwrap_or_default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: trusted_proxy::TrustedProxies::from_env(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
@@ -1524,6 +1533,7 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
             approved_at: Some(now),
+            approved_content_hash: Some(sha256_hex(prompt)),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,

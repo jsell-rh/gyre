@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
@@ -16,6 +16,12 @@
   } from './test-reachability.js';
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
+  import {
+    hasCausalEdges,
+    computeTraceOrder,
+    governingSpecFor,
+    buildTraceSteps,
+  } from './causal-trace.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -35,6 +41,13 @@
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
+    //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
+    //                     closes overlays most-recent-first and clears the trace query itself, so it opts
+    //                     out (false); a second window listener there would clear the trace on the same
+    //                     keypress that closes an overlay, breaking the cascade ordering.
+    rootLabel = '',          // breadcrumb root segment label (repo name at repo scope)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
     timelineActive = false,    // Whether time travel mode is active
@@ -241,6 +254,20 @@
   let drillTransitioning = $state(false);
   let drillTransitionStart = 0;
   const DRILL_TRANSITION_MS = 300;
+  // Camera pose at drill-transition start. Kept OUTSIDE the `cam` object on
+  // purpose: the layout $effect replaces `cam` wholesale (`cam = { ...targetCam }`)
+  // whenever the breadcrumb changes — which happens on every drill — so start
+  // pose stored on `cam` itself would be silently dropped and lerpCam would
+  // interpolate from `undefined` (NaN camera, broken hit-testing everywhere).
+  let drillStartCam = null;
+  // Two-phase drill (explorer-canvas.md §5 zoom transition): phase 1 zooms
+  // into the clicked node while unrelated nodes fade out (old layout still
+  // visible); when it completes, the scope is applied (breadcrumb push →
+  // layout swap) and phase 2 smoothly settles the camera on the new level.
+  // Applying the scope immediately would swap the layout in the same tick as
+  // the double-click, making unrelated nodes disappear abruptly (jump-cut)
+  // instead of fading out.
+  let pendingDrill = null;
 
   // Recent interaction trail for conversational context (sent with messages)
   let recentInteractions = $state([]);
@@ -340,9 +367,53 @@
   let ghostPulsePhase = $state(0); // 0..1 pulsing animation
   let ghostAnimCycles = $state(0); // count of completed pulse cycles
 
-  // Trace path numbering state (DFS execution order badges for "Trace from here")
+  // Trace path numbering state (BFS execution order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
-  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in DFS order
+  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
+  // Set when "Trace from here" is requested but the graph has no Calls/RoutesTo
+  // edges at all — the spec requires a warning instead of a silent empty trace.
+  let traceWarning = $state(false);
+  // Node that started the current trace. Plain (non-reactive) vars: written by
+  // event handlers, read by the trace effect once the query round-trips back
+  // as the activeQuery prop — keeping them untracked means the activating
+  // click itself cannot trigger an intermediate effect run that would clear
+  // them before the query lands (effects are batched with the query update in
+  // production, but staying untracked removes the ordering assumption).
+  let traceStartNodeId = null;
+  // Dedupe guard for detail-panel emission: the trace effect re-runs on data
+  // reloads while a trace is active; re-emitting would clobber the user's
+  // current detail selection.
+  let lastTraceDetailEmittedFor = null;
+
+  // Start a causal flow trace from `node` (explorer-canvas.md §6).
+  // Shared by the right-click context menu and the toolbar Trace button.
+  // If the loaded graph contains no causal (Calls/RoutesTo) edges, trace mode
+  // cannot show any flow: warn instead of entering a degenerate trace.
+  function startTraceFromNode(node) {
+    if (!node) return;
+    if (!hasCausalEdges(edges)) {
+      traceWarning = true;
+      return;
+    }
+    traceWarning = false;
+    traceStartNodeId = node.id;
+    lastTraceDetailEmittedFor = null;
+    // Trace from here: show causal flow using Calls + RoutesTo edges.
+    // Depth 15 to capture full reachable subgraph while staying responsive.
+    onInteractiveQuery({
+      scope: { type: 'focus', node: node.qualified_name ?? node.name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
+      // Spec: unreachable nodes dim to 20% opacity (edges dim further via the
+      // query edge filter's ×0.1 factor on unmatched edges).
+      emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.2 },
+      edges: { filter: ['calls', 'routes_to'] },
+      zoom: 'fit',
+      annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
+      _trace: true,
+    });
+  }
+
+  // Whether a causal flow trace is currently active (the "Clear trace" affordances key off this).
+  let traceActive = $derived(!!activeQuery?._trace);
 
   // Pre-compute incoming call counts to avoid O(N*E) per anomaly check
   let incomingCallCounts = $derived.by(() => {
@@ -821,7 +892,7 @@
       const st = statsMap.get(nid);
       st.durations.push(s.duration_us);
       st.total++;
-      if (s.status === 'error' || s.status === 'ERROR') st.errors++;
+      if ((s.status ?? '').toLowerCase() === 'error') st.errors++;
     }
     // Compute percentiles
     const result = new Map();
@@ -897,7 +968,7 @@
 
       if (currentTime >= spanStart && currentTime <= spanEnd) {
         const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = span.status === 'error' || span.status === 'ERROR';
+        const isError = (span.status ?? '').toLowerCase() === 'error';
         newParticles.push({
           fromId: parent.graph_node_id,
           toId: span.graph_node_id,
@@ -916,6 +987,19 @@
     // Access highlightedSpanId to create a dependency
     const _spanId = highlightedSpanId;
     if (lens === 'evaluative') scheduleRedraw();
+  });
+
+  // Pan/zoom the camera to a node on external request (detail-panel trace
+  // step click — explorer-canvas.md §6 step 6). `nonce` lets repeated clicks
+  // on the same step re-fire. The layoutNodes lookup stays TRACKED so a
+  // request arriving before the layout settles re-fires once nodes exist;
+  // the zoom itself is untracked so later layout changes don't re-zoom.
+  $effect(() => {
+    const req = focusRequest;
+    if (!req?.nodeId) return;
+    const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === req.nodeId);
+    if (!ln) return; // not laid out yet — retried when layoutNodes changes
+    untrack(() => zoomToNode(req.nodeId));
   });
 
   // Computed elapsed time string for trace playback display
@@ -2656,10 +2740,13 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(stepNum), bx, by);
-        // Show governing spec annotation below badge if space permits
+        // Show governing spec annotation below badge if space permits.
+        // Checks GovernedBy edges too, not just the spec_path field (spec §6
+        // step 5: "annotated with its governing spec (if any)").
         const n = ln.node;
-        if (n?.spec_path && sw > 60 && sh > 30) {
-          const specLabel = n.spec_path.split('/').pop()?.replace('.md', '') ?? '';
+        const govSpec = governingSpecFor(n, edges);
+        if (govSpec && sw > 60 && sh > 30) {
+          const specLabel = govSpec.split('/').pop()?.replace('.md', '') ?? '';
           if (specLabel) {
             const specFs = Math.max(7, Math.min(9, sw * 0.06));
             ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
@@ -3312,38 +3399,47 @@
           ctx.restore();
         }
       }
-      // Evaluative metric badge (when evaluative lens is active)
-      if (evalColor && n && sw > 50 && sh > 30) {
-        let metricVal = 0;
-        let metricLabel = '';
-        // Evaluative lens only shows trace-based (behavioral) metrics
-        if (evaluativeMetric === 'span_duration') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.meanDuration; metricLabel = metricVal < 1000 ? `${Math.round(metricVal)}\u00B5s` : `${(metricVal / 1000).toFixed(1)}ms`; }
-        }
-        else if (evaluativeMetric === 'span_count') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.spanCount; metricLabel = `${metricVal} spans`; }
-        }
-        else if (evaluativeMetric === 'error_rate') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.errorRate * 100; metricLabel = `${metricVal.toFixed(0)}% err`; }
-        }
-        if (metricVal > 0) {
+      // Evaluative metric badges (when evaluative lens is active).
+      // Spec §4: node badges show span count, error rate, AND mean duration —
+      // all three are rendered as a chip row, independent of which metric
+      // drives the heat coloring (heat metric selection only changes color).
+      if (lens === 'evaluative' && n && sw > 50 && sh > 30) {
+        const stats = nodeSpanStats.get(n.id);
+        if (stats && stats.spanCount > 0) {
           const bx = s.x + sw / 2 - 4;
           const by = s.y - sh / 2 + 4;
           const bfs = Math.max(7, Math.min(9, sw * 0.08));
           ctx.save();
           ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
-          const bw = measureText(ctx, metricLabel, ctx.font) + 6;
-          ctx.fillStyle = evalColor + '88';
-          ctx.beginPath();
-          ctx.roundRect(bx - bw, by - 2, bw, bfs + 4, 3);
-          ctx.fill();
-          ctx.fillStyle = '#fff';
           ctx.textAlign = 'right';
           ctx.textBaseline = 'top';
-          ctx.fillText(metricLabel, bx - 3, by);
+          // Chips are laid out right-to-left from the node's top-right corner:
+          // [mean duration] [error rate] [span count]
+          const meanUs = stats.meanDuration;
+          const chips = [
+            { label: `${stats.spanCount} spans`, bg: (evalColor ?? '#3b82f6') + '88', fg: '#fff' },
+            {
+              label: `${Math.round(stats.errorRate * 100)}% err`,
+              bg: stats.errorRate > 0 ? '#7f1d1d' : '#1e293b',
+              fg: stats.errorRate > 0 ? '#fca5a5' : '#94a3b8',
+            },
+            {
+              label: meanUs < 1000 ? `${Math.round(meanUs)}\u00B5s` : `${(meanUs / 1000).toFixed(1)}ms`,
+              bg: '#1e293b',
+              fg: '#e2e8f0',
+            },
+          ];
+          let cursorX = bx;
+          for (const chip of chips) {
+            const cw = measureText(ctx, chip.label, ctx.font) + 6;
+            ctx.fillStyle = chip.bg;
+            ctx.beginPath();
+            ctx.roundRect(cursorX - cw, by - 2, cw, bfs + 4, 3);
+            ctx.fill();
+            ctx.fillStyle = chip.fg;
+            ctx.fillText(chip.label, cursorX - 3, by);
+            cursorX -= cw + 2;
+          }
           ctx.restore();
         }
       }
@@ -3813,11 +3909,30 @@
       const elapsed = performance.now() - drillTransitionStart;
       const t = Math.min(elapsed / DRILL_TRANSITION_MS, 1);
       const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
-      cam.x = cam._drillStartX + (targetCam.x - cam._drillStartX) * eased;
-      cam.y = cam._drillStartY + (targetCam.y - cam._drillStartY) * eased;
-      cam.zoom = cam._drillStartZoom + (targetCam.zoom - cam._drillStartZoom) * eased;
+      // Fall back to the target pose when no start pose was captured (e.g. a
+      // drill started before any camera state existed) — never interpolate
+      // from undefined.
+      const start = drillStartCam ?? { x: targetCam.x, y: targetCam.y, zoom: targetCam.zoom };
+      cam.x = start.x + (targetCam.x - start.x) * eased;
+      cam.y = start.y + (targetCam.y - start.y) * eased;
+      cam.zoom = start.zoom + (targetCam.zoom - start.zoom) * eased;
       if (t >= 1) {
         drillTransitioning = false;
+        drillStartCam = null;
+        // Phase 1 complete: apply the deferred drill scope (breadcrumb push →
+        // layout swap) and run phase 2 — a smooth arrival on the new level's
+        // fitted view. The layout $effect sets targetCam to the new fit; it
+        // also hard-cuts `cam`, but that value is never drawn: drawFrame only
+        // runs inside animLoop after lerpCam, which re-derives `cam` from
+        // drillStartCam each frame.
+        const pending = pendingDrill;
+        pendingDrill = null;
+        if (pending) {
+          applyDrillScope(pending);
+          drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
+          drillTransitioning = true;
+          drillTransitionStart = performance.now();
+        }
       }
     } else {
       cam.x += (targetCam.x - cam.x) * LERP_SPEED;
@@ -3827,6 +3942,12 @@
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
     // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
     cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
+    // Last-resort guard: a non-finite camera (NaN world origin) makes every
+    // hit-test rect "contain" every point and renders nothing — snap to the
+    // target pose rather than propagate it.
+    if (!Number.isFinite(cam.x) || !Number.isFinite(cam.y) || !Number.isFinite(cam.zoom)) {
+      cam.x = targetCam.x; cam.y = targetCam.y; cam.zoom = targetCam.zoom;
+    }
     // Track significant zoom changes for the interaction context (§10)
     trackZoomChange();
   }
@@ -3878,16 +3999,78 @@
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
     if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
       needsAnim = false;
-      animFrame = requestAnimationFrame(animLoop);
+      // Re-frame directly rather than via scheduleAnim(): animScheduled must
+      // stay true across the frame boundary (a frame is still pending), and
+      // a mid-frame scheduleRedraw() must coalesce into this tail decision,
+      // not start a re-entrant frame chain on the same stack.
+      if (syncFrameDepth < SYNC_FRAME_DEPTH_MAX) {
+        syncFrameDepth++;
+        try {
+          animFrame = requestAnimationFrame(runFrame);
+        } finally {
+          syncFrameDepth--;
+        }
+      } else {
+        // Synchronous rAF (jsdom mocks, sync-rAF webview polyfills): the
+        // re-frame chain recurses on one stack, and conditions that are not
+        // frame-count-bounded (drill transitions keyed on wall-clock time,
+        // evaluative playback) never settle when the mock advances no time
+        // between frames — the chain would exhaust the stack. Stop cleanly
+        // here so a later scheduleRedraw() can start a fresh chain. Real
+        // browsers (async rAF) never accumulate depth and never reach this.
+        stopLoop();
+      }
     } else {
-      animFrame = null;
+      stopLoop();
     }
+  }
+
+  // ── Frame scheduling ──────────────────────────────────────────────
+  // A frame is "pending" from scheduleAnim() until animLoop's tail decides
+  // to stop. Scheduling is guarded by this flag, NOT by the animFrame handle:
+  // a synchronous requestAnimationFrame implementation (jsdom test mocks,
+  // embedded webviews with sync rAF polyfills) runs the callback BEFORE
+  // requestAnimationFrame returns, so `animFrame = requestAnimationFrame(...)`
+  // re-enters, and when the re-entered loop stops and writes `animFrame =
+  // null`, the outer assignment overwrites it with a stale handle. Every
+  // subsequent scheduleRedraw() would see a non-null animFrame and bail —
+  // the canvas would never redraw again. The flag is only cleared when the
+  // loop actually stops, so it stays accurate under both async and sync rAF.
+  let animScheduled = false;
+  // Depth of the synchronous re-frame chain (see the cap comment in
+  // animLoop's tail). Async rAF returns before the callback runs, so the
+  // finally-decrement always restores 0 and real browsers never accumulate
+  // depth; only a synchronous rAF grows this counter.
+  let syncFrameDepth = 0;
+  const SYNC_FRAME_DEPTH_MAX = 100;
+
+  function stopLoop() {
+    animFrame = null;
+    animScheduled = false;
+  }
+
+  function runFrame(ts) {
+    // untrack: the render loop must never register reactive dependencies in
+    // whatever effect scheduled it. Under a synchronous rAF, animLoop's
+    // reads — including the needsAnim $state it consumes and toggles in its
+    // tail — would be attributed to the calling effect, so every needsAnim
+    // flip would re-run that effect, re-schedule the loop, and flip it again:
+    // an infinite effect↔redraw cycle. Under async rAF the callback runs
+    // outside any effect and tracking is moot, but untrack keeps the
+    // invariant explicit for both execution models.
+    untrack(() => animLoop(ts));
+  }
+
+  function scheduleAnim() {
+    if (destroyed || animScheduled) return;
+    animScheduled = true;
+    animFrame = requestAnimationFrame(runFrame);
   }
 
   function scheduleRedraw() {
     if (destroyed) return;
     needsAnim = true;
-    if (!animFrame) animFrame = requestAnimationFrame(animLoop);
+    scheduleAnim();
   }
 
   // ── Interaction handlers ──────────────────────────────────────────
@@ -4231,9 +4414,91 @@
     scheduleRedraw();
   }
 
+  // ── Progressive drill-down scope resolution (explorer-canvas.md §5) ─────
+  // Double-clicking a container drills the canvas into its children via
+  // Contains edges. Real graph nodes (package/module/type with Contains
+  // children) drill directly. Synthetic path-tree groups — the treemap's
+  // directory-style groupings, e.g. the top-level package cells — have no
+  // node id in the Contains index, so resolve them to the real graph node
+  // whose Contains subtree covers the group's contents. For a group named
+  // "greeting-service" that is the greeting-service package node, and
+  // drilling shows exactly the modules inside it (spec Level 0 → 1).
+  function isContainsAncestor(ancestorId, nodeId) {
+    const { childToParent } = treeData;
+    let cur = childToParent.get(nodeId);
+    while (cur) {
+      if (cur === ancestorId) return true;
+      cur = childToParent.get(cur);
+    }
+    return false;
+  }
+
+  // Resolve a synthetic tree-group layout node to the real graph node whose
+  // Contains subtree covers the group's laid-out members. Returns null when
+  // no single member covers the rest (pure directory grouping) — callers
+  // then fall back to the camera zoom.
+  function resolveTreeGroupScopeNode(ln) {
+    if (!ln || ln.kind !== 'tree-group') return null;
+    // Real graph-node cells use their node id; synthetic path groups use
+    // '__tree__'-prefixed ids.
+    if (!ln.id.startsWith('__tree__')) return ln.node ?? null;
+    const { parentToChildren } = treeData;
+    // Collect the real graph nodes laid out inside this group's cell subtree.
+    const members = [];
+    const seen = new Set();
+    function collectCells(cells) {
+      for (const cell of cells) {
+        if (seen.has(cell.id)) continue;
+        seen.add(cell.id);
+        if (cell.node && !cell.id.startsWith('__tree__')) members.push(cell.node);
+        const kids = childrenIndex.get(cell.id);
+        if (kids) collectCells(kids);
+      }
+    }
+    collectCells(childrenIndex.get(ln.id) ?? []);
+    if (members.length === 0) return null;
+    // The scope node is the member that is a Contains-ancestor of every other
+    // member (the package/module node the group was formed around).
+    for (const cand of members) {
+      if (!(parentToChildren.get(cand.id)?.length > 0)) continue;
+      let coversAll = true;
+      for (const other of members) {
+        if (other.id !== cand.id && !isContainsAncestor(cand.id, other.id)) {
+          coversAll = false;
+          break;
+        }
+      }
+      if (coversAll) return cand;
+    }
+    return null;
+  }
+
+  // Unified drill target for a canvas hit: a real container node drills
+  // itself; a synthetic tree-group resolves to its Contains scope node.
+  // Returns null when there is nothing to drill (leaf nodes, scopeless
+  // directory groups).
+  function drillTargetForHit(hit) {
+    if (!hit) return null;
+    const node = hit.node;
+    if (node && (treeData.parentToChildren.get(node.id) ?? []).length > 0) return node;
+    if (hit.kind === 'tree-group') return resolveTreeGroupScopeNode(hit);
+    return null;
+  }
+
+  // Apply a drill's scope change: push the breadcrumb (which triggers the
+  // layout $effect to filter the canvas to the node's Contains children) and
+  // sync canvasState for deep-linking.
+  function applyDrillScope(node) {
+    breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
+    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
+  }
+
   // Drill into a node with smooth spatial zoom transition.
   // Zooms INTO the clicked node's bounding box, fades unrelated nodes,
-  // then renders children in the same layout style.
+  // then renders children in the same layout style. The scope change
+  // (breadcrumb push, layout swap) is deferred to the end of the zoom
+  // (pendingDrill) so the fade-out plays on the old layout instead of the
+  // children appearing via an abrupt content swap.
   function drillInto(node) {
     // Guard: prevent rapid double-clicks from queuing multiple drill transitions
     if (drillTransitioning) return;
@@ -4247,26 +4512,27 @@
     const ww = ln?.w ?? 200;
     const wh = ln?.h ?? 200;
 
-    // Start fade transition: dim unrelated nodes (animated in render loop)
-    drillFadeTarget = node.id;
+    // Start fade transition: dim unrelated nodes (animated in render loop).
+    // Target the clicked LAYOUT cell so the cell itself (and its laid-out
+    // children, via the parentTreeGroup chain) stay bright while siblings
+    // and the rest of the canvas fade out.
+    drillFadeTarget = ln?.id ?? node.id;
     drillFadeAlpha = 1.0;
     needsAnim = true; // Ensure the render loop picks up the fade animation
     trackInteraction(`drill:${node.name ?? node.id}`);
-    breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
     selectedNodeId = null;
-    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
     onNodeDetail(null);
 
     // Smooth spatial zoom: target camera to center on this node and fit it
-    // Store start positions for ease-out cubic interpolation
-    cam._drillStartX = cam.x;
-    cam._drillStartY = cam.y;
-    cam._drillStartZoom = cam.zoom;
+    // Store start positions for ease-out cubic interpolation (kept off the
+    // `cam` object — see drillStartCam declaration)
+    drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
     targetCam.x = wx;
     targetCam.y = wy;
     const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
     disarmZoomTracking();
     targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
+    pendingDrill = node;
     drillTransitioning = true;
     drillTransitionStart = performance.now();
     needsAnim = true;
@@ -4296,10 +4562,11 @@
 
     // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
     // Double-click → filter to children, update breadcrumb, smooth zoom transition.
-    if (node) {
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+    // Real container nodes and resolvable synthetic groups (packages) both drill.
+    if (node || hit.kind === 'tree-group') {
+      const drillTarget = drillTargetForHit(hit);
+      if (drillTarget) {
+        drillInto(drillTarget);
         return;
       }
     }
@@ -4346,25 +4613,21 @@
       y: menuY,
       node: hit.node,
       hit,
+      drillTarget: drillTargetForHit(hit),
     };
   }
 
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
+    const drillTarget = contextMenu.drillTarget;
     contextMenu = null;
     ctxMoreOpen = false;
-    if (action === 'trace') {
-      // Trace from here: show causal flow using Calls + RoutesTo edges.
-      // Depth 15 to capture full reachable subgraph while staying responsive.
-      onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
-        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
-        edges: { filter: ['calls', 'routes_to'] },
-        zoom: 'fit',
-        annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
-        _trace: true,
-      });
+    if (action === 'clear_trace') {
+      // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
+      onInteractiveQuery(null);
+    } else if (action === 'trace') {
+      startTraceFromNode(node);
     } else if (action === 'blast') {
       onInteractiveQuery({
         scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements', 'field_of', 'depends_on'], direction: 'incoming', depth: 10 },
@@ -4443,44 +4706,54 @@
       // preserving all canvas state (zoom, query, conversation, drill-down).
       onNodeDetail({ ...node, _action: 'view_code' });
     } else if (action === 'drill') {
-      // Drill into this node via Contains edges with smooth zoom transition
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+      // Drill into this node via Contains edges with smooth zoom transition.
+      // For synthetic tree-groups this is the resolved Contains scope node.
+      const target = drillTarget ?? node;
+      if (target && (treeData.parentToChildren.get(target.id) ?? []).length > 0) {
+        drillInto(target);
       }
     }
   }
 
   // Build a step-by-step trace list for the detail panel.
   // Returns an array of { step, nodeId, name, type, specPath, edges } sorted by step number.
+  // Spec resolution checks GovernedBy edges, not just the spec_path field.
   function buildTraceStepList() {
-    if (tracePathOrder.size === 0) return [];
-    const nodeMap = new Map();
-    for (const n of nodes) nodeMap.set(n.id, n);
-    const steps = [];
-    for (const [nodeId, stepNum] of tracePathOrder) {
-      const n = nodeMap.get(nodeId);
-      if (!n) continue;
-      // Find edges from this step to the next
-      const outEdges = tracePathEdges.filter(e => e.fromId === nodeId);
-      steps.push({
-        step: stepNum,
-        nodeId,
-        name: n.name ?? n.qualified_name ?? '?',
-        qualifiedName: n.qualified_name ?? '',
-        type: n.node_type ?? '',
-        specPath: n.spec_path ?? null,
-        outEdges: outEdges.map(e => ({ toId: e.toId, edgeType: e.edgeType, toStep: e.toStep })),
+    return buildTraceSteps(nodes, edges, tracePathOrder, tracePathEdges);
+  }
+
+  // Emit the trace start node to the detail panel, enriched with the full
+  // numbered step list (explorer-canvas.md §6 step 6: the detail panel shows
+  // the trace when trace mode activates — via the toolbar Trace button or
+  // right-click "Trace from here" — not only after a subsequent canvas
+  // click). Called from the trace effect once the BFS order is computed.
+  // Deduped per start node so effect re-runs (data reloads) keep the user's
+  // current detail selection; a new "Trace from here" resets the guard.
+  function emitTraceDetailFromEffect(order, pathEdges) {
+    if (!traceStartNodeId) return;
+    if (lastTraceDetailEmittedFor === traceStartNodeId) return;
+    const stepNum = order.get(traceStartNodeId);
+    if (stepNum == null) return;
+    const startNode = nodes.find(n => n.id === traceStartNodeId);
+    if (!startNode) return;
+    lastTraceDetailEmittedFor = traceStartNodeId;
+    untrack(() => {
+      onNodeDetail({
+        ...startNode,
+        _traceStep: stepNum,
+        _traceTotal: order.size,
+        _traceSteps: buildTraceSteps(nodes, edges, order, pathEdges),
       });
-    }
-    steps.sort((a, b) => a.step - b.step);
-    return steps;
+    });
   }
 
   // Navigate breadcrumb with smooth zoom-out animation.
   // index=-1 means go to root, otherwise go to breadcrumb[index].
   function navigateBreadcrumb(index) {
     const prevBreadcrumb = [...breadcrumb];
+    // Cancel any in-flight drill: navigating up supersedes the pending scope
+    // change, otherwise the deferred breadcrumb push would land on top of it.
+    pendingDrill = null;
     if (index < 0) {
       breadcrumb = [];
     } else {
@@ -4492,9 +4765,7 @@
 
     // Smooth zoom-out: animate camera with ease-out cubic to the target parent node or fit all.
     disarmZoomTracking();
-    cam._drillStartX = cam.x;
-    cam._drillStartY = cam.y;
-    cam._drillStartZoom = cam.zoom;
+    drillStartCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
     if (breadcrumb.length === 0) {
       // Going to root: fit the entire tree
       const allBounds = computeAllNodesBounds();
@@ -4611,8 +4882,14 @@
       const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === selectedNodeId);
       if (ln?.node) {
         const children = treeData.parentToChildren.get(ln.node.id) ?? [];
-        if (children.length > 0) drillInto(ln.node);
-        else onNodeDetail(ln.node);
+        if (children.length > 0) {
+          drillInto(ln.node);
+        } else {
+          // Synthetic tree-group selection: resolve to its Contains scope
+          const scopeNode = resolveTreeGroupScopeNode(ln);
+          if (scopeNode) drillInto(scopeNode);
+          else onNodeDetail(ln.node);
+        }
       }
       return;
     }
@@ -4747,16 +5024,23 @@
       if (lastTouchDist > 0) {
         const scale = dist / lastTouchDist;
         const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * scale));
-        // Zoom toward the pinch center (midpoint between two fingers)
+        // Zoom toward the pinch center (midpoint between two fingers).
+        // Solve targetCam so the world point under the midpoint stays under
+        // the midpoint at the new zoom — computed against targetCam (the
+        // authoritative pose being mutated), exactly like applyZoomAtMouse.
+        // Reading the world point via screenToWorld() here would use the
+        // lagging display camera `cam`, whose zoom does not change between
+        // the two reads — making the correction identically zero and
+        // anchoring every pinch at the screen center instead.
         const rect = canvasEl?.getBoundingClientRect();
         if (rect) {
           const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
           const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-          const worldBefore = screenToWorld(cx, cy);
+          const worldX = (cx - W / 2) / targetCam.zoom + targetCam.x;
+          const worldY = (cy - H / 2) / targetCam.zoom + targetCam.y;
           targetCam.zoom = newZoom;
-          const worldAfter = screenToWorld(cx, cy);
-          targetCam.x -= (worldAfter.x - worldBefore.x);
-          targetCam.y -= (worldAfter.y - worldBefore.y);
+          targetCam.x = worldX - (cx - W / 2) / newZoom;
+          targetCam.y = worldY - (cy - H / 2) / newZoom;
         } else {
           targetCam.zoom = newZoom;
         }
@@ -4822,36 +5106,32 @@
   });
 
   // Compute trace path ordering and connecting edges when a trace query is active.
-  // Uses depth-first ordering to represent call-stack execution order: when A calls B
-  // and B calls C, the order is A(1)→B(2)→C(3) — which matches the actual execution
-  // stack (callee executes before returning to caller to call the next function).
-  // BFS would incorrectly assign all direct callees the same depth-level number.
-  // For functions with multiple sequential callees, children are sorted alphabetically
-  // for determinism (we lack intra-function call ordering from static analysis).
+  // BFS ordering (explorer-canvas.md §6): all direct callees of a node are
+  // numbered before second-level callees, better approximating execution
+  // order than DFS (which numbers entire subtrees before siblings). Siblings
+  // are sorted alphabetically for determinism (static call graphs lack
+  // intra-function call ordering). The traversal itself lives in
+  // causal-trace.js (computeTraceOrder) so it is directly unit-testable.
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
       (activeQuery.scope.direction === 'outgoing' || activeQuery._trace) &&
       queryMatchedWithDepth;
     if (!isTrace) {
-      tracePathOrder = new Map();
-      tracePathEdges = [];
+      traceStartNodeId = null;
+      lastTraceDetailEmittedFor = null;
+      if (tracePathOrder.size > 0 || tracePathEdges.length > 0) {
+        tracePathOrder = new Map();
+        tracePathEdges = [];
+        // untrack: with a synchronous rAF mock (tests), drawFrame would
+        // otherwise execute inside this effect's reactive context and its
+        // reads would become effect dependencies, re-triggering the effect.
+        untrack(() => scheduleRedraw());
+      }
       return;
     }
 
-    // Build outgoing adjacency for DFS from matched edges
     const matchedIds = new Set(queryMatchedWithDepth.keys());
-    const outAdj = new Map();
-    for (const e of edges) {
-      const srcId = edgeSrc(e);
-      const tgtId = edgeTgt(e);
-      const et = edgeType(e);
-      if ((et === 'calls' || et === 'routes_to' || et === 'routesto') &&
-          matchedIds.has(srcId) && matchedIds.has(tgtId)) {
-        if (!outAdj.has(srcId)) outAdj.set(srcId, []);
-        outAdj.get(srcId).push({ toId: tgtId, edgeType: et });
-      }
-    }
 
     // Find root node (the focus node)
     const rootNode = activeQuery.scope.node;
@@ -4865,65 +5145,46 @@
     }
 
     if (!rootId || !matchedIds.has(rootId)) {
-      // Fallback: use BFS depth ordering
+      // Fallback: use BFS depth ordering from the query resolver
       const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
       const ordered = new Map();
       for (let i = 0; i < entries.length; i++) ordered.set(entries[i][0], i + 1);
       tracePathOrder = ordered;
       tracePathEdges = [];
+      emitTraceDetailFromEffect(ordered, []);
       return;
     }
 
-    // BFS traversal to assign execution order — visits all direct calls
-    // of a function before going deeper, better approximating execution
-    // order than DFS (which numbers entire subtrees before siblings).
-    const ordered = new Map();
-    const traceEdges = [];
-    const visited = new Set();
-    let step = 0;
+    // BFS over outgoing Calls/RoutesTo edges (restricted to matched nodes so
+    // the numbers agree with the dimmed subgraph the query selected).
+    const matchedEdges = edges.filter(e => {
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
+      return matchedIds.has(srcId) && matchedIds.has(tgtId);
+    });
+    const { order, pathEdges } = computeTraceOrder(nodes, matchedEdges, rootId);
 
-    const queue = [rootId];
-    visited.add(rootId);
-    step++;
-    ordered.set(rootId, step);
-
-    while (queue.length > 0) {
-      const nodeId = queue.shift();
-
-      const children = outAdj.get(nodeId) ?? [];
-      // Sort children by name for deterministic ordering
-      children.sort((a, b) => {
-        const na = nodes.find(n => n.id === a.toId)?.name ?? '';
-        const nb = nodes.find(n => n.id === b.toId)?.name ?? '';
-        return na.localeCompare(nb);
-      });
-
-      for (const child of children) {
-        if (!visited.has(child.toId)) {
-          visited.add(child.toId);
-          step++;
-          ordered.set(child.toId, step);
-          traceEdges.push({
-            fromId: nodeId, toId: child.toId,
-            edgeType: child.edgeType,
-            fromStep: ordered.get(nodeId),
-            toStep: step
-          });
-          queue.push(child.toId);
-        }
-      }
-    }
-
-    // Add remaining matched nodes not reachable via DFS (disconnected components)
+    // Add remaining matched nodes not reachable via the causal BFS
+    // (disconnected components)
+    let step = order.size;
     for (const nodeId of matchedIds) {
-      if (!ordered.has(nodeId)) {
+      if (!order.has(nodeId)) {
         step++;
-        ordered.set(nodeId, step);
+        order.set(nodeId, step);
       }
     }
 
-    tracePathOrder = ordered;
-    tracePathEdges = traceEdges;
+    tracePathOrder = order;
+    tracePathEdges = pathEdges;
+    // Populate the detail panel with the trace step list as soon as the
+    // trace activates (spec §6 step 6), not only after a later canvas click.
+    emitTraceDetailFromEffect(order, pathEdges);
+    // The trace overlay (numbered badges + path arrows) is drawn by
+    // drawFrame; without a redraw request it only appears on the next
+    // unrelated pan/zoom once the camera has settled. untrack keeps
+    // drawFrame's reads (synchronous under a sync rAF mock) out of this
+    // effect's dependency set.
+    untrack(() => scheduleRedraw());
   });
 
   // Sync canvasState zoom
@@ -4954,6 +5215,26 @@
       };
     }
   });
+
+  // Escape anywhere on the page exits trace mode (explorer-canvas.md §6
+  // "Exit trace mode: Press Escape"). The canvas element only sees keydown
+  // while focused — after clicking the toolbar Trace button or a detail-panel
+  // trace step, focus is no longer on the canvas, so the affordance must be
+  // window-level. Inputs (search box) keep their own Escape handling.
+  // Skipped when the host owns the window Escape cascade (windowEscape=false):
+  // ExplorerView's handler clears trace queries through its overlay cascade
+  // (spec editor → query editor → detail panel → active view query), so the
+  // trace must survive the Escape that closes an overlay above it.
+  function onWindowKeyDown(e) {
+    if (!windowEscape) return;
+    if (e.key !== 'Escape') return;
+    if (!activeQuery?._trace) return;
+    const tag = (e.target?.tagName ?? '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+    onInteractiveQuery(null);
+  }
+  window.addEventListener('keydown', onWindowKeyDown);
+  onDestroy(() => window.removeEventListener('keydown', onWindowKeyDown));
 
   let destroyed = false;
   onDestroy(() => {
@@ -5027,6 +5308,19 @@
       </button>
       <button class="concept-clear-btn" type="button" onclick={() => { multiSelectedIds = new Set(); scheduleRedraw(); }}>Clear</button>
       <span class="concept-hint">Shift+Click to add/remove</span>
+    </div>
+  {/if}
+
+  <!-- Causal Flow Trace warning: no Calls/RoutesTo edges in the graph
+       (explorer-canvas.md §6 data requirement). Shown instead of entering a
+       degenerate empty trace mode. -->
+  {#if traceWarning}
+    <div class="trace-warning" role="alert" data-testid="trace-warning">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>Call graph not available — run code sync to extract call edges</span>
+      <button class="trace-warning-dismiss" onclick={() => { traceWarning = false; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
   {/if}
 
@@ -5147,6 +5441,27 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       Risk
     </button>
+
+    <!-- Causal Flow Trace (explorer-canvas.md §6): toolbar activation for the
+         selected node + exit affordance when a trace is active. -->
+    {#if traceActive}
+      <button class="tb-btn" class:active={true} onclick={() => { onInteractiveQuery(null); }} title="Exit trace mode (Escape)" type="button" aria-pressed={true} data-testid="toolbar-clear-trace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+        Clear trace
+      </button>
+    {:else}
+      <button
+        class="tb-btn"
+        onclick={() => startTraceFromNode(canvasState?.selectedNode)}
+        disabled={!canvasState?.selectedNode}
+        title={canvasState?.selectedNode ? `Trace causal flow from ${canvasState.selectedNode.name ?? canvasState.selectedNode.qualified_name ?? 'selection'} (Calls/RoutesTo)` : 'Select a node, then trace its causal flow'}
+        type="button"
+        data-testid="toolbar-trace"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Trace
+      </button>
+    {/if}
 
     {#if anomalies.length > 0 && !anomalyPanelOpen}
       <button class="tb-btn anomaly-reopen" onclick={() => { anomalyPanelOpen = true; }} title="Show anomalies ({anomalies.length})" type="button">
@@ -5315,6 +5630,19 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
             Blast radius
           </button>
+          <!-- Causal Flow Trace (explorer-canvas.md §6): one of the three
+               spec-named right-click actions alongside View spec / View
+               provenance, so it lives in the primary section, not "More..." -->
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')} data-testid="ctx-trace">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trace from here
+          </button>
+          {#if traceActive}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('clear_trace')} data-testid="ctx-clear-trace">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+              Clear trace
+            </button>
+          {/if}
           {#if contextMenu.node.file_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -5331,15 +5659,11 @@
           </button>
           {#if ctxMoreOpen}
             <div class="ctx-submenu">
-              <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                Trace from here
-              </button>
               <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 View history
               </button>
-              {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+              {#if contextMenu.drillTarget && (treeData.parentToChildren.get(contextMenu.drillTarget.id) ?? []).length > 0}
                 <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
                   Drill into
@@ -5541,6 +5865,7 @@
   <!-- Breadcrumb -->
   <Breadcrumb
     {breadcrumb}
+    rootLabel={rootLabel || 'Root'}
     onNavigate={(i) => { navigateBreadcrumb(i); }}
     onReset={() => { navigateBreadcrumb(-1); }}
   />
@@ -5700,6 +6025,22 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 12px; background: #172554; border-bottom: 1px solid #1e3a5f; flex-shrink: 0;
   }
+  .trace-warning {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: rgba(120, 53, 15, 0.4);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #fbbf24;
+  }
+  .trace-warning-dismiss {
+    display: flex; align-items: center; justify-content: center;
+    margin-left: auto;
+    width: 24px; height: 24px; background: transparent; border: none;
+    border-radius: 4px; color: #94a3b8; cursor: pointer;
+  }
+  .trace-warning-dismiss:hover { background: #1e293b; color: #e2e8f0; }
   .annotation-content { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .annotation-title { font-size: 13px; font-weight: 600; color: #e2e8f0; }
   .annotation-desc { font-size: 11px; color: #94a3b8; }

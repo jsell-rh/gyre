@@ -309,7 +309,7 @@ mod tests {
         SqliteStorage::new(path).unwrap();
     }
 
-    /// Regression guard for migration 000057 (task-120): the username
+    /// Regression guard for migration 000058 (task-120): the username
     /// backfill must actually run on SQLite and must leave every legacy row
     /// with a unique, URL-safe handle.
     ///
@@ -321,8 +321,8 @@ mod tests {
     /// deployment's startup entirely. The fix runs the deletion as
     /// sequential depth-1 UPDATEs over a scratch column.
     ///
-    /// This test builds a pre-000057 database (all migrations except 000057
-    /// applied, legacy rows inserted), applies 000057 alone, and asserts the
+    /// This test builds a pre-000058 database (all migrations except 000058
+    /// applied, legacy rows inserted), applies 000058 alone, and asserts the
     /// backfill semantics: sanitization of non-URL-safe and over-long
     /// handles, empty-handle coverage, de-duplication, and the pass-2
     /// collision hardening where a dedup suffix collides with a distinct
@@ -331,9 +331,11 @@ mod tests {
     /// (The migration was originally numbered 000056; after main landed
     /// task-180's `spec_assertion_results` under the same 000056 version,
     /// Diesel would have silently dropped this one — alphabetically-first
-    /// wins — so it was renumbered to the next unused sequence, 000057.)
+    /// wins — so it was renumbered to 000057. Main then landed task-193's
+    /// `spec_approval_attestation` under 000057, so it was renumbered
+    /// again to the next unused sequence, 000058.)
     #[test]
-    fn migration_000057_backfills_unique_url_safe_usernames() {
+    fn migration_000058_backfills_unique_url_safe_usernames() {
         use diesel::migration::MigrationSource;
         use diesel::Connection;
 
@@ -341,14 +343,15 @@ mod tests {
         let path = tmp.path().to_str().unwrap();
         let mut conn = SqliteConnection::establish(path).unwrap();
 
-        // Apply every migration except 000057: the pre-migration state.
-        // (000056 here is task-180's spec_assertion_results, a different
-        // migration that legitimately owns that version on main.)
+        // Apply every migration except 000058: the pre-migration state.
+        // (000056 here is task-180's spec_assertion_results and 000057 is
+        // task-193's spec_approval_attestation — different migrations that
+        // legitimately own those versions on main.)
         let all = MIGRATIONS.migrations().unwrap();
         let (pre, target): (Vec<_>, Vec<_>) = all
             .into_iter()
-            .partition(|m| m.name().version().to_string() != "20261008000057");
-        assert_eq!(target.len(), 1, "000057 not found in embedded migrations");
+            .partition(|m| m.name().version().to_string() != "20261008000058");
+        assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
         // run_pending_migrations (used by SqliteStorage::new) it does not
@@ -357,7 +360,7 @@ mod tests {
         conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();
 
-        // Legacy rows exactly as a pre-000057 deployment would hold them
+        // Legacy rows exactly as a pre-000058 deployment would hold them
         // (users: id, external_id, name NOT NULL; display_name from 000036
         // left NULL so the backfill reads `name`).
         use diesel::RunQueryDsl;
@@ -380,7 +383,7 @@ mod tests {
             .unwrap();
         }
 
-        // Run 000057 alone. Panics here on the original parser-overflow
+        // Run 000058 alone. Panics here on the original parser-overflow
         // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
         conn.run_migrations(&target).unwrap();
 
@@ -481,6 +484,157 @@ mod tests {
         assert_eq!(d.global_role, "Member");
         let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
         assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+    }
+
+    /// Task-102 F1 regression: migration 000054 folds legacy path/pid
+    /// rows into the envelope `detail` payload. The fold must be plain
+    /// portable SQL (CASE WHEN + string concatenation): this migrations
+    /// directory is embedded once and executed by BOTH storage backends,
+    /// and the previous json_patch/json_object form aborted PostgreSQL
+    /// deployments at startup. This test drives the REAL embedded up.sql
+    /// against seeded legacy rows — including JSON-hostile path values
+    /// (quote, backslash, newline, tab) and non-object details — and
+    /// asserts the folded payload parses back to exactly the merged
+    /// data (merge-patch semantics: NULL source values add no key, a
+    /// pre-existing key is never overwritten, a non-object target is
+    /// replaced by the folded object).
+    #[test]
+    fn migration_000054_folds_legacy_path_pid_into_detail() {
+        use diesel::sql_types::{Integer, Nullable, Text};
+        use diesel::RunQueryDsl;
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations below, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in sqlite/search.rs), so the lint is scoped off for this
+        // small row-carrier module instead. Nothing here writes
+        // `field: field` initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::{Nullable, Text};
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct FoldedRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) detail: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) agent_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) resource_type: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) resource_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) outcome: String,
+            }
+            #[derive(QueryableByName)]
+            pub(super) struct VersionRow {
+                #[diesel(sql_type = Text)]
+                pub(super) version: String,
+            }
+        }
+        use rows::{FoldedRow, VersionRow};
+
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+
+        // Re-create the pre-000054 legacy shape and seed representative rows.
+        diesel::sql_query("DROP TABLE audit_events")
+            .execute(&mut conn)
+            .unwrap();
+        diesel::sql_query(
+            "CREATE TABLE audit_events (\
+             id TEXT PRIMARY KEY NOT NULL, \
+             agent_id TEXT NOT NULL, \
+             event_type TEXT NOT NULL, \
+             path TEXT, \
+             details TEXT NOT NULL DEFAULT '{}', \
+             pid INTEGER, \
+             timestamp BIGINT NOT NULL)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let insert = "INSERT INTO audit_events \
+             (id, agent_id, event_type, path, details, pid, timestamp) \
+             VALUES (?, 'ag-1', 'file_access', ?, ?, ?, 1)";
+        let seed: &[(&str, Option<&str>, &str, Option<i32>)] = &[
+            ("both", Some("/etc/hosts"), r#"{"mode":"read"}"#, Some(1234)),
+            ("nulls", None, "{}", None),
+            ("pid_only", None, r#"{"k":1}"#, Some(77)),
+            ("hostile", Some("/tmp/we\"ird\\pa\nth\t"), "{}", None),
+            ("scalar", Some("/x"), "42", None),
+            ("existing_key", None, r#"{"path":"already","k":2}"#, None),
+        ];
+        for (id, path, details, pid) in seed {
+            diesel::sql_query(insert)
+                .bind::<Text, _>(id)
+                .bind::<Nullable<Text>, _>(path)
+                .bind::<Text, _>(details)
+                .bind::<Nullable<Integer>, _>(pid)
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        // Un-mark 000054 so the runner re-applies the real up.sql to the
+        // legacy rows (the same transition a deployed database makes).
+        let versions: Vec<VersionRow> = diesel::sql_query(
+            "SELECT version FROM __diesel_schema_migrations WHERE version LIKE '%000054%'",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(versions.len(), 1, "expected exactly one 000054 version row");
+        let deleted = diesel::sql_query("DELETE FROM __diesel_schema_migrations WHERE version = ?")
+            .bind::<Text, _>(&versions[0].version)
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(deleted, 1, "failed to un-mark migration 000054");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("portable 000054 up.sql must run (task-102 F1)");
+
+        let rows: Vec<FoldedRow> = diesel::sql_query(
+            "SELECT id, detail, agent_id, resource_type, resource_id, outcome FROM audit_events",
+        )
+        .load(&mut conn)
+        .unwrap();
+        let folded: std::collections::HashMap<String, serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.id.clone(),
+                    serde_json::from_str(&r.detail)
+                        .unwrap_or_else(|e| panic!("invalid folded JSON for {}: {e}", r.id)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            folded["both"],
+            serde_json::json!({"mode": "read", "path": "/etc/hosts", "pid": 1234})
+        );
+        assert_eq!(folded["nulls"], serde_json::json!({}));
+        assert_eq!(folded["pid_only"], serde_json::json!({"k": 1, "pid": 77}));
+        assert_eq!(
+            folded["hostile"],
+            serde_json::json!({"path": "/tmp/we\"ird\\pa\nth\t"})
+        );
+        // Merge-patch replaces a non-object target with the folded object.
+        assert_eq!(folded["scalar"], serde_json::json!({"path": "/x"}));
+        // A pre-existing key is never overwritten; nothing to fold keeps
+        // the legacy payload verbatim.
+        assert_eq!(
+            folded["existing_key"],
+            serde_json::json!({"path": "already", "k": 2})
+        );
+
+        for r in &rows {
+            assert_eq!(r.agent_id.as_deref(), Some("ag-1"));
+            assert_eq!(r.resource_type, "agent");
+            assert_eq!(r.resource_id.as_deref(), Some("ag-1"));
+            assert_eq!(r.outcome, "success");
+        }
     }
 
     /// Guard: detect duplicate migration version strings before they shadow each other.
