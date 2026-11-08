@@ -392,6 +392,11 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",
                     "workspace_member",
                     None,

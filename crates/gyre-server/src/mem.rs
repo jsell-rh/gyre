@@ -17,9 +17,9 @@ use gyre_ports::{
     AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -3051,6 +3051,33 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+// ── MemRolloutPolicyRepository ──────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemRolloutPolicyRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl RolloutPolicyRepository for MemRolloutPolicyRepository {
+    async fn get(&self, workspace_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(workspace_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, workspace_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, workspace_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemLlmConfigRepository ────────────────────────────────────────────────────
 
 type LlmConfigKey = (Option<String>, String); // (workspace_id, function_key)
@@ -3472,7 +3499,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3487,6 +3514,7 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         Some(storage),
+        None,
         None,
     )
 }
@@ -3505,6 +3533,23 @@ pub fn test_state_with_secrets(
         policies,
         None,
         Some(secrets),
+        None,
+    )
+}
+
+/// Build a test AppState with a custom KvJsonStore — used to exercise
+/// kv read-failure paths (e.g. the rolling-rollout pending-state merge
+/// must abort, not overwrite, when the stored state cannot be read).
+#[cfg(test)]
+pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+        Some(kv),
     )
 }
 
@@ -3513,7 +3558,7 @@ pub fn test_state_with_secrets(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Build a test AppState whose policy repo fails every `create`, used to
@@ -3528,6 +3573,7 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        None,
         None,
         None,
     )
@@ -3546,6 +3592,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        None,
         None,
         None,
     )
@@ -3576,7 +3623,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None)
+    test_state_inner(git_ops, workspaces, policies, None, None, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3589,6 +3636,7 @@ fn test_state_inner(
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
+    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3607,7 +3655,7 @@ fn test_state_inner(
         worktrees: Arc::new(MemWorktreeRepository::default()),
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
-        kv_store: Arc::new(MemKvStore::default()),
+        kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
@@ -3678,6 +3726,7 @@ fn test_state_inner(
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
