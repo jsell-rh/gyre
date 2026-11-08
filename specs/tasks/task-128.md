@@ -130,7 +130,7 @@ Domain types (`gyre-domain/src/policy.rs`): `Policy` carries every spec field
 `effect`, `conditions`, `actions`, `resource_types`, `enabled`, `immutable`,
 `created_by: Id`, `created_at`, `updated_at`) plus `built_in` (required by the
 spec's Built-In Policies section). `PolicyScope` = {Tenant, Workspace, Repo};
-`PolicyEffect` = {Allow, Deny}; `ConditionOp` has all 8 variants; 
+`PolicyEffect` = {Allow, Deny}; `ConditionOp` has all 8 variants;
 `ConditionValue` = {String, StringList, Number, Bool} plus `Null` as the
 value-side placeholder for `Exists`. `builtin_policies()` and
 `trust_policies_for_level()` produce the built-in/trust-preset policy sets.
@@ -150,90 +150,76 @@ personas, tasks, agents, MRs, teams; scope chain repo→workspace→tenant);
 `env.ip` from the socket peer (CWE-348, never forwarded headers);
 `env.budget_remaining` from the real budget system; `env.main_health` from
 the real merge-queue pause state; `env.time`/`action`/`resource.type`
-injected by the evaluator. `resource.visibility`/`resource.team` apply only
-to entity types carrying those fields (none today — documented at the
-extraction site; conditions on them fail closed).
+injected by the evaluator.
 
-Dynamic references (`resolve_condition_value`/`resolve_dynamic_value`/
-`resolve_dynamic_scalar`): `$resource.*`/`$subject.*` resolve against the
-live context preserving the referenced attribute's type; unresolvable
-references fail the condition (fail closed — an Allow with an unresolvable
-reference cannot grant).
+Dynamic references: `$resource.*`/`$subject.*` resolve against the live
+context preserving the referenced attribute's type; unresolvable references
+fail the condition (fail closed — an Allow with an unresolvable reference
+cannot grant).
 
 Port + adapters: `PolicyRepository` (create, find_by_id, list, list_by_scope,
 update, delete, delete_by_name_prefix, delete_by_name_prefix_and_scope_id,
 record_decision, list_decisions). SQLite adapter against the `policies`
-table (migration `000007_platform_entities` + `000028_policy_immutable`;
-conditions/actions/resource_types as JSON); built-in delete guard enforced
-in code in both SQLite and mem adapters. `scope_id`/`created_by` stored as
-text, carried as `Id` in the domain.
+table (conditions/actions/resource_types as JSON); built-in delete guard
+enforced in code in both SQLite and mem adapters.
 
-Evaluation (`policy_engine::evaluate`): immutable Deny first (before all
-priority-based evaluation), then priority order with scope specificity
-(repo > workspace > tenant) and Deny-before-Allow tie-break, then default
-deny. All five §Policy Examples are encoded as verbatim evaluation tests
-(`spec_example_agent_repo_scope` incl. its `$resource.repo_id` reference,
-`spec_example_persona_management`, `spec_example_viewer_no_spawn`,
-`spec_example_gate_approved_persona`, `spec_example_default_deny`).
+Evaluation (`policy_engine::evaluate`): immutable Deny first, then priority
+order with scope specificity (repo > workspace > tenant) and
+Deny-before-Allow tie-break, then default deny. All five §Policy Examples
+are encoded as verbatim evaluation tests (`spec_example_agent_repo_scope`
+incl. its `$resource.repo_id` reference, `spec_example_persona_management`,
+`spec_example_viewer_no_spawn`, `spec_example_gate_approved_persona`,
+`spec_example_default_deny`).
 
-Test evidence (focused suites run in an earlier round at attributed
-commit `6df5dd5`, whose entire task-128 surface is byte-identical to
-this head — see resume note below): `policy_engine::tests` 31/31;
-`abac_middleware::tests` 23/23 (attribute extraction proven end-to-end
-through live tower oneshot requests: membership-sourced workspace_role,
-team_ids, entity-lookup owner/approval_status/tenant via scope chain,
-persona attributes, env.ip/budget_remaining/main_health); `auth::tests`
-36/36; `api::policies` 12/12; `sqlite::policy` 4/4. One earlier failing
-test, `spec_resource_tenant_resolves_via_scope_chain`, was a test-premise
-bug (a non-matching Allow at 810 cannot outrank the builtin Developer
-Allow at 800): it now uses a cross-tenant Deny at 810
-(`resource.tenant_id NotEquals $subject.tenant_id`), so only a real
-scope-chain lookup (tenant t-1 != "default") makes the deny fire.
+### Merge-resolution round (head 8ca9afafb)
 
-### Resume round: checkpoint recovery and base merge 7f8b5d9c
+Resolved the merge of assignment base `c5deca801` (task-105 head) into this
+branch at merge commit `8ca9afafb` (parents `e8540e9e3` + `c5deca801`),
+clean tree:
 
-This round resumed after a worker lease expiry. Source was recovered via
-checkpoint `29ad56fb`; the merge of base `7f8b5d9c` (task-156
-reconciliation surface) completed at head `8e932152` with no unresolved
-conflicts and a clean tree — no merge/rebase repair was needed. The merge
-touches no task-128 surface: `git diff --stat` is empty over every task
-file (domain/ports/adapters policy, mem policy, policy_engine, abac,
-abac_middleware, auth, api/policies) between `6df5dd5`, `29ad56fb`, and
-`HEAD`, and `web/` is unchanged by the merge. The only merged change
-inside a test dependency is the mem.rs `MetaSpecRepository` same-version
-archive guard (task-156 surface, not exercised by any ABAC/policy/auth
-test).
+- `abac_middleware.rs`: kept BOTH test sets — the task-128 attribute tests
+  and upstream's `builtin_policy_seeding_fails_closed_on_store_error`
+  (upstream's fail-closed `seed_builtin_policies` retained; its
+  warn-continue exemption entry correctly removed with upstream's fix).
+- `main.rs`: kept upstream's connect_info comment (code identical).
+- Three exemption files: adopted upstream's fixed-site entry removals,
+  with the auth.rs entry renumbered 773→833 where task-128's auth changes
+  moved the JWT tenant fallback line.
+- Type adaptations where upstream code assumed pre-task-128
+  `Policy.scope_id: Option<String>`/`created_by: String`:
+  `merge_processor.rs` `evaluate_merge_abac` (scope comparison),
+  `merge_processor.rs`/`api/workspaces.rs`/`gyre-domain policy.rs` tests.
+- Duplicate `/api/v1/...` literal cleanup: the recovered checkpoint
+  `29ad56fb` had 31 duplicate literals vs the frozen baseline of 22 —
+  `check-abac-route-registry.sh` was FAILING there (the prior round's
+  "all scripts pass" claim was wrong for this check). After the merge the
+  count was 26 vs upstream's lowered baseline 17. Fixed without weakening
+  the check (no baseline raise, no exemptions): hoisted module-level
+  consts `REPOS_ID_ROUTE`/`SPECS_ROUTE`/`SPECS_PATH_ROUTE`/
+  `PERSONAS_ID_ROUTE` shared by the resolver registry and tests,
+  `WORKSPACES_PATH_PREFIX` for the two `extract_path_attributes`
+  `starts_with` sites, and test-only URI consts. Final count: 17 = frozen
+  baseline.
 
-Static verification at this head (evidence:
-`/tmp/stage/review-evidence/task-1....txt`): all acceptance-criteria
-structures present (Policy fields incl. `immutable`/`built_in`,
-PolicyScope, PolicyEffect, 8 ConditionOp variants, ConditionValue,
-dynamic-reference resolution, PolicyRepository, SQLite adapter, the five
-§Policy Example tests); all 20 repo invariant scripts pass (check-arch,
-check-abac-route-registry, check-abac-exempt-handlers,
-check-task-commit-attribution, migration checks, security-pattern
-checks); repo-wide conflict-marker scan clean.
+### Test evidence (run at head 8ca9afafb; crates.io reachable this round)
 
-This sandbox cannot reach crates.io or any mirror (github.com and
-registry.npmjs.org only), so cargo cannot resolve the 399-package
-lockfile and the focused Rust suites could not be re-run here — recorded
-as infrastructure evidence for remote verification, not a code defect
-(evidence:
-`/tmp/stage/review-evidence/transport-restriction-cargo-offline.txt`).
+- `cargo check --workspace --all-targets` — 0 errors.
+- `cargo test -p gyre-server --lib` — **1456 passed / 0 failed** (includes
+  `abac_middleware` 25, `policy_engine` 34, `merge_processor` 67, `auth` 43,
+  `api::policies` 12, `api::workspaces` 16, `mem` 13; the five §Policy
+  Example tests and the membership/entity-lookup attribute tests run
+  end-to-end through live tower oneshot requests).
+- `cargo test -p gyre-domain -p gyre-common -p gyre-ports` — 116 + 432 + 8
+  passed / 0 failed.
+- `cargo test -p gyre-adapters --lib` — 382 passed / 0 failed / 12 ignored
+  (includes `sqlite::policy` 4).
+- All repo invariant scripts pass, including `check-abac-route-registry`
+  (duplicate count 17 = frozen baseline), `check-arch`,
+  `check-fabricated-scope-defaults`, `check-warn-continue-creation`,
+  `check-relative-path-defaults`, and the security-pattern checks;
+  repo-wide conflict-marker scan clean. Transcripts under
+  `/tmp/stage/review-evidence/` (summary: `task-1....md`; suite transcripts:
+  `task-1....txt`).
 
-### Prior round: web dist repair (historical context retained for review)
-
-An earlier round resolved a conflicted merge (base `d81b0fe4`) by
-rebuilding `web/dist` from the merged web source (`npm ci` + `npm run
-build`, locked dependencies); the rebuilt dist is marker-free and
-self-consistent, and this round's merge left `web/` byte-identical. Web
-unit tests at that tree: 1623 passed / 41 skipped / 1 failed — the single
-failure is `ExplorerCanvas-performance.test.js`'s jsdom wall-clock
-guard, proven environmental (the identical test fails at the pristine
-approved base `d81b0fe4` in the same sandbox). No code change made and
-no assertion weakened.
-
-Full `cargo test --all` and GitHub CI remain verification/publication
-gates. The implement sandbox cannot bind a TCP listener — no live HTTP
-server probe; middleware behavior is covered by the in-process tower
-tests above.
+Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
+verification/publication gates.
