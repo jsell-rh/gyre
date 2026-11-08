@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "af4dd137adb2697aea0acb1d939b91efcc4b9b36"]
 ---
 
 ## Authority and Scope
@@ -123,7 +123,12 @@ is claimed here, per section, with the verifying evidence below.
   each carry generation guards so a delayed old-scope response cannot
   overwrite the new scope's content; workspace lookup failures surface as
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
-  error + Retry, per-section load errors) rather than empty success.
+  error + Retry, per-section load errors) rather than empty success. The
+  guard is pinned by `web/src/__tests__/StaleScopeResponse.test.js`
+  (`af4dd137a`): each of the three loaders is rendered for real, switched
+  to a new scope, and the old scope's deferred response is resolved after
+  the switch — the new scope's rendered content is preserved and the old
+  scope's never appears (mutation probe in Verification).
 
 ### Verification
 
@@ -162,6 +167,23 @@ is claimed here, per section, with the verifying evidence below.
   evidence (myNotifications envelope, `?subTab` deep link, task-084 base
   rebase with the 9-tab `WorkspaceSettings` union → 71 passed) is retained
   under `/tmp/stage/review-evidence/README.md`.
+- Review repair (`af4dd137a`, closing the 3c1e3f8d finding that the §4
+  stale-response guard had no regression): test-only addition — the
+  production guards were already real. `StaleScopeResponse.test.js`
+  renders the real `WorkspaceHome`, `Inbox`, and `Briefing` with real API
+  arguments (`myNotifications()` for the Decisions loader,
+  `myNotifications({workspace_id})` for Inbox, `getWorkspaceBriefing(id,
+  null)` for Briefing), switches scope via the workspace prop change
+  App.svelte drives, and resolves the old scope's still-pending deferred
+  promise after the switch. Mutation probe: with `stale()` forced to
+  `false` in WorkspaceHome.svelte and every `gen !== loadGen` check
+  removed in Inbox.svelte (2 sites) and Briefing.svelte (5 sites), all
+  three tests fail (the late old-scope response wipes the new workspace's
+  decisions / renders the old workspace's rows); guards intact → 3/3
+  pass. Focused navigation suite including the new file and the
+  Agent-Rules guard regression (`WorkspaceHomeRulesFailure.test.js`):
+  7 files, 119 tests, 0 failures (evidence retained under
+  `/tmp/stage/review-evidence/`).
 - `web/dist` was not rebuilt or committed here (the executor restores
   generated assets from the assignment base and final integration
   rebuilds them remotely); full suites, all-target Clippy, and exact-head
