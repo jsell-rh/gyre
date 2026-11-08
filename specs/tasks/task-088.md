@@ -3,10 +3,10 @@ title: "HSI Explorer Default Views (Boundary, Spec Realization, Change, System T
 spec_ref: "human-system-interface.md §3 Default Views"
 depends_on:
   - task-065
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Default Views (Automatic, No LLM)"
-commits: ["8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15", "1a50c2276ef6c6c7a6e5e4ec092c112fa7703e45"]
+commits: ["8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15", "8407bd1cfe42fc1ab324cb7bffd8275bce4c5acd"]
 ---
 
 ## Spec Excerpt
@@ -183,3 +183,24 @@ warnings (merge commit 531ca48b7).
 - Full `npm test` in `web/` after the rebase: 76 files, 1771 passed,
   41 skipped (includes task-078's ExplorerViewShortcuts, causal-trace and
   streaming suites alongside the default-view suites above).
+
+### CI repair — explorer visual baselines (run 42455312769)
+
+The 11 E2E explorer-visual regressions at candidate head 61e430cbf were
+baseline drift, not a rendering defect: the spec-required view selector
+tablist makes the concept search bar 2px taller, so `.treemap-canvas-area`
+renders 2px shorter (919x397 → 919x395, 579x335 → 579x333, 579x298 →
+579x296) and the size mismatch is a hard `toHaveScreenshot` failure.
+Commit 8407bd1cf replaced the 11 affected baselines with the CI run's own
+actual screenshots (authoritative gate-environment rendering; same repair
+as task-083 c69d9fd54). No test logic, locator, or tolerance change; the
+toolbar, blast-radius-tiered and full-page baselines are untouched.
+
+Local verification: reproduced the exact CI failure set (11 failed, all
+2px size mismatch); local rendering is pixel-identical to the CI actuals
+for zoom-level-0 and within 0.20%–1.28% differing pixels for the rest
+(gate tolerance 2%); full explorer-visual suite 15/15 passed against the
+new baselines; mutation probe — building a dist with the
+`explorer-view-tabs` block removed fails zoom_level_0 (919x395 expected vs
+919x397 received), so the baselines genuinely pin the new toolbar.
+Evidence retained under the attempt's review-evidence directory.
