@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
-commits: ["7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee"]
+commits: ["7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee", "f51574568c6c3ebdd025d42892ddb27a423129eb"]
 ---
 
 ## Spec Excerpt
@@ -111,8 +111,11 @@ lens selection.
   (pass) / red (fail), with the latest result per gate deciding the
   outcome. Precomputed per node so the render loop stays O(1) per edge.
 - **Data loading** (ExplorerView `loadEvaluativeData`): gate outcomes
-  joined from recent MRs (`spec_ref` "path@sha" → per-spec most recent MR
-  with concluded gates) and the spec approval ledger
+  joined from this repo's recent MRs (queried with `repository_id` —
+  `GET /api/v1/merge-requests` only accepts repository_id /
+  workspace_id / status — with a 50-MR recency window applied
+  client-side; `spec_ref` "path@sha" → per-spec most recent MR with
+  concluded gates) and the spec approval ledger
   (`GET /api/v1/specs/approvals`), both best-effort, non-blocking.
 - **URL persistence**: lens selection is restored from `?lens=evaluative`
   deep links on mount and synced via `history.replaceState` on switch
@@ -137,71 +140,51 @@ lens selection.
   (differential red/green stroke assertions), approval icons ✓/⏳/✗ (and
   absent in structural lens), and lens switching preserves node label
   positions exactly (no re-layout).
-- `web/src/__tests__/ExplorerViewLensUrl.test.js` — 5 tests: structural
+- `web/src/__tests__/ExplorerViewLensUrl.test.js` — 6 tests: structural
   default has no param, switching to evaluative persists
-  `?lens=evaluative`, switching back drops it, deep-link restore, and the
-  observable lens disabled state + tooltip.
+  `?lens=evaluative`, switching back drops it, deep-link restore, the
+  observable lens disabled state + tooltip, and the evaluative gate-data
+  load querying `mergeRequests({ repository_id })` (repo-scoped, not the
+  server-ignored `repo_id`).
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
 
-### Rebase repair and re-verification (round 14)
+### Review repair: repo-scoped gate-status query (round 16)
 
-The executor assigned a rebase repair (repair id `13613c1a0d49475aae2ada405a41157c`,
-assigned base 124a852, candidate head 0e4d785): merging the new assignment
-base (task-193's spec-approval attestation work and the trace/causal Explorer
-work) into this branch conflicted in `ExplorerView.svelte` and
-`ExplorerCanvas.svelte`. Resolved this round:
+The review round (repair id `4bc383b9ab8241cfafa02ab4af25c73e`) found
+that `loadEvaluativeData` (from product commit 0766a167) queried
+`api.mergeRequests({ repo_id, per_page })`, but `GET
+/api/v1/merge-requests` only accepts `repository_id` / `workspace_id` /
+`status` (`ListMrsQuery`, crates/gyre-server/src/api/merge_requests.rs) —
+`repo_id` and `per_page` are silently ignored, so the handler's unscoped
+arm returned ALL tenant MRs. Because the gate-status join is keyed by
+spec path alone, gate outcomes from OTHER repos' MRs were attributed to
+the viewed repo's nodes in any multi-repo tenant with shared spec paths
+(every repo carries specs/system/*.md), including false-green gate
+rings/edges. Fixed in product-surface commit
+`f51574568c6c3ebdd025d42892ddb27a423129eb`:
 
-- **Merge conflicts resolved by union of both import groups.** Both
-  conflicts were import blocks only: HEAD (this branch) imports the lens
-  pipeline (`lens-rendering.js`), the incoming side imports the trace
-  pipeline (`trace-navigation.js`, `causal-trace.js`). Both features are
-  used by the merged files (verified: `evaluativeNodeDecorations`/
-  `gateStatusDecoration` draw paths, `loadEvaluativeData`/`gateStatusBySpec`/
-  `specApprovals` data flow, and `buildTraceSteps`/`computeTraceOrder`/
-  `traceStepTargetNode` trace paths all intact), so both import sets are
-  kept. The merge commit is `be494b399`; no conflict markers remain
-  tree-wide.
-- **No other production code changes.** The three-lens implementation
-  (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
-  gates.rs rejection fields) is intact from product-surface commit
-  0766a167, an ancestor of this branch head; the incoming task-193
-  spec-approval changes (attestation/stack_hash validity, ledger API
-  changes in specs.rs/spec_ledger.rs) merged cleanly around it.
-- **Fresh focused probes on the merged tree after `npm ci`:**
-  `npx vitest run` on the six suites covering both conflicted files —
-  lens-rendering (27), ExplorerViewLensUrl (5), ExplorerCanvas (157),
-  ExplorerCanvasTrace, causal-trace, ExplorerViewLargeGraph — 238/238
-  passed (task090-merge-resolution-tests.log, exit 0);
-  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
-  incl. `list_spec_approvals_includes_rejection_fields`, confirming the
-  ledger rejection fields survive the merge with task-193's ledger changes
-  (task090-cargo-gates-merge.log, exit 0). Logs retained under
-  /tmp/stage/review-evidence with exit codes.
-- **Assigned task text preserved byte-identical.** The acceptance criteria
-  checkboxes are left unchecked exactly as assigned — acceptance is decided
-  by independent review, not by self-checking the boxes. Frontmatter
-  unchanged (progress ready-for-review, product-surface commit 0766a167
-  attributed in `commits:`); the merge commit is process-type and out of
-  `scripts/check-task-commit-attribution.sh` scope. Working tree clean.
+- **Query with `repository_id`** (as every other frontend call site —
+  DetailPanel, RepoMode, RepoSettings, ExplorerCodeTab — already does),
+  so the MR list is scoped to the viewed repo and the path-keyed join
+  only ever sees this repo's gate outcomes.
+- **50-MR recency window applied client-side** (`.slice(0, 50)` after the
+  most-recent-first sort): the endpoint has no `per_page` support, so the
+  originally intended window is now actually enforced.
+- **Regression test** (`ExplorerViewLensUrl.test.js`, "loads evaluative
+  gate data repo-scoped"): asserts `api.mergeRequests` is called with
+  `{ repository_id }`. Verified differential — the test fails against
+  the previous `repo_id` query (1 failed | 5 passed when the fix is
+  stashed) and passes with it, so the param contract is now guarded.
+- **Out of scope, left untouched**: the identical `repo_id` misuse in
+  `loadTraceData` (ExplorerView.svelte, pre-existing from task-065's
+  #627, flagged by the reviewer as outside this candidate) — it needs
+  its own attributed fix.
 
-### Verification repair (round 15)
-
-The verification round (repair id `b2adb23869154729979c83bca6993cd3`)
-flagged two findings in `crates/gyre-server/src/api/gates.rs` from the
-`list_spec_approvals_includes_rejection_fields` test:
-
-- **rustfmt**: line 646 `assert_eq!` exceeded the line-width limit.
-- **clippy `unused_mut`**: the `approved` binding at line 599 is never
-  mutated.
-
-Both fixed in product-surface commit
-`7bb23bca676396d8434491cef270f6094a92a36f` (reformatted the assert,
-dropped the unnecessary `mut`). No behavior change. Re-verified on the
-current head (which includes the merge of assignment base 637be718):
-`cargo fmt -p gyre-server` clean, `cargo clippy -p gyre-server --lib
---tests` exits 0 with no gates.rs findings, and `cargo test -p
-gyre-server --lib api::gates` passes 7/7 including the rejection-fields
-round-trip. Evidence with exit codes retained under
-`/tmp/stage/review-evidence`. The commit is attributed in `commits:`
-frontmatter; acceptance criteria left unchecked for independent review.
+Focused probes on the current head after `npm ci` (logs under
+/tmp/stage/review-evidence): `npx vitest run` on ExplorerViewLensUrl —
+6/6 passed (exit 0); lens-rendering + ExplorerViewLargeGraph +
+ExplorerCanvas + ExplorerViewShortcuts — 192/192 passed (exit 0).
+Prior repair rounds (rebase resolution be494b399, gates.rs lint fix
+7bb23bca) are retained in git history. Acceptance criteria left
+unchecked for independent review.
