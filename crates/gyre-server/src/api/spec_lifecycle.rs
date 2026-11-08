@@ -215,6 +215,78 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn get_put_traverse_sqlite_migration_end_to_end() {
+        // Review finding d2598c14 F2: the tests above run against the
+        // in-memory store. This one wires a real temp-file SQLite storage
+        // into `spec_lifecycle_configs` — the same wiring production
+        // `build_state` performs via the `store!` macro in DB-backed mode —
+        // so the API handlers genuinely traverse the migration-created
+        // `spec_lifecycle_configs` table (SqliteStorage::new runs the
+        // embedded migrations, incl. 2026-10-08-000059).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let sqlite = std::sync::Arc::new(
+            gyre_adapters::SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap(),
+        );
+        let mut base = (*test_state()).clone();
+        base.spec_lifecycle_configs = sqlite;
+        let state = std::sync::Arc::new(base);
+
+        let repo = Repository::new(
+            gyre_common::Id::new("repo-sqlite"),
+            gyre_common::Id::new("proj-1"),
+            "sqlite-repo",
+            "/tmp/sqlite-repo",
+            0,
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.repos.create(&repo))
+                .unwrap();
+        });
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Unconfigured repo: GET returns defaults read from the migrated
+        // table (absent row -> port contract default, not an error).
+        let resp = get(&app, "/api/v1/repos/repo-sqlite/settings/spec-lifecycle").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["enabled"].as_bool().unwrap());
+        assert_eq!(json["default_priority_new"].as_str().unwrap(), "Medium");
+
+        // PUT persists through the SQLite adapter into the migrated table.
+        let body = serde_json::json!({
+            "enabled": false,
+            "watched_paths": ["docs/specs/"],
+            "default_priority_new": "Critical",
+        });
+        let resp = put(
+            &app,
+            "/api/v1/repos/repo-sqlite/settings/spec-lifecycle",
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Read back through the same port git_http.rs uses, proving the
+        // row landed in the migration-created table, not a mem stand-in.
+        let cfg = state
+            .spec_lifecycle_configs
+            .get_for_repo("repo-sqlite")
+            .await
+            .unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.watched_paths, vec!["docs/specs/".to_string()]);
+        assert_eq!(cfg.default_priority_new, TaskPriority::Critical);
+
+        // And a fresh GET reflects the persisted row.
+        let resp = get(&app, "/api/v1/repos/repo-sqlite/settings/spec-lifecycle").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(!json["enabled"].as_bool().unwrap());
+        assert_eq!(json["default_priority_new"].as_str().unwrap(), "Critical");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn put_agent_role_forbidden() {
         // Agent role must not be able to disable the lifecycle hook:
         // that would let agents push spec changes that go unnoticed.
