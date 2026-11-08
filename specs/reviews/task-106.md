@@ -47,3 +47,83 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 3 — candidate `17335d7d3` (pipeline R22; base `98a5299b9`)
+
+Independent review of the exact assigned candidate after the R20/R21 repair
+rounds. Evidence: `/tmp/stage/review-evidence/task-106-r22/`.
+
+Verified working (no findings):
+
+- **Adapter contract** (`gyre-adapters/src/jj_ops.rs`): `jj_rebase` runs
+  `jj git import` (destination branch resolves against the bare repo's moved
+  ref), then `jj rebase -b @ -d <branch>` (whole in-flight stack — the
+  documented F5 spec-vs-plan divergence), classifies conflicts via the
+  `jj resolve --list -r @` exit-code contract (0 = conflicted, files on
+  stdout; 2 = clean), and parses the rebased count from stderr where jj
+  0.39.0 writes it. `jj_bookmark_set` (create-or-move,
+  `--allow-backwards`), `jj_main_checkout_init` (idempotent standalone
+  checkout), `jj_workspace_add` (import-before-resolve; half-created
+  workspace forgotten + removed on failure), `jj_workspace_forget`
+  (idempotent), `jj_git_export` all respect the port boundary
+  (`check-arch.sh` exit 0).
+- **Trigger** (`merge_processor.rs`): `rebase_inflight_agents` is the last
+  step after `run_post_merge_gates` returns Ok in BOTH merge paths (R2 F3);
+  targets = same target branch, MR Open/Approved, agent Active, worktree on
+  disk, merged authors excluded.
+- **Conflict-as-state**: repo-scoped MR `has_conflicts` flag (set on
+  conflict, cleared by a later clean rebase — R19 F3), SpeculativeConflict →
+  workspace, Escalation → agent with the conflicting-file list; audit events
+  record success/conflict/error outcomes.
+- **Notification**: `baseline_moved` to the agent with `new_base_sha` and
+  `rebased_count` via `emit_event`.
+- **Safeguards**: 60s backoff persisted only after a terminal outcome; a
+  movement inside the window sets a pending marker (newest base wins);
+  `replay_pending_rebases` runs on every processor cycle and an infra Err
+  keeps the marker on the replay path (R2 F8).
+- **Completion path** (R20): bookmark SET + `jj git export` before MR
+  stats; verified in `complete_agent`.
+- **Spawn layout / response** (R21): response `worktree_path` equals the
+  recorded worktree path for both provisioning outcomes — pinned by
+  `spawn_response_worktree_path_matches_recorded_worktree`, which drives the
+  REAL `Git2OpsAdapter` for the fallback case.
+- **Wiring**: `AppState` uses the real `JjOpsAdapter`; test doubles are
+  `#[cfg(test)]`-only. Exemption files shrank (jj smoke tests converted to
+  recorded-fixture tests; ignored-tool-tests and relative-path entries
+  removed). CI installs pinned jj 0.39.0 and sets `GYRE_JJ_TESTS_MUST_RUN=1`
+  (guard panics on a missing binary — no silent skip).
+
+Probes (logs in the evidence dir): `cargo test -p gyre-server --lib` →
+**1439 passed, 0 failed**; `cargo test -p gyre-adapters --lib` → **391
+passed, 0 failed** (jj fixture tests guard-skip locally — no jj binary in
+this sandbox, GitHub release download refused, see
+`jj-download-attempt.log`; their assertions were read and are substantive,
+and the CI jj leg executes them against the pinned binary with the
+must-run guard — remote verification should confirm that leg is green);
+`merge_processor::` filter → 77 passed; `rebase` filter → 17 passed;
+`cargo fmt --check` clean; `check-arch`, `check-mem-port-contracts`,
+`check-inert-enforcement`, `check-dead-message-kinds`,
+`check-ignored-tool-tests`, `check-task-commit-attribution`,
+`check-in-memory-state-stores` all exit 0.
+`check-assertionless-tests.sh` / `check-test-coverage-depth.sh` exit 2 due
+to a mawk-vs-gawk incompatibility — verified to fail identically on the
+base commit `98a5299b9` (environmental, pre-existing, not a defect).
+
+Notes (not findings):
+
+- Trigger-path infra Err drops that movement's rebase (audited, window not
+  consumed; the next movement retries) — the tested contract from
+  `rebase_failure_does_not_consume_backoff_window`, consistent with the
+  F4/F8 scoping across prior rounds.
+- Cosmetic narrow race: an in-window pending marker can survive a later
+  trigger-path success and replay once as a duplicate no-op rebase (branch
+  name resolves to the fresh tip) with a duplicate `baseline_moved` citing
+  a stale base SHA.
+- The coverage-matrix row for source-control.md §4 stays `task-assigned`;
+  promotion to `verified` is the Spec-Fidelity Auditor stage's action
+  (cf. commit `5becd6c92`), not the implementer's.
+
+Verdict: **approved** — every acceptance criterion is implemented in
+production code and pinned by tests that fail on the pre-fix behaviors;
+independent probes confirm the suites, boundaries, and mechanical
+invariants at the exact candidate.
