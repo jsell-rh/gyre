@@ -398,6 +398,25 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register log compression job (observability.md §Log Retention &
+    // Compression) — daily by default, configurable via
+    // GYRE_LOG_COMPRESSION_INTERVAL (seconds).
+    registry
+        .register(
+            JobDefinition {
+                name: crate::log_compression::JOB_NAME.to_string(),
+                description: "Zstd-compresses audit event details and agent log \
+                     lines older than 7 days (observability §Log Retention & Compression)"
+                    .to_string(),
+                interval_secs: crate::log_compression::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
+        )
+        .await;
+
+    // Register spawn budget reset job at midnight UTC
     registry
         .register(
             JobDefinition {
@@ -477,10 +496,10 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "trust_suggestion_check".to_string(),
-                description:
-                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
-             notifications for Admin/Owner members when criteria are met (HSI §2)"
-                        .to_string(),
+                description: "Queries 30-day gate failures and MR reverts per workspace; creates \
+             TrustSuggestion notifications for Admin/Owner members when both counts \
+             are 0 and trust can escalate (HSI §2)"
+                    .to_string(),
                 interval_secs: 86400,
                 enabled: true,
                 run_at_utc_hour: None,
@@ -502,6 +521,31 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
+    // Register meta-spec conformance sweep job (runs daily,
+    // meta-spec-reconciliation.md §10). Interval is configurable via
+    // GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_conformance_sweep".to_string(),
+                description: "Sweeps all workspaces for meta-spec drift between the active \
+                     meta-spec set and provenance-recorded set SHAs (§10)"
+                    .to_string(),
+                interval_secs: std::env::var("GYRE_META_SPEC_SWEEP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::reconciliation::SWEEP_INTERVAL_SECS),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
         )
         .await;
 
