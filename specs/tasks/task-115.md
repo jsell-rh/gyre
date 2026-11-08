@@ -91,42 +91,51 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
 
 ## Shipped
-Round-4 review repair (review checkpoint `829bba20`, fix commit `86415e4b`
-on `pipeline/task-115/813e9bfe4ae14ed197c8bf46b9104450-1`). The single
-finding of the round is fixed and verified against both failure modes it
-named.
+Rebase repair onto the new target base `72ad2a128` (merge commit
+`c095cf489` on `pipeline/task-115/78536abfa87b4408a3e7954d40f8a0f0-1`,
+candidate `933ac8ea4`). All three conflicts resolved; no behavior of the
+signal chain regressed against the base's upgraded approval machinery.
 
-### F1 — duplicate Diesel migration version 20261010000056
+### Conflict resolutions
 
-Commit `336dd201` had added `2026-10-10-000056_task_spec_ref`, deriving the
-same Diesel version as the base's pre-existing
-`2026-10-10-000056_meta_spec_approved_content_hash`. Diesel runs only one
-migration per version, so on a fresh database the `meta_specs.approved_content_hash`
-column was never created and every meta-spec insert failed — the repo's
-migration-sequence invariant (AGENTS.md, `scripts/check-migration-versions.sh`)
-was violated. Renumbered the directory to the next unused sequence
-`2026-10-10-000057_task_spec_ref` (derived version `20261010000057`);
-migration body unchanged. Both storage backends embed the same
-`migrations/` dir, so SQLite and PostgreSQL pick up the fix together, and a
-database that ran the broken duplicate (which recorded `20261010000056` as
-the meta_spec migration, the alphabetical first) now runs the renumbered
-migration as a new version, creating the missing `tasks.spec_ref` column.
+1. **Approve handler (`specs.rs`) — the substantive one.** The base
+   replaced the candidate-era "any approval for the current SHA =>
+   Approved" resolution with mode-based resolution
+   (`resolve_new_approval_status`) and gated the base's `SpecApproved`
+   emission on the transition INTO Approved. The candidate's emission was
+   unconditional (correct only under its old always-Approved resolution).
+   Resolution: base's transition gate kept around the task-115 emission -
+   payload (spec'd fields + `workspace_id` for the orchestrator registry
+   scope), bus emission, and `signal_chain::on_spec_approved` routing now
+   fire only when the ledger entry actually becomes Approved, so partial
+   approvals (e.g. the human half of a `human_and_agent` pair) and
+   redundant re-approvals no longer trigger orchestration.
+2. **Reject handler (`specs.rs`):** both sides carried the task-097 F3 fix
+   (tenant resolved from the workspace record; fanout skipped + logged
+   when unresolvable); kept the base's structure verbatim.
+3. **`fabricated-scope-defaults-exemptions.txt`:** both sides had removed
+   the specs.rs entry (fixed in task-193); kept the base's documenting
+   comment. Entry count unchanged at 4.
 
-### Test evidence (head `86415e4b`, clean tree)
+Migration sequence verified collision-free after the merge: the base's
+`2026-09-30-000056`, `2026-10-08-000056/000057`, and
+`2026-10-10-000056` coexist with the candidate's
+`2026-10-10-000057_task_spec_ref` (distinct full-prefix Diesel versions).
 
-- Pre-fix reproduction confirmed both named failure modes:
-  `check-migration-versions.sh` exit 1 naming the `20261010000056` pair;
-  `--lib sqlite::meta_spec` 6 failures (`table meta_specs has no column
-  named approved_content_hash`); `no_duplicate_migration_version_prefixes`
-  failure on the same pair.
-- Post-fix: `check-migration-versions.sh` OK; `check-migration-sql-portability.sh` OK;
-  `cargo test -p gyre-adapters --lib sqlite::` → **266 passed, 0 failed**
-  (broken-tree baseline: 258 passed / 7 failed), including `sqlite::meta_spec`
-  (10 passed), `sqlite::task` (11 passed, round-3 F1 regression intact), and
-  the duplicate-version guard; `cargo test -p gyre-server --lib signal_chain`
-  → **19 passed, 0 failed**; `check-task-commit-attribution` OK after the
-  frontmatter update.
-- Evidence: `/tmp/stage/review-evidence/task-115-round4-migration-renumber.txt`
+### Test evidence (head `c095cf489`, clean tree)
+
+- `cargo check -p gyre-server --lib` - clean.
+- `cargo test -p gyre-server --lib signal_chain` -> **19 passed, 0 failed**.
+- `cargo test -p gyre-server --lib specs` -> **106 passed, 0 failed**,
+  including `approve_spec_emits_spec_approved_and_triggers_chain` and
+  `reject_spec_cancels_chain_created_delegation_task` (the chain now runs
+  behind the base's mode-based resolution and transition gate).
+- `cargo test -p gyre-adapters --lib sqlite::` -> **272 passed, 0 failed**
+  (base added sqlite suites; round-4 migration renumber still intact).
+- Mechanical checks: `check-fabricated-scope-defaults`,
+  `check-migration-versions`, `check-migration-sql-portability`,
+  `check-task-commit-attribution` all OK.
+- Evidence: `/tmp/stage/review-evidence/task-115-rebase-72ad2a12.txt`
 - Sandbox transport restriction (unchanged from base,
   `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
   `otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run
@@ -142,11 +151,13 @@ delegation + coordination tasks, cross-workspace p4 notifications), Phase 3
 (task scheduler, repo orchestrator spawn, spec-pinned decomposition into
 ordered Implementation sub-tasks, coordination assessment). Repair rounds:
 scheduler double-processing guards (cycle run lock, re-read after repo
-mutex, LLM latency bounds — `de294c12`), false bulk-ack of the orchestrator
+mutex, LLM latency bounds - `de294c12`), false bulk-ack of the orchestrator
 inbox, decorative spec read consumed into the delegation description,
 no-ledger-SHA hard error, sub-task repo/workspace scoping, round-3
 (`147d8259`: TaskRepository::create workspace_id restoration in both task
 adapters + `create_persists_workspace_scope`; empty-SHA spec_ref hard-fail
 in `decompose_delegation` + `delegation_with_empty_sha_spec_ref_stays_blocked`),
-and the rebase repairs (`88e97e0d`, `e4a8e9b8` — import-list-only conflicts
-resolved as the union).
+round-4 (`86415e4b`: duplicate Diesel migration version `20261010000056`
+renumbered to `2026-10-10-000057_task_spec_ref`), and the earlier rebase
+repairs (`88e97e0d`, `e4a8e9b8` - import-list-only conflicts resolved as
+the union).
