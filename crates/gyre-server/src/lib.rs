@@ -23,6 +23,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -280,8 +281,10 @@ pub struct AppState {
     /// admin kills and every new spawn.
     pub spawned_backends:
         Arc<Mutex<HashMap<String, std::sync::Arc<crate::api::spawn::SpawnBackend>>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -950,7 +953,7 @@ pub fn build_state(
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         spawned_backends: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
