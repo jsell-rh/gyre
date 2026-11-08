@@ -4,7 +4,11 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+<<<<<<< HEAD
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
+=======
+  import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
+>>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
@@ -214,6 +218,14 @@
 
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
+  // HSI §3 Layer 1: MR gate evaluation records for the current repo —
+  // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
+  let gateRecords = $state([]);
+  // HSI §3 Layer 1: recent ArchitecturalDelta records (last hour only) for
+  // the fading highlight rings. Loaded on canvas load so the rings do not
+  // depend on the collapsed-by-default Architecture-Insights panel; the
+  // insights panel's full timeline (a superset) takes precedence once live.
+  let livenessTimeline = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -929,14 +941,19 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; livenessTimeline = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
+<<<<<<< HEAD
     gateStatusBySpec = {};
     specApprovals = [];
+=======
+    gateRecords = [];
+    livenessTimeline = null;
+>>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
     graphWarnings = [];
     graphWarningsDismissed = false;
     perfWarningDismissed = false;
@@ -950,9 +967,18 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+<<<<<<< HEAD
       // Load evaluative lens overlays: gate outcomes + spec approvals
       // (best-effort, non-blocking)
       loadEvaluativeData(repoId);
+=======
+      // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
+      loadGateData(repoId);
+      // Load recent ArchitecturalDelta records for the fading change rings
+      // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
+      // load must not gate.
+      loadLivenessTimeline(repoId);
+>>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -998,7 +1024,7 @@
   async function loadTraceData(repoId) {
     try {
       // Find the most recent MR for this repo that has trace data
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 5 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       for (const mr of mrList) {
         try {
@@ -1012,6 +1038,7 @@
     } catch { /* trace loading is best-effort */ }
   }
 
+<<<<<<< HEAD
   /** Load Evaluative lens data (HSI §3): gate outcomes and spec approvals.
    *
    *  Gate status: gate results are recorded per MR, and each MR carries a
@@ -1075,6 +1102,49 @@
     } catch {
       gateStatusBySpec = {};
     }
+=======
+  /**
+   * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
+   * Each MR's spec_ref links its gate results to the graph nodes the spec
+   * governs; the Evaluative lens colors edges green (all passed) / red (any
+   * failed). Best-effort and non-blocking, like trace loading.
+   */
+  async function loadGateData(repoId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      const records = [];
+      for (const mr of mrList) {
+        if (!mr?.spec_ref) continue;
+        try {
+          const gates = await api.mrGates(mr.id);
+          if (Array.isArray(gates) && gates.length > 0) {
+            records.push({ mrId: mr.id, spec_ref: mr.spec_ref, gates });
+          }
+        } catch { /* no gates for this MR, skip */ }
+      }
+      gateRecords = records;
+    } catch { /* gate loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load the repo's recent ArchitecturalDelta records on
+   * canvas load so the fading highlight rings have a data source in the
+   * default view (the Architecture-Insights panel that owns the full
+   * timeline is collapsed by default). The query is bounded to the recent-
+   * change window (since = now − 1h, no until) so the payload stays small;
+   * computeRecentChanges re-applies the same window, and the insights
+   * panel's full timeline supersedes this slice once loaded. Best-effort
+   * and non-blocking, like trace/gate loading.
+   */
+  async function loadLivenessTimeline(repoId) {
+    try {
+      const since = Math.floor((Date.now() - RECENT_CHANGE_WINDOW_MS) / 1000);
+      const timeline = await api.repoGraphTimeline(repoId, since);
+      if (selectedRepoId !== repoId) return; // stale — user switched repos
+      livenessTimeline = Array.isArray(timeline) ? timeline : [];
+    } catch { /* recent-change rings are best-effort */ }
+>>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
   }
 
   function onRepoChange(e) {
@@ -1648,9 +1718,10 @@
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
                 windowEscape={false}
-                timeline={graphTimeline ?? []}
+                timeline={graphTimeline ?? livenessTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                {gateRecords}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;
