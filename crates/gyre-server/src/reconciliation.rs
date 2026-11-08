@@ -569,16 +569,30 @@ pub async fn run_reconciliation(
                 // overwrite it. `created_keys` prunes stored deferrals of
                 // work this wave just put in flight.
                 let deferred = remaining.len();
-                let total_deferred =
-                    merge_pending_rollout(state, &ws_id, remaining, &created_keys).await;
-                if deferred > 0 {
-                    info!(
-                        workspace_id = %ws_id,
-                        deferred,
-                        total_deferred,
-                        batch_size,
-                        "reconciliation: rolling rollout — first batch created, remainder deferred"
-                    );
+                match merge_pending_rollout(state, &ws_id, remaining, &created_keys).await {
+                    Some(total_deferred) => {
+                        if deferred > 0 {
+                            info!(
+                                workspace_id = %ws_id,
+                                deferred,
+                                total_deferred,
+                                batch_size,
+                                "reconciliation: rolling rollout — first batch created, remainder deferred"
+                            );
+                        }
+                    }
+                    None => {
+                        // Read failure aborted the merge: the stored
+                        // remainder is untouched, but THIS wave's deferred
+                        // remainder was not persisted — operator-visible
+                        // so the missing follow-up batches can be
+                        // re-triggered.
+                        warn!(
+                            workspace_id = %ws_id,
+                            deferred,
+                            "reconciliation: rolling rollout — pending-state read failed, this wave's remainder was NOT deferred; stored remainder untouched"
+                        );
+                    }
                 }
             }
         }
@@ -778,7 +792,13 @@ struct PendingRollout {
 }
 
 /// Merge deferred rolling-rollout work into the workspace's pending state
-/// (§7 Rolling). Returns the resulting deferred count.
+/// (§7 Rolling). Returns `Some(count)` with the resulting deferred count,
+/// or `None` when the merge was ABORTED because the stored pending state
+/// could not be read — in that case nothing is written and the stored
+/// remainder is left exactly as it was ("cannot determine state" must not
+/// become "state is empty": overwriting with the incoming-only list would
+/// silently discard the stored deferred work, the same loss class as the
+/// overwrite bug this merge exists to prevent).
 ///
 /// `incoming` are newly deferred tasks. `consumed` lists the (repo_id,
 /// title) pairs the caller has resolved out of the pending remainder
@@ -801,7 +821,7 @@ async fn merge_pending_rollout(
     ws_id: &Id,
     incoming: Vec<PendingRolloutTask>,
     consumed: &[(String, String)],
-) -> usize {
+) -> Option<usize> {
     let mut remaining: Vec<PendingRolloutTask> = Vec::new();
     match state
         .kv_store
@@ -821,6 +841,10 @@ async fn merge_pending_rollout(
                 }
             }
             Err(e) => {
+                // Unparseable stored state is unrecoverable garbage — it
+                // cannot be merged with, so recovering to the incoming
+                // remainder (rather than aborting) is the only forward
+                // path that keeps the rollout drainable.
                 warn!(
                     workspace_id = %ws_id,
                     error = %e,
@@ -830,11 +854,19 @@ async fn merge_pending_rollout(
         },
         Ok(None) => {}
         Err(e) => {
+            // Fail CLOSED: a read failure means the stored remainder is
+            // unknown, not empty. Abort the merge without writing — an
+            // overwrite here would discard the stored deferred work behind
+            // a transient read error that does not affect the write path.
+            // The stored state stays live for the next advance; work the
+            // caller already created as tasks is deduplicated on that
+            // advance, so the rollout self-heals.
             warn!(
                 workspace_id = %ws_id,
                 error = %e,
-                "rolling rollout: failed to read pending state, keeping only the incoming remainder"
+                "rolling rollout: failed to read pending state, merge aborted — stored remainder left untouched"
             );
+            return None;
         }
     }
     remaining.extend(incoming);
@@ -844,7 +876,7 @@ async fn merge_pending_rollout(
             .kv_store
             .kv_remove(ROLLOUT_PENDING_NS, ws_id.as_str())
             .await;
-        return 0;
+        return Some(0);
     }
     let count = remaining.len();
     let pending = PendingRollout {
@@ -865,7 +897,7 @@ async fn merge_pending_rollout(
             warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to serialize pending state");
         }
     }
-    count
+    Some(count)
 }
 
 /// Create the next batch of a rolling rollout when the previous batch has
@@ -945,6 +977,14 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         usize::MAX
     };
     let task_priority = policy.priority.task_priority();
+    // §7 Background: tasks are created WITHOUT the delegation signal —
+    // they sit in Backlog and cannot trigger agent spawning; the repo
+    // orchestrator decides priority. The flush path must derive the flag
+    // from the LIVE policy (re-read above), not from the strategy the
+    // rollout started under: a mid-rollout switch to Background must
+    // produce inert tasks, exactly like `run_reconciliation`'s own
+    // Background branch.
+    let delegation = policy.strategy != RolloutStrategy::Background;
     let now = crate::api::now_secs();
 
     // Existing open tasks — same dedup rule as `run_reconciliation`.
@@ -981,7 +1021,7 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
                 workspace_id,
                 &cand,
                 task_priority.clone(),
-                true,
+                delegation,
                 now,
             )
             .await
@@ -993,20 +1033,34 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         }
     }
 
-    let deferred = merge_pending_rollout(state, workspace_id, kept, &consumed).await;
-    if deferred == 0 {
-        info!(
-            workspace_id = %workspace_id,
-            created,
-            "rolling rollout: no deferred work left"
-        );
-    } else {
-        info!(
-            workspace_id = %workspace_id,
-            created,
-            deferred,
-            "rolling rollout: next batch created"
-        );
+    match merge_pending_rollout(state, workspace_id, kept, &consumed).await {
+        Some(0) => {
+            info!(
+                workspace_id = %workspace_id,
+                created,
+                "rolling rollout: no deferred work left"
+            );
+        }
+        Some(deferred) => {
+            info!(
+                workspace_id = %workspace_id,
+                created,
+                deferred,
+                "rolling rollout: next batch created"
+            );
+        }
+        None => {
+            // Read failure aborted the merge: the stored pre-advance
+            // snapshot is untouched. Entries this advance already created
+            // as tasks are still in that snapshot and are deduplicated on
+            // the next advance, so the rollout self-heals — but the log
+            // makes the anomaly operator-visible.
+            warn!(
+                workspace_id = %workspace_id,
+                created,
+                "rolling rollout: pending-state read failed on advance; stored remainder retained (already-created work is deduplicated next advance)"
+            );
+        }
     }
 
     if created > 0 {
@@ -2000,6 +2054,212 @@ mod tests {
             .count();
         assert_eq!(open, 3, "batch-size change must apply to the next batch");
         assert!(pending_rollout_state(&state, "ws-bsize").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rolling_strategy_switch_to_background_flushes_inert_tasks() {
+        // F1 regression (review fd31a1cb): the flush path in
+        // `maybe_advance_rolling_rollout` used to hardcode the delegation
+        // signal, so a mid-rollout switch to Background created the
+        // deferred remainder WITH `task_type: Delegation` — those tasks
+        // can trigger agent spawning, contradicting §7 Background ("leave
+        // them in Backlog... repo orchestrator decides priority") and
+        // disagreeing with `run_reconciliation`'s own Background branch.
+        // The flag must be derived from the re-read LIVE policy.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sw-bg").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-swb-{i}"), "ws-sw-bg").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-sw-bg",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(summary.tasks_created, 1);
+        assert_eq!(
+            pending_rollout_state(&state, "ws-sw-bg").await.unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Admin switches to Background; batch 1 completes.
+        set_policy(
+            &state,
+            "ws-sw-bg",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Background,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+        finish_all_reconciliation_tasks(&state, "ws-sw-bg").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+
+        // The whole remainder flushed at once, and every flushed task is
+        // inert: Backlog, no delegation signal — identical to what a
+        // fresh Background rollout would have created.
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .collect::<Vec<_>>();
+        assert_eq!(open.len(), 2, "Background switch must flush the remainder");
+        assert!(
+            open.iter().all(|t| t.status == TaskStatus::Backlog),
+            "Background-flushed tasks must sit in Backlog"
+        );
+        assert!(
+            open.iter().all(|t| t.task_type.is_none()),
+            "Background-flushed tasks must not carry the Delegation spawning signal"
+        );
+        assert!(pending_rollout_state(&state, "ws-sw-bg").await.is_none());
+    }
+
+    /// KvJsonStore wrapper whose `kv_get` fails while `fail_reads` is set —
+    /// used to exercise the fail-closed pending-state merge: a read
+    /// failure must abort the merge (stored remainder untouched), never
+    /// overwrite the stored state with an incoming-only list.
+    struct FlakyReadKvStore {
+        inner: crate::mem::MemKvStore,
+        fail_reads: std::sync::atomic::AtomicBool,
+    }
+
+    impl FlakyReadKvStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::mem::MemKvStore::default(),
+                fail_reads: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::KvJsonStore for FlakyReadKvStore {
+        async fn kv_set(&self, namespace: &str, key: &str, value: String) -> anyhow::Result<()> {
+            self.inner.kv_set(namespace, key, value).await
+        }
+
+        async fn kv_get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<String>> {
+            if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(anyhow::anyhow!("injected kv read failure"))
+            } else {
+                self.inner.kv_get(namespace, key).await
+            }
+        }
+
+        async fn kv_remove(&self, namespace: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.kv_remove(namespace, key).await
+        }
+
+        async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            self.inner.kv_list(namespace).await
+        }
+
+        async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
+            self.inner.kv_clear(namespace).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_pending_rollout_read_failure_leaves_stored_state_untouched() {
+        // F2 regression (review fd31a1cb): `merge_pending_rollout` used to
+        // fail OPEN on a pending-state read error — it warned "keeping
+        // only the incoming remainder" and then WROTE that incoming-only
+        // list, silently discarding the stored deferred remainder behind
+        // a transient read failure that did not affect the write path
+        // (the same silent-work-loss class as the overwrite bug the merge
+        // exists to prevent). A read failure must ABORT the merge: the
+        // stored state stays exactly as it was.
+        let kv = Arc::new(FlakyReadKvStore::new());
+        let state = crate::mem::test_state_with_kv_store(kv.clone());
+        let ws = make_workspace(&state, "ws-kvfail").await;
+        for i in 0..4 {
+            make_repo(&state, &format!("repo-kv-{i}"), "ws-kvfail").await;
+        }
+        let persona = make_meta_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        set_policy(
+            &state,
+            "ws-kvfail",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        // Wave A: persona v4 → 1 task + 3 deferred (stored).
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        assert_eq!(a.tasks_created, 1);
+        assert_eq!(
+            pending_rollout_state(&state, "ws-kvfail").await.unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Wave B triggers while kv reads fail: its first batch is still
+        // created (the write path is unaffected), but the merge of its
+        // deferred remainder into the stored state must ABORT on the read
+        // failure instead of overwriting the stored remainder.
+        kv.fail_reads
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        assert_eq!(b.tasks_created, 1);
+        kv.fail_reads
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Stored state is EXACTLY wave A's remainder — not overwritten
+        // with wave B's incoming-only list, not merged.
+        let pending = pending_rollout_state(&state, "ws-kvfail")
+            .await
+            .expect("aborted merge must leave the stored remainder in place");
+        let remaining = pending["remaining"].as_array().unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(
+            remaining
+                .iter()
+                .all(|e| e["title"].as_str().unwrap().contains("backend-developer")),
+            "stored remainder must still be wave A's deferrals"
+        );
+        assert!(
+            !remaining
+                .iter()
+                .any(|e| e["title"].as_str().unwrap().contains("code-reviewer")),
+            "wave B's remainder must NOT have replaced the stored state"
+        );
+
+        // The retained state is live, not garbage: the rollout keeps
+        // draining from it (finish wave B's open task, advance → next
+        // batch created from wave A's stored remainder).
+        finish_all_reconciliation_tasks(&state, "ws-kvfail").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        let after = pending_rollout_state(&state, "ws-kvfail").await;
+        assert_eq!(
+            after.as_ref().unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "the untouched stored remainder must still drive the next batch"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
