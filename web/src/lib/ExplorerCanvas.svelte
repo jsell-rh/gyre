@@ -17,18 +17,16 @@
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
   import {
-<<<<<<< HEAD
     gateStatusDecoration,
     evaluativeNodeDecorations,
   } from './lens-rendering.js';
-=======
+  import {
     activeAgentNodeIds as computeActiveAgentNodeIds,
     computeRecentChanges,
     recentChangeAlpha,
     computeNodeGateStatus,
     edgeGateStatus,
   } from './liveness.svelte.js';
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
   import {
     hasCausalEdges,
     computeTraceOrder,
@@ -3908,18 +3906,6 @@
         if (inCount > 1) lineWidth = 1.2 + Math.min(inCount / 5, 3);
       }
 
-<<<<<<< HEAD
-      // Evaluative lens: gate status edge coloring (HSI §3) — edges leaving
-      // a node governed by a spec with a concluded gate run are colored
-      // green (pass) / red (fail). Overrides the base/trace edge color;
-      // the structural layout and topology are unchanged (lenses compose).
-      if (lens === 'evaluative') {
-        const gateStatus = gateStatusByNodeId.get(srcId);
-        if (gateStatus) {
-          color = gateStatus === 'pass' ? '#22c55e' : '#ef4444';
-          edgeAlpha = Math.max(edgeAlpha, 0.75);
-          lineWidth = Math.max(lineWidth, 1.8);
-=======
       // ── HSI §3 Layer 1: gate status colors (Evaluative lens only) ─────
       // Green when all gates passed for both connected nodes, red when at
       // least one has a failed gate. nodeGateStatus is only populated in the
@@ -3934,7 +3920,23 @@
           color = '#ef4444'; // red — at least one gate failed
           edgeAlpha = Math.max(edgeAlpha, 0.75);
           lineWidth = Math.max(lineWidth, 2);
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
+        }
+      }
+
+      // Evaluative lens: gate status edge coloring (HSI §3) — edges leaving
+      // a node governed by a spec with a concluded gate run are colored
+      // green (pass) / red (fail), with the most recent MR per spec path
+      // deciding the outcome. When both data sources are present this
+      // per-spec recency join overrides the record-aggregate coloring above
+      // (it resolves "most recent gate results" per spec, per HSI §3);
+      // either way the structural layout and topology are unchanged
+      // (lenses compose).
+      if (lens === 'evaluative') {
+        const gateStatus = gateStatusByNodeId.get(srcId);
+        if (gateStatus) {
+          color = gateStatus === 'pass' ? '#22c55e' : '#ef4444';
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 1.8);
         }
       }
 
@@ -5588,7 +5590,6 @@
     ['High flow', 'hsl(0,70%,45%)'],
     ['OK span', '#60a5fa'],
     ['Error span', '#ef4444'],
-<<<<<<< HEAD
     ['Coverage ok', '#22c55e'],
     ['Coverage partial', '#eab308'],
     ['Coverage low', '#ef4444'],
@@ -5597,9 +5598,12 @@
     ['Approved', '#22c55e'],
     ['Pending', '#eab308'],
     ['Rejected', '#ef4444'],
-=======
-    ...(hasGateEdges ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']] : []),
->>>>>>> 2100127c46c7e7d8c307a6d59211e3f77c6d690a
+    // Record-aggregate gate entries only while the per-spec join above has
+    // no data — the two families describe the same gate outcomes, and the
+    // per-spec recency join's entries subsume the aggregate ones.
+    ...(hasGateEdges && gateStatusByNodeId.size === 0
+      ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']]
+      : []),
   ] : [
     ['Has spec', '#22c55e'],
     ['Suggested', '#eab308'],
