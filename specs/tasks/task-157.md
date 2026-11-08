@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["9caa8566fc874dbacffb341ddb2af0b086d3f418", "de208c147ff0653404a2b6b0a8d33e1f2e8b91a1", "aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
+commits: ["6b6cbbd87cbd5df5a190e682c1ced6f8057651d5", "9caa8566fc874dbacffb341ddb2af0b086d3f418", "de208c147ff0653404a2b6b0a8d33e1f2e8b91a1", "aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
 ---
 
 ## Spec Excerpt
@@ -81,11 +81,12 @@ From `meta-spec-reconciliation.md` §7 — Rollout Policy:
 
 Real, production implementation of `meta-spec-reconciliation.md` §7 Rollout
 Policy, plus the review repairs for overlapping rolling waves (commit
-`de208c147ff0653404a2b6b0a8d33e1f2e8b91a1`) and for the flush-path
+`de208c147ff0653404a2b6b0a8d33e1f2e8b91a1`), for the flush-path
 delegation flag and merge read-failure fail-open (commit
-`9caa8566fc874dbacffb341ddb2af0b086d3f418`), on the assignment base
-`124a852bedb4e5759bf143b6c2683df6eeb03849`. Full commit list in the
-frontmatter.
+`9caa8566fc874dbacffb341ddb2af0b086d3f418`), and for the Background-history
+rolling-rollout stall (commit `6b6cbbd87cbd5df5a190e682c1ced6f8057651d5`,
+which also merges the assignment base `637be7187` — conflict resolved in
+`mem.rs` imports only). Full commit list in the frontmatter.
 
 ### Spec fidelity
 
@@ -232,26 +233,58 @@ semantics it guards against:
 Evidence retained at
 `/tmp/stage/review-evidence/task-157-fd31a1cb-repair.txt`.
 
+### Review repair (attempt c9dc5a11, commit `6b6cbbd8`)
+
+Review finding `c9dc5a11` reproduced on candidate `fe7beea54`:
+`maybe_advance_rolling_rollout`'s next-batch gate counted ANY non-terminal
+reconciliation-labeled task as "batch in flight", but §7 Background tasks
+are created without a `task_type` and sit in Backlog by design until the
+repo orchestrator engages them (potentially forever) — so a workspace with
+Background history stalled a later Rolling rollout indefinitely: batch 1
+completed, the advance saw the inert Backlog tasks as in-flight work, and
+no next batch was ever created (and the strategy-switch flush, living
+inside the same never-running advance, was unreachable too). Fixed by
+gating the advance on the rollout's own in-flight work — non-terminal
+reconciliation tasks carrying a `task_type` (the spawning signal) — which
+is internally consistent with `run_reconciliation`, which starts a new
+wave's first batch without any in-flight check.
+
+Regression test `background_history_does_not_stall_rolling_rollout`
+reproduces the review scenario end-to-end (Background wave parks 3 inert
+tasks → policy switched to Rolling → new wave creates batch 1 + 2 deferred
+→ batch completions must keep advancing the rollout to the very end, with
+the parked tasks untouched) and was mutation-verified to fail under the
+old gate exactly at the reviewer's reproduction point ("batch 2 must be
+created after batch 1 completes despite Background history: left 0,
+right 1"). A test-only `finish_active_reconciliation_tasks` helper drives
+only tasks carrying a `task_type` to Done, leaving inert Background tasks
+parked — `finish_all_reconciliation_tasks` would have finished them too
+and silently un-stalled the scenario.
+
+Evidence retained at
+`/tmp/stage/review-evidence/task-157-c9dc5a11-repair.txt`.
+
 ### Test evidence
 
-Focused probes at head `9caa8566f`:
+Focused probes at head `6b6cbbd8`:
 
-- `cargo test -p gyre-server --lib reconciliation::tests` — 32 passed
-  (28 pre-existing + 4 regression tests from the two repairs), covering:
+- `cargo test -p gyre-server --lib reconciliation::tests` — 33 passed
+  (28 pre-existing + 5 regression tests from the three repairs), covering:
   immediate creates all tasks at once; rolling creates batch 1 only and
   advances on completion; background leaves tasks in Backlog; priority
   mapping; strategy-switch flush; strategy-switch to Background flushes
   inert tasks; batch-size change applies to the next batch; overlapping
   waves retain both remainders; re-triggered wave supersedes not
   duplicates; pending-state read failure leaves stored state untouched;
-  auto_merge enqueues / default does not / non-reconciliation MRs
-  ignored; unset policy is the spec default; `ReconciliationCompleted`
-  fires exactly once at rollout end. Suite run four times consecutively —
-  stable (no order-dependent flakiness).
+  background history does not stall a rolling rollout; auto_merge enqueues
+  / default does not / non-reconciliation MRs ignored; unset policy is the
+  spec default; `ReconciliationCompleted` fires exactly once at rollout
+  end. Suite run three times consecutively — stable (no order-dependent
+  flakiness).
 - `cargo test -p gyre-server --lib api::meta_specs` — 25 passed.
-- Diff-scoped gates against base `124a852be`:
+- Diff-scoped gates against base `637be7187`:
   `check-rustfmt-diff.py` → "changed lines clean (20 Rust files checked)";
-  `check-clippy-diff.py` → "changed lines clean (20 Rust files, 1096
+  `check-clippy-diff.py` → "changed lines clean (20 Rust files, 1094
   existing warnings outside changes)".
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub
