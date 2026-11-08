@@ -43,3 +43,41 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 12
+
+Candidate: `7435129e0` (round-11 repair `93e70ce96` + two process-only commits recording frontmatter). Evidence: `/tmp/stage/review-evidence/` (source SHA, all logs, SUMMARY.md).
+
+Test runs (via `/tmp/stage/bin/cargo`):
+
+- `cargo test -p gyre-cli` → **142 + 1 passed, 0 failed**; the two round-11 push-safety tests re-run by name → passed.
+- `cargo test -p gyre-server --lib` focused: `users::`/`orchestrator` (32), `create_user` (6, incl. cross-tenant 403), `auth` (incl. `api_key_auth_rejects_user_without_tenant_binding`), `starter_manifest` (2: real-parser round-trip of the shipped CLI bytes + ledger-sync tree walk), `system_token_resolves_workspace_in_foreign_tenant` → all pass.
+- `cargo fmt -p gyre-cli --check` → clean; `cargo clippy -p gyre-cli --bin gyre` → exit 0 (only the pre-existing gyre-common warning); `gyre-domain` clippy errors confined to files task-099 never touched.
+- Check scripts: all 21 relevant scripts exit 0. `check-assertionless-tests` (exit 2) and `check-cli-spec-parity` (exit 1, spec_assist SSE) fail **byte-identically on the base `c5deca80`** (verified via git worktree diff of logs) — pre-existing, not task-099 regressions.
+
+Mutation testing (each mutation restored, file md5 re-verified, tree clean):
+
+1. Replacing the diverged-main refusal with unconditional `--force` (the original F11 defect) → `push_sync_first_run_replaces_seed_and_resume_refuses_to_rewind_merged_main` **fails**.
+2. Moving the bearer token back into `-c http.extraHeader=...` child argv (F12 defect) → `git_auth_token_never_appears_in_child_argv` **fails**.
+3. Short-circuiting `is_disposable_seed` to `false` → the first-run seed-replacement assertion **fails**.
+
+All three round-11 guards are load-bearing; the tests are not self-confirming.
+
+Live end-to-end (debug build, in-memory server on port 3000):
+
+- `bootstrap --dev --repo gyre-demo --repo-path ... --starter-kit` → exit 0: tenant dev, workspace default, repo, 4 personas pre-approved, all 5 starter-kit files on disk with a clean auto-commit of exactly the kit paths, "Spec manifest registered - 1 spec(s)" (real push + ledger sync), 3 gates detected from Cargo.toml + check-arch.sh, orchestrator registered with a **truthful** launch-failure report (the sandbox has no orchestrator command; the summary says registered-but-launch-failed, not "running" — the F3 contract, live).
+- `bootstrap --tenant "Acme Corp" --admin-user jsell ...` → exit 0: admin created, API key minted and shown once, `~/.gyre/config` written, subsequent steps authenticate as the new admin (verified in code: `client_api` is rebuilt on the minted key at main.rs:1891).
+- Resume re-run → exit 0, everything reused/skipped, no rewind of server main.
+- Failure paths: `--dev --tenant` → exit 1; missing `--tenant` without `--dev` → exit 1; server down → exit 1 at the health check.
+
+Verified closed (spot-checks of the prior-round repairs, independent of the labels):
+
+- F1: `create_user` binds the user to a validated tenant; the API-key auth path fail-closes on a missing tenant binding (with a test through the full router); `is_system_principal` discriminates on `user_id.is_none()`, not a spoofable name match.
+- F2: `resolve_orchestrator_persona` consults the `state.personas` store bootstrap populates, is fail-closed, checks approval, and persists `agent.persona_id`.
+- F3: orchestrator spawn resolves a compute target, launches a process, monitors liveness, and reports `launch_status` truthfully.
+- F5: the starter manifest lives in its own file consumed by the server's real `parse_manifest` in a test (correct `approval: {mode: human_only}` shape).
+- F11/F12: see mutation tests above; the push inspects remote main (ls-remote + fetch), fast-forwards when ahead, replaces the server's empty seed with a SHA-pinned `--force-with-lease`, and refuses diverged pushes; the token travels via `GIT_CONFIG_*` env config, never argv.
+
+No findings. All ten acceptance criteria hold with live, independent evidence; the round-11 guards are real and mutation-verified. **Approved.**
+
+— Reviewer, 2026-11-08
