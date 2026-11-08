@@ -1,0 +1,35 @@
+# Review — task-110 (Implement tenant & workspace invitation flow)
+
+Spec: `specs/system/user-management.md` §Tenant-Level User Onboarding, §Workspace Invitation Flow, §Invitation Expiry, §Tenant Invitations.
+Candidate under review: `c1f347a4f` (rebase round 4; merge of upstream `c5deca801a` onto the task-110 line, committed as `8a9b01ee4`), base `c5deca801a`.
+Evidence: `/tmp/stage/review-evidence/task-110-review-round4.md` (+ raw probe scripts/outputs, guard-script logs, test logs).
+
+## Round 4 (independent review of the rebase-resolution candidate)
+
+Verdict: **not approved — one blocking finding (F1, two sites of the same class); the task contract itself is otherwise fully satisfied by independent evidence.**
+
+### What was independently verified (no findings)
+
+- **All five tenant-invitation endpoints + policy endpoints + the full workspace-invitation lifecycle work through the REAL production chain.** A live server was built from the candidate (`SKIP_WEB_BUILD=1 cargo build -p gyre-server`), started against a fresh SQLite database (startup ran the complete migration chain including `2026-10-10-000058_invitations`), and probed over HTTP through `build_router` — auth middleware, ABAC middleware, real route registration, Diesel persistence: single invite (201, email normalized, Pending, magic-link `invite_url`), duplicate pending → 409, status-filtered listing, policy GET/PUT (defaults 7/7/50, partial update, 0-day rejected 400), magic-link accept **with no Authorization header → 200** (proving the token routes are correctly outside `require_auth_middleware`), second accept → 409 (single-use), decline → 204, revoke → 204, bulk (2 created / 1 error), invalid role → 400, unknown token → 404; workspace invite by username/email/user_id → 201, token accept → 204 with membership `accepted: true` at the invited role, token decline → 204 with no membership, re-invite after decline → 201, existing-member invite → 409, revoke → 204. Never-onboarded email selectors correctly 404 (workspace invitations target existing tenant users).
+- **Focused suites, all green at the candidate:** `api::invitations` 18/18, `auth::` 46/46 (both parents' suites — upstream provisioning/sanitization AND task-110 email-link claim + unverified-email and cross-tenant negatives), `api::users` 14/14, `gyre-adapters` 383 passed/0 failed (SQLite invitation round-trips, conditional-UPDATE single-use guard, fresh-DB migration boot, `claim_external_id` contract), `gyre-domain` 436 passed.
+- **Tokens:** 32-byte ring SystemRandom CSPRNG, hex, stored only as SHA-256 (known-answer test pins the hash); token_hash has a UNIQUE index.
+- **Single-use race safety:** `transition_status(id, from, to)` puts the `from` precondition inside the write in all three adapters (SQLite/Postgres conditional UPDATE, mem check-and-set under the store lock); concurrent-claim test asserts exactly one winner; revoke/decline/expiry all use the same conditional transition so terminal statuses are never overwritten.
+- **Authorization:** TenantAdmin-only tenant routes and Owner/Admin workspace routes enforce per-handler through the real chain (non-admin 403 and non-member 403 tests assert nothing was created); magic-link routes validate the token itself, and a presented Bearer identity must match the invitee (tenant: email match; workspace: user-id match). Cross-tenant guards on revoke, list, invite, and accept. ABAC resolver mappings added for every new `api/mod.rs` route.
+- **Rebase resolution correctness:** the duplicate-column migration collision is real and fixed (task-110's `2026-10-09-000057_user_tenant_scope` reduced to its unique `idx_users_tenant` contribution; fresh-DB boot verified by both the adapter suite and the live probe); `claim_external_id` is implemented in SQLite, Postgres, and mem with the taken/unknown failure contract, and the JWT email-link path requires `email_verified=true` and same-tenant match (negatives tested).
+- **Guard scripts:** arch, abac-route-registry, abac-exempt-handlers, migration-versions, migration-sql-portability, mem-port-contracts, fabricated-scope-defaults, in-memory-state-stores, task-commit-attribution, warn-continue-creation, scope-literal-defaults, forged-scope-fields, inert-enforcement, forwarded-header-trust, unwired-port-methods, api-auth, response-consumption, placeholder-stubs — all exit 0. Exemption-file edits are comment re-anchoring only (no new entries). Startup `database is locked` r2d2 noise reproduces identically on the base commit (pre-existing).
+- **No fake completion:** `specs/coverage/system/user-management.md` still records the four sections as `task-assigned` — nothing is marked implemented prematurely.
+
+### F1 (blocking): candidate violates the repo's non-atomic-creation pre-commit invariant at two sites
+
+`bash scripts/check-non-atomic-creation.sh` at the candidate tree → **exit 1, 2 violations**; the base commit `c5deca801a` passes clean (exit 0), so both are introduced by this task. The check is a repo pre-commit hook (`.pre-commit-config.yaml` id `non-atomic-creation`, no `|| true`), so the committed tree fails the repo's own developer tooling; it is absent from `ci.yml`, which is why the shipped "all guard scripts OK" claim did not catch it.
+
+1. `accept_tenant_invitation_claimed` (`crates/gyre-server/src/api/invitations.rs:677`): creates the user via `state.users.create()` (:707) and the pre-assigned memberships via `state.workspace_memberships.create()` (:751) across two repositories with no transaction and no exemption marker.
+2. `invite_to_workspace` (`crates/gyre-server/src/api/invitations.rs:934`): creates the workspace invitation via `state.workspace_invitations.create()` (:1048) and the invitee notification via `state.notifications.create()` (:1089), same shape (the notification create is an explicit `let _ =` best-effort).
+
+Assessment: the failure semantics at both sites are deliberate and documented — the accept path rolls the invitation back to `Pending` on side-effect failure and is idempotent on retry (user dedup by namespaced external_id, membership-exists skip), and the notification is a courtesy record whose loss does not break the flow (the invitee still has `GET /api/v1/users/me/invitations`). But the repo's sanctioned encoding for exactly this situation — a transactional wrap or the inline `// non-atomic-create:ok - <reason>` marker the linter itself prescribes — is absent, and the shipped evidence claims mechanical-guard compliance that the committed tree does not have. Fix is small: either add the markers with the recovery rationale, or wrap the creations; re-run the script to green.
+
+### Non-blocking observation (pre-existing, outside this diff)
+
+The API-key branch of the auth extractor resolves `tenant_id: "default"` regardless of the linked user's tenant (unchanged by this candidate), so invitation endpoints scoped by `auth.tenant_id` place API-key callers in the `default` tenant. Uniform pre-existing platform behavior; the JWT path carries real tenant claims. Worth a follow-up task, not charged to task-110.
+
+— Reviewer, 2026-11-08 (round 4; evidence under /tmp/stage/review-evidence)
