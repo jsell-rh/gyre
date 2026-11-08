@@ -48,7 +48,8 @@ Respond with valid JSON only, no markdown code fences.";
 /// here). The user prompt additionally carries server-derived context the
 /// LLM needs: recent MRs with trace data (for flow-layout trace_source
 /// selection) and, on refinement turns, the previous view definition.
-pub const PROMPT_EXPLORER_GENERATE: &str = "You are a read-only code explorer view generator — a query translator, \
+pub const PROMPT_EXPLORER_GENERATE: &str =
+    "You are a read-only code explorer view generator — a query translator, \
 not an agent. You translate the user's natural-language question into ONE \
 ViewSpec JSON object for the knowledge-graph Explorer. You cannot modify \
 code, create tasks, or trigger agent actions; you only describe what to \

@@ -557,7 +557,11 @@ pub async fn generate_explorer_view(
     // can pick a trace_source for flow-layout questions. Same lookup the
     // has_trace filter on the workspace MR list serves.
     let recent_traced_mrs = recent_mrs_with_traces(&state, &workspace_id, 10).await;
-    let user_prompt = build_generate_user_prompt(&req.question, req.previous_spec.as_ref(), &recent_traced_mrs);
+    let user_prompt = build_generate_user_prompt(
+        &req.question,
+        req.previous_spec.as_ref(),
+        &recent_traced_mrs,
+    );
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
@@ -799,7 +803,9 @@ fn build_generate_user_prompt(
                     prompt.push_str(&line);
                     prompt.push('\n');
                 }
-                Err(e) => tracing::warn!(mr_id = %mr.mr_id, error = %e, "MR prompt serialization failed"),
+                Err(e) => {
+                    tracing::warn!(mr_id = %mr.mr_id, error = %e, "MR prompt serialization failed")
+                }
             }
         }
         prompt.push('\n');
@@ -941,7 +947,9 @@ async fn validate_repo_ownership(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, MrWithTrace};
+    use super::{
+        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, MrWithTrace,
+    };
     use axum::{body::Body, http::Request};
     use http::StatusCode;
     use std::sync::Arc;
@@ -1505,8 +1513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_view_rejects_hybrid_viewquery_viewspec_payload()
-    {
+    async fn create_view_rejects_hybrid_viewquery_viewspec_payload() {
         // A payload carrying BOTH a valid ViewQuery `scope` AND ViewSpec
         // fields (`left`/`right`). The two grammars have disjoint top-level
         // field sets; serde ignores unknown fields, so a "try ViewQuery
@@ -1562,7 +1569,10 @@ mod tests {
             1000,
         );
         mr.workspace_id = gyre_common::Id::new(workspace_id);
-        mr.spec_ref = Some("specs/system/identity-security.md@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string());
+        mr.spec_ref = Some(
+            "specs/system/identity-security.md@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                .to_string(),
+        );
         state.merge_requests.create(&mr).await.unwrap();
         if with_trace {
             let trace = gyre_common::GateTrace {
@@ -1590,12 +1600,18 @@ mod tests {
         }
     }
 
-    async fn generate(app: axum::Router, workspace: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    async fn generate(
+        app: axum::Router,
+        workspace: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{workspace}/explorer-views/generate"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace}/explorer-views/generate"
+                    ))
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
                     .body(Body::from(body.to_string()))
@@ -1664,7 +1680,14 @@ mod tests {
         // trusted to know which MRs currently hold traces. The spec's
         // trace_source.mr_id here names an MR with NO captured trace.
         let state = crate::mem::test_state();
-        seed_mr(&state, "mr-untraced", "ws-flow2", "Retry payment flow", false).await;
+        seed_mr(
+            &state,
+            "mr-untraced",
+            "ws-flow2",
+            "Retry payment flow",
+            false,
+        )
+        .await;
         let mut s = (*state).clone();
         s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
             inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
@@ -1691,7 +1714,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(payload["view_spec"]["layout"], "graph", "payload: {payload}");
+        assert_eq!(
+            payload["view_spec"]["layout"], "graph",
+            "payload: {payload}"
+        );
         assert!(
             payload["view_spec"]["data"].get("trace_source").is_none(),
             "fallback must strip trace_source: {payload}"
@@ -1714,7 +1740,14 @@ mod tests {
         // confirming the MR's existence in this workspace.
         let state = crate::mem::test_state();
         // The traced MR belongs to a DIFFERENT workspace.
-        seed_mr(&state, "mr-other-ws", "ws-elsewhere", "Other workspace MR", true).await;
+        seed_mr(
+            &state,
+            "mr-other-ws",
+            "ws-elsewhere",
+            "Other workspace MR",
+            true,
+        )
+        .await;
         let mut s = (*state).clone();
         s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
             inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
@@ -1739,7 +1772,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(payload["view_spec"]["layout"], "graph", "payload: {payload}");
+        assert_eq!(
+            payload["view_spec"]["layout"], "graph",
+            "payload: {payload}"
+        );
         assert!(
             payload["view_spec"]["data"].get("trace_source").is_none(),
             "foreign trace_source must be stripped: {payload}"
@@ -1895,7 +1931,11 @@ mod tests {
 
         let traced = recent_mrs_with_traces(&state, "ws-mrs", 10).await;
         let ids: Vec<&str> = traced.iter().map(|m| m.mr_id.as_str()).collect();
-        assert_eq!(ids, vec!["mr-new", "mr-old"], "newest first, untraced excluded");
+        assert_eq!(
+            ids,
+            vec!["mr-new", "mr-old"],
+            "newest first, untraced excluded"
+        );
 
         // limit caps the result.
         let capped = recent_mrs_with_traces(&state, "ws-mrs", 1).await;

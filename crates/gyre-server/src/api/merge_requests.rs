@@ -1204,8 +1204,8 @@ pub async fn get_attestation(
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
-    use gyre_domain::MergeRequest;
     use axum::{body::Body, Router};
+    use gyre_domain::MergeRequest;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -2444,12 +2444,7 @@ mod tests {
 
         async fn ids(app: Router, uri: &str) -> Vec<String> {
             let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
@@ -2462,11 +2457,7 @@ mod tests {
         }
 
         // No params: all three, repository order (unfiltered).
-        let all = ids(
-            app.clone(),
-            "/api/v1/workspaces/ws-list/merge-requests",
-        )
-        .await;
+        let all = ids(app.clone(), "/api/v1/workspaces/ws-list/merge-requests").await;
         assert_eq!(all.len(), 3, "unfiltered list returns all MRs");
 
         // has_trace=true: only traced MRs, newest first.
@@ -2486,11 +2477,7 @@ mod tests {
         assert_eq!(capped, vec!["mr-b"]);
 
         // limit alone: most recent MRs of the unfiltered set.
-        let limited = ids(
-            app,
-            "/api/v1/workspaces/ws-list/merge-requests?limit=2",
-        )
-        .await;
+        let limited = ids(app, "/api/v1/workspaces/ws-list/merge-requests?limit=2").await;
         assert_eq!(limited, vec!["mr-c", "mr-b"], "newest first, capped at 2");
     }
 }
