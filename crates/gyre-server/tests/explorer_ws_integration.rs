@@ -52,7 +52,9 @@ impl WsCtx {
             }
             None => base_state,
         };
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -970,6 +972,203 @@ async fn explorer_ws_self_check_loop_refines_broad_groups() {
         sent["groups"][0]["nodes"],
         json!(["node_0", "node_1", "node_2"]),
         "client must receive the refined group, got: {sent}"
+    );
+}
+
+// ── §11 Self-Check Loop: refinement flow + best-version-at-cap (mainline) ────
+
+/// Drive one explorer message turn over the WebSocket and collect the wire
+/// traffic: statuses observed, view_query messages received, and whether the
+/// turn reached the terminal `ready` status.
+struct TurnTrace {
+    statuses: Vec<String>,
+    view_queries: Vec<serde_json::Value>,
+    saw_ready: bool,
+    saw_text_done: bool,
+}
+
+async fn run_message_turn(
+    sink: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    stream: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    question: &str,
+) -> TurnTrace {
+    sink.send(Message::Text(
+        json!({
+            "type": "message",
+            "text": question,
+            "canvas_state": {}
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let mut trace = TurnTrace {
+        statuses: Vec::new(),
+        view_queries: Vec::new(),
+        saw_ready: false,
+        saw_text_done: false,
+    };
+    for _ in 0..60 {
+        let Some(msg) = WsCtx::read_msg(stream).await else {
+            break;
+        };
+        match msg["type"].as_str() {
+            Some("status") => {
+                let status = msg["status"].as_str().unwrap_or_default().to_string();
+                // Spec §6: only the three contract values may appear on the wire.
+                assert!(
+                    status == "thinking" || status == "refining" || status == "ready",
+                    "Off-contract status value on the wire: {status:?}"
+                );
+                if status == "ready" {
+                    trace.saw_ready = true;
+                    break;
+                }
+                trace.statuses.push(status);
+            }
+            Some("view_query") => {
+                trace.view_queries.push(msg["query"].clone());
+            }
+            Some("text") if msg["done"] == serde_json::json!(true) => {
+                trace.saw_text_done = true;
+            }
+            _ => {} // warnings, pings, errors handled by assertions below
+        }
+    }
+    trace
+}
+
+/// §11 Self-Check Loop: the server extracts `<view_query>` blocks from agent
+/// output, dry-runs them server-side, and — when the dry-run produces
+/// actionable warnings — feeds the result back to the agent as a synthetic
+/// tool result so it can refine, sending status "refining" to the frontend.
+/// Only the refined (warning-free) query may reach the frontend.
+#[tokio::test]
+async fn explorer_ws_self_check_refinement_flow() {
+    // Scripted agent: first attempt references a callout node that does not
+    // exist in the graph (actionable dry-run warning), second attempt —
+    // produced AFTER receiving the dry-run feedback — resolves cleanly.
+    let warned_query =
+        r#"{"scope":{"type":"all"},"callouts":[{"node":"DoesNotExist","text":"missing"}]}"#;
+    let refined_query =
+        r#"{"scope":{"type":"all"},"callouts":[{"node":"TaskPort","text":"found"}]}"#;
+    let script = vec![
+        format!("Let me check this query.\n\n<view_query>{warned_query}</view_query>"),
+        format!("Refined after the dry-run feedback.\n\n<view_query>{refined_query}</view_query>"),
+    ];
+    let ctx = WsCtx::new_with_llm(Arc::new(ScriptedLlmFactory::new(script))).await;
+    let repo_id = ctx.repo_id.clone();
+    // Seed the graph so the dry-run has real state to resolve against:
+    // TaskPort resolves exactly; DoesNotExist triggers an unresolved-callout
+    // warning (actionable → refinement turn).
+    ctx.state
+        .graph_store
+        .create_node(make_graph_node(&repo_id, "TaskPort", NodeType::Function))
+        .await
+        .unwrap();
+    ctx.state
+        .graph_store
+        .create_node(make_graph_node(&repo_id, "CoordinatorService", NodeType::Class))
+        .await
+        .unwrap();
+
+    let (mut sink, mut stream) = ctx.connect(&repo_id).await;
+    let trace = run_message_turn(&mut sink, &mut stream, "show me TaskPort").await;
+
+    assert!(
+        trace.statuses.iter().any(|s| s == "refining"),
+        "self-check must emit status \"refining\" while re-prompting the agent, got {:?}",
+        trace.statuses
+    );
+    assert!(
+        trace.saw_text_done,
+        "turn must finish the streamed text (done=true)"
+    );
+    assert!(trace.saw_ready, "turn must reach terminal ready status");
+    assert_eq!(
+        trace.view_queries.len(),
+        1,
+        "exactly one view_query may reach the frontend — the warned first attempt must NOT be sent"
+    );
+    let q = &trace.view_queries[0];
+    assert_eq!(
+        q["callouts"][0]["node"], "TaskPort",
+        "frontend must receive the REFINED query, not the warned first attempt"
+    );
+}
+
+/// §11 Self-Check Loop: the loop is capped at 3 refinement turns. When the
+/// cap is reached with warnings still outstanding, the BEST version (fewest
+/// actionable warnings) is sent anyway — a later refinement that regresses
+/// must not displace an earlier, better attempt.
+#[tokio::test]
+async fn explorer_ws_self_check_sends_best_version_after_cap() {
+    // Four attempts with monotonically worsening warning counts:
+    //   1 warning  (unresolved callout)          — refinement 1
+    //   2 warnings (unresolved + substring)      — refinement 2
+    //   3 warnings (unresolved + 2 substring)    — refinement 3 (cap)
+    //   3 warnings (no improvement)              — cap reached: send best
+    // The first attempt has the fewest warnings, so it is the best version.
+    let q1 = r#"{"scope":{"type":"all"},"callouts":[{"node":"Missing1","text":"a"}]}"#;
+    let q2 = r#"{"scope":{"type":"all"},"callouts":[{"node":"Missing1","text":"a"},{"node":"Port","text":"b"}]}"#;
+    let q3 = r#"{"scope":{"type":"all"},"callouts":[{"node":"Missing1","text":"a"},{"node":"Port","text":"b"},{"node":"Coord","text":"c"}]}"#;
+    let script = vec![
+        format!("Attempt one.\n\n<view_query>{q1}</view_query>"),
+        format!("Attempt two.\n\n<view_query>{q2}</view_query>"),
+        format!("Attempt three.\n\n<view_query>{q3}</view_query>"),
+        format!("Attempt four.\n\n<view_query>{q3}</view_query>"),
+    ];
+    let ctx = WsCtx::new_with_llm(Arc::new(ScriptedLlmFactory::new(script))).await;
+    let repo_id = ctx.repo_id.clone();
+    // TaskPort / CoordinatorService make "Port" and "Coord" resolve via
+    // substring match (one actionable warning each), while "Missing1"
+    // stays unresolved.
+    ctx.state
+        .graph_store
+        .create_node(make_graph_node(&repo_id, "TaskPort", NodeType::Function))
+        .await
+        .unwrap();
+    ctx.state
+        .graph_store
+        .create_node(make_graph_node(&repo_id, "CoordinatorService", NodeType::Class))
+        .await
+        .unwrap();
+
+    let (mut sink, mut stream) = ctx.connect(&repo_id).await;
+    let trace = run_message_turn(&mut sink, &mut stream, "show me the graph").await;
+
+    let refining_count = trace.statuses.iter().filter(|s| *s == "refining").count();
+    assert_eq!(
+        refining_count, 3,
+        "exactly MAX_REFINEMENT_TURNS (3) refinement turns may run, got {refining_count}"
+    );
+    assert!(trace.saw_ready, "turn must reach terminal ready status");
+    assert_eq!(
+        trace.view_queries.len(),
+        1,
+        "exactly one view_query may reach the frontend"
+    );
+    let q = &trace.view_queries[0];
+    let callouts = q["callouts"].as_array().unwrap();
+    assert_eq!(
+        callouts.len(),
+        1,
+        "the BEST version (first attempt, 1 warning) must be sent after the cap — got {} callouts",
+        callouts.len()
+    );
+    assert_eq!(
+        callouts[0]["node"], "Missing1",
+        "best version is the first attempt; later regressed attempts must not displace it"
     );
 }
 
