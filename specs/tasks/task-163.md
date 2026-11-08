@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["38e4ae86b7b40c5c2c6e0a6550238f80ef391523", "71e25bb8c1b92e52babd309d383dc4de864794b8"]
+commits: ["38e4ae86b7b40c5c2c6e0a6550238f80ef391523", "71e25bb8c1b92e52babd309d383dc4de864794b8", "202c9a2d1"]
 ---
 
 ## Spec Excerpt
@@ -67,7 +67,7 @@ Persistent storage for breaking changes and per-workspace dependency policies, w
 
 - **Ports**: `BreakingChangeRepository` (gyre-ports/src/breaking_change.rs: create / find_by_id / list_unacknowledged / list_by_source_repo / acknowledge) and `DependencyPolicyRepository` (gyre-ports/src/dependency_policy.rs: get_for_workspace / set_for_workspace) — pre-existing on base, contract unchanged.
 - **SQLite adapters**: crates/gyre-adapters/src/sqlite/breaking_change.rs and dependency_policy.rs — full Diesel implementations; policy upsert on `(workspace_id)` PK; behavior string<->enum mapping rejects unknown values. Postgres mirrors in postgres/{breaking_change,dependency_policy}.rs; schema.rs registers both tables.
-- **Migration 000056** (`2026-10-08-000056_dep_breaking_policies`): `breaking_changes` (id PK, edge/source-repo indexes, acknowledged fields) and `dependency_policies` (workspace_id PK, all five policy columns). Next unused sequence number; portable SQL (no dialect-only constructs) — check-migration-sql-portability passes.
+- **Migration** (`2026-10-08-000057_dep_breaking_policies`, renumbered from 000056 in round 6 after an upstream collision): `breaking_changes` (id PK, edge/source-repo indexes, acknowledged fields) and `dependency_policies` (workspace_id PK, all five policy columns). Portable SQL (no dialect-only constructs) — check-migration-sql-portability passes; idempotent up.sql so re-runs under a new version are harmless.
 - **AppState wiring**: `breaking_changes` and `dependency_policies` now go through the `store!` macro (lib.rs:910-917) — SqliteStorage/PgStorage in DB-backed mode, mem fallback only in pure in-memory mode, identical to every sibling store.
 - **Cascade tests**: `trigger_cascade_tests` (merge_processor.rs:2210) runs after every merge, reads the persistent policy, respects per-workspace opt-out of the dependent's workspace, creates a High-priority `cascade-test` labeled task in each dependent repo, emits `cascade_test_triggered` events, notifies members. Agent completion/failure of `cascade-test` tasks routes through `report_cascade_test_result` (spawn.rs:1363/1464).
 - **Branch hygiene**: the pipeline checkpoint carried an accidental `web/dist` rebuild (54790eed); reverted at ec2de557 + 38783f63 — task-163 has no UI changes, and the rebuild introduced a trailing-whitespace error in vendored svelte-i18n that fails `git diff --check` (task-210 Round 12 precedent). web/dist now byte-identical to base e96d25ab (all four blobs MD5-matched).
@@ -101,6 +101,17 @@ Finding category `contract`: the protected task text changed in round 4 — the 
 - **Production fix preserved**: the SCIM race fix `38e4ae86` remains at HEAD; `git diff 38e4ae86..0055160b -- crates/` is empty (the round-5 merge `0055160b` brought only pipeline tooling, dev-dashboard, and docs changes), so the round-4 executable evidence — full `gyre-server` lib suite 1242 passed / 0 failed, SCIM suite green across 10 consecutive runs — applies verbatim to the Rust surface at this head.
 - **Frontmatter**: `38e4ae86` re-recorded in `commits:` — `bash scripts/check-task-commit-attribution.sh` fails (exit 1) at the restored frontmatter and passes (exit 0) with the entry present; frontmatter updates are process bookkeeping, not requirement changes (round-3 precedent).
 - **Sandbox transport restriction (this round)**: crates.io and static.crates.io are unreachable from this sandbox (connection refused; github.com and registry.npmjs.org are reachable) and no cargo registry cache or target dir exists here, so Rust suites cannot be re-executed in this round — an infrastructure restriction recorded for remote verification, not a code defect. Static gates re-run at this head: attribution OK, `python3 scripts/check-rustfmt-diff.py 3c39ab1f` — changed lines clean (10 Rust files), `git diff --check 3c39ab1f..HEAD` clean, `scripts/check-arch.sh` exit 0. Evidence: `/tmp/stage/review-evidence/contract-repair-56added8/`.
+
+### Rebase Repair (round 6, finding 0c019eeffe8441288159b997a0496ff6)
+
+Finding category `rebase`: merging repair base `a4ebdf6f` into this branch conflicted in `crates/gyre-adapters/src/schema.rs` (both sides added new Diesel tables).
+
+- **schema.rs resolution** (merge commit `dbcb95769`): union of both sides — `breaking_changes`, `dependency_policies` (this task) and `spec_assertion_results` (upstream task) registered in both the table list and the `diesel::table!` definitions. sqlite/mod.rs and postgres/mod.rs auto-merged cleanly with all three adapter modules registered.
+- **Migration version collision fixed** (commit `202c9a2d1`): the merged tree carried `2026-10-08-000056_dep_breaking_policies` (this task) and `2026-10-08-000056_spec_assertion_results` (upstream) — the same Diesel version `20261008000056`, alphabetically first wins, so the upstream `spec_assertion_results` tables would have been silently dropped on fresh databases. `check-migration-versions.sh` FAILed at the merged tree; renumbered this task's migration to the next unused sequence `2026-10-08-000057_dep_breaking_policies` (up.sql is idempotent — `CREATE TABLE/INDEX IF NOT EXISTS` — so databases that already ran it under 000056 re-run harmlessly). Gate now OK.
+- **Un-shadowing proof**: all `up.sql` files applied in Diesel version order to a fresh sqlite DB → `breaking_changes`, `dependency_policies`, `spec_assertion_results`, `meta_specs` all present (before the renumber, `spec_assertion_results` was dropped).
+- **Focused suites re-run at head `202c9a2d1`** (crates.io reachable again this round, unlike round 5): adapters `migrations` 3 passed, `breaking_change` 7 passed, `dependency_policy` 4 passed; `gyre-server --test task163_dependency_persistence` 2 passed; `merge_processor::tests::trigger_cascade` 8 passed; `api::dependencies::tests` 64 passed; `api::scim::tests` 6 passed (round-4 race fix survives the merge).
+- **Static gates at head**: migration-versions, migration-sql-portability, arch, mem-port-contracts, in-memory-state-stores — all OK; `check-rustfmt-diff.py a4ebdf6f` changed lines clean (10 Rust files); `git diff --check a4ebdf6f..HEAD` clean; attribution gate OK with `202c9a2d1` recorded in frontmatter (fails exit 1 without it). Evidence: `/tmp/stage/review-evidence/rebase-repair-0c019eef/`.
+- **web/dist**: the merge carries upstream's regenerated `web/dist` from `a4ebdf6f`; per assignment, generated web/dist assets are restored/rebuilt by the executor and are not touched here.
 
 
 ## Verification Repair (round 2, finding 44b85cf5ee5a4d98a5f7473cdc870775)
