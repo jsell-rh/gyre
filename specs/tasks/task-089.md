@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Generated Views (LLM-Powered, On-Demand)"
-commits: ["801a872a300d95fd93eaae6db572a5d6b04b4336"]
+commits: ["801a872a300d95fd93eaae6db572a5d6b04b4336", "74af4c305c0db43c839a7e4eb262ec9826537048"]
 ---
 
 ## Spec Excerpt
@@ -122,8 +122,12 @@ The generated-views flow is now real end-to-end on the workspace `explorer-views
 
 ### Test evidence
 
-- Rust: 23 tests in `api::explorer_views` (7 new: flow pass-through, flow→graph fallback ×2, invalid previous_spec 400, prompt-injection unit test, explanation fallback chain, MR-discovery ordering/filtering) + `api::merge_requests::tests::list_workspace_mrs_filters_by_trace_and_limits` — all pass (`cargo test -p gyre-server --lib api::explorer_views` / `api::merge_requests`).
+- Rust: 23 tests in `api::explorer_views` (7 new: flow pass-through, flow→graph fallback ×2, invalid previous_spec 400, prompt-injection unit test, explanation fallback chain, MR-discovery ordering/filtering) + `api::merge_requests::tests::list_workspace_mrs_filters_by_trace_and_limits` — all pass (`cargo test -p gyre-server --lib api::explorer_views` / `api::merge_requests`); re-run green after the formatting repair (commit `74af4c305c`).
 - Web: `generated-view.test.js` (14 unit tests), `GeneratedViewChat.test.js` (5 component tests), `ExplorerGeneratedViews.test.js` (3 full-tree integration tests: mode tabs, canvas annotation rendering, flow-view trace fetch + evaluative-lens switch). Full `npm test` in `web/`: **86 files, 1883 passed, 41 skipped, 0 failed**.
 - `scripts/check-arch.sh` and `scripts/check-abac-route-registry.sh` pass (no new routes; query params only).
+
+### Verification repair (2025 assignment)
+
+The prior verification run failed only on changed-lines rustfmt in `explorer_views.rs`, `merge_requests.rs`, and `llm_defaults.rs` (every other gate in that log passed). Commit `74af4c305c` runs `cargo fmt` on exactly those files — no behavior change; `cargo fmt --all --check` is now clean and the focused Rust tests above were re-run and pass.
 
 web/dist was deliberately not committed — the executor rebuilds and publishes generated assets from the assignment base.
