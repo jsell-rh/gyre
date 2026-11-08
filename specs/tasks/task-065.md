@@ -13,7 +13,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["3ad887b9849093fdcfc9e3708b1b407c43e03f8c", "b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
+commits: ["3ad887b9849093fdcfc9e3708b1b407c43e03f8c", "b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
 ---
 
 ## Spec Excerpt
@@ -129,81 +129,71 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
   (`edgePassesFilter`) in canvas-filters.js, pinned by unit tests and
   component-level draw-path tests (task-065 F1 repair).
 - **Semantic zoom treemap**: path-tree hierarchy, LOD rules per zoom band,
-  double-click drill-down via Contains edges with breadcrumb update and
-  eased camera transition; workspace-scope `onScopeDrill` on repo_id leaves
-  without Contains children (adopted from upstream task-173).
+  double-click drill-down via Contains edges with breadcrumb update and a
+  two-phase eased camera transition (zoom-into + fade on the old layout,
+  deferred scope swap, then smooth arrival — adopted from main's task-067);
+  synthetic tree-group cells resolve to their Contains scope node
+  (`resolveTreeGroupScopeNode`); workspace-scope `onScopeDrill` on repo_id
+  leaves without Contains children (adopted from upstream task-173).
 - **View query rendering**: scope resolution (focus/filter/concept/
   test_gaps/diff/all + $clicked/$selected), emphasis (highlight, dim,
   tiered_colors, heat, badges), groups as labeled dashed clusters, callouts
   as annotated nodes, narrative as numbered steps, annotation title/
   description with $name and {{var}} substitution.
 - **Interactions**: mousedown pan, wheel zoom, dblclick drill, click select,
-  right-click context menu, minimap click+drag navigation.
+  right-click context menu (with drill-into on resolvable container cells),
+  minimap click+drag navigation.
 - **Minimap**: drawMinimap renders full graph + viewport rect;
   minimapToWorld + onMinimapMouseDown/drag navigate.
 - **Deterministic visual baselines**: committed woff2 font fixtures +
   forced-font stylesheet so sandbox and CI rasterize identical glyph
   outlines; 15 explorer-visual.spec.js baselines.
 
-### Merge-repair round (main 2115ae23 — current head bcfe713b)
+### Requirements-changed reconciliation round (base a884329d — head 810f7059)
 
-Merged current main (2115ae23 — task-064 View Query Grammar §10
-Interaction Context + fix/verifier-script-overlay) into the published
-candidate 968d4005 (merge commit bcfe713b). Conflict resolutions:
+The controller re-ran this task under repair category `requirements_changed`:
+the contract advanced on main after the approved lineage was published —
+task-065 landed on main (feat 0e889626f + verify 5bd8aac97 + approval
+5c04298b4), task.md progress flipped to `complete`, and the coverage matrix
+was refreshed (explorer-canvas.md row 5 → implemented via task-067; §16
+call_graph member added to explorer-implementation.md under task-076).
 
-1. **ExplorerCanvas.svelte** (single conflict block, the import list):
-   resolved as the union of both sides — ours' canvas-filters.js imports
-   (`collectEdgeParticipants`, `nodeFilterOpacity`: the unit-tested F1
-   filter dimming) plus main's `ZoomInteractionTracker` from the new
-   canvas-state.js. Main's §10 zoom-interaction tracking (arm/disarm
-   camera-control wiring across drill/breadcrumb/query-fit/auto-fit,
-   `trackZoomChange()` in the animation loop) is adopted wholesale
-   alongside our filter implementation. Main's unused `NodeBadge` import
-   stays dropped with our deleted duplicate component (verified zero
-   `<NodeBadge` usages in main's version).
+The executor merged the assignment base a884329d into the retained source
+checkpoint 781d69b4 (merge commit 810f7059). Reconciliation result:
+`git diff a884329d..810f7059` is **empty** — the merged tree is
+tree-identical to the current base, because the checkpoint's entire
+product content was published to main verbatim. The current contract is
+therefore satisfied by construction: the task-065 surfaces at head are the
+published, independently approved implementation plus main's subsequent
+advances (task-067 two-phase drill-down + NaN-camera fix + synthetic
+tree-group drilling + breadcrumb rootLabel; task-076 LSP call graph
+backend). No source changes were required; this round is verification and
+re-recording.
 
-2. **web/dist** (rename/rename on `elk.bundled-*.js`, both-modified
-   `index.html`): resolved by rebuilding dist from the merged sources
-   (vite build) — the same method as every prior merge round; dist is
-   generated output and the conflicted index.html referenced divergent
-   bundle hashes. New bundles: index-DtVmBKEH.js /
-   elk.bundled-BeoNa-iK.js; CSS hash unchanged (index-GeLbLKhg.css).
+### Test evidence (requirements-changed round, sandbox, at head 810f7059)
 
-Retained from our side (auto-merge verified in the merged tree):
-`$bindable` filter/lens props, FILTER_PRESETS toolbar,
-nodeFilterOpacity/edgePassesFilter delegation to canvas-filters.js,
-structural-lens ghost-animation gating. Adopted from main alongside the
-zoom tracker: canvas-state.js wire format (`toWireCanvasState` in
-ExplorerChat), ExplorerView §10 interaction records (structured
-`{action, detail}` entries, `active_query` in canvas state, `onLoadView`
-interaction, zoom_level/visible_tree_groups owned by reactive sync
-effects instead of stale syncCanvasState snapshots).
-
-### Test evidence (merge-repair round, sandbox, at merge head bcfe713b)
-
-- `cd web && npm ci` → locked versions; `npm run build` → dist rebuilt
-  cleanly from merged sources.
-- `cd web && npm test`: **63 files, 1623 passed | 41 skipped, 0 failed**
-  (grew from 62/1602: the merge adopts main's canvas-state.test.js).
-- explorer-visual.spec.js: **15 passed** via the sandbox Playwright
-  config (chromium `--no-zygote`, static bootstrap server on :2222 + the
-  spec's route interception) — every baseline compares clean against the
-  merged tree, no re-pinning needed (main's task-064 canvas changes are
-  non-visual: interaction tracking only).
+- `cd web && npm ci` → locked versions, exit 0.
+- `cd web && npm test`: **64 files, 1626 passed | 41 skipped, 0 failed**
+  (grew from the published round's 63/1623: the base adopts main's
+  ExplorerCanvasDrillDown.test.js, 3 tests, which pass against the
+  merged tree).
 - `scripts/check-task-commit-attribution.sh` and
-  `scripts/check-sandbox-sweep-artifacts.sh`: OK at the merge head.
-- Evidence: /tmp/stage/review-evidence/task-065-merge-repair.txt.
+  `scripts/check-sandbox-sweep-artifacts.sh`: OK at the head.
+- Evidence: /tmp/stage/review-evidence/task-065-reqchange.txt.
 
 ### Verification notes for the reviewer
 
-- Rust-side merge content (gyre-common view_query.rs, gyre-server
-  explorer_views/saved_views/explorer_ws, gyre-domain
-  view_query_composition.rs) is pure upstream code from main; our
-  candidate made zero crates/ changes relative to the merge base
-  (701cb1ad), so the textual auto-merge carries no semantic-merge risk
-  from our side. Exact-head gates remain owned by GitHub CI.
-- app.spec.js requires the real release gyre-server — owned by exact-head
-  GitHub CI (e2e.yml), not runnable in this sandbox.
+- explorer-visual.spec.js (15 baselines) not re-run in-sandbox this round:
+  the merged tree's web/src is byte-identical to main a884329d, whose CI
+  verified those baselines at the exact same sources, and re-running here
+  would require rebuilding web/dist (deferred to the executor / remote
+  integration per assignment). The candidate→merged canvas delta is
+  exclusively drill-transition/context-menu/breadcrumb code that no
+  baseline scenario executes (no drill/dblclick/breadcrumb usage in the
+  spec); the last sandbox-verified combination (bcfe713b) was 15/15.
+- Rust side: zero crates/ deltas relative to the base (tree-identical);
+  exact-head cargo and CI gates remain owned by GitHub CI. app.spec.js
+  requires the real release gyre-server — likewise owned by exact-head CI.
 - Glyphs outside the forced fonts' latin subsets (canvas arrow/check
   badges, 🔒) still resolve through system fallback; they matched across
   environments in every baseline generation to date and sit well under
@@ -213,6 +203,8 @@ effects instead of stale syncCanvasState snapshots).
   whitespace-gate exemption for generated dist (d14fa446), F1
   filter-dimming repair with mutation-proof evidence (6110fe43),
   task-180 merge resolution (2f215b1e), task-063/task-092 rebase repair
-  with re-pinned view-query baselines (9502ab9f lineage).
+  with re-pinned view-query baselines (9502ab9f lineage), task-064
+  interaction-context merge (bcfe713b).
 
-Progress: ready-for-review at head bcfe713b.
+Progress: ready-for-review at head 810f7059 (requirements-changed
+reconciliation; tree-identical to base a884329d).
