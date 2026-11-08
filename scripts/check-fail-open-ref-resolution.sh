@@ -22,9 +22,10 @@
 # explicit 404/500 error propagation, or logging + fail-closed return.
 #
 # Exemptions are legacy debt in
-# scripts/fail-open-ref-resolution-exemptions.txt (path:line form,
-# frozen count). Fix by making the site fail closed; never add entries.
-FROZEN_EXEMPTION_COUNT=2
+# scripts/fail-open-ref-resolution-exemptions.txt (path:line form). The
+# file is EMPTY at baseline zero: the two original R3-F3 sites were fixed
+# fail-closed in product code. The count must stay 0 — never add entries.
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 
