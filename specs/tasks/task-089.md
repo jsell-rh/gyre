@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Generated Views (LLM-Powered, On-Demand)"
-commits: []
+commits: ["801a872a300d95fd93eaae6db572a5d6b04b4336"]
 ---
 
 ## Spec Excerpt
