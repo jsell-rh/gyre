@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688", "bb1099a10325fd4f58f63aed0b26c70ac295ce44"]
 ---
 
 ## Spec Excerpt
@@ -73,49 +73,58 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4).
-Task-106 production behavior is unchanged since round 5; later rounds
-were review, compile, CI, verification-gate, and base-merge repairs.
+Core behavior shipped in rounds 1–5; later rounds were review, CI,
+verification-gate, base-merge, and completion-path repairs.
 
-### Base-merge resolution round (R18, commit `a5db6ecd`)
+### Completion-path repair round (R20, commit `bb1099a10`)
 
-Merged assignment base `72ad2a128` (task-096 head, carrying the
-task-095/096/077 upstream work) into the task branch and resolved the
-three content conflicts. Task-106 behavior is unchanged; the conflicts
-were between task-106's R17 exemption workaround and the base's real
-fixes for the same sites:
+Repaired the three findings of review `a442cdb`:
 
-- `scripts/inert-enforcement-exemptions.txt` — taken verbatim from the
-  base. The base's task-095 verification repair fixed the two
-  task-077-owned `evaluate_attestation_abac` discard sites **for real**
-  (the decision now fails the queue entry on Deny), which supersedes
-  the R17 inline-marker workaround: the `// enforcement:ok` markers,
-  the `#[rustfmt::skip]`, and the file entries are all dropped. The
-  exemptions file is byte-identical to the base, so the exemption
-  freeze holds trivially.
-- `merge_processor.rs` — took the base's task-095 improvements
-  (spec-keyed `revert_breaker_key`, `RevertResult::Conflict` handling
-  in group revert, `{spec_carry}` remediation text, gating attestation
-  ABAC); kept **both** test suites in the tests module (the 13
-  task-106 rebase tests and the base's task-077/HSI trust-hold tests,
-  which start after the same shared TASK-095 test).
-- `api/spawn.rs` — kept task-106's jj-workspace-path canonicalization
-  (prefers `{repo.path}/jj-main` workspaces, falls back to the
-  plain-git worktree); unioned the test-module imports so both sides'
-  tests compile.
+- **F1 (major) — bookmark set, not create**: `complete_agent` ran `jj
+  bookmark create <source> -r @`, which fails with "Bookmark already
+  exists" in exactly the layout this task ships (spawn's `create_branch`
+  writes `refs/heads/<branch>` into the bare repo; jj's git import
+  materializes it as a local bookmark), so the following `jj git export`
+  exported the bookmark's stale spawn-time position and the agent's
+  work at `@` never reached the bare repo — the MR diffed and merged an
+  unchanged branch. New port method `JjOpsPort::jj_bookmark_set`
+  (`jj bookmark set <name> -r <rev> --allow-backwards`, create-or-move)
+  now backs the completion path (workspace AND legacy-colocated
+  branches); the public `POST /repos/:id/jj/bookmark` endpoint keeps
+  create semantics. Fixture test
+  `jj_bookmark_set_moves_imported_bookmark_to_agent_work` pins the
+  reviewer repro against real jj (create refuses on the imported
+  bookmark; set moves it; export carries the agent's edit into
+  `refs/heads/<branch>`) — guard-skipped locally (no jj binary), runs
+  in CI against pinned jj-vcs 0.39.0 with `GYRE_JJ_TESTS_MUST_RUN=1`.
+- **F2 — export before MR stats**: the bookmark-set + `jj git export`
+  block moved BEFORE the MR's `diff_stats`/`has_conflicts` are
+  computed from git refs, so a fresh MR carries the agent's actual
+  completed work instead of pre-export (empty/stale) stats.
+- **F3 — stale conflict flag cleared**: the rebase success arm now
+  resets `has_conflicts` to `Some(false)` on the author's MR when an
+  earlier conflicted rebase flagged it — the conflicts-as-state surface
+  no longer reports state jj no longer has.
 
-### Prior repair rounds (behavior-preserving)
+Both new server tests were mutation-verified: reintroducing each
+pre-fix behavior (create-regression, export-after-MR-create,
+no-flag-clear) makes them FAIL; the fix makes them PASS (transcripts in
+`/tmp/stage/review-evidence/task-106-r20/`).
 
-- **R17 (`bf2c2308`)**: inline `enforcement:ok` markers replacing
-  re-pinned exemption entries (superseded by R18 — the base fixed the
-  sites for real).
-- **R16 (`e088a007`)**: CI test job installs pinned jj-vcs 0.39.0 and
-  runs `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`;
-  `jj_fixture_guard()` panics on a missing jj under that env var so a
-  broken install fails loudly instead of guard-skipping 13 fixture
-  tests to zero-assertion passes.
-- **R10–R14 (`cf800612`, `6d15a91f`)**: rustfmt on candidate-owned
-  files, clippy `#[allow]` annotations matching repo precedent
-  (`JjOpsPort` double_must_use, `record_rebase_audit` too_many_arguments).
+### Prior rounds
+
+- **R19 base merge (`b99537ec`)**: merged assignment base `98a5299b9`
+  (task-088/120 upstream work); no content conflicts on task-106 files.
+- **R18 (`a5db6ecd`)**: merged base `72ad2a128` (task-095/096/077);
+  took the base's real fixes for the two attestation sites
+  (exemptions file byte-identical to base), kept both test suites in
+  merge_processor.rs and both sides' spawn.rs improvements.
+- **R16–R17 (`e088a007`, `bf2c2308`)**: CI installs pinned jj-vcs 0.39.0
+  and runs `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`
+  (guard panics on missing jj); R17's inline-marker workaround was
+  superseded by R18.
+- **R10–R14**: rustfmt, clippy `#[allow]` annotations matching repo
+  precedent.
 
 ### Behavior
 
@@ -123,11 +132,9 @@ fixes for the same sites:
   `rebase_inflight_agents` (merge_processor.rs) rebases every other
   in-flight agent targeting the same branch — same target branch, MR
   Open/Approved, agent Active, worktree present; merged authors excluded.
-  Runs as the LAST step in both the single-entry and atomic-group paths
-  (F3: never onto a base that gate-failure recovery would revert).
+  Runs as the LAST step in both the single-entry and atomic-group paths.
 - **jj layout**: per-repo shared jj main checkout at `{repo.path}/jj-main`
-  (standalone, backed by the bare git repo — jj 0.39.0 refuses colocation
-  inside git worktrees) with per-agent workspaces at
+  (standalone, backed by the bare git repo) with per-agent workspaces at
   `{repo.path}/workspaces/{agent_id}`; plain-git worktree fallback at
   `{repo.path}/worktrees/{branch}` when jj provisioning fails.
   `jj_workspace_add` runs `jj git import` before resolving `-r <branch>`
@@ -137,19 +144,22 @@ fixes for the same sites:
   `jj git import`, then `jj rebase -b @ -d <moved branch>` (whole
   in-flight stack, per the F5 spec-vs-plan divergence). Conflict
   detection via the `jj resolve --list -r @` exit-code contract
-  (0 = conflicted with files on stdout, 2 = clean) — no text scraping
-  for the decision (F1).
+  (0 = conflicted with files on stdout, 2 = clean).
+- **Completion path** (R20): on complete, a jj-workspace agent's source
+  bookmark is SET onto `@` and exported to the bare repo BEFORE the MR's
+  stats are computed, so diff/can_merge/merge see the actual work.
 - **Conflict-as-state**: on conflict the author's MR gets
-  `has_conflicts = Some(true)`; `SpeculativeConflict` to the workspace
-  and `Escalation` to the agent carry the conflicting-file list. On
-  success the agent gets `baseline_moved` (Custom) with `new_base_sha`
-  and `rebased_count`. All via `emit_event` (signed, persisted, WS).
+  `has_conflicts = Some(true)` (cleared again by a later clean rebase,
+  R20 F3); `SpeculativeConflict` to the workspace and `Escalation` to
+  the agent carry the conflicting-file list. On success the agent gets
+  `baseline_moved` (Custom) with `new_base_sha` and `rebased_count`.
+  All via `emit_event` (signed, persisted, WS).
 - **Deferral semantics** (plan item 5 / F4 / F8): a movement inside the
   60s backoff window sets a `jj_rebase_pending` marker (newest base
-  wins — batch semantics); `replay_pending_rebases` on processor idle
-  cycles retries after expiry; the backoff timestamp is written only
-  after a terminal outcome; an infrastructure Err keeps the pending
-  marker on BOTH trigger and replay paths.
+  wins — batch semantics); `replay_pending_rebases` retries after
+  expiry on every processor cycle; the backoff timestamp is written
+  only after a terminal outcome; an infrastructure Err keeps the
+  pending marker on BOTH trigger and replay paths.
 - **Absolute paths + audit** (F6): `configured_repos_path()` anchors
   `GYRE_REPOS_PATH` at the process cwd at server start;
   `spawn_agent_core` absolutizes legacy relative `repo.path` rows before
@@ -158,27 +168,29 @@ fixes for the same sites:
 
 ### Test evidence
 
-At HEAD `a5db6ecd` (R18 base-merge resolution). This round's probe logs
-+ exit codes in `/tmp/stage/review-evidence/task-106-r18/`:
+At HEAD `bb1099a10` (R20). Probe logs + exit codes in
+`/tmp/stage/review-evidence/task-106-r20/`:
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1421 passed,
-  0 failed** (was 1293 pre-merge; the increase is the base's
-  task-077/095/096 tests now in the tree). Includes all 13 task-106
-  rebase tests and all task-077 trust-hold tests.
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` → **EXIT 0**.
-- `bash scripts/check-inert-enforcement.sh` → **EXIT 0** (the base's
-  real fix means the two attestation sites are no longer violations at
-  all — stronger than the R17 marker suppression).
-- Exemptions freeze: `git diff 72ad2a128 --
-  scripts/inert-enforcement-exemptions.txt` → **empty** (file identical
-  to the assignment base; no growth in any direction).
-- `cargo fmt --check` on both resolved Rust files → **EXIT 0**.
-- `cargo test -p gyre-adapters --lib jj_ops` → 17 passed; jj_ops.rs was
-  untouched by this merge. The 13 real-jj fixture tests guard-skip
-  here because no `jj` binary exists in this sandbox (CI's R16 leg
-  runs them against pinned jj-vcs 0.39.0 with
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1438 passed,
+  0 failed** (includes the 2 new R20 tests, all task-106 rebase tests,
+  and the base's task-077/095/096 suites).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` → **391 passed,
+  0 failed** (new fixture test guard-skips here: no `jj` binary in this
+  sandbox; CI's R16 leg runs it against pinned jj-vcs 0.39.0 with
   `GYRE_JJ_TESTS_MUST_RUN=1`) — an installation restriction for remote
   verification, not a code defect.
+- `cargo check -p gyre-server --all-targets` → EXIT 0.
+- `cargo fmt --check` on the 5 changed files → EXIT 0.
+- Clippy `--all-targets` on ports/adapters/server: warning-location
+  diff vs the pre-change baseline shows only line-number shifts of
+  pre-existing warnings — zero new findings.
+- `scripts/check-mem-port-contracts.sh`, `check-arch.sh`,
+  `check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
+  `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`
+  → all EXIT 0.
+- Mutation verification: all three pre-fix behaviors reintroduced →
+  both new tests FAIL; fix restored → both PASS (transcripts in the
+  evidence dir).
 
 All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
 `web/dist/`): npm registry tarball fetches are blocked from this sandbox
