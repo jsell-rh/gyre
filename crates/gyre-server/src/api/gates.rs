@@ -596,7 +596,7 @@ mod tests {
         // both are inactive, but rejection is a reviewer decision while
         // revocation returns the spec to pending.
         let state = test_state();
-        let mut approved = SpecApproval::new(
+        let approved = SpecApproval::new(
             gyre_common::Id::new("ap-1"),
             "specs/system/auth.md",
             "1".repeat(40),
@@ -643,6 +643,9 @@ mod tests {
         let rejected = by_path.get("specs/system/billing.md").unwrap();
         assert_eq!(rejected["active"], serde_json::json!(false));
         assert_eq!(rejected["rejected_at"], serde_json::json!(120));
-        assert_eq!(rejected["rejected_reason"], serde_json::json!("out of scope"));
+        assert_eq!(
+            rejected["rejected_reason"],
+            serde_json::json!("out of scope")
+        );
     }
 }
