@@ -87,3 +87,88 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-11-08) — merge repair `75d49d4c8`, verdict PASS
+
+Candidate `f4755ca4e` (base `124a852be`). This round is a merge of main into
+the branch tip `26fb31c23` plus bookkeeping (`953ab6459`, `f4755ca4e`); the
+task-120 product surface itself is unchanged from the Round-2 PASS state.
+
+### M1 — sqlite/mod.rs conflict resolution: VERIFIED
+
+`git diff-tree --cc 75d49d4c8` scopes the hand-merged set to exactly seven
+paths (the `000058` migration dir, `schema.rs`, `sqlite/mod.rs`,
+`api/users.rs`, `auth.rs`, `mem.rs`). The conflicting `sqlite/mod.rs` hunk
+held two independent regression tests — task-120's username-backfill guard
+and main's task-102 `migration_000054_folds_legacy_path_pid_into_detail` —
+and both are kept with semantics intact. Relative to the branch tip,
+`auth.rs` changes are comment-only (000057→000058 renumber); the `users.rs`
+delta is main's invite notification routing; the `mem.rs` delta is main's
+trace/policy test hooks — none regress the task-120 surface.
+
+### M2 — second migration version collision: VERIFIED
+
+Main landed task-193's `2026-10-08-000057_spec_approval_attestation` under
+Diesel version `20261008000057`, colliding with the previously renumbered
+task-120 migration (Diesel runs one migration per version, alphabetically
+first). The repair renames the directory to
+`2026-10-08-000058_user_entity_profile_fields`; both `up.sql` and `down.sql`
+are **byte-identical** to the previously reviewed 000057 blobs (verified via
+`git diff` between the blobs — empty output). The regression test's
+partition key is updated to `20261008000058` (test renamed
+`migration_000058_backfills_unique_url_safe_usernames`, pre-migration set
+correctly includes main's 000056 and 000057), and the 000057→000058
+comments in `sqlite/mod.rs`, `schema.rs`, and `auth.rs` are consistent.
+`check-migration-versions.sh` → OK; no stale `user_entity … 000057`
+references remain repo-wide. (The apparent duplicate sequence `000056` is
+date-disambiguated: `20261008000056` vs `20261010000056` — distinct Diesel
+versions.)
+
+### Probes (evidence: `/tmp/stage/review-evidence/`)
+
+- `cargo test -p gyre-adapters --lib` → **370 passed, 0 failed** (12
+  ignored), including `migration_000058_backfills_unique_url_safe_usernames`,
+  main's `migration_000054_folds_legacy_path_pid_into_detail`,
+  `no_duplicate_migration_version_prefixes`,
+  `migrations_create_previously_shadowed_columns`,
+  `migration_is_idempotent`, `user_entity_fields_round_trip`,
+  `username_immutable_on_update`, `username_unique_across_users`.
+- `cargo test -p gyre-server --lib` → **1387 passed, 0 failed**, including
+  all task-120 surface tests (`get_me_returns_stored_profile_with_preferences`,
+  `put_me_updates_display_name_and_preferences`,
+  `put_me_rejects_malformed_preferences`, and the seven auth
+  username-derivation/collision/immutability tests).
+- Gates on the merged tree: migration versions, SQL portability, arch,
+  mem-port contracts, in-memory-state-stores, forged-scope-fields,
+  non-atomic-creation, byte-slice-truncation, inert-enforcement,
+  dead-message-kinds, task-commit-attribution → all OK.
+  `check-rustfmt-diff.py HEAD^1` → clean.
+
+### Observation (non-blocking)
+
+`f4755ca4e` (automated branch-commit bookkeeping) removed `75d49d4c8` from
+the `commits:` frontmatter while restoring the two process SHAs that
+`953ab6459` had dropped. This matches the repo's frozen convention — the
+attribution gate scopes to non-merge commits only, and every prior merge
+commit on this branch (e.g. `020df4e48`) is likewise unlisted; the merge
+commit is fully documented with its SHA in the task's Shipped notes and
+here. Recorded for traceability, not a defect.
+
+### Deferred to verification
+
+`check-clippy-diff.py` requires a workspace-wide clippy build, which this
+sandbox's wrapper rejects (transport restriction, not a code defect). The
+merge's changed lines relative to the branch tip are comment-only
+renumbers plus a file rename; main's lines are covered by main's own CI.
+The verifier should run `python3 scripts/check-clippy-diff.py` and
+`cargo test --all` on this exact head.
+
+### Verdict
+
+The merge repair is faithful: the renumber is a byte-identical rename to
+the next unused sequence, the conflict resolution preserves both regression
+tests, and the entire task-120 surface passes its focused suites on the
+merged tree. No hollow implementations, no gate weakening, no unrelated
+changes. **PASS.**
+
+— Reviewer, 2026-11-08
