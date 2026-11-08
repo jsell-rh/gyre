@@ -2510,6 +2510,13 @@ mod tests {
         let store = Arc::new(MemGraphStore::new());
         let repo_id = Id::new("repo-edge-count");
         let results_repo = Arc::new(MemSpecAssertionResultRepository::default());
+        // Pass 2 telemetry sinks (task-076): real in-memory sinks — the marker
+        // path runs on the no-toolchain-evidence branch here, but it is the
+        // production wiring, not a stub.
+        let telemetry = Arc::new(CallGraphTelemetry {
+            kv: Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>,
+            metrics: Arc::new(crate::metrics::Metrics::new().unwrap()),
+        });
         extract_and_store_graph(
             work.to_str().unwrap(),
             repo_id.as_str(),
@@ -2520,6 +2527,7 @@ mod tests {
             None,
             Arc::clone(&results_repo) as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
             None,
+            Arc::clone(&telemetry),
         )
         .await;
 
@@ -2555,6 +2563,7 @@ mod tests {
             None,
             results_repo as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
             None,
+            telemetry,
         )
         .await;
 
