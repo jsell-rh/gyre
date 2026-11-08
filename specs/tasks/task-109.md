@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: ["696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
+commits: ["696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28", "5b2b0684ed92530fceec3293d9472ae13120daca"]
 ---
 
 ## Spec Excerpt
@@ -101,7 +101,7 @@ behavior exactly: watched `["specs/system/", "specs/development/"]`, ignored
 field-level defaults keep a partial JSON payload from zeroing unspecified
 fields; `is_watched()` applies ignored-over-watched precedence.
 
-**Persistence** (migration `2026-10-08-000058_spec_lifecycle_configs`,
+**Persistence** (migration `2026-10-08-000059_spec_lifecycle_configs`,
 see the migration-numbering repair rounds below):
 separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
 portable SQL for both SQLite and PostgreSQL through the shared embedded
@@ -159,7 +159,13 @@ re-colliding with `000057` (finding d9ebdcd9, verification exit 1). The
 merge of that base (`6b1e4e789`) renumbered to the next unused sequence
 `000058`; no schema change — the migrations dir is embedded wholesale
 (`embed_migrations!("migrations")`), so only the directory name and its
-header comment changed.
+header comment changed. A third renumber (`000058` → `000059`, commit
+`5b2b0684e`, finding 7a1761da) followed the same pattern: the merged
+base `c5deca801` carries task-120's
+`2026-10-08-000058_user_entity_profile_fields` on the same date-sequence.
+That migration stays at `000058` — its regression test keys on version
+`20261008000058` — so this task's migration moved to the next unused
+sequence `000059`.
 
 **Verification-repair round (finding d9ebdcd9, commit `696c03f2`):**
 besides the migration renumber, the failed verification run flagged three
@@ -174,20 +180,29 @@ Agent-role 403 test (now `.unwrap()`ed, matching the sibling call sites).
 `python3 scripts/check-clippy-diff.py 72ad2a128` exits 0 at the repair
 commit (16 changed Rust files, changed lines clean).
 
-**Test evidence** (focused probes re-run at the verification-repair
-commit `696c03f2` on this branch, recorded under
+**Test evidence** (focused probes re-run at the latest repair commit
+`5b2b0684e` on this branch; earlier rounds recorded under
 `/tmp/stage/review-evidence/task-109/`):
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
+- `bash scripts/check-migration-versions.sh` — exit 0 (was the failing
+  check, verification finding 7a1761da: duplicate version 20261008000058)
+- `bash scripts/check-migration-sql-portability.sh` — exit 0
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
   (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation —
-  against a real fresh SQLite DB, proving the 000058 migration creates
-  the table)
+  against a real fresh SQLite DB, proving the renamed 000059 migration
+  still creates the table)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
   no_duplicate_migration_version_prefixes` — 1/1
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
+  migration_000058_backfills_unique_url_safe_usernames` — 1/1 (task-120's
+  regression test that keys on version 20261008000058, re-run to confirm
+  the renumber leaves the neighboring migration untouched)
+
+Earlier-round probes (unchanged source, still standing at `696c03f2`):
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` — 7/7
   (API 5 incl. Agent-role 403 with a real JWT on the assigned
   `/settings/spec-lifecycle` path — these construct a fresh SQLite-backed
-  server, so GET/PUT now exercise the 000058 migration end-to-end;
+  server, so GET/PUT exercise the migration end-to-end;
   hook 2: `enabled=false` creates no tasks and custom `watched_paths`
   fully replace defaults with `default_priority_new: Critical` landing on
   the created task — end-to-end against a real bare git repo with real
@@ -196,12 +211,10 @@ commit `696c03f2` on this branch, recorded under
   'git_http::tests::parse_spec_changes'` — 9/9 and
   `'git_http::tests::classify_spec_change'` — 6/6 (config-driven filtering,
   custom paths, ignored-override, configured priorities)
-- `scripts/check-migration-versions.sh` and
-  `scripts/check-migration-sql-portability.sh` — both exit 0
 - `python3 scripts/check-clippy-diff.py 72ad2a128` — exit 0 (changed
   lines clean); `cargo fmt --all --check` — clean; `bash scripts/check-arch.sh`
   and the remaining `scripts/check-*.sh` static gates — all exit 0
-  (incl. `check-task-commit-attribution.sh`, which passes once `696c03f2`
+  (incl. `check-task-commit-attribution.sh`, which passes once `5b2b0684e`
   is recorded in this file's `commits:` frontmatter as done in this
   commit)
 - Web UI tests are unchanged by this repair (the fix touches no
