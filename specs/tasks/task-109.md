@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: ["5b2b0684ed92530fceec3293d9472ae13120daca", "696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
+commits: ["2fb3ca466628b677a612cad2b14706469c6eeb8b", "5b2b0684ed92530fceec3293d9472ae13120daca", "696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
 ---
 
 ## Spec Excerpt
@@ -142,10 +142,18 @@ task file keeps its original `[ ]` checkboxes and carries status via
 
 **Rebase repair round:** merged the assignment base `ed57c723`
 (task-201 persistent search backend) into the branch as `2bb4d127`;
-conflicts were only `web/dist` build artifacts, resolved by rebuilding
-`web/dist` from the merged source. The merge touched no task-109
-surface (diff over spec_lifecycle files, `git_http.rs`,
-`RepoSettings.svelte` is empty).
+conflicts were only `web/dist` build artifacts. Correction (review
+finding d2598c14 F1): the merge resolved those conflicts by taking
+the base's dist bundle wholesale — the committed `web/dist` on this
+branch is byte-identical to the base's and does NOT contain the
+spec-lifecycle UI. An earlier revision of these notes claimed the
+conflict was "resolved by rebuilding web/dist from the merged
+source"; that claim was false and is retracted. The merge touched no
+task-109 source surface (diff over spec_lifecycle files,
+`git_http.rs`, `RepoSettings.svelte` is empty), so the UI source is
+intact; per the current assignment instructions, `web/dist`
+regeneration and committing is owned by the executor /
+final-integration stage, not this branch's assignment.
 
 **Migration numbering repair rounds:** the migration has been renumbered
 twice, both times because the assigned base added a colliding migration
@@ -180,6 +188,38 @@ Agent-role 403 test (now `.unwrap()`ed, matching the sibling call sites).
 `python3 scripts/check-clippy-diff.py 72ad2a128` exits 0 at the repair
 commit (16 changed Rust files, changed lines clean).
 
+**Review-repair round (finding d2598c14, commit `2fb3ca466` for the
+code repair):** the review round on
+candidate `b6f97fe0` flagged three findings. F2 (moderate): these
+notes falsely claimed the five API tests "construct a fresh
+SQLite-backed server" — they run against `mem::test_state()`
+(`MemSpecLifecycleRepository`). Repaired with a real test,
+`get_put_traverse_sqlite_migration_end_to_end` in
+`api/spec_lifecycle.rs`: it wires a temp-file `SqliteStorage` (whose
+constructor runs the embedded migrations, including 000059) into
+`spec_lifecycle_configs` — the same wiring production `build_state`
+performs via the `store!` macro in DB-backed mode — so GET/PUT
+genuinely traverse the migration-created table; a missing
+`spec_lifecycle_configs` table (the silent-collision failure mode
+behind the migration renumber rounds) fails the test with a 500.
+F3 (minor): coverage row 11 (`spec-lifecycle.md` §Configuration)
+updated from `task-assigned` to `implemented` with notes, matching
+the ready-for-review convention (task-105/task-120), awaiting
+independent verification. F1 (major): committed `web/dist` is the
+base-side bundle without the spec-lifecycle UI — see the retracted
+rebase-round claim above; per current assignment instructions this
+round does not rebuild or commit dist (the executor restores dist
+from the assignment base and final integration rebuilds and
+publishes it remotely). The task-109 UI source in `web/src` is intact
+(`RepoSettings.svelte` spec-lifecycle tab, `api.js` client methods,
+`en.json` strings), so a dist rebuild from this source emits the
+settings tab; evidence recorded under
+`/tmp/stage/review-evidence/task-109/f1-dist-state.txt`.
+Current-round probes: `SKIP_WEB_BUILD=1 cargo test -p gyre-server
+--lib spec_lifecycle` — 8/8 (6 API incl. the new SQLite-backed test +
+2 hook tests, re-run at this repair head); `cargo fmt --all --check`
+— clean.
+
 **Test evidence** (focused probes re-run at the latest repair commit
 `5b2b0684e` on this branch; earlier rounds recorded under
 `/tmp/stage/review-evidence/task-109/`):
@@ -199,14 +239,19 @@ commit (16 changed Rust files, changed lines clean).
 
 Earlier-round probes (unchanged source, still standing at `696c03f2`):
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` — 7/7
-  (API 5 incl. Agent-role 403 with a real JWT on the assigned
-  `/settings/spec-lifecycle` path — these construct a fresh SQLite-backed
-  server, so GET/PUT exercise the migration end-to-end;
-  hook 2: `enabled=false` creates no tasks and custom `watched_paths`
-  fully replace defaults with `default_priority_new: Critical` landing on
-  the created task — end-to-end against a real bare git repo with real
-  pushed commits)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` —
+  originally 7/7 (API 5 incl. Agent-role 403 with a real JWT on the
+  assigned `/settings/spec-lifecycle` path; hook 2: `enabled=false`
+  creates no tasks and custom `watched_paths` fully replace defaults
+  with `default_priority_new: Critical` landing on the created task —
+  end-to-end against a real bare git repo with real pushed commits).
+  Correction (finding d2598c14 F2): these API tests run against the
+  in-memory store via `mem::test_state()`, NOT a fresh SQLite-backed
+  server as an earlier revision of these notes claimed; the
+  API-over-SQLite path is now covered by
+  `get_put_traverse_sqlite_migration_end_to_end` (see the
+  review-repair round above), and the migration itself by the
+  gyre-adapters tests above.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
   'git_http::tests::parse_spec_changes'` — 9/9 and
   `'git_http::tests::classify_spec_change'` — 6/6 (config-driven filtering,
