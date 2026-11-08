@@ -668,6 +668,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Rollout policy (meta-spec-reconciliation.md §7)
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+            get(meta_specs::get_rollout_policy).put(meta_specs::put_rollout_policy),
+        )
         // Orchestrator lifecycle (platform-model.md §3, task-093)
         .route(
             "/api/v1/workspaces/:id/orchestrator/spawn",
