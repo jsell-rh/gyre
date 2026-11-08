@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: ["0dbe7863b4677f170458f24b1f6d76565a26ce24", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
+commits: ["0dbe7863b4677f170458f24b1f6d76565a26ce24", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28", "696c03f2df6a0459c3e3d1d2971e6a3340414cae"]
 ---
 
 ## Spec Excerpt
@@ -101,8 +101,8 @@ behavior exactly: watched `["specs/system/", "specs/development/"]`, ignored
 field-level defaults keep a partial JSON payload from zeroing unspecified
 fields; `is_watched()` applies ignored-over-watched precedence.
 
-**Persistence** (migration `2026-10-08-000057_spec_lifecycle_configs`,
-renumbered from 000056 by the review repair below):
+**Persistence** (migration `2026-10-08-000058_spec_lifecycle_configs`,
+see the migration-numbering repair rounds below):
 separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
 portable SQL for both SQLite and PostgreSQL through the shared embedded
 migrations dir. Diesel adapters (SQLite + Postgres) implement the
@@ -147,33 +147,47 @@ conflicts were only `web/dist` build artifacts, resolved by rebuilding
 surface (diff over spec_lifecycle files, `git_http.rs`,
 `RepoSettings.svelte` is empty).
 
-**Migration renumber repair (finding 7ac79a6a, commit `0dbe7863`):** the
-migration originally shipped as `2026-10-08-000056_spec_lifecycle_configs`,
-sharing Diesel version `20261008000056` with
-`2026-10-08-000056_spec_assertion_results` from the assigned base — Diesel
-runs only one migration per version, so the `spec_lifecycle_configs` table
-was silently never created on fresh databases and per-repo config degraded
-to defaults. Renumbered to the next unused sequence (`000057`); no schema
-change — the migrations dir is embedded wholesale
+**Migration numbering repair rounds:** the migration has been renumbered
+twice, both times because the assigned base added a colliding migration
+on the same date-sequence. Diesel runs only one migration per version
+(alphabetically first wins), so a collision silently drops the
+`spec_lifecycle_configs` table on fresh databases and per-repo config
+degrades to defaults. First `000056` → `000057` (finding 7ac79a6a, commit
+`0dbe7863`: collision with `spec_assertion_results`); then the base
+`72ad2a128` itself added `2026-10-08-000057_spec_approval_attestation`,
+re-colliding with `000057` (finding d9ebdcd9, verification exit 1). The
+merge of that base (`6b1e4e789`) renumbered to the next unused sequence
+`000058`; no schema change — the migrations dir is embedded wholesale
 (`embed_migrations!("migrations")`), so only the directory name and its
-header comment changed. `scripts/check-migration-versions.sh`,
-`scripts/check-migration-sql-portability.sh`, and the guard test
-`no_duplicate_migration_version_prefixes` all exit 0 at the repair commit.
+header comment changed.
 
-**Test evidence** (focused probes re-run at the migration-renumber
-repair commit `0dbe7863` on this branch, recorded under
+**Verification-repair round (finding d9ebdcd9, commit `696c03f2`):**
+besides the migration renumber, the failed verification run flagged three
+non-migration findings on this task's changed lines, all repaired in
+`696c03f2`: rustfmt drift across the task-109 files (whole-tree
+`cargo fmt --all --check` now clean), a missing
+`#[allow(clippy::double_must_use)]` on the `SpecLifecycleRepository`
+trait (async_trait generates a must_use future per method — the
+established `gyre-ports` pattern, e.g. `git_ops.rs`, `storage.rs`), and a
+discarded must-use `Result` from `seed_builtin_policies` in the
+Agent-role 403 test (now `.unwrap()`ed, matching the sibling call sites).
+`python3 scripts/check-clippy-diff.py 72ad2a128` exits 0 at the repair
+commit (16 changed Rust files, changed lines clean).
+
+**Test evidence** (focused probes re-run at the verification-repair
+commit `696c03f2` on this branch, recorded under
 `/tmp/stage/review-evidence/task-109/`):
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
   (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation —
-  against a real fresh SQLite DB, proving the renumbered migration creates
+  against a real fresh SQLite DB, proving the 000058 migration creates
   the table)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
   no_duplicate_migration_version_prefixes` — 1/1
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` — 7/7
   (API 5 incl. Agent-role 403 with a real JWT on the assigned
   `/settings/spec-lifecycle` path — these construct a fresh SQLite-backed
-  server, so GET/PUT now exercise the renumbered migration end-to-end;
+  server, so GET/PUT now exercise the 000058 migration end-to-end;
   hook 2: `enabled=false` creates no tasks and custom `watched_paths`
   fully replace defaults with `default_priority_new: Critical` landing on
   the created task — end-to-end against a real bare git repo with real
@@ -184,12 +198,18 @@ repair commit `0dbe7863` on this branch, recorded under
   custom paths, ignored-override, configured priorities)
 - `scripts/check-migration-versions.sh` and
   `scripts/check-migration-sql-portability.sh` — both exit 0
-- Web UI tests are unchanged by this repair (the rename touches no
+- `python3 scripts/check-clippy-diff.py 72ad2a128` — exit 0 (changed
+  lines clean); `cargo fmt --all --check` — clean; `bash scripts/check-arch.sh`
+  and the remaining `scripts/check-*.sh` static gates — all exit 0
+  (incl. `check-task-commit-attribution.sh`, which passes once `696c03f2`
+  is recorded in this file's `commits:` frontmatter as done in this
+  commit)
+- Web UI tests are unchanged by this repair (the fix touches no
   `web/` source); the prior round's `npx vitest run
   src/__tests__/RepoSettings.test.js` — 56/56 stands.
 
-`cargo test --all`, the remaining mechanical checks, and exact-head GitHub
-checks are owned by the verification stage per assignment instructions;
-this sandbox cannot run TCP listeners (capability probe errno 95,
-`capabilities.json`), so the `git_clone_empty_repo_via_smart_http` test and
-live-UI browser drive require host verification.
+`cargo test --all`, the full web suite, and exact-head GitHub checks are
+owned by the verification stage per assignment instructions; this repair
+round needed no TCP-listener probe (all probes above are in-process),
+and the current sandbox capability report marks listener probes
+supported should verification require them.
