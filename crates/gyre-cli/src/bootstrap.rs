@@ -179,11 +179,22 @@ pub async fn push_and_sync_specs(
     // sends HEAD without them and the ledger stays empty while the CLI
     // reports success (spec §8 step 6 + starter-kit branch). Commit only
     // paths the starter kit owns; leave the user's own staging untouched.
+    // `git add` aborts when an explicit pathspec matches no file, so only
+    // the kit paths that actually exist are staged — a repo can carry a
+    // pre-existing specs/manifest.yaml without the rest of the kit
+    // (§8 step 6 applies to any manifest-bearing repo, not just
+    // --starter-kit runs), and staging the missing siblings would fail
+    // the whole step for those repos.
+    let kit_paths_present: Vec<&str> = STARTER_KIT_PATHS
+        .iter()
+        .filter(|p| repo_path.join(p).exists())
+        .copied()
+        .collect();
     let status = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(["status", "--porcelain", "--"])
-        .args(STARTER_KIT_PATHS)
+        .args(&kit_paths_present)
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("failed to run git status: {e}"))?;
@@ -198,7 +209,7 @@ pub async fn push_and_sync_specs(
             .arg("-C")
             .arg(repo_path)
             .args(["add", "--"])
-            .args(STARTER_KIT_PATHS)
+            .args(&kit_paths_present)
             .output()
             .await
             .map_err(|e| anyhow::anyhow!("failed to run git add: {e}"))?;
@@ -223,23 +234,57 @@ pub async fn push_and_sync_specs(
         }
     }
 
-    // Push the local branch to the server's bare repo. The server seeds
-    // `main` with an empty initial commit at repo creation, and the user's
-    // local history is unrelated to that seed, so git refuses the update
-    // as a non-fast-forward unless the push is forced. The seed commit is
-    // disposable scaffolding whose only purpose is making HEAD valid for
-    // `git worktree add` — bootstrap registers the user's local repo as
-    // the platform's source of truth, so replacing the seed with the real
-    // history is the intended first-run semantics (round-3 finding 2:
-    // the unforced push made EVERY first-run fail at this step).
-    let push = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args([
-            "-c",
-            &format!("http.extraHeader=Authorization: Bearer {}", api.token()),
-        ])
-        .args(["push", "--force", clone_url, "HEAD:refs/heads/main"])
+    // Push the local branch to the server's bare repo. HOW the push runs
+    // depends on what the server's main currently holds (round-11 F11: an
+    // unconditional `--force` rewound merged MR commits out of main on
+    // resume runs — the merge processor advances the bare repo's main with
+    // server-side merge commits, and a stale local checkout forcing over
+    // them silently removed merged history):
+    //
+    //   * no remote main yet          -> plain push (creates the branch)
+    //   * remote main is behind HEAD  -> plain push (fast-forward; git
+    //                                     itself rejects anything else)
+    //   * remote main is the server's disposable seed commit (see below)
+    //                                  -> replace it, pinned to the exact
+    //                                     seed SHA via --force-with-lease
+    //   * anything else (diverged — e.g. main advanced with merged MRs
+    //     while the local checkout has not pulled)
+    //                                  -> refuse: bootstrap never discards
+    //                                     server-side history
+    //
+    // The server seeds a repo's main with a single root commit carrying an
+    // empty tree (repos.rs `create_repo` -> `create_initial_commit`) purely
+    // so HEAD is valid for `git worktree add`. The user's local history is
+    // unrelated to that seed, so the first-run push cannot fast-forward —
+    // replacing the seed with the real history is the documented first-run
+    // semantics (round-3 finding 2: the unforced push made EVERY first-run
+    // fail at this step). The lease pins the replacement to the seed we
+    // just inspected, so a concurrent push between our fetch and our push
+    // fails the lease instead of being clobbered.
+    let remote_main = ls_remote_main(repo_path, clone_url, api.token()).await?;
+    let mut push_cmd = git_with_auth(repo_path, api.token());
+    push_cmd.arg("push");
+    if let Some(remote_sha) = remote_main {
+        // Bring the remote main commit (and its tree) into the local object
+        // store so ancestry and seed shape can be inspected offline.
+        fetch_main_object(repo_path, clone_url, api.token()).await?;
+        if !is_ancestor_of_head(repo_path, &remote_sha).await? {
+            if is_disposable_seed(repo_path, &remote_sha).await? {
+                push_cmd.arg(format!("--force-with-lease=refs/heads/main:{remote_sha}"));
+            } else {
+                anyhow::bail!(
+                    "refusing to push: the server's main ({remote_sha}) has \
+                     commits this checkout does not (e.g. MRs merged on the \
+                     server); pull or rebase onto the server branch first — \
+                     bootstrap will not overwrite them"
+                );
+            }
+        }
+        // Ancestor (or equal): a plain push fast-forwards the remote, or is
+        // a no-op when the remote already matches HEAD (resume re-run).
+    }
+    push_cmd.arg(clone_url).arg("HEAD:refs/heads/main");
+    let push = push_cmd
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("failed to run git push: {e}"))?;
@@ -264,6 +309,114 @@ pub async fn push_and_sync_specs(
         "bootstrap: spec ledger synced"
     );
     Ok(synced.registered)
+}
+
+/// Build a `git` command scoped to `repo_path` whose HTTP bearer token is
+/// passed through git's environment config (GIT_CONFIG_COUNT /
+/// GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n, git >= 2.31) instead of a
+/// `-c http.extraHeader=...` argument (round-11 F12): child argv is
+/// readable via `ps` and `/proc/<pid>/cmdline` for the lifetime of every
+/// network-touching git call, while environment config keeps the token
+/// out of it.
+fn git_with_auth(repo_path: &Path, token: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("-C").arg(repo_path);
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Bearer {token}"),
+        );
+    cmd
+}
+
+/// Run a git command that must succeed and return its trimmed stdout.
+async fn git_stdout(mut cmd: tokio::process::Command, what: &str) -> anyhow::Result<String> {
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run git {what}: {e}"))?;
+    if !out.status.success() {
+        return Err(anyhow::anyhow!(
+            "git {what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The SHA of the server's `refs/heads/main`, or `None` when the server
+/// repo has no main branch yet (e.g. its seed failed to initialize).
+async fn ls_remote_main(
+    repo_path: &Path,
+    clone_url: &str,
+    token: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut cmd = git_with_auth(repo_path, token);
+    cmd.arg("ls-remote").arg(clone_url).arg("refs/heads/main");
+    let out = git_stdout(cmd, "ls-remote").await?;
+    Ok(out
+        .lines()
+        .next()
+        .and_then(|l| l.split_ascii_whitespace().next())
+        .map(|sha| sha.to_string()))
+}
+
+/// Fetch the server's `refs/heads/main` into the local object store (via
+/// FETCH_HEAD) so its commit and tree can be inspected offline. No local
+/// branch or remote-tracking ref is created or moved.
+async fn fetch_main_object(repo_path: &Path, clone_url: &str, token: &str) -> anyhow::Result<()> {
+    let mut cmd = git_with_auth(repo_path, token);
+    cmd.arg("fetch")
+        .arg("--no-tags")
+        .arg(clone_url)
+        .arg("refs/heads/main");
+    git_stdout(cmd, "fetch").await?;
+    Ok(())
+}
+
+/// Whether `commit` is an ancestor of (or equal to) the local HEAD —
+/// i.e. pushing HEAD is a fast-forward for the remote branch.
+async fn is_ancestor_of_head(repo_path: &Path, commit: &str) -> anyhow::Result<bool> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run git merge-base: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow::anyhow!(
+            "git merge-base failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Whether `commit` is the server's disposable first-run seed: a root
+/// commit (no parents) whose tree is empty — the exact shape
+/// `create_initial_commit` writes (treebuilder over nothing, no parents).
+/// Real history never matches: merge commits have parents, and any commit
+/// carrying actual content has a non-empty tree.
+async fn is_disposable_seed(repo_path: &Path, commit: &str) -> anyhow::Result<bool> {
+    let parents = {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("-C").arg(repo_path);
+        cmd.args(["show", "-s", "--format=%P", commit]);
+        git_stdout(cmd, "show").await?
+    };
+    if !parents.is_empty() {
+        return Ok(false);
+    }
+    let tree_entries = {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("-C").arg(repo_path);
+        cmd.args(["ls-tree", commit]);
+        git_stdout(cmd, "ls-tree").await?
+    };
+    Ok(tree_entries.is_empty())
 }
 
 /// Starter-kit manifest template (§8 "Starter Kit": "Default manifest with
@@ -675,5 +828,198 @@ mod tests {
         let text = s.render();
         assert!(text.contains("already active"));
         assert!(!text.contains("is running"));
+    }
+
+    // ── push_and_sync_specs push-safety tests (round-11 F11/F12) ──────────
+    //
+    // Real git plumbing against a real bare "server" repo; only the
+    // GyreClient's sync-specs call is served by the mock HTTP server.
+    // These pin the resume contract: the first run replaces the server's
+    // disposable empty seed, a local-ahead re-run fast-forwards, and a
+    // re-run from a checkout that has not pulled after server-side MR
+    // merges must NOT rewind main.
+
+    /// Run git synchronously in `dir`, with a test identity so commits work
+    /// in fresh repos. Panics on failure; test-fixture only.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@gyre.test")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@gyre.test")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} in {} failed: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare "server" repo shaped exactly like repos.rs creates them:
+    /// main pointing at a single root commit with an empty tree
+    /// (create_initial_commit's treebuilder-over-nothing, no parents).
+    fn init_server_bare_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init", "--bare", "-b", "main"]);
+        let empty_tree = git(path, &["mktree"]);
+        let seed = git(
+            path,
+            &["commit-tree", empty_tree.as_str(), "-m", "Initial commit"],
+        );
+        git(path, &["update-ref", "refs/heads/main", seed.as_str()]);
+    }
+
+    /// A user checkout: one commit with a README, plus an uncommitted
+    /// specs/manifest.yaml (exercising the starter-kit auto-commit path).
+    /// Its history is unrelated to the server seed, like every real
+    /// first-run checkout.
+    fn init_local_repo(path: &Path) {
+        git(path, &["init", "-b", "main"]);
+        // Identity must live in the repo config so the commits made INSIDE
+        // push_and_sync_specs (starter-kit auto-commit) succeed too.
+        git(path, &["config", "user.email", "t@gyre.test"]);
+        git(path, &["config", "user.name", "t"]);
+        std::fs::write(path.join("README.md"), "hello\n").unwrap();
+        git(path, &["add", "README.md"]);
+        git(path, &["commit", "-m", "first"]);
+        std::fs::create_dir_all(path.join("specs")).unwrap();
+        std::fs::write(path.join("specs").join("manifest.yaml"), "version: 1\n").unwrap();
+    }
+
+    fn server_main(path: &Path) -> String {
+        git(path, &["rev-parse", "refs/heads/main"])
+    }
+
+    fn local_head(path: &Path) -> String {
+        git(path, &["rev-parse", "HEAD"])
+    }
+
+    fn mock_sync_client(responses: usize) -> crate::client::GyreClient {
+        let scripted = (0..responses)
+            .map(|_| {
+                (
+                    "200 OK".to_string(),
+                    r#"{"registered":1,"head_sha":"synced"}"#.to_string(),
+                )
+            })
+            .collect();
+        let (base, _captured) = crate::client::test_http::spawn_mock_http_server_sequence(scripted);
+        crate::client::GyreClient::new(base, "test-token".to_string())
+    }
+
+    #[tokio::test]
+    async fn push_sync_first_run_replaces_seed_and_resume_refuses_to_rewind_merged_main() {
+        let server = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        init_server_bare_repo(server.path());
+        init_local_repo(local.path());
+        let api = mock_sync_client(1);
+        let clone_url = server.path().to_string_lossy().to_string();
+
+        // First run: the unrelated local history must replace the empty
+        // seed (a plain push would be rejected as non-fast-forward).
+        let registered = push_and_sync_specs(&api, local.path(), "r-1", &clone_url)
+            .await
+            .expect("first-run push must succeed");
+        assert_eq!(registered, 1);
+        // The uncommitted manifest was auto-committed and is on main
+        // (the helper panics if the object is missing).
+        git(
+            local.path(),
+            &["cat-file", "-e", "HEAD:specs/manifest.yaml"],
+        );
+        assert_eq!(server_main(server.path()), local_head(local.path()));
+
+        // Simulate the server-side merge processor advancing main: an MR
+        // branch merged into main in a scratch clone, pushed to the bare
+        // repo — exactly what a merged MR leaves behind.
+        let scratch = tempfile::tempdir().unwrap();
+        git(scratch.path(), &["clone", &clone_url, "."]);
+        git(scratch.path(), &["config", "user.email", "t@gyre.test"]);
+        git(scratch.path(), &["config", "user.name", "t"]);
+        git(scratch.path(), &["checkout", "-b", "feat"]);
+        std::fs::write(scratch.path().join("feat.txt"), "x\n").unwrap();
+        git(scratch.path(), &["add", "feat.txt"]);
+        git(scratch.path(), &["commit", "-m", "feat"]);
+        git(scratch.path(), &["push", "origin", "feat"]);
+        git(scratch.path(), &["checkout", "main"]);
+        git(
+            scratch.path(),
+            &["merge", "--no-ff", "origin/feat", "-m", "Merge MR"],
+        );
+        git(scratch.path(), &["push", "origin", "main"]);
+        let merged = server_main(server.path());
+        assert_ne!(merged, local_head(local.path()));
+
+        // Re-run bootstrap from the stale local checkout (never pulled):
+        // the push must be refused, not forced over the merge commit.
+        let err = push_and_sync_specs(&api, local.path(), "r-1", &clone_url)
+            .await
+            .expect_err("a checkout behind merged main must not push");
+        assert!(
+            err.to_string().contains("refusing to push"),
+            "error must explain the refusal, got: {err}"
+        );
+        assert_eq!(
+            server_main(server.path()),
+            merged,
+            "server main was rewound out from under merged MR history"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_sync_resume_fast_forwards_when_local_is_ahead() {
+        let server = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        init_server_bare_repo(server.path());
+        init_local_repo(local.path());
+        let api = mock_sync_client(2);
+        let clone_url = server.path().to_string_lossy().to_string();
+
+        push_and_sync_specs(&api, local.path(), "r-1", &clone_url)
+            .await
+            .expect("first-run push must succeed");
+
+        // New local commits after the first run: the resume re-run must
+        // push them (fast-forward), not skip the step.
+        std::fs::write(local.path().join("more.txt"), "y\n").unwrap();
+        git(local.path(), &["add", "more.txt"]);
+        git(local.path(), &["commit", "-m", "second"]);
+        push_and_sync_specs(&api, local.path(), "r-1", &clone_url)
+            .await
+            .expect("resume push with local-ahead history must succeed");
+        assert_eq!(server_main(server.path()), local_head(local.path()));
+    }
+
+    #[test]
+    fn git_auth_token_never_appears_in_child_argv() {
+        // F12: the bearer token must reach git through environment config,
+        // never through `-c http.extraHeader=...` argv (readable via ps and
+        // /proc/<pid>/cmdline for the lifetime of every network push).
+        let cmd = git_with_auth(Path::new("/tmp"), "secret-token-xyz");
+        let std_cmd = cmd.as_std();
+        let argv = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !argv.contains("secret-token-xyz"),
+            "token leaked into git argv: {argv}"
+        );
+        let env_value = std_cmd
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_CONFIG_VALUE_0")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string())
+            .expect("GIT_CONFIG_VALUE_0 must be set");
+        assert_eq!(env_value, "Authorization: Bearer secret-token-xyz");
     }
 }
