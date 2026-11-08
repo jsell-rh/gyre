@@ -1081,6 +1081,7 @@ pub async fn revoke_spec_approval(
                     )))
                 }
             }
+        }
     }
 
     let _ = state

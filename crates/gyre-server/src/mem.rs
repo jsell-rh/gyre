@@ -4,7 +4,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::spec_approval::ApprovalTransitionError;
-use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
