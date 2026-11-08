@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["de208c147ff0653404a2b6b0a8d33e1f2e8b91a1", "aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
+commits: ["de208c147ff0653404a2b6b0a8d33e1f2e8b91a1", "aa73b69a563fedd2c99929831aca325cfc1d3dc5", "e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3", "9caa8566fc874dbacffb341ddb2af0b086d3f418"]
 ---
 
 ## Spec Excerpt
@@ -80,12 +80,12 @@ From `meta-spec-reconciliation.md` §7 — Rollout Policy:
 ## Shipped
 
 Real, production implementation of `meta-spec-reconciliation.md` §7 Rollout
-Policy, plus the review-repair for overlapping rolling waves, in commits
-`a1ff51f2cd964fa606e58eee76baaf73435a5be3`,
-`e67c467191726aa1e3510cd15c2ea0ee044362b5`,
-`aa73b69a563fedd2c99929831aca325cfc1d3dc5` (lint repair), and
-`de208c147ff0653404a2b6b0a8d33e1f2e8b91a1` (overlapping-wave merge fix) on
-the assignment base `124a852bedb4e5759bf143b6c2683df6eeb03849`.
+Policy, plus the review repairs for overlapping rolling waves (commit
+`de208c147ff0653404a2b6b0a8d33e1f2e8b91a1`) and for the flush-path
+delegation flag and merge read-failure fail-open (commit
+`9caa8566fc874dbacffb341ddb2af0b086d3f418`), on the assignment base
+`124a852bedb4e5759bf143b6c2683df6eeb03849`. Full commit list in the
+frontmatter.
 
 ### Spec fidelity
 
@@ -190,24 +190,65 @@ Evidence retained at `/tmp/stage/review-evidence/task-157-overlap-fix-*.txt`:
 focused tests, diff-scoped rustfmt/clippy gates, and a notes file recording
 the mutation checks (temporary source mutations, reverted afterwards).
 
+### Review repair (attempt fd31a1cb, commit `9caa8566f`)
+
+Two findings on candidate `c2904d4f6`, both fixed:
+
+- **F1 — flush-path delegation flag**: `maybe_advance_rolling_rollout`'s
+  flush path hardcoded `delegation = true`, so a mid-rollout switch to the
+  Background strategy created the deferred remainder with
+  `task_type: Some(Delegation)` — those tasks can trigger agent spawning,
+  contradicting §7 Background ("leave them in Backlog... repo orchestrator
+  decides priority") and disagreeing with `run_reconciliation`'s own
+  Background branch. Fixed by deriving the flag from the re-read live
+  policy (`policy.strategy != Background`); a Background switch now
+  flushes inert Backlog tasks with no task_type.
+- **F2 — merge fail-open on read failure**: `merge_pending_rollout`
+  failed open on a `kv_get` Err — it warned "keeping only the incoming
+  remainder" and then wrote that incoming-only list, overwriting the
+  stored deferred remainder behind a transient read failure (the same
+  silent-work-loss class the `de208c147` repair fixed). Fixed by aborting
+  the merge on read failure: the function now returns `Option<usize>`
+  (`None` = aborted, nothing written, stored state untouched), and both
+  callers log the abort operator-visibly. An aborted advance self-heals:
+  already-created tasks are deduplicated on the next advance. The
+  unparseable-JSON arm remains a deliberate recovery (garbage cannot be
+  merged with; the incoming remainder keeps the rollout drainable).
+
+Two regression tests added, each mutation-verified to fail under the
+semantics it guards against:
+
+- `rolling_strategy_switch_to_background_flushes_inert_tasks` — fails
+  when the flush path hardcodes delegation=true (asserts flushed tasks
+  sit in Backlog with no task_type after a mid-rollout Background
+  switch).
+- `merge_pending_rollout_read_failure_leaves_stored_state_untouched` —
+  fails under the old fail-open semantics (a `FlakyReadKvStore` test
+  double injects a kv read failure during a second wave; the stored
+  remainder must remain exactly the first wave's deferrals and still
+  drive the next batch afterwards). Supported by a new test-only
+  `test_state_with_kv_store` helper in `mem.rs`.
+
+Evidence retained at
+`/tmp/stage/review-evidence/task-157-fd31a1cb-repair.txt`.
+
 ### Test evidence
 
-Focused probes at head `de208c147`:
+Focused probes at head `9caa8566f`:
 
-- `cargo test -p gyre-server --lib reconciliation::tests` — 30 passed
-  (28 pre-existing + the 2 new regression tests), covering: immediate
-  creates all tasks at once; rolling creates batch 1 only and advances on
-  completion; background leaves tasks in Backlog; priority mapping;
-  strategy-switch flush; batch-size change applies to the next batch;
-  overlapping waves retain both remainders; re-triggered wave supersedes
-  not duplicates; auto_merge enqueues / default does not /
-  non-reconciliation MRs ignored; unset policy is the spec default;
-  `ReconciliationCompleted` fires exactly once at rollout end. Suite run
-  five times consecutively — stable (no order-dependent flakiness).
+- `cargo test -p gyre-server --lib reconciliation::tests` — 32 passed
+  (28 pre-existing + 4 regression tests from the two repairs), covering:
+  immediate creates all tasks at once; rolling creates batch 1 only and
+  advances on completion; background leaves tasks in Backlog; priority
+  mapping; strategy-switch flush; strategy-switch to Background flushes
+  inert tasks; batch-size change applies to the next batch; overlapping
+  waves retain both remainders; re-triggered wave supersedes not
+  duplicates; pending-state read failure leaves stored state untouched;
+  auto_merge enqueues / default does not / non-reconciliation MRs
+  ignored; unset policy is the spec default; `ReconciliationCompleted`
+  fires exactly once at rollout end. Suite run four times consecutively —
+  stable (no order-dependent flakiness).
 - `cargo test -p gyre-server --lib api::meta_specs` — 25 passed.
-- `cargo test -p gyre-domain meta_spec` — 6 passed (run at the earlier
-  repair head `aa73b69a5`; this repair touches only
-  `gyre-server/src/reconciliation.rs`).
 - Diff-scoped gates against base `124a852be`:
   `check-rustfmt-diff.py` → "changed lines clean (20 Rust files checked)";
   `check-clippy-diff.py` → "changed lines clean (20 Rust files, 1096
