@@ -51,3 +51,23 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 3 (2026-11-08) — repair round 91, candidate `080ec2cbf`: attribution clobber recurred again; product surface verified intact
+
+Assignment: base `124a852bedb4e5759bf143b6c2683df6eeb03849` (merged at `bd849c25b` with zero task-208-surface drift), candidate `080ec2cbfd9c1421a442adbd77836f8193a9160f` ("process: record task-208 branch commits"). Evidence: `/tmp/stage/review-evidence/r95/`.
+
+**Finding (reproduced on the exact candidate — 91st recurrence of the r93/r94 class):** the candidate's only change vs parent `25de667e3` rewrites `specs/tasks/task-208.md` `commits:` from six SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)`, root `.gitattributes` +4, the live `web/dist/** -whitespace` rule at `.gitattributes:4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0 and `git merge-base --is-ancestor ea006d52 124a852be` → 1, so it is task-208-labeled branch product surface that becomes invisible to review scoping while unlisted — violating the AGENTS.md attribution invariant and contradicting the task's own Shipped record (six SHAs). Reproduce: `git show 080ec2cbf -- specs/tasks/task-208.md`. Root cause re-confirmed on this attempt: the executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) is again the pre-fix version — `diff` vs the fixed in-repo `scripts/dev-attribution.py` (sha256 `c23f2505…`) shows exactly the missing `path == '.gitattributes' or` line; the executor re-populates `/tmp/stage` from the durable pre-fix source before the checkpoint pass, so the durable fix must land wherever `/tmp/stage` is populated from (process owner). The in-repo fixed pass computes exactly the six-SHA list (running it re-adds `ea006d52`; the resulting working-tree change was reverted — review performed on the pristine candidate). The in-repo gate `scripts/check-task-commit-attribution.sh task-208` passes either way (narrower filter; documented residual).
+
+**Product surface — all probes pass on the candidate (no new findings):**
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (exit 0); the test drives the real router via `app().oneshot` with a bearer token and asserts 404 on all three URIs.
+- `npm ci` (exit 0) + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed (exit 0).
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches; the only `users/me/{agents,tasks,mrs}` URI references in `crates/` are the 404-guard literals in the regression test itself.
+- `UserProfile.svelte` renders exactly six tabs (info, tokens, memberships, ledger, notif-prefs, notifications); no tab bodies/state/fetches for the removed tabs.
+- Spec amendment intact: `user-management.md` §"My Stuff" Views records the supersession (ui-navigation.md §2 + HSI §12), M22.8 row struck Removed; coverage user-management row 22 `n/a`, HSI row 54 `implemented`.
+- Remaining `users/me/*` endpoints (`/me`, `/me/tokens`, `/me/notifications`, `/me/judgments`, `/me/notification-preferences`) keep the per-handler-auth ABAC-exempt model — the abac_middleware diff removes exactly the three my-stuff mappings, nothing else.
+- `scripts/test_dev_attribution.py` → 2/2 OK.
+- `web/dist/` at the tip is byte-identical to the assignment base's (executor restore-to-base flow; last dist commits are task-078/081-era and still contain the pre-removal client) — not a candidate change; final integration rebuilds and publishes dist from the merged clean `web/src`.
+
+Verifier must still run `cargo test --all` and `cd web && npm test`.
+
+Verdict: **not approved** — the candidate is defective exactly as its predecessors in this class: it un-records a task-labeled product-surface commit (`ea006d52`) from review scoping. The product work itself remains correct and fully verified.
