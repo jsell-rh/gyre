@@ -3,7 +3,7 @@ title: "Explorer Phase 4 Polish — Streaming, Keyboard Shortcuts & Performance"
 spec_ref: "explorer-implementation.md §28"
 depends_on:
   - task-071
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §28 Phase 4: Polish"
 commits: ["293246b7cdc399e1313b7dd2981c4508b05c7715"]
