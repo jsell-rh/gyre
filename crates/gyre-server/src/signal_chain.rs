@@ -1868,10 +1868,7 @@ mod tests {
         let state = chain_state().await;
         on_spec_approved(&state, &approved_payload()).await;
 
-        let (a, b) = tokio::join!(
-            scheduler_run_once(&state),
-            scheduler_run_once(&state)
-        );
+        let (a, b) = tokio::join!(scheduler_run_once(&state), scheduler_run_once(&state));
         a.unwrap();
         b.unwrap();
 
@@ -1938,7 +1935,9 @@ mod tests {
             .into_iter()
             .find(|t| t.task_type == Some(TaskType::Delegation))
             .expect("delegation task created");
-        delegation.transition_status(TaskStatus::InProgress).unwrap();
+        delegation
+            .transition_status(TaskStatus::InProgress)
+            .unwrap();
         delegation.updated_at = 0; // far in the past → stale
         state.tasks.update(&delegation).await.unwrap();
 
@@ -2066,7 +2065,11 @@ mod tests {
     async fn delegation_with_empty_sha_spec_ref_stays_blocked() {
         let state = chain_state().await;
 
-        let mut t = Task::new(Id::new("del-emptysha"), "Delegation with empty-SHA spec_ref", 0);
+        let mut t = Task::new(
+            Id::new("del-emptysha"),
+            "Delegation with empty-SHA spec_ref",
+            0,
+        );
         t.task_type = Some(TaskType::Delegation);
         t.repo_id = Id::new("r-1");
         t.workspace_id = Id::new("ws-1");
@@ -2150,7 +2153,12 @@ mod tests {
         .to_string();
 
         // Point repo r-1 at the real git repo and pin the ledger SHA.
-        let mut repo = state.repos.find_by_id(&Id::new("r-1")).await.unwrap().unwrap();
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
         repo.path = repo_path.to_string_lossy().to_string();
         state.repos.update(&repo).await.unwrap();
         let mut entry = state

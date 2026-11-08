@@ -620,9 +620,15 @@ mod tests {
             "detector stamped a fresh heartbeat on the system orchestrator"
         );
 
-        let peers = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(
-            !peers.iter().any(|a| a.name.starts_with("system-ws-orch-restart")),
+            !peers
+                .iter()
+                .any(|a| a.name.starts_with("system-ws-orch-restart")),
             "no restart replacement spawned for a system orchestrator"
         );
         assert_eq!(
@@ -652,7 +658,13 @@ mod tests {
             "still exactly one live workspace orchestrator after a second cycle"
         );
         assert_eq!(
-            state.agents.find_by_id(&agent.id).await.unwrap().unwrap().status,
+            state
+                .agents
+                .find_by_id(&agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             AgentStatus::Active
         );
     }
