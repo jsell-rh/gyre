@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["27bfb2a699f9bd6f22085b497726e0d32f8f688a", "deec7953a0c6a6d289d99f8239068ba403c43b06"]
 ---
 
 ## Spec Excerpt
@@ -183,6 +183,10 @@ task owned.
 - `docs/api-reference.md` updated (also fixed the stale
   `PUT /users/me/notifications/{id}/read` row, which never existed in
   code).
+- Inbox UI (commit deec7953a0): type normalization and badge variants
+  map the renamed types (`SpecApprovalRequested`, `AgentBudgetWarning`,
+  legacy names kept for pre-migration rows) and all new taxonomy types,
+  with en.json labels — verified by the full vitest suite (1858 passed).
 
 ### Not emitted (documented, not hidden)
 
