@@ -70,7 +70,9 @@ pub struct UserProfileResponse {
     pub timezone: String,
     pub locale: String,
     pub global_role: String,
+    pub roles: Vec<String>,
     pub preferences: serde_json::Value,
+    pub last_login_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -87,7 +89,9 @@ impl From<User> for UserProfileResponse {
             timezone: u.timezone.clone(),
             locale: u.locale.clone(),
             global_role: format!("{:?}", u.global_role),
+            roles: u.roles.iter().map(|r| r.as_str().to_string()).collect(),
             preferences: prefs,
+            last_login_at: u.last_login_at,
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
@@ -118,7 +122,10 @@ pub async fn get_me(
         timezone: "UTC".to_string(),
         locale: "en".to_string(),
         global_role,
-        preferences: serde_json::json!({}),
+        roles: auth.roles.iter().map(|r| r.as_str().to_string()).collect(),
+        preferences: serde_json::to_value(gyre_domain::UserPreferences::default())
+            .unwrap_or_default(),
+        last_login_at: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -134,6 +141,13 @@ pub struct UpdateProfileRequest {
     pub preferences: Option<serde_json::Value>,
 }
 
+/// PUT /api/v1/users/me
+///
+/// Updates the caller's editable profile fields: display_name, timezone,
+/// locale, avatar_url, and preferences (user-management.md §User
+/// Preferences: server-side persistence). username, external_id, email,
+/// and global_role are not editable here — username is immutable after
+/// creation and email is derived from SSO (§Username vs Display Name).
 pub async fn update_me(
     auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
@@ -149,25 +163,42 @@ pub async fn update_me(
         .await?
         .ok_or(ApiError::NotFound("User not found".to_string()))?;
 
-    let now = now_secs();
     if let Some(dn) = req.display_name {
+        if dn.trim().is_empty() {
+            return Err(ApiError::InvalidInput(
+                "display_name must not be empty".to_string(),
+            ));
+        }
         user.display_name = dn;
     }
     if let Some(tz) = req.timezone {
+        if tz.trim().is_empty() {
+            return Err(ApiError::InvalidInput(
+                "timezone must not be empty".to_string(),
+            ));
+        }
         user.timezone = tz;
     }
     if let Some(locale) = req.locale {
+        if locale.trim().is_empty() {
+            return Err(ApiError::InvalidInput(
+                "locale must not be empty".to_string(),
+            ));
+        }
         user.locale = locale;
     }
     if let Some(avatar) = req.avatar_url {
         user.avatar_url = Some(avatar);
     }
     if let Some(prefs_json) = req.preferences {
-        if let Ok(prefs) = serde_json::from_value(prefs_json) {
-            user.preferences = prefs;
-        }
+        // Partial-update semantics: omitted preference fields keep their
+        // current value (matching the Option-based top-level fields). An
+        // invalid value for a present field still fails the whole request.
+        let patch: gyre_domain::UserPreferencesPatch = serde_json::from_value(prefs_json)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid preferences: {e}")))?;
+        user.preferences.apply_patch(patch);
     }
-    user.updated_at = now;
+    user.updated_at = now_secs();
     state.users.update(&user).await?;
     Ok(Json(UserProfileResponse::from(user)))
 }
@@ -954,11 +985,11 @@ pub async fn create_user(
     }
 
     let username = req.username.trim().to_string();
-    if username.is_empty() || username.len() > 64 {
-        return Err(ApiError::InvalidInput(
-            "username must be 1-64 characters".to_string(),
-        ));
-    }
+    // URL-safe handle contract (user-management.md §Username vs Display
+    // Name): lowercase letters, digits, '-', '_'; no edges/consecutive
+    // separators; 1-64 chars. Rejects rather than silently rewriting the
+    // admin's chosen handle.
+    User::validate_username(&username).map_err(ApiError::InvalidInput)?;
 
     // Parse roles; default to Admin (this is the bootstrap admin-user path).
     let mut roles: Vec<UserRole> = Vec::new();
@@ -980,8 +1011,17 @@ pub async fn create_user(
     // the same username is detectable via find_by_external_id.
     let external_id = format!("local:{username}");
     if let Some(existing) = state.users.find_by_external_id(&external_id).await? {
-        return Err(ApiError::InvalidInput(format!(
+        return Err(ApiError::Conflict(format!(
             "user with external id {external_id} already exists (id {})",
+            existing.id
+        )));
+    }
+    // Username is unique (spec §Username vs Display Name). The adapter also
+    // enforces this, but checking here yields a precise 409 instead of a
+    // raw storage error surfacing as 500.
+    if let Some(existing) = state.users.find_by_username(&username).await? {
+        return Err(ApiError::Conflict(format!(
+            "username {username} already taken (user {})",
             existing.id
         )));
     }
@@ -1437,8 +1477,8 @@ mod tests {
             } else {
                 assert_eq!(
                     resp.status(),
-                    StatusCode::BAD_REQUEST,
-                    "duplicate external_id must be rejected"
+                    StatusCode::CONFLICT,
+                    "duplicate external_id must be rejected with 409 Conflict"
                 );
             }
         }
@@ -1461,10 +1501,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    // ── Session Management (user-management.md §Session Management) ──────
-
-    /// Provision a user with an authenticating API key; returns (state, raw key).
-    async fn provision_user_with_key() -> (std::sync::Arc<crate::AppState>, String) {
+    /// Helper: bootstrap a user via POST /api/v1/users (Admin-only) and
+    /// return (state, user_id, raw_api_key). The API key authenticates as
+    /// the new user, exercising the same auth extractor path production
+    /// clients use.
+    async fn bootstrap_user(username: &str) -> (std::sync::Arc<crate::AppState>, String, String) {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let resp = app
@@ -1474,14 +1515,27 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"session-user"}"#))
+                    .body(Body::from(format!(r#"{{"username":"{username}"}}"#)))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        let raw_key = json["api_key"]["key"].as_str().unwrap().to_string();
+        (
+            state,
+            json["user"]["id"].as_str().unwrap().to_string(),
+            json["api_key"]["key"].as_str().unwrap().to_string(),
+        )
+    }
+
+    // ── Session Management (user-management.md §Session Management) ──────
+
+    /// Provision a user with an authenticating API key; returns (state, raw key).
+    /// Thin wrapper over [`bootstrap_user`]: the session tests below do not
+    /// need the user id, only a state + a key that authenticates.
+    async fn provision_user_with_key() -> (std::sync::Arc<crate::AppState>, String) {
+        let (state, _user_id, raw_key) = bootstrap_user("session-user").await;
         (state, raw_key)
     }
 
@@ -1747,6 +1801,71 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "revoke-all must sign the credential out everywhere"
+        );
+    }
+
+    /// "Sign out everywhere" must cover devices never seen before the
+    /// revoke-all: the same credential presented from a NEW device (fresh
+    /// User-Agent, no session row of its own) is rejected by the
+    /// credential-wide `credential_revoked` check in the auth extractor —
+    /// the per-device session check cannot catch it because this device
+    /// has no revoked row. This is the stolen-credential scenario: without
+    /// the extractor-level check, a fresh device would mint a new session
+    /// and receive 200.
+    #[tokio::test]
+    async fn revoke_all_blocks_credential_from_never_seen_device() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // One known device authenticates, creating its session row.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Sign out everywhere from that device.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/me/sessions/revoke-all")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // A device that never authenticated before the revoke-all presents
+        // the same key. It has no session row (revoked or otherwise), so
+        // only the credential-wide check can reject it.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "attacker-client/9.9")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoke-all must reject the credential itself, including from devices never seen before"
         );
     }
 
@@ -2125,6 +2244,195 @@ mod tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "unknown user id must 404, not return an empty session list"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_me_returns_stored_profile_with_preferences() {
+        // user-management.md §User Preferences: preferences are stored
+        // server-side and returned via GET /api/v1/users/me.
+        let (state, user_id, key) = bootstrap_user("prof-me").await;
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], user_id);
+        assert_eq!(json["username"], "prof-me");
+        assert_eq!(json["preferences"]["theme"], "System");
+        assert_eq!(json["preferences"]["ui_density"], "Comfortable");
+        assert_eq!(json["preferences"]["code_font_size"], 14);
+        assert_eq!(json["preferences"]["diff_view"], "SideBySide");
+        assert_eq!(json["preferences"]["activity_feed_scope"], "MyActivity");
+    }
+
+    #[tokio::test]
+    async fn put_me_updates_display_name_and_preferences() {
+        // user-management.md: PUT /api/v1/users/me accepts display_name,
+        // timezone, locale, and preferences updates — persisted server-side
+        // (visible on a subsequent GET through a fresh auth round-trip).
+        let (state, _user_id, key) = bootstrap_user("put-me").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"Jordan Sell","timezone":"America/New_York","locale":"en-US","preferences":{"theme":"Dark","ui_density":"Compact","code_font_size":16,"diff_view":"Unified","activity_feed_scope":"All"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["display_name"], "Jordan Sell");
+        assert_eq!(json["timezone"], "America/New_York");
+        assert_eq!(json["locale"], "en-US");
+        assert_eq!(json["preferences"]["theme"], "Dark");
+        assert_eq!(json["preferences"]["ui_density"], "Compact");
+
+        // Persistence: re-read through a new request (fresh auth lookups).
+        let app2 = crate::api::api_router().with_state(state);
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["display_name"], "Jordan Sell");
+        assert_eq!(json2["timezone"], "America/New_York");
+        assert_eq!(json2["preferences"]["theme"], "Dark");
+        assert_eq!(json2["preferences"]["code_font_size"], 16);
+        assert_eq!(json2["username"], "put-me", "username immutable via PUT");
+
+        // Partial preferences payload: omitted fields keep their current
+        // value (merge, not replace-with-defaults). The PUT above omitted
+        // notification_channels and default_workspace_id entirely.
+        assert_eq!(
+            json2["preferences"]["notification_channels"],
+            serde_json::json!({"in_app": true, "email_enabled": false, "email_digest": "Off"}),
+            "omitted notification_channels must keep the stored value, not reset to default"
+        );
+        assert_eq!(
+            json2["preferences"]["default_workspace_id"],
+            serde_json::Value::Null,
+            "omitted default_workspace_id must keep the stored value"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_me_rejects_malformed_preferences() {
+        // An invalid preferences payload must fail the request (400), not
+        // be silently dropped while the rest of the update applies.
+        let (state, _user_id, key) = bootstrap_user("put-me-bad").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"Should Not Apply","preferences":{"theme":"Neon","code_font_size":16}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid theme must be rejected"
+        );
+
+        // And nothing was applied — display_name unchanged.
+        let app2 = crate::api::api_router().with_state(state);
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json2 = body_json(resp2).await;
+        assert_eq!(
+            json2["display_name"], "put-me-bad",
+            "rejected update must not partially apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_non_url_safe_username() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"Bad Handle!"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_duplicate_username() {
+        // Same username, different external_id namespace collision is
+        // impossible via this path (external_id is local:{username}), so
+        // seed the conflict directly: create u1, then attempt the same
+        // handle through a user whose external_id differs.
+        let state = test_state();
+        let seed = gyre_domain::User::new_sso(
+            gyre_common::Id::new("seed-user-1"),
+            "ext-seed",
+            "taken",
+            "Taken Handle",
+            1000,
+        );
+        state.users.create(&seed).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"taken"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "duplicate username must be a 409 conflict"
         );
     }
 }
