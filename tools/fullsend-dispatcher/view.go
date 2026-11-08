@@ -195,39 +195,44 @@ type historyDone struct {
 	err   error
 }
 type Model struct {
-	sortDescending                      bool
-	filter, historyFilter, filterBefore string
-	filtering, helpOpen                 bool
-	helpScroll, sortMode                int
-	gPending                            time.Time
-	confirmScroll                       int
-	signIn                              *signInSession
-	signInActive                        bool
-	signInCancel                        context.CancelFunc
-	signInText, signInInput             string
-	signInScroll                        int
-	signInPending                       string
-	signInPrompt                        *gatewayPrompt
-	signInChoice                        int
-	signInResult                        string
-	signInDiagnostics                   bool
-	pendingCancel                       *Row
-	cancelChoice                        int
-	pendingRetry                        *Row
-	issueGrouping                       bool
-	showCompleted                       bool
-	historyIssue                        *Row
-	historyRows                         []Row
-	historyLoading                      bool
-	engine                              *Engine
-	ctx                                 context.Context
-	cancel                              context.CancelFunc
-	state                               Snapshot
-	width, height, index, scroll        int
-	selected, screen, notice, logText   string
-	noticeUntil                         time.Time
-	plainColor                          bool
-	exit                                int
+	configReturn                             string
+	configIndex, configChoice, configCursor  int
+	configEditing, configSaving              bool
+	configInput, configError, configExpected string
+	sortDescending                           bool
+	filter, historyFilter, filterBefore      string
+	filtering, helpOpen                      bool
+	helpScroll, sortMode                     int
+	gPending                                 time.Time
+	confirmScroll                            int
+	signIn                                   *signInSession
+	signInActive                             bool
+	signInCancel                             context.CancelFunc
+	signInText, signInInput                  string
+	signInScroll                             int
+	signInPending                            string
+	signInPrompt                             *gatewayPrompt
+	signInChoice                             int
+	signInResult                             string
+	signInDiagnostics                        bool
+	pendingCancel                            *Row
+	cancelChoice                             int
+	pendingRetry                             *Row
+	issueGrouping                            bool
+	showCompleted                            bool
+	historyIssue                             *Row
+	historyRows                              []Row
+	historyLoading                           bool
+	engine                                   *Engine
+	ctx                                      context.Context
+	cancel                                   context.CancelFunc
+	state                                    Snapshot
+	width, height, index, scroll             int
+	selected, screen, notice, logText        string
+	logs                                     logViewState
+	noticeUntil                              time.Time
+	plainColor                               bool
+	exit                                     int
 }
 
 func (m Model) Init() tea.Cmd { return tick() }
@@ -355,12 +360,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := m.visibleRows()
 		m.restoreSelection(m.selected, previous)
 		if m.screen == "logs" && len(rows) > 0 {
-			value, err := tail(rows[m.index].Log, 65536)
-			if err != nil {
-				m.logText = "Log is not available yet: " + err.Error()
-			} else {
-				m.logText = value
-			}
+			m.refreshLog(rows[m.index].Log)
 		}
 		if m.state.Done {
 			m.exit = m.state.Exit
@@ -422,6 +422,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice("Cancel requested. Waiting for Fullsend to stop and finish cleanup.")
 		}
+	case settingsDone:
+		m.configSaving = false
+		if v.err != nil {
+			m.configError = v.err.Error()
+		} else {
+			m.configEditing = false
+			m.configError = ""
+			m.setNotice(v.message)
+		}
 	case retryDone:
 		if v.err != nil {
 			m.setNotice(v.err.Error())
@@ -429,6 +438,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setNotice("Retry requested for " + v.key + ". Starts when eligible and a worker slot is free.")
 		}
 	case tea.KeyMsg:
+		if m.screen == "configuration" && !m.helpOpen {
+			return m.updateConfiguration(v)
+		}
 		if m.pendingCancel != nil {
 			switch v.String() {
 			case "esc", "h":
@@ -569,14 +581,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.exit = 130
 			return m, tea.Quit
-		case "tab", "c":
+		case ",":
+			m.configReturn = m.screen
+			m.screen = "configuration"
+		case "tab", "shift+tab", "c":
 			if m.screen == "" && m.historyIssue == nil {
 				var prior *Row
 				if len(rows) > 0 {
 					r := rows[m.index]
 					prior = &r
 				}
-				if v.String() == "tab" {
+				if (v.String() == "tab" && m.issueGrouping) || (v.String() == "shift+tab" && !m.issueGrouping) {
+					m.configReturn = m.screen
+					m.screen = "configuration"
+				} else if v.String() == "tab" || v.String() == "shift+tab" {
 					m.issueGrouping = !m.issueGrouping
 				} else {
 					m.showCompleted = !m.showCompleted
@@ -600,14 +618,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 		case "enter", "l":
 			if len(rows) > 0 {
-				m.screen = "logs"
-				m.scroll = 0
-				value, err := tail(rows[m.index].Log, 65536)
-				if err != nil {
-					m.logText = err.Error()
-				} else {
-					m.logText = value
-				}
+				m.openLog(rows[m.index].Log)
 			}
 		case "H":
 			if len(rows) > 0 || m.historyIssue != nil {
@@ -744,7 +755,7 @@ func (m Model) workHeader(row Row, width int, section string) []string {
 
 func (m Model) wrapped(text string, width int, color string) []string {
 	// Sanitize external text before styling; never strip ANSI from styled lines.
-	wrapped := ansi.Hardwrap(clean(text), width, true)
+	wrapped := ansi.Wrap(clean(text), width, "")
 	lines := strings.Split(wrapped, "\n")
 	for i := range lines {
 		lines[i] = m.style(lines[i], color, false)
@@ -905,9 +916,6 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 	}
 	return header, body
 }
-func (m Model) logPageSize() int {
-	return max(1, m.height-2-11-3)
-}
 func (m *Model) clampScroll() {
 	if m.screen == "signin" {
 		text := strings.Join(m.signInBody(max(10, m.width-6)), "\n")
@@ -919,7 +927,7 @@ func (m *Model) clampScroll() {
 		m.confirmScroll = min(m.confirmScroll, max(0, total-max(1, m.height-11)))
 	}
 	if m.screen == "logs" {
-		m.scroll = min(m.scroll, max(0, len(strings.Split(m.logText, "\n"))-m.logPageSize()))
+		m.clampLogScroll()
 	}
 	if m.screen == "details" {
 		header, body := m.detailContent(m.visibleRows(), max(12, m.width-4))
@@ -1009,6 +1017,9 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollIndicator(start, min(len(content), start+count), len(content)), "", m.style("j/k scroll   h / esc / ? close   q detach", "8", false))
 		return m.frame(lines, w, h)
 	}
+	if m.screen == "configuration" {
+		return m.configurationView(lines, w, h)
+	}
 	if m.screen == "signin" {
 		lines = append(lines, m.style("Gateway  /  Sign in", "7", true), "")
 
@@ -1076,16 +1087,7 @@ func (m Model) View() string {
 
 	rows := m.visibleRows()
 	if m.screen == "logs" && len(rows) > 0 {
-		row := rows[m.index]
-		lines = append(lines, m.workHeader(row, w, "Logs")...)
-		lines = append(lines, m.style(middle(row.Log, w), "8", false), "")
-		content := strings.Split(m.logText, "\n")
-		count := max(1, h-len(lines)-3)
-		end := max(min(len(content), count), len(content)-m.scroll)
-		start := max(0, end-count)
-		lines = append(lines, m.scrollPane(content, start, count, w)...)
-		lines = append(lines, m.scrollIndicator(start, end, len(content)))
-		lines = append(lines, "", m.style("j/k scroll   d details   r retry  C cancel   C cancel   h back   ? help   q detach", "8", false))
+		lines = m.logsView(lines, rows[m.index], w, h)
 	} else if m.screen == "details" {
 		header, body := m.detailContent(rows, w)
 		lines = append(lines, header...)
@@ -1093,7 +1095,7 @@ func (m Model) View() string {
 		start := min(m.scroll, max(0, len(body)-count))
 		lines = append(lines, m.scrollPane(body, start, count, w)...)
 		lines = append(lines, m.scrollIndicator(start, min(len(body), start+count), len(body)))
-		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   C cancel   h back   ? help   q detach", "8", false))
+		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   h back   ? help   q detach", "8", false))
 	} else {
 		if m.state.Monitoring {
 			lines = append(lines, "Existing workers are finishing. Scheduling resumes automatically.", "")

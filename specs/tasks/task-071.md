@@ -4,12 +4,12 @@ spec_ref: "explorer-implementation.md §18–19, §26"
 depends_on:
   - task-069
   - task-070
-progress: not-started
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §18 ExplorerChat (Svelte)"
   - "explorer-implementation.md §19 ExplorerView (Svelte)"
   - "explorer-implementation.md §26 Phase 2: Chat + Agent"
-commits: []
+commits: ["318e8120f7720b70d7ca49e5c16e7eb1b33dad5d", "1364412d59fbc3c8cfd63c43cafe94de972afeb9"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,63 @@ The components already exist and are substantial. This is an audit + gap-fill ta
 2. Does the chat handle all 4 server message types (text, view_query, views, status)?
 3. Are saved views managed via WebSocket messages or REST calls? The spec says WebSocket.
 4. Is there reconnection logic for WebSocket drops?
+
+## Shipped
+
+Audit + gap-fill against spec §18–19, §26 (frontend half — the server
+handler, MCP tools, SDK wiring, and self-check loop shipped under
+task-068/069/070, all `complete`). This round restored the retained
+source checkpoint (merge fdadc0874 carries `318e8120` onto the assigned
+branch), re-audited every §18/§19 responsibility against the merged
+code, and re-ran the focused suites green.
+
+### Behavior (audited in production code)
+
+- **Connection**: `connect()` opens `WS /api/v1/repos/:repo_id/explorer`,
+  exchanging the Bearer token for a single-use ticket via
+  `POST /api/v1/ws-ticket` (browsers cannot set Authorization headers on
+  WS upgrades; the server prefers the ticket flow and supports the
+  Bearer header for non-browser clients — shipped under task-069).
+- **User messages** carry the §10 wire `canvas_state` via
+  `toWireCanvasState()` (selected_node, zoom_level, visible_tree_groups,
+  active_filter, active_lens, active_query, recent_interactions);
+  camelCase-internal fields do not leak onto the wire.
+- **Streaming**: `text` chunks with `done:false` accumulate into a live
+  streaming bubble rendered through `renderMarkdown` (markdown before
+  finalization); `done:true` finalizes the message. A 65s no-chunk
+  timeout finalizes orphaned streams, and disconnect finalizes in-flight
+  text.
+- **View query forwarding**: `view_query` messages are validated with
+  `validateViewQuery` (invalid queries surface an error bubble and are
+  NOT applied), then forwarded via `onViewQuery(query)`; prior queries
+  stay re-appliable via per-message "Apply view" buttons.
+- **Saved views over WebSocket** (not REST): `list_views` on socket
+  open, `views` → `onSavedViewsUpdate`, dropdown with per-view load
+  (`load_view`), "Save this view" dialog sending `save_view` with the
+  last conversation query, plus delete for non-system views.
+- **Status indicators**: header status dot + label for
+  Connecting/Thinking.../Refining query.../Ready/Error/Disconnected,
+  thinking-indicator with Cancel while waiting.
+- **Reconnection**: exponential backoff (base 1s, cap 5 attempts) with
+  manual reconnect; the retained fix re-arms the backoff timer when a
+  socket drops inside the `CONNECT_DEBOUNCE_MS` window so a fast
+  disconnect cannot permanently kill auto-reconnect.
+- **ExplorerView wiring**: `bind:canvasState={explorerCanvasState}` on
+  ExplorerCanvas feeds `canvasState` into ExplorerChat;
+  `onViewQuery` sets `activeViewQuery` (rendered into the canvas as
+  `activeQuery`); an `$effect` mirrors `activeViewQuery` into
+  `canvasState.active_query` so the LLM sees the applied view.
+
+### Test evidence
+
+- `ExplorerChat-component.test.js` (19 mounted-component tests, real
+  render with mocked WebSocket + ticket-auth fetch) covers every
+  acceptance criterion above, including the fast-drop reconnect case
+  (verified to fail against the unfixed component) and the
+  MAX_RECONNECTS cap.
+- `ExplorerChat.test.js` (110 protocol tests) passes unchanged.
+- Focused run: `npx vitest run ExplorerChat-component ExplorerChat` —
+  2 files, 129 tests passed.
+- Full AC run at branch HEAD fdadc0874: `cd web && npm test` —
+  **68 files, 1687 passed, 41 skipped** — green (evidence:
+  /tmp/stage/review-evidence/task-071-web-tests.txt).
