@@ -363,6 +363,27 @@ pub enum NotificationPriority {
     Urgent,    // Needs attention now (security finding, agent escalation, MR reverted)
 }
 
+> **Priority band membership (amended 2026-11, task-112 review):** The band
+> comments above classify notification types by example. The full
+> type→band mapping (implemented as `NotificationPriority::for_notification_type`
+> in `gyre-domain/src/user.rs`) is:
+>
+> | Band | Notification types |
+> |---|---|
+> | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure |
+> | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
+> | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
+>
+> The HSI §8 1–10 numeric priority is an Inbox-ordering concern and is
+> deliberately **not** threshold-mapped onto these bands: SecurityFinding and
+> GateFailure share numeric priority 3 yet sit in different bands, AgentEscalation
+> is numeric 5 yet Urgent, and BudgetWarning is numeric 7 yet High — no numeric
+> threshold can reproduce the specced membership. Channel `min_priority`
+> filtering and the §Notification Routing for Agent Escalations Urgent check
+> therefore derive the band from the notification type, never from the numeric
+> priority.
+
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"
     pub entity_id: String,

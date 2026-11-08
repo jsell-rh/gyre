@@ -1370,6 +1370,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
     async fn get_channel_preferences_returns_defaults() {
         let resp = app()
             .oneshot(

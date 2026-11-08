@@ -1586,8 +1586,8 @@ pub async fn fail_agent(
     // Notify per user-management.md §Notification Routing for Agent
     // Escalations: spawning user (primary), workspace Admins if the spawner
     // is offline, workspace Owners when the priority is Urgent.
-    // (AgentEscalation is HSI §8 priority 5 → High band; Admin fan-out when
-    // the spawner is offline is the operative branch here.)
+    // (AgentEscalation is an Urgent-band type per §Notification Entity, so
+    // Owners are always notified here.)
     // Tenant resolved from the agent's workspace — never fabricated.
     let tenant_id = match state.workspaces.find_by_id(&agent.workspace_id).await {
         Ok(Some(ws)) => ws.tenant_id.to_string(),

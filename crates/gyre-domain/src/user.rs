@@ -1,4 +1,4 @@
-use gyre_common::Id;
+use gyre_common::{Id, NotificationType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,15 +231,58 @@ impl NotificationPriority {
         }
     }
 
-    /// Maps a 1–10 HSI §8 notification priority onto the 4-band scale of
-    /// user-management.md §Notification Entity:
-    /// 1–3 Urgent, 4–6 High, 7–8 Medium, 9–10 Low.
-    pub fn from_band(p: u8) -> Self {
-        match p {
-            1..=3 => Self::Urgent,
-            4..=6 => Self::High,
-            7..=8 => Self::Medium,
-            _ => Self::Low,
+    /// Band for a notification type, per the type→band membership table of
+    /// user-management.md §Notification Entity (band comments + the task-112
+    /// review amendment recording the full table).
+    ///
+    /// The band is derived from the notification TYPE, never from the HSI §8
+    /// 1–10 numeric priority: that scale is an Inbox-ordering concern and no
+    /// numeric threshold can reproduce the specced membership (SecurityFinding
+    /// and GateFailure share numeric priority 3 yet sit in different bands;
+    /// AgentEscalation is numeric 5 yet Urgent; BudgetWarning is numeric 7 yet
+    /// High). Deriving the band from the number silently breaks the
+    /// §Notification Routing for Agent Escalations "Urgent → always notify
+    /// workspace Owners" step and per-channel min_priority semantics.
+    pub fn for_notification_type(t: &NotificationType) -> Self {
+        use NotificationType as T;
+        match t {
+            // Urgent - needs attention now (work blocked / immediate action):
+            // security finding, agent escalation, MR reverted (spec examples),
+            // agent stuck awaiting clarification (HSI §8 #1), merge queue
+            // blocked, budget exhausted (work stopped).
+            T::AgentEscalation
+            | T::SecurityFinding
+            | T::MrReverted
+            | T::AgentNeedsClarification
+            | T::MergeQueueEscalation
+            | T::BudgetExhausted => Self::Urgent,
+            // High - needs attention soon: gate failure, budget warning
+            // (spec examples), plus decisions/blocks that stall work soon:
+            // approvals, rejections, conflicts, paused queue, failed groups.
+            T::GateFailure
+            | T::BudgetWarning
+            | T::SpecPendingApproval
+            | T::SpecRejected
+            | T::ConstraintViolation
+            | T::SpecConflict
+            | T::PersonaApprovalRequested
+            | T::MergeQueuePaused
+            | T::CascadeTestFailed
+            | T::AtomicGroupFailure => Self::High,
+            // Medium - needs attention eventually: spec drift (spec example),
+            // stale-dependency-adjacent and review-arbitration items.
+            T::MetaSpecDrift
+            | T::CrossWorkspaceSpecChange
+            | T::ConflictingInterpretations
+            | T::DependencyChainTooDeep
+            | T::SpecAssertionFailure => Self::Medium,
+            // Low - informational (MR merged, gate passed - spec examples):
+            // completions, suggestions, notices.
+            T::AgentCompleted
+            | T::TrustSuggestion
+            | T::AbandonedBranch
+            | T::SuggestedSpecLink
+            | T::CascadeTestTriggered => Self::Low,
         }
     }
 }

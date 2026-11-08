@@ -108,7 +108,10 @@ pub async fn dispatch_with<S: HttpSender>(
     // In-app is always delivered (in_app can't be disabled) — the caller has
     // already persisted the notification, which IS in-app delivery.
 
-    let priority = NotificationPriority::from_band(notif.priority);
+    // Band derives from the notification type (user-management.md
+    // §Notification Entity membership), never from the HSI §8 numeric
+    // priority — see NotificationPriority::for_notification_type.
+    let priority = NotificationPriority::for_notification_type(&notif.notification_type);
 
     // Email channel.
     if channels.email.enabled
@@ -296,7 +299,7 @@ pub async fn notify_agent_escalation(
     agent: &gyre_domain::Agent,
     content: EscalationContent<'_>,
 ) {
-    let priority = NotificationPriority::from_band(content.notification_type.default_priority());
+    let priority = NotificationPriority::for_notification_type(&content.notification_type);
     let recipients = escalation_recipients(state, agent, priority).await;
     let now = crate::api::now_secs() as i64;
     for user_id in recipients {
@@ -615,21 +618,27 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
 
-    fn band(p: u8) -> NotificationPriority {
-        NotificationPriority::from_band(p)
+    fn band(t: NotificationType) -> NotificationPriority {
+        NotificationPriority::for_notification_type(&t)
     }
 
     #[test]
-    fn priority_bands_match_spec_examples() {
-        // Low: informational (MR merged=9, gate passed) — Urgent: security
-        // finding, agent escalation, MR reverted (priority 1-3 per HSI §8).
-        assert_eq!(band(9), NotificationPriority::Low);
-        assert_eq!(band(10), NotificationPriority::Low);
-        assert_eq!(band(7), NotificationPriority::Medium);
-        assert_eq!(band(6), NotificationPriority::High);
-        assert_eq!(band(4), NotificationPriority::High);
-        assert_eq!(band(3), NotificationPriority::Urgent);
-        assert_eq!(band(1), NotificationPriority::Urgent);
+    fn priority_bands_match_spec_membership() {
+        // user-management.md §Notification Entity band comments (authoritative
+        // examples) + the task-112 review amendment recording the full table.
+        // Urgent: security finding, agent escalation, MR reverted.
+        assert_eq!(band(NotificationType::SecurityFinding), NotificationPriority::Urgent);
+        assert_eq!(band(NotificationType::AgentEscalation), NotificationPriority::Urgent);
+        assert_eq!(band(NotificationType::MrReverted), NotificationPriority::Urgent);
+        // High: budget warning, gate failure.
+        assert_eq!(band(NotificationType::BudgetWarning), NotificationPriority::High);
+        assert_eq!(band(NotificationType::GateFailure), NotificationPriority::High);
+        // Medium: stale dependency, spec drift.
+        assert_eq!(band(NotificationType::MetaSpecDrift), NotificationPriority::Medium);
+        assert_eq!(band(NotificationType::DependencyChainTooDeep), NotificationPriority::Medium);
+        // Low: informational (MR merged, gate passed).
+        assert_eq!(band(NotificationType::AgentCompleted), NotificationPriority::Low);
+        assert_eq!(band(NotificationType::SuggestedSpecLink), NotificationPriority::Low);
     }
 
     /// One captured outbound HTTP delivery: (url, body, headers).
@@ -691,17 +700,18 @@ mod tests {
         state.workspaces.create(&ws).await.unwrap();
     }
 
-    fn sample_notif(user: &str, priority: u8) -> Notification {
-        Notification::new(
+    fn sample_notif(user: &str, notification_type: NotificationType) -> Notification {
+        let title = format!("{} event", notification_type.as_str());
+        let n = Notification::new(
             Id::new("notif-1"),
             Id::new("ws-1"),
             Id::new(user),
-            NotificationType::GateFailure,
-            "Gate failed",
+            notification_type,
+            title,
             "tenant-1",
             2_000_000,
-        )
-        .with_priority(priority)
+        );
+        n
     }
 
     #[tokio::test]
@@ -718,14 +728,16 @@ mod tests {
             }),
             slack: None,
         };
-        let notif = sample_notif("user-1", 3);
+        // GateFailure is a High-band type (spec: "needs attention soon");
+        // webhook threshold High → delivered (>= is inclusive).
+        let notif = sample_notif("user-1", NotificationType::GateFailure);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
         dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
 
         let calls = sender.calls.lock();
-        assert_eq!(calls.len(), 1, "urgent >= high threshold must deliver");
+        assert_eq!(calls.len(), 1, "high band >= high threshold must deliver");
         let (url, body, headers) = &calls[0];
         assert_eq!(url, "https://hooks.example.test/gyre");
         // HMAC-SHA256 over the exact body bytes with the configured secret.
@@ -741,13 +753,13 @@ mod tests {
         // Body carries the notification fields the receiver needs.
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(parsed["notification_type"], "GateFailure");
-        assert_eq!(parsed["title"], "Gate failed");
+        assert_eq!(parsed["title"], "GateFailure event");
     }
 
     #[tokio::test]
     async fn webhook_below_threshold_is_not_sent() {
         let state = test_state();
-        // Priority 9 = Low band; webhook threshold High → suppressed.
+        // AgentCompleted is a Low-band type; webhook threshold High → suppressed.
         let channels = NotificationChannels {
             in_app: true,
             email: EmailConfig::default(),
@@ -758,7 +770,7 @@ mod tests {
             }),
             slack: None,
         };
-        let notif = sample_notif("user-1", 9);
+        let notif = sample_notif("user-1", NotificationType::AgentCompleted);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -782,7 +794,7 @@ mod tests {
                 min_priority: NotificationPriority::Low,
             }),
         };
-        let notif = sample_notif("user-1", 9);
+        let notif = sample_notif("user-1", NotificationType::AgentCompleted);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -793,14 +805,17 @@ mod tests {
         assert_eq!(url, "https://hooks.slack.test/T/B/X");
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(parsed["channel"], "#ops");
-        assert!(parsed["text"].as_str().unwrap().contains("Gate failed"));
+        assert!(parsed["text"]
+            .as_str()
+            .unwrap()
+            .contains("AgentCompleted event"));
     }
 
     #[tokio::test]
     async fn email_queue_is_durable_and_threshold_filtered() {
         let state = test_state();
-        // Enabled email, digest Immediate, threshold Medium; notification
-        // priority 3 (Urgent band) → queued in the kv outbox.
+        // Enabled email, digest Immediate, threshold Medium; GateFailure
+        // (High band) → queued in the kv outbox.
         let channels = NotificationChannels {
             in_app: true,
             email: EmailConfig {
@@ -811,22 +826,22 @@ mod tests {
             webhook: None,
             slack: None,
         };
-        let notif = sample_notif("user-1", 3);
+        let notif = sample_notif("user-1", NotificationType::GateFailure);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
         dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
 
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
-        assert_eq!(outbox.len(), 1, "urgent notification must be queued");
+        assert_eq!(outbox.len(), 1, "high-band notification must be queued");
         let (key, value) = &outbox[0];
         assert!(key.starts_with("user-1:"));
         let parsed: serde_json::Value = serde_json::from_str(value).unwrap();
-        assert_eq!(parsed["subject"], "[Gyre] Gate failed");
+        assert_eq!(parsed["subject"], "[Gyre] GateFailure event");
         assert_eq!(parsed["user_id"], "user-1");
 
-        // Low priority (9) below Medium threshold → no queue entry.
-        let notif_low = sample_notif("user-1", 9);
+        // Low band (AgentCompleted) below Medium threshold → no queue entry.
+        let notif_low = sample_notif("user-1", NotificationType::AgentCompleted);
         dispatch_with(&state, &notif_low, &channels, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(outbox.len(), 1, "below-threshold email must not queue");
@@ -840,7 +855,7 @@ mod tests {
             },
             ..channels
         };
-        let notif2 = sample_notif("user-2", 1);
+        let notif2 = sample_notif("user-2", NotificationType::SecurityFinding);
         dispatch_with(&state, &notif2, &channels_off, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(
@@ -932,6 +947,74 @@ mod tests {
             recipients,
             vec![Id::new("spawner-1"), Id::new("owner-1")],
             "Urgent always notifies workspace Owners even when spawner is online"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_escalation_notifies_owners_even_when_spawner_online() {
+        // Regression (task-112 review): AgentEscalation is an Urgent-band
+        // type per user-management.md §Notification Entity, so §Notification
+        // Routing step 3 must fan out to workspace Owners even when the
+        // spawning user is online. The old numeric from_band(5) mapping
+        // classified it High, leaving the Owner branch unreachable in the
+        // only production escalation path (fail_agent → notify_agent_escalation).
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+
+        // Spawner online: presence entry keyed by user id string.
+        state.presence.write().await.insert(
+            ("spawner-1".to_string(), "sess-1".to_string()),
+            crate::PresenceEntry {
+                workspace_id: "ws-1".to_string(),
+                view: "inbox".to_string(),
+                editing_entity: None,
+                timestamp: 1,
+                server_last_seen: u64::MAX, // never idle-evicted
+                connection_id: 1,
+            },
+        );
+
+        let agent = agent_spawned_by(&ws, Some("spawner-1"));
+        notify_agent_escalation(
+            &state,
+            &agent,
+            EscalationContent {
+                notification_type: NotificationType::AgentEscalation,
+                title: "Agent 'worker-1' failed and needs attention",
+                tenant_id: "tenant-1",
+                body: None,
+                entity_ref: Some("agent-1".to_string()),
+                repo_id: None,
+            },
+        )
+        .await;
+
+        let owner_notifs = state
+            .notifications
+            .list_for_user(&Id::new("owner-1"), None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        let spawner_notifs = state
+            .notifications
+            .list_for_user(&Id::new("spawner-1"), None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        let admin_notifs = state
+            .notifications
+            .list_for_user(&Id::new("admin-1"), None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_notifs.len(),
+            1,
+            "Urgent agent escalation must notify workspace Owners even when the spawner is online"
+        );
+        assert_eq!(spawner_notifs.len(), 1, "spawner remains the primary recipient");
+        assert!(
+            admin_notifs.is_empty(),
+            "online spawner: no Admin fan-out"
         );
     }
 
