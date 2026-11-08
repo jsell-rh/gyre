@@ -3,7 +3,7 @@ title: "HSI Explorer Default Views (Boundary, Spec Realization, Change, System T
 spec_ref: "human-system-interface.md §3 Default Views"
 depends_on:
   - task-065
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §3 Default Views (Automatic, No LLM)"
 commits: ["8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15"]
