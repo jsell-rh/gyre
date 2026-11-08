@@ -20,7 +20,7 @@ async fn test_state() -> std::sync::Arc<gyre_server::AppState> {
 #[tokio::test]
 async fn scoped_review_token_reviewer_identity_is_bound() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     // Seed an MR.
@@ -234,7 +234,7 @@ async fn revoked_scoped_token_is_rejected() {
 #[tokio::test]
 async fn validation_scoped_token_cannot_submit_review() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     // Seed an MR.
@@ -299,7 +299,7 @@ async fn validation_scoped_token_cannot_submit_review() {
 #[tokio::test]
 async fn validation_scoped_token_can_read_mr_context() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let mr_id = gyre_common::Id::new("mr-probe-validation-read");
@@ -358,7 +358,7 @@ async fn validation_scoped_token_can_read_mr_context() {
 #[tokio::test]
 async fn lookalike_scope_does_not_inherit_review_capability() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let mr_id = gyre_common::Id::new("mr-probe-lookalike");

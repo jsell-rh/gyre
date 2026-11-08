@@ -3,7 +3,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -12,14 +11,15 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
-    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
-    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
+    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -179,8 +179,10 @@ impl GitOpsPort for NoopGitOps {
         _repo_path: &str,
         _branch: &str,
         _sha_to_revert: &str,
-    ) -> Result<String> {
-        Ok("0000000000000000000000000000000000000000".to_string())
+    ) -> Result<gyre_domain::RevertResult> {
+        Ok(gyre_domain::RevertResult::Success {
+            revert_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        })
     }
 }
 
@@ -191,6 +193,27 @@ impl GitOpsPort for NoopGitOps {
 #[cfg(test)]
 pub struct ConfigurableGitOps {
     pub conflict_branches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// SHAs passed to `revert_commit`, in call order (task-095 R3-F1:
+    /// tests must be able to observe WHICH commit was reverted).
+    pub revert_calls: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// When true, `revert_commit` fails — the double must be able to fail,
+    /// so error paths of the revert flow are testable (task-095 F8 lesson).
+    pub revert_fails: bool,
+    /// When true, `revert_commit` returns a Conflict — the R4-F1
+    /// conflict path must be testable without a real git repo.
+    pub revert_conflicts: bool,
+}
+
+#[cfg(test)]
+impl Default for ConfigurableGitOps {
+    fn default() -> Self {
+        Self {
+            conflict_branches: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            revert_fails: false,
+            revert_conflicts: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +223,7 @@ impl ConfigurableGitOps {
             branches.into_iter().map(|s| s.to_string()).collect();
         Self {
             conflict_branches: Arc::new(std::sync::Mutex::new(set)),
+            ..Default::default()
         }
     }
 }
@@ -344,9 +368,24 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
-        _sha_to_revert: &str,
-    ) -> Result<String> {
-        Ok("0000000000000000000000000000000000000000".to_string())
+        sha_to_revert: &str,
+    ) -> Result<gyre_domain::RevertResult> {
+        if self.revert_fails {
+            return Err(anyhow::anyhow!(
+                "revert_commit failed (ConfigurableGitOps revert_fails)"
+            ));
+        }
+        self.revert_calls.lock().push(sha_to_revert.to_string());
+        if self.revert_conflicts {
+            return Ok(gyre_domain::RevertResult::Conflict {
+                message: format!(
+                    "revert of {sha_to_revert} conflicts with later changes (test double)"
+                ),
+            });
+        }
+        Ok(gyre_domain::RevertResult::Success {
+            revert_commit_sha: format!("revert-of-{sha_to_revert}"),
+        })
     }
 }
 
@@ -972,10 +1011,18 @@ pub struct MemUserRepository {
 #[async_trait]
 impl UserRepository for MemUserRepository {
     async fn create(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        // Port contract: fail if id, external_id, or username already exists.
+        let mut store = self.store.lock().await;
+        if store.values().any(|u| {
+            u.id == user.id || u.external_id == user.external_id || u.username == user.username
+        }) {
+            anyhow::bail!(
+                "user already exists for username {}, external_id {}",
+                user.username,
+                user.external_id
+            );
+        }
+        store.insert(user.id.to_string(), user.clone());
         Ok(())
     }
 
@@ -993,15 +1040,42 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_username(&self, username: &str) -> Result<Option<User>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|u| u.username == username)
+            .cloned())
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
 
     async fn update(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: username and external_id are immutable after creation.
+        if let Some(existing) = store.get(user.id.as_str()) {
+            if existing.username != user.username {
+                anyhow::bail!(
+                    "username is immutable: cannot change {} to {}",
+                    existing.username,
+                    user.username
+                );
+            }
+            if existing.external_id != user.external_id {
+                anyhow::bail!(
+                    "external_id is immutable: cannot change {} to {}",
+                    existing.external_id,
+                    user.external_id
+                );
+            }
+        } else {
+            anyhow::bail!("cannot update user {}: not found", user.id);
+        }
+        store.insert(user.id.to_string(), user.clone());
         Ok(())
     }
 
@@ -1178,49 +1252,78 @@ impl CostRepository for MemCostRepository {
     }
 }
 
+/// One stored audit event. Once the log-compression job compresses an
+/// event's detail (observability.md §Log Retention & Compression), the
+/// raw JSON lives only in `detail_zstd` and `event.detail` is `Null` —
+/// mirroring the SQLite/Postgres adapters, where compression blanks the
+/// `detail` column and stores the zstd payload in `detail_zstd`.
+struct MemAuditEntry {
+    event: AuditEvent,
+    detail_zstd: Option<Vec<u8>>,
+}
+
+impl MemAuditEntry {
+    /// Materialize the domain event, decompressing the detail payload
+    /// when compressed. A corrupt compressed payload is a hard error —
+    /// same contract as the DB adapters.
+    fn materialize(&self) -> Result<AuditEvent> {
+        let mut event = self.event.clone();
+        if let Some(z) = &self.detail_zstd {
+            let raw = zstd::decode_all(z.as_slice())
+                .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
+            event.detail = serde_json::from_slice(&raw)
+                .map_err(|e| anyhow::anyhow!("parse compressed audit detail: {e}"))?;
+        }
+        Ok(event)
+    }
+}
+
 #[derive(Default)]
 pub struct MemAuditRepository {
-    store: Arc<Mutex<Vec<AuditEvent>>>,
+    store: Arc<Mutex<Vec<MemAuditEntry>>>,
 }
 
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
-        self.store.lock().await.push(event.clone());
+        self.store.lock().await.push(MemAuditEntry {
+            event: event.clone(),
+            detail_zstd: None,
+        });
         Ok(())
     }
 
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
-        let mut events: Vec<AuditEvent> = store
-            .iter()
-            .filter(|e| {
-                filter
-                    .agent_id
-                    .as_ref()
-                    .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
-                    && filter
+        let mut events: Vec<AuditEvent> =
+            store
+                .iter()
+                .filter(|e| {
+                    filter.agent_id.as_ref().is_none_or(|a| {
+                        e.event.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
+                    }) && filter
                         .event_type
                         .as_ref()
-                        .is_none_or(|t| e.event_type.as_str() == *t)
-                    && filter
-                        .workspace_id
-                        .as_ref()
-                        .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
-                    && filter
-                        .user_id
-                        .as_ref()
-                        .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
-                    && filter
-                        .resource_type
-                        .as_ref()
-                        .is_none_or(|rt| e.resource_type == *rt)
-                    && filter.outcome.is_none_or(|o| e.outcome == o)
-                    && filter.since.is_none_or(|s| e.timestamp >= s)
-                    && filter.until.is_none_or(|u| e.timestamp <= u)
-            })
-            .cloned()
-            .collect();
+                        .is_none_or(|t| e.event.event_type.as_str() == *t)
+                        && filter.workspace_id.as_ref().is_none_or(|w| {
+                            e.event
+                                .workspace_id
+                                .as_ref()
+                                .is_some_and(|id| id.as_str() == w)
+                        })
+                        && filter.user_id.as_ref().is_none_or(|u| {
+                            e.event.user_id.as_ref().is_some_and(|id| id.as_str() == u)
+                        })
+                        && filter
+                            .resource_type
+                            .as_ref()
+                            .is_none_or(|rt| e.event.resource_type == *rt)
+                        && filter.outcome.is_none_or(|o| e.event.outcome == o)
+                        && filter.since.is_none_or(|s| e.event.timestamp >= s)
+                        && filter.until.is_none_or(|u| e.event.timestamp <= u)
+                })
+                .map(MemAuditEntry::materialize)
+                .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(filter.limit);
         Ok(events)
@@ -1235,7 +1338,7 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut counts: HashMap<String, u64> = HashMap::new();
         for e in store.iter() {
-            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+            *counts.entry(e.event.event_type.as_str()).or_insert(0) += 1;
         }
         let mut result: Vec<(String, u64)> = counts.into_iter().collect();
         result.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1246,9 +1349,9 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut events: Vec<AuditEvent> = store
             .iter()
-            .filter(|e| e.timestamp > since)
-            .cloned()
-            .collect();
+            .filter(|e| e.event.timestamp > since)
+            .map(MemAuditEntry::materialize)
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         events.truncate(limit);
         Ok(events)
@@ -1257,8 +1360,33 @@ impl AuditRepository for MemAuditRepository {
     async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        store.retain(|e| e.timestamp >= cutoff_secs);
+        store.retain(|e| e.event.timestamp >= cutoff_secs);
         Ok((before - store.len()) as u64)
+    }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<gyre_ports::audit::CompressionStats> {
+        let mut store = self.store.lock().await;
+        let mut stats = gyre_ports::audit::CompressionStats::default();
+        for e in store.iter_mut() {
+            if (stats.compressed as usize) >= limit {
+                break;
+            }
+            if e.detail_zstd.is_some() || e.event.timestamp >= cutoff_secs {
+                continue;
+            }
+            let raw = serde_json::to_vec(&e.event.detail)?;
+            let compressed = zstd::encode_all(raw.as_slice(), 3)?;
+            stats.compressed += 1;
+            stats.bytes_before += raw.len() as u64;
+            stats.bytes_after += compressed.len() as u64;
+            e.detail_zstd = Some(compressed);
+            e.event.detail = serde_json::Value::Null;
+        }
+        Ok(stats)
     }
 }
 
@@ -1775,6 +1903,13 @@ impl PersonaRepository for MemPersonaRepository {
 pub struct MemPolicyRepository {
     policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
     decisions: Arc<Mutex<Vec<gyre_domain::PolicyDecision>>>,
+    /// Test hook: when set, `create` returns an error to simulate a policy-store
+    /// write failure (exercises fail-closed seeding, task-077 F6 class).
+    fail_creates: Arc<std::sync::atomic::AtomicBool>,
+    /// Test hook: when set, `list` returns an error to simulate a policy-store
+    /// read failure (exercises the fail-closed supervised-trust merge gate,
+    /// task-077 F9 class).
+    fail_lists: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemPolicyRepository {
@@ -1785,13 +1920,32 @@ impl MemPolicyRepository {
         Self {
             policies,
             decisions: Arc::new(Mutex::new(Vec::new())),
+            fail_creates: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Test hook: cause subsequent `create` calls to fail.
+    #[cfg(test)]
+    pub fn fail_creates(&self) {
+        self.fail_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: cause subsequent `list` calls to fail.
+    #[cfg(test)]
+    pub fn fail_lists(&self) {
+        self.fail_lists
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl gyre_ports::PolicyRepository for MemPolicyRepository {
     async fn create(&self, policy: &gyre_domain::Policy) -> Result<()> {
+        if self.fail_creates.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("simulated policy store failure");
+        }
         self.policies
             .lock()
             .await
@@ -1804,6 +1958,9 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
     }
 
     async fn list(&self) -> Result<Vec<gyre_domain::Policy>> {
+        if self.fail_lists.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("simulated policy store list failure");
+        }
         Ok(self.policies.lock().await.values().cloned().collect())
     }
 
@@ -2418,6 +2575,47 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
             usage.period_start = now;
         }
         Ok(())
+    }
+}
+
+// ── MemBudgetCallRepository ───────────────────────────────────────────────────
+
+/// In-memory BudgetCallRepository for tests and development.
+/// Mirrors the SQLite/Postgres adapters: insert-only with duplicate-id
+/// rejection, workspace-scoped reads newest-first.
+#[derive(Default)]
+pub struct MemBudgetCallRepository {
+    store: Arc<Mutex<Vec<BudgetCallRecord>>>,
+}
+
+#[async_trait]
+impl BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if store.iter().any(|r| r.id.as_str() == record.id.as_str()) {
+            anyhow::bail!("budget call record {} already exists", record.id.as_str());
+        }
+        store.push(record.clone());
+        Ok(())
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &str,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<BudgetCallRecord>> {
+        let store = self.store.lock().await;
+        let mut records: Vec<BudgetCallRecord> = store
+            .iter()
+            .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+        if limit >= 0 {
+            records.truncate(limit as usize);
+        }
+        Ok(records)
     }
 }
 
@@ -3318,6 +3516,41 @@ pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
+/// Build a test AppState whose policy repo fails every `create`, used to
+/// exercise fail-closed built-in policy seeding (task-077 F6 class).
+#[cfg(test)]
+pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_creates();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+        None,
+    )
+}
+
+/// Build an AppState whose policy repo fails every `list`, used to exercise
+/// the fail-closed supervised-trust merge gate (task-077 F9): a policy-store
+/// read failure must HOLD the merge, never degrade to "no policies".
+#[cfg(test)]
+pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_lists();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+        None,
+    )
+}
+
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
@@ -3401,7 +3634,7 @@ fn test_state_inner(
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(crate::log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
@@ -3418,6 +3651,7 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
@@ -3429,6 +3663,7 @@ fn test_state_inner(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
+        budget_calls: Arc::new(MemBudgetCallRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
@@ -3611,6 +3846,24 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
 
 // ── In-memory TraceRepository ────────────────────────────────────────────────
 
+/// Mirror of `sqlite/trace.rs` / `postgres/trace.rs` `MAX_SUMMARY_BYTES`:
+/// stored (column-side) span summaries are capped at 4KB. The full values
+/// live in the payload rows (mirroring the SQLite blob columns).
+const MAX_SUMMARY_BYTES: usize = 4096;
+
+/// Mirror of the adapters' `truncate_summary`: cap at 4KB on a char boundary
+/// (same clamped-`end` idiom as `sqlite/trace.rs:122-133`).
+fn truncate_summary(s: &str) -> String {
+    if s.len() <= MAX_SUMMARY_BYTES {
+        return s.to_string();
+    }
+    let mut end = MAX_SUMMARY_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 #[derive(Default)]
 pub struct MemTraceRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
@@ -3624,41 +3877,55 @@ pub struct MemTraceRepository {
 impl gyre_ports::TraceRepository for MemTraceRepository {
     async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
         let mut guard = self.store.lock().await;
-        // Capture the previous trace's run id before replacement: the SQLite
-        // delete of the replaced trace cascades to its trace_spans rows, so
-        // the mem replacement must drop the previous run's payloads with it.
-        let old_run_ids: Vec<String> = guard
+        // Replace any existing trace for same MR (capped at most recent).
+        // A fresh capture is non-permanent (SQLite inserts permanent=0).
+        self.permanent.lock().await.remove(trace.mr_id.as_str());
+        // Drop the replaced trace's payload rows too (SQLite deletes them
+        // via the PK replace in the same transaction).
+        let replaced_gate_run_ids: Vec<String> = guard
             .values()
             .filter(|v| v.mr_id == trace.mr_id)
             .map(|v| v.gate_run_id.as_str().to_string())
             .collect();
-        // Replace any existing trace for same MR (capped at most recent).
-        // A fresh capture is non-permanent (SQLite inserts permanent=0).
-        self.permanent.lock().await.remove(trace.mr_id.as_str());
         guard.retain(|_, v| v.mr_id != trace.mr_id);
-        guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
-
-        // Mirror the SQLite adapter: every span's payload blob is written at
-        // store() time (sqlite/trace.rs builds it from input/output before
-        // insert), keyed by gate_run_id + span_id.
-        let mut payloads = self.payloads.lock().await;
-        for run_id in &old_run_ids {
-            payloads.retain(|(rid, _), _| rid != run_id);
-        }
-        for span in &trace.spans {
-            // build_payload_blob semantics: a span with BOTH summaries absent
-            // has no payload row (NULL blob) -- skip it entirely.
-            if span.input_summary.is_none() && span.output_summary.is_none() {
-                continue;
+        {
+            let mut payloads = self.payloads.lock().await;
+            for grid in replaced_gate_run_ids {
+                payloads.retain(|(g, _), _| g != &grid);
             }
-            payloads.insert(
-                (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
-                gyre_ports::trace::SpanPayload {
-                    input: span.input_summary.as_ref().map(|s| s.clone().into_bytes()),
-                    output: span.output_summary.as_ref().map(|s| s.clone().into_bytes()),
-                },
-            );
+            // Mirror sqlite/trace.rs build_payload_blob: a payload row exists
+            // whenever either summary side is Some (SQLite builds a blob from
+            // Some("") too), carries the RAW (untruncated) summaries, and an
+            // empty side decodes back to None. A span with neither side
+            // captured stores no payload row (SQLite blob is None → 404).
+            for span in &trace.spans {
+                if span.input_summary.is_none() && span.output_summary.is_none() {
+                    continue;
+                }
+                let payload_side = |s: &Option<String>| {
+                    s.as_deref()
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.as_bytes().to_vec())
+                };
+                payloads.insert(
+                    (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
+                    gyre_ports::trace::SpanPayload {
+                        input: payload_side(&span.input_summary),
+                        output: payload_side(&span.output_summary),
+                    },
+                );
+            }
         }
+        // SQLite stores the truncated summary in the columns (full value only
+        // in the payload blob). Without mirroring here, in-memory mode would
+        // return >4KB summaries from GET /merge-requests/:id/trace while the
+        // SQL adapters return 4KB.
+        let mut stored = trace.clone();
+        for span in &mut stored.spans {
+            span.input_summary = span.input_summary.as_deref().map(truncate_summary);
+            span.output_summary = span.output_summary.as_deref().map(truncate_summary);
+        }
+        guard.insert(trace.mr_id.as_str().to_string(), stored);
         Ok(())
     }
 
@@ -3697,20 +3964,198 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
 
     async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
         // Promoted traces are permanent (SQLite: `permanent=1` rows survive).
+        let mut store = self.store.lock().await;
         if self.permanent.lock().await.contains(mr_id.as_str()) {
             return Ok(());
         }
-        // SQLite's ON DELETE CASCADE removes the trace's span rows with the
-        // gate_traces row; drop this MR's span payloads with it.
-        let removed = self.store.lock().await.remove(mr_id.as_str());
-        if let Some(trace) = removed {
-            let run_id = trace.gate_run_id.as_str().to_string();
+        // Drop the trace's payload rows with it (SQLite: ON DELETE CASCADE).
+        if let Some(trace) = store.remove(mr_id.as_str()) {
+            let gate_run_id = trace.gate_run_id.as_str().to_string();
             self.payloads
                 .lock()
                 .await
-                .retain(|(rid, _), _| rid != &run_id);
+                .retain(|(g, _), _| g != &gate_run_id);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod trace_contract_tests {
+    use super::*;
+    use gyre_ports::TraceRepository;
+
+    fn span(span_id: &str, input: Option<&str>, output: Option<&str>) -> gyre_common::TraceSpan {
+        gyre_common::TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: "op".to_string(),
+            service_name: "svc".to_string(),
+            kind: gyre_common::SpanKind::Server,
+            start_time: 1,
+            duration_us: 2,
+            attributes: Default::default(),
+            input_summary: input.map(|s| s.to_string()),
+            output_summary: output.map(|s| s.to_string()),
+            status: gyre_common::SpanStatus::Ok,
+            graph_node_id: None,
+        }
+    }
+
+    fn trace(
+        mr: &str,
+        gate_run: &str,
+        spans: Vec<gyre_common::TraceSpan>,
+    ) -> gyre_common::GateTrace {
+        gyre_common::GateTrace {
+            id: Id::new(format!("{mr}-trace")),
+            mr_id: Id::new(mr),
+            gate_run_id: Id::new(gate_run),
+            commit_sha: "0".repeat(40),
+            spans,
+            captured_at: 1,
+        }
+    }
+
+    /// Mirrors sqlite's `promote_to_attestation_preserves_trace`: the mem
+    /// adapter must enforce the same lifecycle contract (spec §3a storage
+    /// lifecycle) — promoted traces survive `delete_by_mr`, non-promoted
+    /// traces and their payload rows are removed.
+    #[tokio::test]
+    async fn promoted_trace_survives_delete_by_mr() {
+        let repo = MemTraceRepository::default();
+        TraceRepository::store(
+            &repo,
+            &trace("mr-plain", "gr-1", vec![span("s1", Some("in"), None)]),
+        )
+        .await
+        .unwrap();
+        TraceRepository::delete_by_mr(&repo, &Id::new("mr-plain"))
+            .await
+            .unwrap();
+        assert!(TraceRepository::get_by_mr(&repo, &Id::new("mr-plain"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-1"), "s1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        TraceRepository::store(
+            &repo,
+            &trace(
+                "mr-promoted",
+                "gr-2",
+                vec![span("s2", Some("in"), Some("out"))],
+            ),
+        )
+        .await
+        .unwrap();
+        TraceRepository::promote_to_attestation(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap();
+        TraceRepository::delete_by_mr(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap();
+        assert!(TraceRepository::get_by_mr(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// F2 regression: `store()` must populate the payload rows (pre-fix the
+    /// mem `payloads` map was never written, so every payload lookup was
+    /// None). Also pins the SQLite-mirrored keying/cascade semantics: a span
+    /// with neither summary side captured stores no payload row, and a
+    /// replacement gate run drops the old run's payload rows.
+    #[tokio::test]
+    async fn store_populates_payloads_and_replacement_cascades() {
+        let repo = MemTraceRepository::default();
+        TraceRepository::store(
+            &repo,
+            &trace(
+                "mr-1",
+                "gr-old",
+                vec![
+                    span("s-old", Some("payload-in"), Some("payload-out")),
+                    span("s-nopayload", None, None),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-old")
+            .await
+            .unwrap()
+            .expect("store() must create a payload row for a span with summaries");
+        assert_eq!(p.input, Some(b"payload-in".to_vec()));
+        assert_eq!(p.output, Some(b"payload-out".to_vec()));
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-nopayload")
+                .await
+                .unwrap()
+                .is_none(),
+            "span with neither summary side captured must store no payload row"
+        );
+
+        // Replacement gate run for the same MR (SQLite: PK replace in the
+        // same transaction) — old run's payload rows must not linger.
+        TraceRepository::store(
+            &repo,
+            &trace("mr-1", "gr-new", vec![span("s-new", Some("new-in"), None)]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-old")
+                .await
+                .unwrap()
+                .is_none(),
+            "replaced trace's payload rows must be dropped"
+        );
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-new"), "s-new")
+            .await
+            .unwrap()
+            .expect("replacement trace payload");
+        assert_eq!(p.input, Some(b"new-in".to_vec()));
+        assert_eq!(p.output, None);
+    }
+
+    /// The stored (trace-side) summaries must be capped at 4KB like the SQL
+    /// adapters' columns, while the payload rows keep the full value.
+    /// Pre-fix, mem stored raw summaries and only the adapters truncated.
+    #[tokio::test]
+    async fn store_truncates_stored_summaries_but_keeps_full_payload() {
+        let repo = MemTraceRepository::default();
+        let big = "x".repeat(5000);
+        TraceRepository::store(
+            &repo,
+            &trace("mr-t", "gr-t", vec![span("s-t", Some(&big), Some(&big))]),
+        )
+        .await
+        .unwrap();
+        let got = TraceRepository::get_by_mr(&repo, &Id::new("mr-t"))
+            .await
+            .unwrap()
+            .expect("trace stored");
+        let s = &got.spans[0];
+        assert_eq!(
+            s.input_summary.as_deref().map(str::len),
+            Some(MAX_SUMMARY_BYTES)
+        );
+        assert_eq!(
+            s.output_summary.as_deref().map(str::len),
+            Some(MAX_SUMMARY_BYTES)
+        );
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-t"), "s-t")
+            .await
+            .unwrap()
+            .expect("payload row exists");
+        assert_eq!(p.input.as_deref().map(<[u8]>::len), Some(5000));
+        assert_eq!(p.output.as_deref().map(<[u8]>::len), Some(5000));
     }
 }
 

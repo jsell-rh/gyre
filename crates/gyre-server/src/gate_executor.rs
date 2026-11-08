@@ -1228,21 +1228,17 @@ async fn run_command_in_dir(
         command.current_dir(dir);
     }
 
-    let result = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
-            return (
-                GateStatus::Failed,
-                format!("timed out after {timeout_secs}s"),
-            );
-        }
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+                return (
+                    GateStatus::Failed,
+                    format!("timed out after {timeout_secs}s"),
+                );
+            }
+        };
 
     match result {
         Ok(output) => {
@@ -1362,12 +1358,9 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
-                let (status, output) = run_command_in_dir(
-                    gate.command.as_deref().unwrap_or("true"),
-                    cwd,
-                    timeout,
-                )
-                .await;
+                let (status, output) =
+                    run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
+                        .await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(
@@ -2215,7 +2208,7 @@ mod tests {
         // store, and evaluation with zero policies is default-deny, so the
         // driver's review POST would 403. main.rs seeds at startup; a test
         // building its own state must do the same (review F1).
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
         let (mr_id, _repo_id, spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2300,7 +2293,7 @@ mod tests {
         let state = crate::build_state("gyre-test-token", &base_url, None);
         // Same as the approved-path test: seed builtin policies or the
         // driver's review POST default-denies (review F1).
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2339,7 +2332,7 @@ mod tests {
         use tower::ServiceExt; // oneshot
 
         let state = test_state();
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
         let app = crate::build_router(state.clone());
 
