@@ -85,9 +85,16 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module; `a1194a81a` and `14af7abd7` repaired review findings; `016b315fd` resolved the final rebase onto base `72ad2a128`. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module; `a1194a81a` and `14af7abd7` repaired review findings; `016b315fd` resolved the rebase onto base `72ad2a128`; merge commit `c66ae2dd8` resolved the rebase onto base `c5deca801`. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
 
-### This round (rebase repair: exemption-file merge conflict)
+### This round (merge repair: rebase onto base c5deca801)
+
+- The controller repair (merge of base `c5deca801`, task-105 log compression + task-120 audit-detail compression lineage) left one content conflict in `crates/gyre-server/src/main.rs`: this branch had added the `impersonation_expiry` job spawn and the base had added the `log_compression` job spawn at the same site. Resolved by keeping **both** `jobs::spawn_job` registrations — `jobs.rs` registers both job names in the merged tree (`impersonation_expiry` at jobs.rs:558, `log_compression` at jobs.rs:407), so dropping either would strand a registered job without its scheduler spawn.
+- Everything else auto-merged cleanly (`auth.rs`, `jobs.rs`, `lib.rs`, `mem.rs`, `siem.rs`, `tty.rs`, adapters, docs, web). The auto-merge did not shift the exempted `auth.rs:983` fabricated-scope site, so `check-fabricated-scope-defaults.sh` passes unchanged on the merged tree.
+- Focused probes on the exact merged head `c66ae2dd8`: `cargo check -p gyre-server` OK; `api::impersonation` 14/14, `auth::` 44/44, `jobs::` 6/6, `log_compression` 11/11, `abac_middleware` 11/11, `api::audit` 12/12, `api::users` 14/14, `siem::` 8/8, `tty` 3/3, `gyre-adapters` audit 14/14. Guards green: fabricated-scope, abac-route-registry, in-memory-state-stores, migration-versions, dead-message-kinds, arch. Evidence: `/tmp/stage/review-evidence/task-108-merge-repair.txt`.
+- The merge carried the base's rebuilt `web/dist` assets; per assignment rules those generated assets are restored by the executor and rebuilt remotely — not touched here.
+
+### Previous round (rebase repair: exemption-file merge conflict)
 
 - The controller repair (rebase onto base `72ad2a128`) left one content conflict in `scripts/fabricated-scope-defaults-exemptions.txt`: the base had removed the `specs.rs:959` entry (site fixed in task-193's repair round, count lowered 5->4) and no longer carries the `git_http.rs:1495` entry (that site is fixed on the base too), while this branch carried the 5-entry file including its `auth.rs:983` line remap. Resolved against the ground truth of the merged tree: base's specs.rs removal and comment block kept (no `"default"` scope fallback remains in `api/specs.rs`), `git_http.rs:1495` entry dropped (site gone from the merged `git_http.rs`), and this branch's `auth.rs:983` remap kept — the task branch's code above the site shifts it from the base's `773` to `983` in the merged tree. Result: 3 entries, at or below the auto-merged `FROZEN_EXEMPTION_COUNT=4` — no exemption added, count not raised; the only net change vs the base is the line remap. `check-fabricated-scope-defaults.sh` verified green on the merged tree (evidence: `/tmp/stage/review-evidence/task-108-rebase-repair.txt`).
 - The other guards touched by the auto-merge (`check-abac-route-registry.sh`, `check-fail-open-ref-resolution.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh`) all pass on the merged tree.
@@ -113,12 +120,12 @@ Admin user impersonation is implemented end-to-end on commit `cad88393d` (identi
 - **`approve_request` checks the caller identity first** (finding: status/expiry were revealed before the target check, letting any authenticated user probe request state — a non-target probing an approved request got 409 instead of 403). The target-user check now runs before any status or expiry is revealed, matching `deny_request`'s ordering. Test: `non_target_cannot_probe_request_status`.
 - **Atomic `actions_taken`** (finding: the unlocked load -> increment -> save in the fire-and-forget recorder lost counts under concurrency). The session-record read-modify-write (increment in `record_impersonated_action`, end in `end_session`) is now serialized by a session-write lock; this also prevents an in-flight increment from overwriting an `end_session` write and resurrecting an ended session. Test: `concurrent_impersonated_actions_are_counted_atomically` — 8 concurrent recordings through a yielding kv adapter (models a real async backend; the synchronous mem adapter cannot reproduce the interleaving); verified to fail with `actions_taken == 1` when the lock is removed, passes with `8` and strictly sequential per-event counts.
 
-### Verification (focused, this round)
+### Verification (focused, previous rounds)
 
-- `./scripts/check-fabricated-scope-defaults.sh` — OK on the merged tree (rebase conflict resolved; see This round).
-- `cargo test -p gyre-server --lib api::impersonation` — 14/14 green; `auth::` 37/37; `jobs::` 6/6 on the merged tree (auth/middleware/jobs/abac_middleware were auto-merged by this repair; their suites confirm no regression).
-- `./scripts/check-abac-route-registry.sh`, `check-fail-open-ref-resolution.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh` — all OK on the merged tree.
-- Evidence: `/tmp/stage/review-evidence/task-108-rebase-repair.txt` (plus prior-round `task-108-mutation-probe.txt`). Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
+- `./scripts/check-fabricated-scope-defaults.sh` — OK on the earlier merged tree (rebase conflict resolved; see that round).
+- `cargo test -p gyre-server --lib api::impersonation` — 14/14 green; `auth::` 37/37; `jobs::` 6/6 on that merged tree (auth/middleware/jobs/abac_middleware were auto-merged by this repair; their suites confirm no regression).
+- `./scripts/check-abac-route-registry.sh`, `check-fail-open-ref-resolution.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh` — all OK on that merged tree.
+- Evidence: `/tmp/stage/review-evidence/task-108-rebase-repair.txt` (plus prior-round `task-108-mutation-probe.txt`). Current-round evidence: `/tmp/stage/review-evidence/task-108-merge-repair.txt`. Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
 
 ### Flow (intent -> signed mandate -> receipt)
 
