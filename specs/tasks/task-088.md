@@ -150,6 +150,17 @@ keys, but `graph_extraction.rs` serialises **arrays** — every real
 GraphExtraction event reported 0/0. Now both shapes are counted; the unit
 test pins the producer shape.
 
+### Rebase integration (task-078 Explorer Phase 4)
+
+Rebased onto base a4ebdf6f5 (task-078: streaming, keyboard shortcuts,
+performance). Single conflict in `ExplorerView.svelte` resolved by keeping
+both sides: the `explorerViewMode === 'boundary'` canvas wrapper from this
+task plus task-078's `windowEscape={false}` Escape-cascade comment/prop —
+ExplorerView owns the window-level Escape cascade, and the canvas now
+renders only in Boundary mode behind the view selector. All four view
+panels coexist with task-078's shortcuts, streaming and performance
+warnings (merge commit 531ca48b7).
+
 ### Test evidence
 
 - `web/src/__tests__/last-seen.test.js` — header capture, older/equal
@@ -169,4 +180,6 @@ test pins the producer shape.
   counts/dependency chips.
 - `cargo test -p gyre-server --lib api::mr_timeline` — 13 passed
   (including the new producer-shape test).
-- Full `npm test` in `web/`: 69 files, 1660 passed, 41 skipped.
+- Full `npm test` in `web/` after the rebase: 76 files, 1771 passed,
+  41 skipped (includes task-078's ExplorerViewShortcuts, causal-trace and
+  streaming suites alongside the default-view suites above).
