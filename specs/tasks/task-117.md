@@ -121,10 +121,12 @@ Implementation commits `02966511`...`2b26880` (merge repair `c79542d8`),
 review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 (round 4), the `6a9739e`/`722179f0` base merges (`976b339a`,
 `7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
-from merged sources), the round-4 base merge `a2bdf9a2`, and the
-round-5 base merge `d9e7785` carry the work below. Evidence is saved
+from merged sources), the round-4 base merge `a2bdf9a2`, the
+round-5 base merge `d9e7785`, and the round-6 base merge
+`4ef962e48` carry the work below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
-rounds 4–5 in `round4/` and `round5-merge-repair/`).
+rounds 4–6 in `round4/`, `round5-merge-repair/`, and
+`round6-merge-repair/`).
 
 ### Behavior
 
@@ -274,6 +276,22 @@ upstream):
   additions) were updated to the merged 6-arg `test_state_inner` with
   a paired `ws_store`, like every other test-state builder.
 
+Round 6 (`4ef962e48`, base merge `c5deca801` — task-105 log
+compression upstream):
+
+- **Rebase repair only, no behavior change.** The two content
+  conflicts (`AppState` in `lib.rs`, `test_state_inner` in `mem.rs`)
+  were both the same shape: HEAD added `spawned_backends` beside the
+  old `agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>` while
+  the base replaced `agent_logs` with the zstd-compressing
+  `log_compression::AgentLogBuffer` (task-105). Resolution keeps
+  both independent additions: `spawned_backends` (task-117 backend-
+  aware kill/liveness routing, doc comment preserved) with the base's
+  `AgentLogBuffer`-typed `agent_logs`. All other files auto-merged;
+  `cargo check -p gyre-server --all-targets` confirms the merged
+  usage sites compile. Focused suites on both merged features pass
+  (see Test evidence).
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -295,6 +313,15 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   abac-exempt-handlers, mcp-write-tools, migration-versions,
   task-commit-attribution gates -> exit 0 (logs in
   `round5-merge-repair/`).
+- Round 6 (`4ef962e48`, merge repair): `cargo test -p gyre-server
+  --lib api::spawn` -> **41 passed, 0 failed** (task-117 lifecycle +
+  base's task-077 F6 test); `log_compression` -> **11 passed**;
+  `api::agent_logs` -> **2 passed**; `cargo test -p gyre-adapters
+  compute --lib` -> **39 passed, 0 failed** (4 ignored);
+  `cargo test -p gyre-server --lib compute_target` -> **24 passed,
+  0 failed**; abac-route-registry, migration-versions, arch,
+  task-commit-attribution gates -> exit 0 (log in
+  `round6-merge-repair/evidence.log`).
 - Earlier rounds (`d404a439`): `cargo test -p gyre-server --lib
   compute_target` -> **24 passed**; web vitest on the merged sources
   -> **1624 passed, 41 skipped, 0 failed** (65 files); enforced static
