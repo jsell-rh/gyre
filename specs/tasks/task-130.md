@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0", "afb1d86bd28b8fa8732a60d64f58ab8c86d83288"]
+commits: ["78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
 ---
 
 ## Spec Excerpt
