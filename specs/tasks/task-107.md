@@ -125,39 +125,55 @@ rounds (F1-F19).
   sign/verify paths against a Fulcio built from upstream proto
   documentation.
 
-### This round (rebase repair onto base `66a5fc67`, head `c46c96579`)
+### This round (rebase repair onto base `72ad2a128`, head `255a92da2`)
 
-- **Base merge resolution**: the assigned repair rebased the branch onto
-  the assignment base `66a5fc67` (task-075 LSP call graph + task-102
-  trusted-proxy main). Three conflicts, resolved in the task's favor
-  where the base carried the pre-task-107 stub:
-  - `crates/gyre-server/src/lib.rs` / `mem.rs` `AppState`: kept the
-    port-backed `commit_signatures: Arc<dyn CommitSignatureRepository>`
-    and `signing_config: SigningConfig` fields (the task-107
-    implementation) and dropped the base's stale in-memory
-    `CommitSignatureStore`/`sigstore_mode` duplicates — the base side
-    predates the task and its fields would have shadowed the real
-    implementation; took the base's new `trusted_proxies` field
-    (task-102, required by `trusted_proxy.rs`/`middleware.rs` merged
-    in from the base).
-  - `web/dist/assets/elk.bundled-DuGOUTHE.js`: regenerated build
-    artifact, resolved to the base's bundle (no frontend source changes
-    on this branch; the executor restores web/dist from the base and
-    final integration republishes).
-- `cargo check -p gyre-server -p gyre-adapters --all-targets` passes at
-  the merged head — the base's `middleware.rs`/`main.rs` trusted-proxy
-  wiring and the task's signing surface compile together with no
-  reference to the dropped stub fields.
+- **Base merge resolution**: the assigned repair merged the assignment
+  base `72ad2a128` (task-096 rollback circuit breaker main, carrying the
+  task-193/task-083 scope-fallback fixes and the hard-failing
+  `seed_builtin_policies`) into the branch. Three conflicts resolved:
+  - `crates/gyre-adapters/src/postgres/mod.rs`: kept BOTH module
+    declarations — the base's `budget_call` (task-096 budget-call port)
+    and the task's `commit_signature` (task-107 repository adapter).
+  - `scripts/fabricated-scope-defaults-exemptions.txt`: took the base's
+    fixed-site state — the `specs.rs` spec-rejected notification tenant
+    fallback (fixed in task-193's repair) and the `git_http.rs`
+    push-event ws_id fallback (fixed: resolved from the repo record,
+    skip + log on lookup failure) no longer exist at the merged head,
+    so their exemption entries are removed. The `auth.rs` entry stays
+    at line 838 — task-107's own `auth.rs` changes (bearer-token
+    plumbing for Fulcio) shifted the site from the base's 773; the
+    merged tree's live flagged sites are exactly the three remaining
+    entries (auth.rs:838, speculative_merge.rs:372, gate_executor.rs:111),
+    under the frozen count of 4. No entries added.
+  - `scripts/warn-continue-creation-exemptions.txt`: took the base's
+    side — both warn-continue creation sites (`spawn.rs` interrogation
+    policy, `abac_middleware.rs` `seed_builtin_policies`) are fixed on
+    main and propagate creation errors now; zero entries remain.
+- **Follow-on repair**: `api/jj.rs` test helper now `.expect`s the
+  `Result` of `seed_builtin_policies` — the base's hard-fail fix turned
+  the discarded result into an `unused_must_use` warning that the CI
+  clippy gate would flag. `Cargo.lock`: `syn` version disambiguation
+  required by the merged dependency graph.
+- `cargo check -p gyre-server -p gyre-adapters --all-targets` passes
+  at the merged head; `cargo fmt --check` clean; all exemption-file
+  static gates (fabricated-scope, warn-continue, abac-exempt-handlers,
+  byte-slice-truncation, fail-open-ref-resolution, inert-enforcement,
+  relative-path-defaults, scope-literal-defaults,
+  lossy-secret-conversion, mem-port-contracts, migration-versions,
+  unwritten-store-fields, abac-route-registry, arch,
+  task-commit-attribution) pass.
 - F19 (upstream Fulcio trust-bundle protojson `CertificateChain` object
   shape) and F12-F17 from prior rounds remain in place at the merged
   head, re-verified by the focused suites below.
 
-### Verification evidence (head `c46c96579`, under /tmp/stage/review-evidence/)
+### Verification evidence (head `255a92da2`, under /tmp/stage/review-evidence/)
 
-Focused suites at the merged head: `merge-focused-tests.txt` —
+Focused suites at the merged head: `rebase-focused-tests.txt` —
 sigstore 17/17 (including the F19 shape test), commit_signatures 6/6,
-api::provenance 5/5, `task107_signing_key_persistence` 1/1;
-`merge-focused-tests-integration.txt` — `task107_upstream_conformance`
+api::provenance 5/5, api::jj 14/14 (including the
+fulcio-unreachable fallback test through the real router),
+`task107_signing_key_persistence` 1/1;
+`rebase-focused-tests-integration.txt` — `task107_upstream_conformance`
 3/3 and `task107_signing_key_env` 1/1. `cargo check -p gyre-server -p
 gyre-adapters --all-targets` exits 0. Full workspace suites,
 architecture checks, all-target Clippy, and GitHub CI are owned by
