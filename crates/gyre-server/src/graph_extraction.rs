@@ -1790,6 +1790,73 @@ mod tests {
         // (Covered above; also check a repo with no marker at all.)
         assert!(!call_graph_complete_for_repo(kv.as_ref(), &Id::new("repo-none"), &[]).await);
     }
+
+    #[tokio::test]
+    async fn sync_rust_repo_persists_calls_edges_in_graph_store() {
+        // A repo with a Cargo.toml -> detect_all_languages reports Rust, and
+        // the Rust Pass 2 edge format (module-qualified names, see
+        // gyre-adapters::call_graph_rust) resolves against Pass 1 nodes and
+        // persists in the graph store. The qualified names use the naming the
+        // real rust-analyzer adapter emits for src/<module>.rs files.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-rust");
+        let caller = make_go_fn("beta::beta_caller", "src/beta.rs", &repo_id);
+        let callee = make_go_fn("alpha::alpha_target", "src/alpha.rs", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![
+                // Resolvable pub-fn-to-pub-fn edge (the kind the real
+                // rust-analyzer adapter emits for a cross-module call).
+                CallEdge {
+                    from: "beta::beta_caller".to_string(),
+                    to: "alpha::alpha_target".to_string(),
+                },
+                // Caller with no Pass 1 node (private fn / impl method):
+                // must be dropped, not mis-linked.
+                CallEdge {
+                    from: "beta::spin".to_string(),
+                    to: "alpha::alpha_target".to_string(),
+                },
+            ],
+        };
+
+        let outcome =
+            extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        assert_eq!(
+            outcome.edges_persisted, 1,
+            "only the pub-to-pub edge should persist"
+        );
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].source_id, caller.id);
+        assert_eq!(calls[0].target_id, callee.id);
+        assert_eq!(calls[0].edge_type, EdgeType::Calls);
+        // §7 (task-076): the Rust leg emits the same EdgeType::Calls variant
+        // with the same provenance metadata tag as the Go/TS legs — Pass 2
+        // edge type consistency holds per language.
+        assert_eq!(
+            calls[0].metadata.as_deref(),
+            Some(gyre_common::call_graph::PASS2_EDGE_METADATA),
+            "Pass 2 Calls edge must carry the provenance metadata tag"
+        );
+    }
     #[tokio::test]
     async fn sync_ts_repo_persists_calls_edges_in_graph_store() {
         // Same pipeline as the Go test above, for the TypeScript leg
