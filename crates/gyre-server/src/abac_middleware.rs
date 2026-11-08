@@ -108,7 +108,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/aibom", "repo", None),
                 RouteResourceMapping::api(
@@ -126,11 +126,6 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/gates/:gate_id", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
@@ -397,6 +392,11 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",
                     "workspace_member",
                     None,
@@ -516,6 +516,12 @@ fn method_to_action(method: &Method) -> &'static str {
 // ---------------------------------------------------------------------------
 // Built-in policy seed (M34 Slice 4)
 // ---------------------------------------------------------------------------
+/// Canonical id of the request-pipeline catch-all Deny. It is seeded as a
+/// built-in so the HTTP ABAC middleware can default-deny unmatched requests.
+/// Internal-service gates that must distinguish "no policy governs this
+/// action" from "a catch-all denied it" (e.g. the merge processor's trust
+/// gate, HSI §2) exclude this policy by id — see merge_processor.rs.
+pub const DEFAULT_DENY_POLICY_ID: &str = "builtin-default-deny";
 
 /// Built-in M34 ABAC policies that ship with the server.
 ///
@@ -656,23 +662,36 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             updated_at: now,
         },
         // Priority 998: Require signed authorization for push/merge (§7.2).
-        // Immutable Deny: non-system subjects must have a valid attestation chain
-        // for push and merge actions. Cannot be overridden by Allow policies.
+        // Immutable Deny: non-system subjects are denied push and merge on
+        // attestation resources UNLESS an attestation chain was located for
+        // the submitted work (subject.attestation_chain_present). The
+        // push-time and merge-time evaluations set that attribute when they
+        // find a chain, so this policy denies chain-less work while letting
+        // attested work through to the normal priority-based evaluation
+        // (where user policies can still restrict it). Cannot be overridden
+        // by any Allow policy.
         Policy {
             id: Id::new("builtin-require-signed-authorization"),
             name: "builtin:require-signed-authorization".to_string(),
             description:
-                "Deny push/merge for non-system subjects unless valid attestation chain exists"
+                "Deny push/merge for non-system subjects unless an attestation chain exists for the submitted work"
                     .to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
             priority: 998,
             effect: PolicyEffect::Deny,
-            conditions: vec![Condition {
-                attribute: "subject.type".to_string(),
-                operator: ConditionOp::NotEquals,
-                value: ConditionValue::String("system".to_string()),
-            }],
+            conditions: vec![
+                Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("system".to_string()),
+                },
+                Condition {
+                    attribute: "subject.attestation_chain_present".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::Bool(true),
+                },
+            ],
             actions: vec!["push".to_string(), "merge".to_string()],
             resource_types: vec!["attestation".to_string()],
             enabled: true,
@@ -682,10 +701,40 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 150: default Allow for work that carries an attestation
+        // chain (§7.2). Sits in the trust band — below user-created policies
+        // (200-299) so user Deny policies still restrict attested work, and
+        // above the builtin default-deny catchall (1) so attested pushes and
+        // merges are allowed by default once `builtin:require-signed-authorization`
+        // is satisfied.
+        Policy {
+            id: Id::new("builtin-attested-authorization"),
+            name: "builtin:attested-authorization".to_string(),
+            description:
+                "Allow push/merge for work that carries an attestation chain (overridable by user policies)"
+                    .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 150,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.attestation_chain_present".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::Bool(true),
+            }],
+            actions: vec!["push".to_string(), "merge".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 1: Default deny — lowest priority catchall.
         // Anything not explicitly allowed is denied.
         Policy {
-            id: Id::new("builtin-default-deny"),
+            id: Id::new(DEFAULT_DENY_POLICY_ID),
             name: "default-deny".to_string(),
             description: "Default deny — any request not matching an Allow policy is denied"
                 .to_string(),
@@ -721,36 +770,85 @@ fn domain_builtin_policies() -> Vec<Policy> {
 }
 
 /// Seed built-in M34 policies into the policy store at startup. Idempotent.
-pub async fn seed_builtin_policies(state: &Arc<AppState>) {
+///
+/// Built-in policies are code-owned: the API refuses to modify or delete
+/// them, so a stored row that differs from the code definition is a stale
+/// copy from an older seed, not an operator edit. When the stored row
+/// differs on any semantic field (name, description, scope, priority,
+/// effect, conditions, actions, resource_types, enabled, immutable), it is
+/// refreshed to the current code definition — otherwise a fix to a built-in
+/// policy would never reach existing deployments (create-only seeding
+/// skips rows that already exist).
+///
+/// Fails closed (task-077 F6 class): the seeded set includes immutable Deny
+/// restrictions (`builtin:require-human-spec-approval`, HSI §2/§12 "spec
+/// approval is always human"; `builtin:require-signed-authorization`) and the
+/// default-deny catch-all. If any seed fails to persist, returning `Ok` would
+/// leave the server enforcing a stricter- or looser-than-configured policy
+/// set silently — an agent could approve specs while the operator believes
+/// the immutable Deny at priority 999 is active. The caller must refuse to
+/// serve with a partially seeded policy set.
+pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> {
     let mut policies = m34_builtin_policies();
     policies.extend(domain_builtin_policies());
     for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
             Ok(None) => {
-                if let Err(e) = state.policies.create(&policy).await {
-                    tracing::warn!(
-                        policy_id = %policy.id,
-                        err = %e,
-                        "Failed to seed built-in ABAC policy"
-                    );
-                } else {
-                    tracing::debug!(
+                state.policies.create(&policy).await.map_err(|e| {
+                    anyhow::anyhow!("failed to seed built-in ABAC policy {}: {e}", policy.id)
+                })?;
+                tracing::debug!(
+                    policy_id = %policy.id,
+                    name = %policy.name,
+                    "Seeded built-in ABAC policy"
+                );
+            }
+            Ok(Some(stored)) => {
+                if builtin_policy_drifted(&stored, &policy) {
+                    let mut refreshed = policy.clone();
+                    // Preserve the original creation metadata; only the
+                    // definition is code-owned.
+                    refreshed.created_by = stored.created_by.clone();
+                    refreshed.created_at = stored.created_at;
+                    state.policies.update(&refreshed).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to refresh drifted built-in ABAC policy {}: {e}",
+                            policy.id
+                        )
+                    })?;
+                    tracing::info!(
                         policy_id = %policy.id,
                         name = %policy.name,
-                        "Seeded built-in ABAC policy"
+                        "Refreshed drifted built-in ABAC policy to current definition"
                     );
                 }
             }
-            Ok(Some(_)) => {} // already exists → idempotent
             Err(e) => {
-                tracing::warn!(
-                    policy_id = %policy.id,
-                    err = %e,
-                    "Error checking built-in policy existence"
-                );
+                return Err(anyhow::anyhow!(
+                    "failed to check existence of built-in ABAC policy {}: {e}",
+                    policy.id
+                ));
             }
         }
     }
+    Ok(())
+}
+
+/// Whether a stored built-in policy row differs from its code definition on
+/// any semantic field. `id`, `built_in`, `created_by`, and `created_at` are
+/// excluded: they never change between seed generations.
+fn builtin_policy_drifted(stored: &Policy, code: &Policy) -> bool {
+    stored.name != code.name
+        || stored.description != code.description
+        || stored.scope != code.scope
+        || stored.scope_id != code.scope_id
+        || stored.priority != code.priority
+        || stored.effect != code.effect
+        || stored.conditions != code.conditions
+        || stored.actions != code.actions
+        || stored.resource_types != code.resource_types
+        || stored.enabled != code.enabled
+        || stored.immutable != code.immutable
 }
 
 // ---------------------------------------------------------------------------
@@ -905,7 +1003,9 @@ pub mod tests {
     fn setup_state_with_policies() -> Arc<AppState> {
         let state = test_state();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
         state
     }
@@ -933,7 +1033,9 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
         });
         init_resolver();
 
@@ -977,7 +1079,9 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
         });
         init_resolver();
 
@@ -1053,10 +1157,11 @@ pub mod tests {
         // must be denied for Developer role now that they use resource_type="admin".
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         use axum::routing::post;
-
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
         });
         init_resolver();
 
@@ -1125,8 +1230,9 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
-            h.block_on(seed_builtin_policies(&state)); // second call must be no-op
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+            // second call must be no-op
+            h.block_on(seed_builtin_policies(&state)).expect("re-seed");
         });
         let policies = state.policies.list().await.unwrap();
         let count = policies
@@ -1163,7 +1269,7 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         let policies = state.policies.list().await.unwrap();
@@ -1179,6 +1285,94 @@ pub mod tests {
         assert!(rsa.actions.contains(&"push".to_string()));
         assert!(rsa.actions.contains(&"merge".to_string()));
         assert!(rsa.resource_types.contains(&"attestation".to_string()));
+
+        // §7.2 unless-clause: the deny must NOT fire for work that carries
+        // an attestation chain, and the companion
+        // `builtin:attested-authorization` Allow must be seeded so attested
+        // work is allowed by default (overridable by user policies).
+        assert_eq!(
+            rsa.conditions.len(),
+            2,
+            "conditions must be [subject.type != system, chain not present]"
+        );
+        let attested = policies
+            .iter()
+            .find(|p| p.name == "builtin:attested-authorization")
+            .expect("builtin:attested-authorization policy must be seeded");
+        assert_eq!(attested.effect, PolicyEffect::Allow);
+        assert_eq!(attested.priority, 150);
+    }
+
+    /// A stored built-in policy row that differs from the code definition
+    /// (a stale copy from an older seed generation — the API refuses to
+    /// modify built-ins, so drift can only come from an old seed) must be
+    /// refreshed on re-seed. Otherwise fixes to built-in policy definitions
+    /// would never reach existing deployments.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seed_refreshes_drifted_builtin_policy() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        // Tamper the stored row to look like an old seed generation: the
+        // pre-fix require-signed-authorization had only the subject.type
+        // condition (no chain unless-clause).
+        let stored = state
+            .policies
+            .find_by_id("builtin-require-signed-authorization")
+            .await
+            .unwrap()
+            .expect("policy must exist after seed");
+        let mut stale = stored.clone();
+        stale.conditions = vec![gyre_domain::Condition {
+            attribute: "subject.type".to_string(),
+            operator: gyre_domain::ConditionOp::NotEquals,
+            value: gyre_domain::ConditionValue::String("system".to_string()),
+        }];
+        state.policies.update(&stale).await.unwrap();
+
+        // Re-seed (next startup): the drifted row is refreshed.
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        let refreshed = state
+            .policies
+            .find_by_id("builtin-require-signed-authorization")
+            .await
+            .unwrap()
+            .expect("policy must exist after re-seed");
+        let code = m34_builtin_policies()
+            .into_iter()
+            .find(|p| p.id.as_str() == "builtin-require-signed-authorization")
+            .unwrap();
+        assert_eq!(
+            refreshed.conditions, code.conditions,
+            "drifted built-in must be refreshed to the code definition"
+        );
+        assert_eq!(refreshed.conditions.len(), 2);
+
+        // Idempotency: a third seed with no drift performs no update and
+        // leaves the row byte-identical.
+        let before = refreshed.clone();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+        let after = state
+            .policies
+            .find_by_id("builtin-require-signed-authorization")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.conditions, after.conditions);
+        assert_eq!(
+            before.updated_at, after.updated_at,
+            "no-op seed must not bump updated_at"
+        );
     }
 
     /// TASK-077 (HSI §2): `builtin:require-human-spec-approval` must be
@@ -1188,8 +1382,8 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
-            h.block_on(seed_builtin_policies(&state)); // idempotent
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+            h.block_on(seed_builtin_policies(&state)).expect("re-seed"); // idempotent
         });
 
         let policies = state.policies.list().await.unwrap();
@@ -1211,5 +1405,31 @@ pub mod tests {
             .filter(|p| p.name == "builtin:require-human-spec-approval")
             .count();
         assert_eq!(count, 1);
+    }
+
+    /// TASK-077 (F6 class): built-in policy seeding must fail closed. If a
+    /// policy-store failure prevents an immutable Deny restriction
+    /// (`builtin:require-human-spec-approval`) from being persisted, the seed
+    /// must return Err — never warn-and-continue and leave the server (or
+    /// test harness) running with the restriction silently missing.
+    /// This test fails on the old warn-and-continue behavior, which returned
+    /// `Ok` regardless of the create error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_policy_seeding_fails_closed_on_store_error() {
+        let state = crate::mem::test_state_failing_policy_creates();
+        let result = seed_builtin_policies(&state).await;
+        let err = result.expect_err("seed must fail when policy creation fails");
+        assert!(
+            err.to_string()
+                .contains("failed to seed built-in ABAC policy"),
+            "error must name the failed seed, got: {err}"
+        );
+        // Nothing was persisted — the store must not contain a partial seed.
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            policies.is_empty(),
+            "no policies should be persisted when seeding fails, got {}",
+            policies.len()
+        );
     }
 }

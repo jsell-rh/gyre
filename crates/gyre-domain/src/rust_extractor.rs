@@ -1068,15 +1068,13 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                                             .get(&self.qualified(&bare_type))
                                             .cloned(),
                                     ];
-                                    #[allow(clippy::never_loop)] // TEMP diagnostic scaffold, reverted before commit
-                                    for candidate in candidates.iter().flatten() {
+                                    if let Some(candidate) = candidates.iter().flatten().next() {
                                         let dep_edge = self.ctx.make_edge(
                                             EdgeType::DependsOn,
                                             field_id.clone(),
                                             candidate.clone(),
                                         );
                                         self.new_edges.push(dep_edge);
-                                        break;
                                     }
                                 }
                             }
