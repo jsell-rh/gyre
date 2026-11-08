@@ -47,3 +47,77 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 3 (candidate `ccb1e6fff`, base `98a5299b9`)
+
+Independent review of the R20 candidate. Prior durable findings (review
+`a442cdb`: F1 bookmark-create-dead-path, F2 export-after-MR-stats, F3 stale
+conflict flag) verified as genuinely repaired in production code
+(`bb1099a10`): `JjOpsPort::jj_bookmark_set` (`jj bookmark set <name> -r <rev>
+--allow-backwards`) backs the completion path in both workspace and
+legacy-colocated layouts; the bookmark-set + `jj git export` block now runs
+BEFORE the MR's `diff_stats`/`has_conflicts` are computed from git refs; the
+rebase success arm clears `has_conflicts` on the author's flagged MR.
+
+Evidence (full logs: `/tmp/stage/review-evidence/task-106-final/`):
+
+- Reviewer installed jj 0.39.0 from crates.io (GitHub release download
+  blocked in this sandbox) and ran the recorded-fixture suite against the
+  real binary: 18/18 pass, including
+  `jj_bookmark_set_moves_imported_bookmark_to_agent_work` (the F1 repro:
+  create refuses on the imported bookmark, set moves it, export carries the
+  agent's edit into `refs/heads/<branch>`), `jj_rebase_b_moves_whole_stack`,
+  `jj_rebase_conflict_surfaces_files`, `jj_workspace_add_resolves_branch_
+  created_after_init`, `jj_workspace_add_failure_cleans_half_created_dir`.
+- Mutation verification (each reverted; tree clean after):
+  `-b`→`-r` in `jj_rebase` kills `jj_rebase_b_moves_whole_stack`;
+  blinding the conflict arm kills `jj_rebase_conflict_surfaces_files`;
+  removing the `rebase_inflight_agents` call from the single-entry merge
+  path kills `merge_triggers_rebase_of_inflight_agents`.
+- `cargo test -p gyre-server --lib` → 1438 passed / 0 failed;
+  `cargo test -p gyre-adapters --lib` → 391 passed / 0 failed;
+  `cargo check -p gyre-server` → EXIT 0; fmt clean; all mechanical
+  invariant scripts (arch, mem-port-contracts, inert-enforcement,
+  byte-slice, relative-path, fail-open-ref, dead-message-kinds, ABAC
+  registry + exempt handlers, migration versions, ignored-tool-tests,
+  task-commit-attribution) → EXIT 0.
+- CI wiring verified in the diff: the test job installs pinned jj-vcs
+  0.39.0 and runs `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`
+  (the guard panics on a missing jj there — local silent skips cannot
+  pass the CI leg).
+
+Findings:
+
+- [ ] **F1 (minor): the spawn response's `worktree_path` names a directory
+  that does not exist for every jj-provisioned agent.**
+  `spawn_agent_core` always returns `worktree_path =
+  {repo_root}/worktrees/{branch_slug}` (spawn.rs:606, response at :1390),
+  but when jj provisioning succeeds — the designed-for common case whenever
+  the jj binary is installed — the plain-git worktree is NOT created
+  (`if !jj_provisioned { create_worktree(...) }`, :731) and the agent's
+  actual working directory is the jj workspace
+  `{repo_root}/workspaces/{agent_id}` (DB worktree record :761-764,
+  container cwd :851-853). The documented protocol response
+  (docs/agent-protocol.md "worktree_path": "/path/to/worktree") and the MCP
+  `gyre_spawn_worker` tool result (mcp.rs:971 serializes the same response)
+  therefore report a nonexistent path, and the API surface is internally
+  inconsistent: `GET /repos/:id/worktrees` lists the workspace path while
+  the spawn response cites the worktrees path. Reproduced by coexisting
+  passing tests (`spawn_creates_missing_branch_before_jj_workspace_add`
+  asserts the DB record contains `/workspaces/`;
+  `spawn_branch_slashes_become_dashes_in_worktree_path` asserts the
+  response's `worktrees/` path). Fix direction: return the effective path
+  (`effective_path`, the same value persisted to the worktree record) in
+  the response.
+
+Notes (not findings): plain-git-fallback agents produce a rebase Err +
+failure audit event on each merge of their target branch (documented
+fallback, logged); teardown paths call `cleanup_jj_workspace` with raw
+`repo.path` so legacy relative rows leak the jj workspace registration
+(disk cleanup still runs; warn-logged, best-effort).
+
+Verdict: **needs-revision** — the §4 task contract itself (rebase trigger,
+stack semantics, conflict-as-state, notifications, safeguards, deferral
+batching, audit trail) is implemented and independently verified against
+real jj 0.39.0, and all prior durable findings are repaired; the remaining
+finding is the misreported spawn-response field above.
