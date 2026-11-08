@@ -1,5 +1,80 @@
 # Review — task-116: Implement meta-spec prompt assembly
 
+Round: 7 (independent review of candidate `42f46743a` against base
+`c5deca801` after the assignment-base merge and clippy repair; rounds 4–5
+re-reviewed the registry-write governance gate, round 6 raised the three
+findings verified closed here). Full evidence:
+`/tmp/stage/review-evidence/task116-round7-independent-review.md`.
+
+## Round 7 verdict
+
+`progress: ready-for-review` → approved. Diff base..candidate is 21 files,
++2633/−25, no web/dist changes (executor restored dist from base); the
+domain model, migrations, and `-registry` CRUD arrive from the base
+(upstream task-209 lineage), and the candidate adds assembly, delivery,
+attestation, stale-pin detection, the spec-bindings API, and the mem
+binding guard.
+
+- **Assembly (§2 Injection Order / Required vs Optional / Spec-Level
+  Binding):** bands required-tenant → required-workspace → bindings at
+  pinned versions; kind rank persona→principle→standard→process with stable
+  tiebreak; same-id dedup keeps the required section; pinned versions
+  resolve from immutable history, unresolvable pins skip with warn.
+  `prompt_assembly` suite 10/10 on this HEAD.
+- **Round-6 fix 1 (approval gate) mutation-verified on this HEAD:**
+  disabling `filter_approved` fails `pending_required_meta_spec_excluded`;
+  disabling the band-3 inline check fails `pending_bound_meta_spec_skipped`
+  — both regression tests bite independently.
+- **Round-6 fix 2 (binding membership gate) mutation-verified:** forcing the
+  `put_spec_meta_spec_bindings` membership gate open fails
+  `spec_bindings_require_membership_in_owning_workspace` (non-member
+  Developer would get 200). Visibility rule (Workspace meta-specs only in
+  their own workspace) blocks the cross-workspace prompt-injection hole.
+- **Round-6 fix 3 (mem port contract):**
+  `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`
+  passes; `lib.rs` and `test_state` wire both repos through one shared
+  binding store.
+- **Delivery:** `spawn.rs` injects `GYRE_META_SPEC_PROMPT`/`...SET_SHA` into
+  `container_env` ahead of the shared `SpawnConfig`, so every compute
+  backend receives it; `agent-runner.mjs` prepends it to the LLM prompt —
+  proven by running the REAL runner as a child process against a capture
+  stub (`docker/gyre-agent` `npm ci` + `npm test`: 12/12, including the 3
+  delivery tests), wired into CI job `gyre-agent-tests`.
+- **Attestation (§ Versioning and Attestation):** end-to-end probe (temporary
+  test in `merge_processor::tests`, restored): a merged MR whose author
+  agent has a stored prompt-set record produces an attestation bundle whose
+  `meta_specs_used` matches the record exactly (version, content_hash). The
+  criterion is real, not just plausible glue.
+- **Stale pin detection:** hourly `meta_spec_stale_pin_check` job registered
+  and spawned; `stale_pin_detection_creates_notification` asserts priority
+  6 and kv dedup; PUT clears dedup keys on pin replacement.
+- **Bootstrap:** `seed_builtin_meta_specs` (base, invoked at `main.rs`) seeds
+  the 9 spec'd defaults with the spec'd required flags and `Approved`
+  status — the approval gate does not exclude the seeds.
+- **API & ABAC:** spec-bindings routes registered with resolver entries;
+  the four `-registry` routes were moved OUT of the frozen exemption file
+  (shrink direction); `check-abac-route-registry`, `check-arch`,
+  `check-mem-port-contracts`, `check-abac-exempt-handlers`,
+  `check-task-commit-attribution`, `check-migration-versions`,
+  `check-dead-message-kinds` all OK.
+
+Focused suites on this HEAD: prompt_assembly 10, meta_spec 31, meta_specs
+23, stale_pin 1, registry_tests 14, spawn 43, adapters meta_spec 10 +
+`update_archives_version`, gyre-agent 12 — all pass. `cargo test --all` and
+exact-head CI remain owned by the verification stage per assignment
+constraints.
+
+Non-blocking observations: (1) `assemble_prompt_set` maps band `list()`
+errors to empty (fail-open) — mitigated because the spawn path already
+depends on the same storage earlier, but worth a spec-owner decision;
+(2) registry writes are global-Admin-only (upstream task-209), stricter
+than §2's literal workspace-admin wording — same ruling as rounds 4–5,
+amend the spec if the literal reading is wanted; (3) the `-registry` route
+name is inherited from the base's collision avoidance with the
+`blast-radius` namespace; (4) coverage rows 12–21 remain `task-assigned`
+with pre-implementation audit notes — honest, ready for the auditor to
+flip on this evidence.
+
 Round: 5 (rounds 4–5 re-reviewed the registry-write governance gate).
 Reviewer scope: `git diff 66422bd..9205a9e` for `crates/gyre-server/src/api/meta_specs.rs`
 (rounds 4–5 delta over the round-3 base); all other task files verified byte-identical
