@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["7601f79ab5fd116a7e22fb0a137b18fb895953bc"]
+commits: ["7601f79ab5fd116a7e22fb0a137b18fb895953bc", "8269e9067"]
 ---
 
 ## Shipped
@@ -22,12 +22,15 @@ with `email: EmailConfig`, `webhook: Option<WebhookConfig>`,
 
 **Dispatcher** (`gyre-server/src/notification_dispatcher.rs`): fans each
 persisted in-app notification out to the recipient's configured channels with
-per-channel `min_priority` threshold filtering. Webhook POSTs the JSON payload
-signed with HMAC-SHA256 (`X-Gyre-Signature`, ring). Slack POSTs to the incoming
-webhook URL (channel override honored). Email queues a durable outbox entry in
-`kv_store` (`email_outbox` ns) for the digest sender — the interface contract
-per the task plan (SMTP transport is deployment's concern). All outbound HTTP
-is latency-bounded (`CHANNEL_HTTP_TIMEOUT_SECS` = 10 s, reqwest with timeout —
+per-channel `min_priority` threshold filtering. The band is derived from the
+notification TYPE via `NotificationPriority::for_notification_type` — never
+from the HSI §8 numeric priority (see the repair round note below). Webhook
+POSTs the JSON payload signed with HMAC-SHA256 (`X-Gyre-Signature`, ring).
+Slack POSTs to the incoming webhook URL (channel override honored). Email
+queues a durable outbox entry in `kv_store` (`email_outbox` ns) for the digest
+sender — the interface contract per the task plan (SMTP transport is
+deployment's concern). All outbound HTTP is latency-bounded
+(`CHANNEL_HTTP_TIMEOUT_SECS` = 10 s, reqwest with timeout —
 `check-unbounded-external-http.sh` invariant).
 
 **Routing engine** (§Who Gets Notified): `escalation_recipients` implements the
@@ -65,36 +68,71 @@ references are by schema name, so the renames are behavior-neutral; portable
 SQLite/PG SQL), `UserChannelPreferenceRepository` port with SQLite, Postgres,
 and mem adapters (all enforce the upsert contract).
 
-**Test evidence** (merge HEAD 43f518232, after merging base c5deca80 — task-105
-log compression / user profile fields; this round's sandbox has crates.io
-access, everything below ran locally):
-- `SKIP_WEB_BUILD=1 cargo build --workspace`: clean.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --no-run`: all test targets
-  compile.
-- `cargo test -p gyre-server --lib api::users`: 17 passed — HEAD's four
-  channel-prefs API tests (defaults, round-trip, rejected `in_app: false`,
-  rejected relative webhook URL) plus the base's profile/PUT-me tests, with
-  the base's notification_channels default-serialization assertion updated to
-  the merged nested §Delivery Channels shape.
-- `cargo test -p gyre-server --lib notification_dispatcher`: 15 passed
+**Test evidence** (repair-round HEAD 8269e9067; all ran locally in this
+sandbox — it has crates.io access):
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-domain -p gyre-server`: clean.
+- `cargo test -p gyre-server --lib notification_dispatcher`: 16 passed
   (HMAC signing + threshold filtering, slack posting + channel override,
   email outbox durability + filtering, escalation recipient chain incl.
-  offline-spawner and Urgent fan-out, in-app records per recipient, persona
-  approval, merge-queue-paused, budget warning/exhausted, security finding).
+  offline-spawner and Urgent fan-out, the new full-path regression
+  agent-escalation → Owners with online spawner, in-app records per
+  recipient, persona approval, merge-queue-paused, budget warning/exhausted,
+  security finding, per-type band membership).
+- `cargo test -p gyre-server --lib api::users`: 18 passed — the four
+  channel-prefs API tests (defaults, round-trip, rejected `in_app: false`,
+  rejected relative webhook URL; the defaults test now actually executes —
+  see repair round) plus the base's profile/PUT-me/notification tests.
+- `cargo test -p gyre-server --lib api::spawn`: 36 passed (fail_agent path
+  covered by the module suite).
 - `cargo test -p gyre-server --test graph_integration
   test_divergence_detection_creates_notifications`: 1 passed.
 - `cargo test -p gyre-adapters --lib user_profile`: 5 passed.
 - `cargo test -p gyre-domain --lib user`: 11 passed.
-- Web (merged `web/src`): `npx vitest run` on Inbox, WorkspaceHome,
-  WorkspaceHomeArchitecture, last-seen: 65 passed.
-- Text gates re-run OK: arch, abac-route-registry, abac-exempt-handlers,
-  dead-message-kinds, unbounded-external-http, mem-port-contracts,
-  byte-slice-truncation, relative-path-defaults, inert-enforcement,
-  mcp-write-tools, lossy-secret-conversion, scope-literal-defaults,
-  forwarded-header-trust, in-memory-state-stores, forged-scope-fields,
-  fail-open-ref-resolution, migration-versions, migration-sql-portability,
-  fabricated-scope-defaults, api-auth, message-delivery, unwired-port-methods,
-  sandbox-sweep-artifacts, no-em-dash, task-commit-attribution.
+- `cargo test -p gyre-server --lib notifications`: 12 passed.
+- Clippy on touched crates: no findings in the changed files.
+- Text gates re-run OK: arch, dead-message-kinds, abac-route-registry,
+  inert-enforcement, unbounded-external-http, byte-slice-truncation.
+  Earlier-round gates (abac-exempt-handlers, mem-port-contracts,
+  relative-path-defaults, mcp-write-tools, lossy-secret-conversion,
+  scope-literal-defaults, forwarded-header-trust, in-memory-state-stores,
+  forged-scope-fields, fail-open-ref-resolution, migration-versions,
+  migration-sql-portability, fabricated-scope-defaults, api-auth,
+  message-delivery, unwired-port-methods, sandbox-sweep-artifacts,
+  task-commit-attribution) are unaffected by this round's diff (no routes,
+  migrations, ports, or stores touched).
+- Web (`web/src`) is untouched by the repair round; the prior round's
+  vitest evidence (65 passed on Inbox, WorkspaceHome,
+  WorkspaceHomeArchitecture, last-seen) stands.
+- Evidence captured under `/tmp/stage/review-evidence/`
+  (`task-112-repair-round.txt`, probe script `run.sh`).
+
+### Review repair round (findings 07fd53c9, commit 8269e9067)
+
+Two review findings repaired:
+
+1. **Band mapping contradicted the spec (code).** The old
+   `NotificationPriority::from_band` numeric threshold mapping (1–3 Urgent,
+   4–6 High, 7–8 Medium, 9–10 Low) classified AgentEscalation (HSI numeric 5)
+   as High — so §Notification Routing for Agent Escalations step 3 ("For
+   Urgent priority: always notify workspace Owners") was unreachable in the
+   only production escalation path (`fail_agent` → `notify_agent_escalation`),
+   with the unit test hand-feeding Urgent masking the dead branch. It also
+   sent GateFailure (3) as Urgent and BudgetWarning (7) as Medium where
+   user-management.md §Notification Entity says High. No numeric threshold
+   can reproduce the specced membership (SecurityFinding and GateFailure
+   share numeric 3 but sit in different bands), so `from_band` is replaced by
+   `NotificationPriority::for_notification_type`, a per-type mapping anchored
+   on the spec's band comments; user-management.md is amended with the full
+   type→band table (same amendment pattern as the team-lead routing note).
+   New regression test `agent_escalation_notifies_owners_even_when_spawner_online`
+   drives the full `notify_agent_escalation` path (online spawner + Owner
+   member) and asserts the Owner receives the in-app notification and Admins
+   are not fanned out — the exact reproduce case from the finding.
+2. **Dead test (test).** `get_channel_preferences_returns_defaults` had no
+   `#[tokio::test]` attribute and never executed (dead_code warning, absent
+   from the run). It now runs and covers the GET defaults path (no stored row
+   → 200 with default channels); `api::users` went from 17 to 18 executing
+   tests with no dead-code warning.
 
 **Merge history**: successive rebase merges from main (ed57c723, 9bef21a4,
 72ad2a128, c5deca80) each resolved with conflicts confined to the seams noted
