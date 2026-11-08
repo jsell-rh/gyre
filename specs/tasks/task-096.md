@@ -3,7 +3,7 @@ title: "Platform Model Rollback Circuit Breaker + CLI/UI"
 spec_ref: "platform-model.md §6 Circuit Breaker"
 depends_on:
   - task-095
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §6 Circuit Breaker"
   - "platform-model.md §6 CLI"
