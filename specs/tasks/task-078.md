@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §28 Phase 4: Polish"
-commits: ["293246b7c"]
+commits: ["293246b7cdc399e1313b7dd2981c4508b05c7715"]
 ---
 
 ## Spec Excerpt
