@@ -1404,7 +1404,11 @@ mod tests {
         let (app, newest) = create_test_mr(app, "newest").await;
         // Pin distinct creation times: rapid API creates can share a second,
         // which would make "newest first" ambiguous.
-        for (id, ts) in [(oldest.clone(), 1_000u64), (middle.clone(), 2_000), (newest.clone(), 3_000)] {
+        for (id, ts) in [
+            (oldest.clone(), 1_000u64),
+            (middle.clone(), 2_000),
+            (newest.clone(), 3_000),
+        ] {
             let mut mr = state
                 .merge_requests
                 .find_by_id(&gyre_common::Id::new(&id))
