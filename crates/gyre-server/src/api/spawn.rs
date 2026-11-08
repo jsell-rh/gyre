@@ -1200,7 +1200,7 @@ pub(crate) async fn spawn_agent_core(
 
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     crate::agent_audit::emit_spawned(
-        &state,
+        state,
         &agent,
         &req.task_id,
         &compute_target_label,
@@ -2568,8 +2568,7 @@ mod tests {
         let revoked = crate::agent_audit::recorded_events(&state, "agent_token_revoked").await;
         assert_eq!(revoked.len(), 1, "exactly one agent_token_revoked event");
         assert_eq!(revoked[0].detail["reason"], "agent_completed");
-        let jti = revoked[0]
-            .detail["jti"]
+        let jti = revoked[0].detail["jti"]
             .as_str()
             .unwrap_or_else(|| panic!("jti must be a string: {}", revoked[0].detail));
         assert!(!jti.is_empty(), "revocation must carry the token's jti");

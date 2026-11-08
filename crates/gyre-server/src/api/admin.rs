@@ -414,14 +414,8 @@ pub async fn admin_reassign_agent(
 
         // Agent lifecycle audit event (observability.md §Audit Event Types):
         // one per reassigned task, attributing the admin who moved it.
-        crate::agent_audit::emit_reassigned(
-            &state,
-            &agent,
-            &task.id,
-            &target.id,
-            &reassigned_by,
-        )
-        .await;
+        crate::agent_audit::emit_reassigned(&state, &agent, &task.id, &target.id, &reassigned_by)
+            .await;
     }
 
     let ws_id = agent.workspace_id.clone();

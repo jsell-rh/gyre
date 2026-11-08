@@ -159,7 +159,12 @@ pub async fn emit_dead(
 ///
 /// Detail fields (spec): `pid`, `pid_alive`. Both are null when the agent has
 /// no workload attestation (no PID was recorded at spawn).
-pub async fn emit_heartbeat(state: &AppState, agent: &Agent, pid: Option<u32>, pid_alive: Option<bool>) {
+pub async fn emit_heartbeat(
+    state: &AppState,
+    agent: &Agent,
+    pid: Option<u32>,
+    pid_alive: Option<bool>,
+) {
     emit(
         state,
         AuditEventType::AgentHeartbeat,
@@ -178,7 +183,12 @@ pub async fn emit_heartbeat(state: &AppState, agent: &Agent, pid: Option<u32>, p
 ///
 /// Detail fields (spec): `jti`, `reason`. `jti` is null when the revoked
 /// credential predates JWT IDs (e.g. UUID fallback tokens).
-pub async fn emit_token_revoked(state: &AppState, agent: &Agent, jti: Option<String>, reason: &str) {
+pub async fn emit_token_revoked(
+    state: &AppState,
+    agent: &Agent,
+    jti: Option<String>,
+    reason: &str,
+) {
     emit(
         state,
         AuditEventType::AgentTokenRevoked,
@@ -256,8 +266,7 @@ pub async fn attested_pid_alive(state: &AppState, agent_id: &str) -> Option<bool
         .await
         .ok()
         .flatten()?;
-    let att: crate::workload_attestation::WorkloadAttestation =
-        serde_json::from_str(&json).ok()?;
+    let att: crate::workload_attestation::WorkloadAttestation = serde_json::from_str(&json).ok()?;
     att.pid.map(crate::workload_attestation::pid_is_alive)
 }
 
@@ -269,17 +278,13 @@ pub async fn attested_pid(state: &AppState, agent_id: &str) -> Option<u32> {
         .await
         .ok()
         .flatten()?;
-    let att: crate::workload_attestation::WorkloadAttestation =
-        serde_json::from_str(&json).ok()?;
+    let att: crate::workload_attestation::WorkloadAttestation = serde_json::from_str(&json).ok()?;
     att.pid
 }
 
 /// Test helper: fetch recorded audit events of one type from the audit port.
 #[cfg(test)]
-pub(crate) async fn recorded_events(
-    state: &AppState,
-    event_type: &str,
-) -> Vec<AuditEvent> {
+pub(crate) async fn recorded_events(state: &AppState, event_type: &str) -> Vec<AuditEvent> {
     state
         .audit
         .query(&gyre_ports::AuditQueryFilter {

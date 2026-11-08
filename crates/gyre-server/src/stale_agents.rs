@@ -42,8 +42,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 // when no PID was ever attested (liveness unknown, not assumed).
                 let pid_alive =
                     crate::agent_audit::attested_pid_alive(state, &agent.id.to_string()).await;
-                crate::agent_audit::emit_dead(state, &agent, agent.last_heartbeat, pid_alive)
-                    .await;
+                crate::agent_audit::emit_dead(state, &agent, agent.last_heartbeat, pid_alive).await;
 
                 // Clean up worktrees
                 if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
@@ -342,8 +341,12 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let dead_pid = child.id();
         child.wait().unwrap();
-        let att =
-            crate::workload_attestation::attest_agent("agent-stale-pid", Some(dead_pid), "local", "");
+        let att = crate::workload_attestation::attest_agent(
+            "agent-stale-pid",
+            Some(dead_pid),
+            "local",
+            "",
+        );
         state
             .kv_store
             .kv_set(
