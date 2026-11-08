@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "93e70ce969237e6bc2622caf38dcbe151f797379"]
 ---
 
 ## Spec Excerpt
@@ -158,11 +158,10 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
-requires. Implementation commits are in the frontmatter. Rounds 1-8
-closed the F1-F7 and successive review/rebase findings; round 9 (merge
-`8441d58b1` + fix `14c20424d`) resolved the merge onto base `414fe9aa1`
-and closed the round-9 review findings; round 10 (`e555ed788`) repaired
-the verification findings from the round-9 head.
+requires. Implementation commits are in the frontmatter. Rounds 1-10
+closed the F1-F7 review findings, the round-9 merge, and the round-10
+exemption-drift verification findings; round 11 (`93e70ce96`) repaired
+the round-11 review findings F11/F12.
 
 ### Behavior
 
@@ -183,41 +182,33 @@ the verification findings from the round-9 head.
   requires `--repo-path`), dev mode flag rejection and token precedence,
   Protocol Injection decomposed to task-101 per the round-1 F2 scope
   note.
-- Round-9 review repairs (in `14c20424d`): create_user tenant
+- Resume semantics (round-9 repairs, `14c20424d`): create_user tenant
   containment (cross-tenant Admin minting rejected with 403 unless the
-  caller is a system principal); truthful orchestrator resume
-  (Pending-persona 409 distinguished from already-live 409; step 5
-  resume approves Pending personas); gate dedupe (server 409 on
-  duplicate gate names per repo, step 7 skips existing names);
-  verified credential reuse (step-2 fallback only on a real 409
-  duplicate; saved token verified via GET /api/v1/users/me for user AND
-  tenant before adoption). Merge-induced semantic conflicts (the
-  duplicate users.tenant_id migration no-op, tenant-bound test
-  fixtures) were repaired in the same round.
-- Round-10 verification repairs (`e555ed788`): the round-9 verification
-  run failed on exemption line drift — earlier candidate edits had
-  shifted flagged sites, so three frozen exemption entries read as NEW
-  exemptions against the verification base's line-pinned copies, and
-  the upstream verifier's fabricated-scope check flagged the moved
-  auth.rs site. Fixed by eliminating the sites instead of re-pinning
-  exemptions:
-  - auth.rs JWT tenant resolution: an absent `tenant_id` claim now
-    resolves via the documented contract helper `system_principal_tenant`
-    (hierarchy-enforcement.md §1 bootstrap tenant) instead of a
-    string-literal "default" — identical behavior, no fabrication
-    pattern at any line. Exemption entry deleted, frozen count 3→2.
-  - gyre-domain `Agent::new`: the construction-time workspace default
-    now resolves via a documented `bootstrap_workspace` helper citing
-    hierarchy-enforcement.md §1 (default workspace provisioned under
-    the default tenant; agents backfilled into it; the single-tenant
-    M34 note that construction-time scope defaults suffice). Exemption
-    entry deleted, frozen count 13→12.
-  - abac-exempt-handlers-exemptions.txt: the two stale task-093
-    orchestrator entries (spawn_workspace_orchestrator F2,
-    spawn_repo_orchestrator F3) deleted — the handlers already load the
-    target workspace/repo and return Forbidden on tenant mismatch, so
-    the drifted entries suppressed nothing and only read as new
-    exemptions.
+  caller is a system principal); Pending-persona 409 distinguished from
+  already-live 409 with step-5 resume approving Pending personas; gate
+  dedupe (server 409 on duplicate names, step 7 skips existing);
+  verified credential reuse (409-duplicate-only fallback; saved token
+  verified for user AND tenant before adoption).
+- Push safety (round-11 F11 repair, `93e70ce96`): the step-6 push to the
+  server's bare repo no longer forces unconditionally. It ls-remotes and
+  fetches the server's main first, then: no remote main -> plain push;
+  remote main behind HEAD -> plain fast-forward push (resume re-runs
+  with new local commits still push); remote main is the server's
+  disposable empty seed commit (root commit, empty tree - exactly what
+  `create_initial_commit` writes) -> replace it with
+  `--force-with-lease` pinned to the inspected seed SHA; anything else
+  (diverged, e.g. main advanced with server-side MR merges) -> refuse
+  with a pull-or-rebase hint, so a stale checkout can never rewind
+  merged MR commits out of main. The same round fixed a latent
+  starter-kit auto-commit defect the new tests exposed: `git add`
+  aborts when a pathspec matches no file, so manifest-bearing repos
+  without the full five-file kit failed step 6; only the kit paths that
+  exist are staged now.
+- Token hygiene (round-11 F12 repair): the bearer token reaches git
+  through GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n
+  environment config (git >= 2.31) instead of `-c http.extraHeader=...`
+  child argv, which was readable via ps and /proc/<pid>/cmdline for the
+  lifetime of every network-touching git call.
 
 ### Tests
 
@@ -229,38 +220,39 @@ the verification findings from the round-9 head.
 - CLI: bootstrap parse/flag, slug, gate detection, starter kit,
   manifest shape, summary rendering, persona coverage tests, client
   classification tests (Pending-persona 409 vs already-live 409;
-  create_user 409 Duplicate vs 403 Other), and four scripted full-flow
-  resume tests against a mock HTTP server (resume approves a Pending
-  persona and skips existing gates while continuing as the verified
-  admin; wrong-user saved token, cross-tenant admin, and a
-  non-duplicate create_user error each fail the run with no further
-  requests).
-- Round-10 focused probes on this head (`e555ed788`): `cargo test -p
-  gyre-domain` all pass; `cargo test -p gyre-server --lib` 1447 passed,
-  0 failed (includes jwt_missing_tenant_id_defaults_to_default,
-  jwt_tenant_id_extracted_from_claim, jwt_invalid_tenant_id_chars_rejected
-  proving the JWT tenant resolution behavior is unchanged); all 20 repo
-  lint/check scripts exit 0 including fabricated-scope-defaults,
-  scope-literal-defaults, and abac-exempt-handlers after the exemption
-  deletions; the working tree has zero exemption entries added relative
-  to base c5deca801 (the dev-check "new verification exemptions
-  forbidden" comparison, simulated locally); `cargo fmt --check` clean.
-- Prior-round suites on the merged tree: `cargo check --all` exit 0;
-  `cargo test -p gyre-cli` 139 + 1 passed; `cargo test -p gyre-server
-  --tests` all targets pass; `cargo test -p gyre-adapters` 375 passed,
-  12 ignored.
+  create_user 409 Duplicate vs 403 Other), four scripted full-flow
+  resume tests against a mock HTTP server, and three round-11
+  push-safety tests running real git against a real bare "server" repo:
+  first-run seed replacement plus refusal-to-rewind after a simulated
+  server-side MR merge (mutation-tested - restoring the unconditional
+  --force fails it), resume fast-forward when local is ahead, and the
+  token-out-of-argv invariant for `git_with_auth`.
+- Round-11 focused probes on this head (`93e70ce96`): `cargo test -p
+  gyre-cli` 142 + 1 passed, 0 failed; `cargo fmt -p gyre-cli --check`
+  clean; `cargo clippy -p gyre-cli --bin gyre` exit 0 (only pre-existing
+  gyre-common warnings, identical on the base head); check scripts arch,
+  byte-slice-truncation, no-em-dash, relative-path-defaults,
+  lossy-secret-conversion all exit 0; check-assertionless-tests exit 2
+  pre-existing and byte-identical to the base head. Evidence:
+  `/tmp/stage/review-evidence/` (source SHA, logs, summary).
+- Prior-round suites: `cargo test -p gyre-server --lib` 1447 passed on
+  `e555ed788`; `cargo test -p gyre-cli` 139 + 1 and `cargo test -p
+  gyre-adapters` 375 passed, 12 ignored on the merged round-9 tree.
 
 ### Verification evidence
 
-- Round-10 evidence: `/tmp/stage/review-evidence/` (source SHA
-  `e555ed788`, check-script and test logs, exemption-diff simulation).
-- Pre-existing on the incoming candidate head (not introduced here,
-  unchanged): `cargo clippy -p gyre-domain --lib` errors in
-  rust_extractor.rs, check-assertionless-tests exit 2,
-  check-cli-spec-parity exit 1 on the spec_assist SSE display path.
+- Round-11 evidence: `/tmp/stage/review-evidence/` (source SHA
+  `93e70ce96`, test/fmt/clippy/check-script logs, mutation-check note).
+- Pre-existing on the candidate head (not introduced here, unchanged):
+  `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs,
+  check-assertionless-tests exit 2, check-cli-spec-parity exit 1 on the
+  spec_assist SSE display path, and the argv token pattern in main.rs
+  Clone/Push commands (predates task-099; F12 was scoped to
+  bootstrap.rs).
 - Round-4's live e2e (dev first-run bootstrap with `--starter-kit`,
   cross-tenant `--admin-user jsell`, failure paths) was run against
-  round-4's head; the round-9 resume behavior is covered by the four
-  scripted flow tests; a fresh live e2e remains with verification.
+  round-4's head; the round-9 resume behavior and the round-11 push
+  safety are covered by the scripted flow and push-safety tests; a
+  fresh live e2e remains with verification.
 - Full workspace suites, all-target Clippy, and GitHub CI remain with
   verification and publication.
