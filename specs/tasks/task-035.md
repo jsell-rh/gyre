@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §System Default Views"
 depends_on: []
 progress: complete
 coverage_sections: []
-commits: []
+commits: ["b0bb30824e81dd07705733f63ea7b8b3b152d91d", "7a032db37e02d03ff14cf4992887741abe29a1e0"]
 ---
 
 ## Spec Excerpt
@@ -106,3 +106,30 @@ When working on this task:
 ## Git Commits
 
 Implemented as part of the explorer-canvas branch prior to task decomposition.
+
+## Shipped
+
+**System default views are seeded, protected, and surfaced in the UI.** The backend was in place from the explorer-canvas branch (present in the assigned base); this assignment closed the remaining plan item — the frontend "System" badge — in commit `b0bb30824`, then verified the whole feature end-to-end against the acceptance criteria.
+
+### Backend (pre-existing in assigned base, verified this round)
+
+- `crates/gyre-server/src/api/saved_views.rs` — `system_default_views()` returns 7 views: the spec's exact 4 (Architecture Overview, Test Coverage Gaps, Hot Paths, Blast Radius (click)) with query JSON matching the spec shapes, plus High-Risk Untested Code, Spec Coverage, and Ungoverned Risk.
+- Seeding is lazy on first `ListViews` access (repo-scoped `/repos/:id/views`, workspace-scoped `/workspaces/:id/explorer-views`, and the explorer WS path), name-reconciled and idempotent — existing system-view names are skipped, so re-listing never duplicates.
+- All seeded views carry `is_system: true` and `created_by: "system"`.
+- Delete endpoints reject system views with 403 "System default views cannot be deleted" (REST) and an error message on the WS path.
+- All default queries pass `ViewQuery::validate` (`test_system_default_views_all_pass_validation`).
+
+### Frontend (commit `b0bb30824`, this assignment)
+
+- `web/src/lib/ExplorerChat.svelte` — saved-views dropdown renders a distinct **System** badge on system views (muted pill, tooltip "System default view — cannot be deleted"). Delete is a no-op for system views (early return) and the delete button is hidden; the server-side 403 is the enforcement backstop.
+
+### Test evidence (this round, fresh run)
+
+- Rust (`gyre-server` lib): `api::saved_views` 13 passed, `api::explorer_views` 16 passed (incl. `delete_builtin_view_forbidden`, `list_is_idempotent_for_builtins`), `explorer_ws::tests::test_system_default*` 5 passed — 34 total, 0 failed.
+- Web (vitest): `ExplorerChat.test.js` 110 passed, including the 2 rendering tests from `b0bb30824` — System badge present on system views / absent on user views, delete button hidden for system views / shown for user views.
+- Evidence retained at `/tmp/stage/review-evidence/task-035-verification.txt`.
+
+### Round note (contract repair 4e2484b8)
+
+- No code changes this round: the production fix from `b0bb30824` and the pre-existing backend are intact on the branch (verified by inspection and fresh test runs above).
+- The prior round's completion notes had modified protected task text; this round keeps the assigned contract body unchanged and records completion only in the frontmatter (`progress`, `commits`) and this `## Shipped` section.
