@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
+commits: ["14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "016b315fd28bf08bd9d5c78dfddf1a561e83dc66"]
 ---
 
 ## Spec Excerpt
@@ -85,9 +85,14 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. This round (`14af7abd7`) repairs two review findings on the previous repair round. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module; `a1194a81a` and `14af7abd7` repaired review findings; `016b315fd` resolved the final rebase onto base `72ad2a128`. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
 
-### This round (review repair: exemption remap, approval critical-section serialization)
+### This round (rebase repair: exemption-file merge conflict)
+
+- The controller repair (rebase onto base `72ad2a128`) left one content conflict in `scripts/fabricated-scope-defaults-exemptions.txt`: the base had removed the `specs.rs:959` entry (site fixed in task-193's repair round, count lowered 5->4) and no longer carries the `git_http.rs:1495` entry (that site is fixed on the base too), while this branch carried the 5-entry file including its `auth.rs:983` line remap. Resolved against the ground truth of the merged tree: base's specs.rs removal and comment block kept (no `"default"` scope fallback remains in `api/specs.rs`), `git_http.rs:1495` entry dropped (site gone from the merged `git_http.rs`), and this branch's `auth.rs:983` remap kept — the task branch's code above the site shifts it from the base's `773` to `983` in the merged tree. Result: 3 entries, at or below the auto-merged `FROZEN_EXEMPTION_COUNT=4` — no exemption added, count not raised; the only net change vs the base is the line remap. `check-fabricated-scope-defaults.sh` verified green on the merged tree (evidence: `/tmp/stage/review-evidence/task-108-rebase-repair.txt`).
+- The other guards touched by the auto-merge (`check-abac-route-registry.sh`, `check-fail-open-ref-resolution.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh`) all pass on the merged tree.
+
+### Previous round (review repair: exemption remap, approval critical-section serialization)
 
 - **`check-fabricated-scope-defaults.sh` passes again** (finding: the final base merge inserted lines above the pre-existing exempted site — the JWT `claims.tenant_id` fallback in `auth.rs`, already validated by `validate_tenant_id` before use — moving it from line 945 to 983 without re-updating the exemption remap, so the guard failed on the candidate and broke pre-commit/CI). The exemption entry is re-mapped to `auth.rs:983` (edit, not addition; the line count stays frozen at 5). Guard verified green on the fixed tree.
 - **The approval session-creation critical section is serialized** (finding: the Pending-status check, the max-1-active-session check, `save_session` and the request-status save were an unlocked read-modify-write, so two concurrent `POST .../approve` calls from the target both loaded the request as Pending and both minted live impersonation tokens for the same admin — two sessions for one consent, two `ImpersonationStarted` events, violating the max-1-active-per-admin rate limit). `SESSION_WRITE_LOCK` (the lock already held by the action counter and `end_session`) is now held across the whole section and released before token minting, audit emission and notification delivery. The sibling read-modify-writes are covered the same way:
@@ -110,11 +115,10 @@ Admin user impersonation is implemented end-to-end on commit `cad88393d` (identi
 
 ### Verification (focused, this round)
 
-- `./scripts/check-fabricated-scope-defaults.sh` — OK (was FAIL on the candidate before the remap).
-- `cargo test -p gyre-server --lib api::impersonation` — 14/14 green (new: `concurrent_approvals_create_exactly_one_session`); `impersonation`-filtered across the crate — 15/15; `jobs::` 6/6; `auth::` 37/37.
-- `cargo clippy -p gyre-server --lib` — warning count for `impersonation.rs` identical before/after the change (6 pre-existing, 0 new).
-- Mutation probe: removing the approve critical-section lock makes the new test fail (`exactly one approval must succeed: left 2, right 1`); restoring the fix makes it pass.
-- Evidence: `/tmp/stage/review-evidence/task-108-fabricated-scope-guard.txt`, `task-108-impersonation-tests.txt`, `task-108-mutation-probe.txt`. Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
+- `./scripts/check-fabricated-scope-defaults.sh` — OK on the merged tree (rebase conflict resolved; see This round).
+- `cargo test -p gyre-server --lib api::impersonation` — 14/14 green; `auth::` 37/37; `jobs::` 6/6 on the merged tree (auth/middleware/jobs/abac_middleware were auto-merged by this repair; their suites confirm no regression).
+- `./scripts/check-abac-route-registry.sh`, `check-fail-open-ref-resolution.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh` — all OK on the merged tree.
+- Evidence: `/tmp/stage/review-evidence/task-108-rebase-repair.txt` (plus prior-round `task-108-mutation-probe.txt`). Full workspace suites, all-target Clippy and GitHub CI are owned by the verification stage.
 
 ### Flow (intent -> signed mandate -> receipt)
 
