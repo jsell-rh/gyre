@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "72f61cbdc55fab1c8a593b2961db695e0804dcd2"]
+commits: ["b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "72f61cbdc55fab1c8a593b2961db695e0804dcd2", "f8f0601a677f316f6876b2c9afcc3d8c8fd6b036", "2d54e1d93022730f9c10ec9003c622587cf4d110"]
 ---
 
 ## Spec Excerpt
@@ -261,3 +261,50 @@ Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP — see
 above); host checklist: e2e
 `spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
 `npm test`, GitHub CI on the exact head.
+
+### Round 5 (merge with assignment base def0add9e)
+
+Merged the new assignment base `def0add9e` (task-157 landing) into this
+branch; all four content conflicts resolved with both sides' behavior
+preserved (evidence: `/tmp/stage/review-evidence/task-138-r5-merge.md`):
+
+- `rust_extractor.rs`: dropped HEAD's self-described "TEMP diagnostic
+  scaffold" (its own comment said revert before commit); kept base's clean
+  single-candidate `DependsOn` edge.
+- `api/specs.rs` approve: kept task-138's cloned `approver_id`/`persona`
+  (reused by the durable ledger entry below) and added base's new
+  `attestation_level`/`stack_hash` `SpecApprovalEvent` fields.
+- `api/specs.rs` revoke: kept task-138's durable-ledger revoke + audit +
+  `ledger_approval_id` response; replaced the naive reset-to-Pending with
+  base's §9-aware `resolve_new_approval_status` recompute, so revoking one
+  half of a `human_and_agent` pair does not demote a still-satisfied entry.
+- `api/specs.rs` reject: took base's notification block (no early return on
+  workspace lookup failure, so the rejection history note is still
+  recorded).
+- `mem.rs`: kept the `ApprovalTransitionError` import needed by the mem
+  `SpecApprovalRepository`; removed the duplicate `BudgetUsage` import.
+- `merge_processor.rs`: kept BOTH test sets — task-138's
+  `require_current_spec_blocks_stale_spec_ref` regression and base's
+  TASK-077 merge-time ABAC tests.
+- Migration version collision (same class as round 4): base's
+  `2026-10-08-000057_spec_approval_attestation` and task-138's
+  `2026-10-08-000057_spec_approval_ledger` both mapped to version
+  `20261008000057` (check-migration-versions.sh FAILED pre-fix). Renumbered
+  the branch-local ledger migration to `2026-11-08-000058_spec_approval_ledger`
+  (pure rename, SQL unchanged); gate exits 0.
+- `web/dist` modify/delete conflicts staged from the assignment base per
+  executor policy; not rebuilt or modified here.
+
+Verification on this exact tree: `cargo check --all` clean;
+`gyre-domain spec_approval` 4/4 and `rust_extractor` 16/16; `gyre-adapters
+sqlite::spec_approval` 10/10; server suites `api::specs` + `api::gates`
+90/90, `merge_processor` 68/68, `git_http` + `spec_lifecycle` 39/39
+(combined 197/197, 0 failed); lifecycle trio passes individually. Static
+gates all exit 0 (arch, mem-port-contracts, ABAC registry + exempt
+handlers, task-commit-attribution, inert-enforcement, migration versions +
+SQL portability, forged-scope-fields, fail-open-ref-resolution,
+dead-message-kinds).
+
+Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP); host
+checklist unchanged: e2e `spec_approval_auto_invalidated_on_spec_change`,
+`cargo test --all`, full `npm test`, GitHub CI on the exact head.
