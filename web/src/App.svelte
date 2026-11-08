@@ -3,6 +3,7 @@
   import { isLoading, t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
   import { createPresenceHeartbeat } from './lib/presence.js';
+  import { createLivenessTracker } from './lib/liveness.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -58,6 +59,10 @@
   // Spec entity this tab is actively editing (reported by the DetailPanel
   // instances) — single source of truth for the heartbeat's editing_entity.
   let activeEditingEntity = $state(null);
+  // HSI §3 liveness tracker — listens for RunStarted/RunFinished Telemetry
+  // bus messages on the workspace subscription and records the active runs
+  // the Explorer canvas glows. Shares the store's message listener bus.
+  let livenessTracker = null;
   function setActiveEditingEntity(e) {
     activeEditingEntity = e;
   }
@@ -76,10 +81,18 @@
       getView: () => presenceViewLabel,
       getEditingEntity: () => activeEditingEntity,
     });
+    // HSI §3 Layer 1: track RunStarted/RunFinished telemetry so the Explorer
+    // canvas can pulse nodes where agents are working. Task → spec_path
+    // resolution uses the task API (best-effort, non-blocking).
+    livenessTracker = createLivenessTracker(store, {
+      fetchTask: (taskId) => api.task(taskId),
+    });
     return () => {
       unsub();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
+      livenessTracker.destroy();
+      livenessTracker = null;
       store.destroy();
       wsStore = null;
     };
