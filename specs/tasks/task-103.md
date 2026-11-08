@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["ad99cb8c9f68accdbb0e960cc6af9e03488bb8d0", "3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b"]
+commits: ["ad99cb8c9f68accdbb0e960cc6af9e03488bb8d0", "3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b", "cead5a881d3bdc2daf5f5135801dddf5cc6d93cd"]
 ---
 
 ## Spec Excerpt
@@ -74,11 +74,14 @@ CEF severity mapping. Product commit:
 `3b9d312fc5c9fd2a6cbfc3eabf631f8cb13b1d8b`.
 
 This round repaired the verification finding
-`2b5e29b31c5f482d9b530bdc8b37c611` (rustfmt changed-lines violations in
-the task's sources plus a `clippy::needless_borrow` at the `emit_spawned`
-call site) in commit `ad99cb8c9` — formatting only plus one borrow fix
-(`&state` → `state` in `spawn_agent_core`, whose `state` is already
-`&Arc<AppState>`); no behavior change.
+`3268594c804e44f78a41168cb443faf5` (checks.sh exit 1:
+`check-fabricated-scope-defaults.sh` flagged `auth.rs:802`) in commit
+`cead5a881`. The task's earlier edits to `auth.rs` (the `jti` claim work)
+renumbered the legacy exempted `claims.tenant_id.unwrap_or("default")`
+site — pinned at `auth.rs:773` in the base — past its line-pinned exemption.
+Per the task-095 precedent (`7a0bd1db7`), renumbering an exemption entry is
+read as a new entry by the exemption freeze, so the sanctioned repair is to
+fix the site, delete the entry, and lower `FROZEN_EXEMPTION_COUNT`.
 
 ### Behavior
 
@@ -120,9 +123,48 @@ call site) in commit `ad99cb8c9` — formatting only plus one borrow fix
 - **CEF severity** (`gyre-server/src/siem.rs`): kill 7, dead 6, revoke 5,
   reassign 4, spawned/completed/heartbeat 3, per the task plan.
 
-### Test evidence
+### Repair detail (this round)
 
-Focused runs on this round's checkout, all exit 0:
+`JwtClaims.tenant_id` is now `String` with
+`#[serde(default = "default_tenant_claim")]` — the documented "absent
+claim = default tenant" single-tenant IdP contract (struct doc;
+`AuthenticatedAgent`: "extracted from `tenant_id` claim (defaults to
+\"default\")") becomes the claim's schema default applied at
+deserialization, not a use-site `unwrap_or` fallback. The value remains a
+deterministic function of the cryptographically verified token (no
+fallible lookup to fail open), and `"default"` is the real bootstrapped
+Tenant row (`bootstrap_default_tenant`, lib.rs). Behavior is unchanged and
+test-pinned (`jwt_missing_tenant_id_defaults_to_default`). The exemption
+entry was deleted and `FROZEN_EXEMPTION_COUNT` lowered 4→3, per the
+exemption file's own instructions.
+
+### Test evidence (this round)
+
+All on this round's checkout, exit 0 (retained at
+`/tmp/stage/review-evidence/task-103-repair.txt`):
+
+- `bash scripts/check-fabricated-scope-defaults.sh` — OK with the candidate
+  script, and OK with the **base** script version (both pinned in the
+  evidence file).
+- `bash scripts/check-scope-literal-defaults.sh` — OK (construction-time
+  sibling unaffected).
+- `python3 scripts/check-rustfmt-diff.py 98a5299b9` — changed lines clean
+  (9 Rust files checked).
+- `python3 scripts/check-clippy-diff.py 98a5299b9` — changed lines clean
+  (1032 existing warnings outside changes).
+- `cargo test -p gyre-server --lib auth::` — 44 passed, 0 failed, including
+  all JWT tenant-resolution tests
+  (`jwt_tenant_id_extracted_from_claim`,
+  `jwt_missing_tenant_id_defaults_to_default`,
+  `jwt_system_tenant_allowed_for_admin`/
+  `jwt_system_tenant_rejected_for_non_admin`,
+  `jwt_invalid_tenant_id_chars_rejected`, `minted_jwt_carries_unique_jti`).
+- Full workspace suites, all-target clippy, and CI are owned by the
+  verification stage.
+
+### Test evidence for the product commit (task-103 lineage)
+
+Focused runs on the product round's checkout, all exit 0:
 
 - `cargo test -p gyre-domain --lib audit` — 8 passed, including
   `audit_event_type_round_trip` covering all 7 new variants.
@@ -144,12 +186,16 @@ Focused runs on this round's checkout, all exit 0:
   `auth::minted_jwt_carries_unique_jti`, and
   `siem::tests::cef_agent_lifecycle_severities`.
 - Full workspace suites, all-target clippy, and CI are owned by the
-  verification stage; evidence for this round retained at
-  `/tmp/stage/review-evidence/task-103-verification-repair.txt`.
+  verification stage.
 
-### Verification-repair evidence (this round)
+### Prior verification-repair round (task-103 lineage)
 
-All on this round's checkout, exit 0:
+Verification finding `2b5e29b31c5f482d9b530bdc8b37c611` (rustfmt
+changed-lines violations in the task's sources plus a
+`clippy::needless_borrow` at the `emit_spawned` call site) was repaired in
+commit `ad99cb8c9` — formatting only plus one borrow fix (`&state` →
+`state` in `spawn_agent_core`); no behavior change. All checks exit 0 on
+that round's checkout:
 
 - `python3 scripts/check-rustfmt-diff.py 72ad2a128...` -- "changed lines
   clean (9 Rust files checked)".
