@@ -352,6 +352,28 @@ describe('Briefing S4.3', () => {
         );
       });
     });
+
+    it('includes repo_id in the ask body when scoped to a repo', async () => {
+      const { api } = await import('../lib/api.js');
+      const mockResponse = new Response('data: {"type":"complete","text":"42"}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      api.briefingAsk.mockResolvedValue(mockResponse);
+
+      render(Briefing, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      await waitFor(() => screen.getByTestId('briefing-chat'));
+
+      const input = screen.getByRole('textbox');
+      await fireEvent.input(input, { target: { value: 'What happened in this repo?' } });
+      await fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      await waitFor(() => {
+        expect(api.briefingAsk).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ question: 'What happened in this repo?', repo_id: 'repo-1' })
+        );
+      });
+    });
   });
 
   describe('Mock/fallback data', () => {
@@ -375,6 +397,32 @@ describe('Briefing S4.3', () => {
       await waitFor(() => {
         expect(screen.getByText('All caught up')).toBeTruthy();
       });
+    });
+  });
+
+  // HSI §1.5 repo-scope Briefing row: same endpoint with ?repo_id= narrowing
+  // every section to the repo. Fails when the repo scope stops passing repo_id
+  // (falls back to the pre-fix empty state) or fetches workspace-wide data.
+  describe('Repo scope (?repo_id= filter, HSI §1.5)', () => {
+    it('fetches the briefing with repo_id when scoped to a repo', async () => {
+      const { api } = await import('../lib/api.js');
+      render(Briefing, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      await waitFor(() => expect(api.getWorkspaceBriefing).toHaveBeenCalled());
+      expect(api.getWorkspaceBriefing).toHaveBeenCalledWith('ws-1', null, 'repo-1');
+    });
+
+    it('renders repo-scoped sections from the filtered briefing', async () => {
+      const { api } = await import('../lib/api.js');
+      render(Briefing, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      await waitFor(() => screen.getByTestId('section-completed'));
+      expect(screen.getByText('Payment retry logic')).toBeTruthy();
+    });
+
+    it('does not fetch a briefing at repo scope without a repo id', async () => {
+      const { api } = await import('../lib/api.js');
+      render(Briefing, { props: { workspaceId: 'ws-1', scope: 'repo' } });
+      await waitFor(() => screen.getByText('All caught up'));
+      expect(api.getWorkspaceBriefing).not.toHaveBeenCalled();
     });
   });
 
