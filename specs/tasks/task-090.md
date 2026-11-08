@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
-commits: ["818eb1c94934ec63e911cfecb43bbf7379aa73cd", "f51574568c6c3ebdd025d42892ddb27a423129eb", "7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee"]
+commits: ["47fca19981be89efbc6dc8ddf687f6dcf9a7f86f", "00d6497aa6e3258482053be801849ed2e5dcdc3e", "f51574568c6c3ebdd025d42892ddb27a423129eb", "7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee"]
 ---
 
 ## Spec Excerpt
@@ -146,10 +146,11 @@ lens selection. The candidate is merged with the task-086 liveness base
   decorations, URL param read/write.
 - `web/src/__tests__/ExplorerCanvas.test.js` — lens component tests
   within the suite: evaluative legend entries, coverage badge drawn green
-  at 85% (and NOT in structural lens), gate edge/ring colors (differential
-  red/green stroke assertions), approval icons ✓/⏳/✗ (and absent in
-  structural lens), and lens switching preserves node label positions
-  exactly (no re-layout).
+  at 85% (and NOT in structural lens), gate edge/ring colors, a
+  differential EDGE-stroke test isolating the per-spec gate edge coloring
+  by path geometry (arrows vs roundRect rings — see the repair note below),
+  approval icons ✓/⏳/✗ (and absent in structural lens), and lens switching
+  preserves node label positions exactly (no re-layout).
 - `web/src/__tests__/ExplorerCanvasLiveness.test.js` +
   `ExplorerViewLivenessWiring.test.js` (task-086) still pass unchanged:
   the record-aggregate gate edges, legend entries, and the ≤10
@@ -163,11 +164,12 @@ lens selection. The candidate is merged with the task-086 liveness base
   (fails if the evaluative loader regresses to `repo_id` or is dropped).
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
-- Full `npm test` in `web/` on the resolved head: 78 files, 1845 passed /
-  41 skipped (exit 0); focused 6-suite run (ExplorerCanvas,
+- Full `npm test` in `web/` on the repaired head (after the base-72ad2a128
+  merge and review repair 2): 80 files, 1865 passed / 41 skipped (exit 0);
+  focused 6-suite run (ExplorerCanvas,
   ExplorerCanvasLiveness, ExplorerViewLensUrl, ExplorerViewLivenessWiring,
-  lens-rendering, liveness): 236/236 passed (exit 0). Logs under
-  /tmp/stage/review-evidence.
+  lens-rendering, liveness): 237/237 passed (exit 0, incl. the new
+  differential edge-stroke test). Logs under /tmp/stage/review-evidence.
 
 ### Review repair: unresolved merge conflicts with the task-086 base
 
@@ -176,8 +178,9 @@ that pipeline checkpoint 8adb4b914 merged base 2100127c4 (task-086
 liveness indicators) with literal conflict markers committed in
 ExplorerCanvas.svelte and ExplorerView.svelte — both files failed to
 compile and every Explorer suite was dead. Fixed in product-surface
-commit `818eb1c94934ec63e911cfecb43bbf7379aa73cd` by resolving all
-seven blocks so both feature sets coexist (details under "Shipped
+commit `47fca19981be89efbc6dc8ddf687f6dcf9a7f86f` (originally
+818eb1c9; the SHA changed in the review-repair-2 subject rewrite below,
+same tree) by resolving all seven blocks so both feature sets coexist (details under "Shipped
 behavior" above). Two reconciliations were forced by genuinely
 overlapping contracts:
 
@@ -199,3 +202,44 @@ overlapping contracts:
   a3ad5d028).
 
 Acceptance criteria left unchecked for independent review.
+
+### Review repair 2: commit-subject task label + missing edge-coloring differential test
+
+The review round (repair id `0fbe07ef9f9c4af9801fd82f3ef2a665`) found
+ two findings on the candidate:
+
+- **CI invariant (process)**: `scripts/check-task-commit-attribution.sh`
+  exited 1 because product-surface commit 818eb1c9's subject ('fix(task-090):
+  resolve rebase conflicts with task-086 liveness code') referenced bare
+  `task-086`, and 818eb1c9 is recorded only in task-090's frontmatter.
+  Fixed by rewriting the commit subject to 'fix(task-090): resolve rebase
+  conflicts with the liveness-indicators base' (commit body, which explains
+  the task-086 reconciliation in detail, is unchanged — the check scans
+  subjects only). The history rewrite preserved topology exactly: the
+  amended commit is `47fca19981be89efbc6dc8ddf687f6dcf9a7f86f`, the two
+  process commits were cherry-picked, and the merge with base 72ad2a128
+  was recreated via `git commit-tree` with the identical tree
+  (d94b2e9666bf82b40845590a92991de1c044b46b). The frontmatter now records
+  the rewritten SHA.
+- **Test (mutation-surviving coverage)**: the per-spec gate edge coloring
+  had no test that fails when it is removed — the reviewer's mutation
+  probe (`if (false && lens === 'evaluative')` on the drawEdges
+  gateStatusByNodeId block) left all 198 tests green because the
+  nominally covering test was satisfied by the node ring's stroke colors
+  alone (rings and edges share the gate greens/reds, and the assertions
+  were mere stroke-color membership). Root cause of the invisibility: the
+  LENS_NODES fixture never renders its governed_by edge at all — the
+  spec node's tree-group is below the 450px leaf-visibility threshold at
+  fit zoom, so the edge is opacity-culled in drawEdges. Fixed in commit
+  `00d6497aa6e3258482053be801849ed2e5dcdc3e`: a new test captures EDGE
+  strokes only, discriminated by path geometry (drawArrow shafts are
+  single-lineTo no-curve paths; rings/borders go through roundRect with
+  quadraticCurveTo segments), on a fixture shaped like the liveness
+  gate-edge tests (single qualified-name tree so leaves and edges render
+  at fit zoom). It asserts the edge leaving the governed node turns
+  red on fail / green on pass while the edge leaving an ungoverned node
+  keeps its structural color. Verified: passes on real code (158/158 in
+  ExplorerCanvas.test.js) and FAILS under the reviewer's exact mutation
+  (1 failed/157 passed). Evidence:
+  /tmp/stage/review-evidence/r17-edge-coloring-test.txt,
+  r17-mutation-edge-coloring-disabled.txt, r17-focused-suites.txt.
