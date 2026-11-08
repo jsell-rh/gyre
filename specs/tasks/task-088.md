@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Default Views (Automatic, No LLM)"
-commits: ["d4e72e32cd9fad766a2c54973b04d631ab179a3f", "2620dd8cf17dcfd2fde2972b76f345dd77116b58", "8407bd1cfe42fc1ab324cb7bffd8275bce4c5acd", "1a50c2276ef6c6c7a6e5e4ec092c112fa7703e45", "8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15"]
+commits: ["d4e72e32cd9fad766a2c54973b04d631ab179a3f", "2620dd8cf17dcfd2fde2972b76f345dd77116b58", "8407bd1cfe42fc1ab324cb7bffd8275bce4c5acd", "1a50c2276ef6c6c7a6e5e4ec092c112fa7703e45", "8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15", "dc05394343a5792d65b2c8a0c4be56e3e6107e6f"]
 ---
 
 ## Spec Excerpt
@@ -206,41 +206,44 @@ tablist at repo scope.
   ExplorerCanvasDrillDown, last-seen, ChangeView, SpecRealizationView,
   SystemTraceView, Briefing, AppShell) — 154 passed.
 
-### CI repair — explorer visual baselines (run 42455312769)
+### Visual baseline repairs (explorer-visual E2E)
 
-The 11 E2E explorer-visual regressions at candidate head 61e430cbf were
-baseline drift, not a rendering defect: the spec-required view selector
-tablist makes the concept search bar 2px taller, so `.treemap-canvas-area`
-renders 2px shorter (919x397 → 919x395, 579x335 → 579x333, 579x298 →
-579x296) and the size mismatch is a hard `toHaveScreenshot` failure.
-Commit 8407bd1cf replaced the 11 affected baselines with the CI run's own
-actual screenshots (authoritative gate-environment rendering; same repair
-as task-083 c69d9fd54). No test logic, locator, or tolerance change; the
-toolbar, blast-radius-tiered and full-page baselines are untouched.
+Three rounds of baseline drift, all caused by toolbar rows the spec
+requires — never a rendering defect — and all repaired the same way:
+regenerate the affected baselines against the current merged UI, change
+no test logic, locator, or tolerance, and prove the new baselines pin the
+toolbar with a mutation probe.
 
-Local verification: reproduced the exact CI failure set (11 failed, all
-2px size mismatch); local rendering is pixel-identical to the CI actuals
-for zoom-level-0 and within 0.20%–1.28% differing pixels for the rest
-(gate tolerance 2%); full explorer-visual suite 15/15 passed against the
-new baselines; mutation probe — building a dist with the
-`explorer-view-tabs` block removed fails zoom_level_0 (919x395 expected vs
-919x397 received), so the baselines genuinely pin the new toolbar.
-Evidence retained under the attempt's review-evidence directory.
+1. **8407bd1cf (CI run 42455312769):** the HSI §3 view-selector tablist
+   makes the concept search bar 2px taller, so `.treemap-canvas-area`
+   renders 2px shorter (919x397 → 919x395, 579x335 → 579x333). The 11
+   affected baselines were replaced with the CI run's own actual
+   screenshots. Post-update suite: 15/15 passed.
+2. **d4e72e32 (after the task-083 merge):** the Graph|Briefing arch
+   sub-tabs row re-drifted the same 11 baselines by a further 34px
+   vertical offset (919x395 → 919x361, 579x333 → 579x299). Regenerated
+   locally against the merged UI; suite 15/15 passed; mutation probe —
+   hiding the view-selector tablist fails zoom_level_0 (919x361 expected
+   vs 919x363 received).
+3. **dc0539434 (final base merge 755da0096, review 969dec59):** the merge
+   imported task-080's filter-preset visual tests whose 919x363 baselines
+   predate both toolbar rows and were never regenerated. Reproduced at
+   candidate head a517589f2 with a fresh web build:
+   `filter_preset_buttons_show_correct_subsets` failed with a hard size
+   mismatch (expected 919x363, received 919x361, deterministic across
+   runs — the exact review finding). Both filter-preset baselines
+   regenerated to 919x361, consistent with the other 14 canvas
+   baselines. Post-update full explorer-visual suite at the merged head:
+   **16 passed**. Mutation probe: hiding the `explorer-view-tabs` tablist
+   fails the new baselines with the exact inverse mismatch (919x361
+   expected, 919x363 received), so they genuinely pin the merged toolbar.
+   Evidence retained under the attempt's review-evidence directory.
 
-### Baseline regeneration after the task-083 merge
-
-The task-083 merge re-drifted the same 11 baselines: the repo-scope header
-now also carries the Graph|Briefing arch sub-tabs row, so
-`.treemap-canvas-area` renders 34px shorter (919x395 → 919x361, 579x333 →
-579x299, 579x296 → 579x262, 579x466 → 579x432 — same widths, pure vertical
-offset; local run at merge head, 11 failed / 4 passed, every failure a
-uniform size mismatch). Commit d4e72e32 regenerated the 11 baselines
-locally against the merged UI (forced-font fixtures; server built from
-merged sources). Post-update full explorer-visual suite: 15/15 passed.
-Mutation probe repeated at the merged head: hiding the view-selector
-tablist fails zoom_level_0 (919x361 expected vs 919x363 received), so the
-regenerated baselines pin the merged toolbar with both tablists. The
-toolbar, blast-radius-tiered and full-page baselines are unchanged.
+   Operational note for local runs: the committed `web/dist` at the
+   merged head renders the pre-merge toolbar (it predates the merge's
+   web/src changes), so explorer-visual must run against a fresh
+   `npm run build` — exactly what CI does at the exact head. `web/dist`
+   is executor-owned and was not part of the repair commit.
 
 ### Verification repair — commit attribution (d4e72e32)
 
