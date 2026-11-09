@@ -151,6 +151,41 @@ the merged head (42 passed / 0 failed), the touched-crate suites re-ran green
 task-155 attribution omission (27bd585c missing from its frontmatter,
 reproduced at base) was repaired per the gate's prescribed remediation.
 
+Base fefde294 merge round (branch head 44b69b651, commits 9beb1481b +
+10d235004): the rebase repair auto-merged everything except a comment-only
+conflict in `api/spawn.rs` (resolved keeping the detailed wording). Two real
+merge defects found and fixed:
+
+- **Duplicate Diesel migration version `20261008000057`**: base fefde294
+  ships `2026-10-08-000057_spec_approval_attestation`, and
+  alphabetically-first-wins means the task's `task_generation` migration was
+  silently dropped — the `generation` column would never exist on fresh
+  databases. Renumbered to the next unused sequence
+  `2026-10-08-000059_task_generation`; `check-migration-versions.sh` and
+  `check-migration-sql-portability.sh` exit 0.
+- **Test-fixture field drift**: the task's fixtures in `constraint_check.rs`
+  construct `MergeRequest` and `SpecApprovalEvent` with struct literals;
+  the base added `merge_commit_sha` and `attestation_level`/`stack_hash`
+  fields, breaking compilation of the lib test target. Initialized the new
+  fields to `None` (fixture-external, no behavioral change).
+
+Post-merge verification on head 10d235004: full `cargo test -p gyre-server
+--lib` → 1493 passed / 0 failed; `cargo test -p gyre-adapters` → 383 passed
+/ 12 ignored / 0 failed; focused filter (`constraint_check admin_reassign
+update_task_api reassign`) → 43 passed / 0 failed, including all five
+context-binding tests (`enforce_push_rejects_repo_id_mismatch`,
+`enforce_merge_rejects_workspace_id_mismatch`,
+`enforce_push_rejects_stale_generation`, `enforce_push_rejects_spec_sha_mismatch`,
+`verify_context_binding_unit_matrix`) and both generation-bump tests. All
+21 mechanical gates (`check-arch.sh` and the full scripts/ set listed above
+plus `check-unbounded-external-http`, `check-forged-scope-fields`,
+`check-byte-slice-truncation`, `check-dead-message-kinds`,
+`check-abac-route-registry`, `check-abac-exempt-handlers`,
+`check-mcp-write-tools`) exit 0. The implementation (verify_context_binding,
+constraint_check wiring, Task.generation persistence and bump paths) is
+unchanged by this round — only the migration directory name, two test
+fixtures, and the spawn.rs comment were touched.
+
 Scope note: the spec-approval signing endpoint (`api/specs.rs:610`) still
 creates SignedInputs with `expected_generation: None` — the signer-side pin
 is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
