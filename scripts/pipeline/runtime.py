@@ -20,11 +20,15 @@ def observe(store, force=False):
             sandboxes=None
             pending=list(store.db.execute("SELECT * FROM resources WHERE kind='sandbox' AND state='deleting'"))
             if pending:
-                value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,
-                                      'get','sandboxes.agents.x-k8s.io','-o','json'],capture_output=True,text=True,timeout=10,check=True)
-                listing=json.loads(value.stdout)
-                if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete sandbox inventory')
-                sandboxes={item['metadata']['name']:item for item in listing['items']}
+                try:
+                    value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,
+                                          'get','sandboxes.agents.x-k8s.io','-o','json'],capture_output=True,text=True,timeout=10,check=True)
+                    listing=json.loads(value.stdout)
+                    if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete sandbox inventory')
+                    sandboxes={item['metadata']['name']:item for item in listing['items']}
+                except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as exc:
+                    # Capacity diagnostics must not suppress existing OOM evidence.
+                    store.set_setting('runtime_observer_error',{'kind':type(exc).__name__,'at':time.time()})
             value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,'get','pods','-o','json'],capture_output=True,text=True,timeout=10,check=True)
             listing=json.loads(value.stdout)
             if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete pod inventory')

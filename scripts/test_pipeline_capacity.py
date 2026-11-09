@@ -112,6 +112,19 @@ class CapacityTests(unittest.TestCase):
         data=json.loads(self.store.db.execute("SELECT data FROM resources WHERE name='old-pod'").fetchone()[0])
         self.assertNotIn('compute_observation',data)
 
+    def test_failed_sandbox_inventory_does_not_hide_other_workers_oom_evidence(self):
+        self.store.db.execute("INSERT INTO resources VALUES(?,?,?,?,?,?,?)",('live',self.work,1,'sandbox','present','{}',time.time()))
+        pod={'metadata':{'name':'live','uid':'pod-uid','labels':{'openshell.ai/boundary-role':'workload'}},
+             'spec':{'containers':[{'resources':{'limits':{'memory':'4Gi'}}}]},
+             'status':{'containerStatuses':[{'state':{'terminated':{'reason':'OOMKilled','exitCode':137}}}]}}
+        def kube(args,**kwargs):
+            if 'sandboxes.agents.x-k8s.io' in args:raise subprocess.CalledProcessError(1,'kubectl')
+            return SimpleNamespace(stdout=json.dumps({'items':[pod]}))
+        with patch('pipeline.runtime.subprocess.run',side_effect=kube):observe(self.store,force=True)
+        self.assertEqual(self.store.compute_used(),2)
+        data=json.loads(self.store.db.execute("SELECT data FROM resources WHERE name='live'").fetchone()[0])
+        self.assertEqual(data['runtime']['reason'],'OOMKilled')
+
     def test_verification_reserve_uses_same_occupancy_accounting(self):
         self.store.set_setting('slots',2)
         self.assertFalse(self.store.admission_available('implement'))
