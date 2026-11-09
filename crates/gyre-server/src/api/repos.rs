@@ -308,6 +308,11 @@ pub async fn archive_repo(
             // not heartbeat expiration (agent-runtime.md §1 AgentStatus enum).
             let _ = agent.transition_status(AgentStatus::Stopped);
             state.agents.update(&agent).await?;
+
+            // Platform Model §7: the agent's task was just cancelled — its
+            // one-time task-scoped secrets must not outlive the task.
+            // Revocation is teardown (logs `secret.revoked` per secret).
+            crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
         }
     }
 
