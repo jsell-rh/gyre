@@ -51,3 +51,19 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 116 (2026-11-09) — candidate re-clobbers attribution; product surface verified clean
+
+Assignment: base `4118553f`, candidate `6c5a89f55` ("process: record task-208 branch commits", this attempt's executor checkpoint pass output). Evidence: `/tmp/stage/review-evidence/r116/`.
+
+**Finding (blocking, the 103rd recurrence of the rounds 2–115 clobber class):** the candidate commit itself rewrites `commits:` from six SHAs to five, dropping `ea006d52` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes`, +4). Verified: `ea006d52` is an ancestor of the candidate (exit 0) and not of the assigned base (exit 1), i.e. task-208-labeled branch product surface invisible to review scoping while unlisted — violating the AGENTS.md attribution invariant and contradicting the task's own Shipped record (six SHAs, restored at `e460c56f5` in round 115, re-clobbered here). Root cause re-confirmed: the executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) is again the pre-fix version; diff vs the fixed in-repo `scripts/dev-attribution.py` (sha256 `c23f2505…`) is exactly the missing `path == ".gitattributes" or` line, so the checkpoint pass recomputes the five-SHA list. The fixed in-repo pass computes the six-SHA list (`e7c21825, aecd6847, a11cbf7e, ea006d52, ad1121c5, 98fd096e`; dry run verified, working tree restored afterwards). Durable fix must land wherever `/tmp/stage` is populated from (process owner).
+
+**Product surface — independently verified PASS at the candidate (focused probes):**
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches (exit 1). No route or ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` — the only `crates/` URI references are the 404 regression test's own literals (`users.rs:996-998`); i18n keys clean.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (1/1, exit 0) — real in-process router test asserting 404 on all three URIs.
+- `web/`: `npm ci` (exit 0) + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed (exit 0), including the exact-six-tab guard (`[role="tab"]` data-id list = info, tokens, memberships, ledger, notif-prefs, notifications; forbidden-list assertion).
+- Spec amendment in place (user-management.md §"My Stuff" Views records the ui-navigation.md §2 + HSI §12 supersession with the per-user-needs→workspace-home mapping; M22.8 row struck to Removed at line 652); coverage user-management row 22 `n/a` with supersession note, row 23 `task-assigned` task-114; HSI row 54 `implemented`.
+- Remaining `users/me/*` endpoints keep the per-handler-auth ABAC-exempt model unchanged (`api/mod.rs:802-819`; exemption-file entries pre-existing); `e2e-flow.sh` now asserts 404 on the removed URIs; `docs/api-reference.md` rows deleted.
+- The branch-tip committed dist bundle (`index-QXRGsaeH.js`, task-090's restore-to-base output) still contains the my-stuff URIs — the standing executor-flow situation documented since round 39: the candidate diff does not touch `web/dist/`, and final integration rebuilds and publishes dist remotely from the merged clean `web/src`. Not a candidate-introduced defect; recorded for the verifier.
+
+Verdict: **not approved** — sole finding is the attribution clobber carried by the candidate commit itself; all product-surface acceptance criteria hold. The verifier must still run `cargo test --all` and `cd web && npm test`.
