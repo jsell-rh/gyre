@@ -19,6 +19,14 @@ pub enum AuditEventType {
     // observability.md §Audit Event Types)
     ImpersonationStarted,
     ImpersonationEnded,
+    // Agent lifecycle events (observability.md §Audit Event Types)
+    AgentSpawned,
+    AgentCompleted,
+    AgentKilled,
+    AgentDead,
+    AgentHeartbeat,
+    AgentTokenRevoked,
+    AgentReassigned,
     Custom(String),
 }
 
@@ -36,6 +44,13 @@ impl AuditEventType {
             Self::ContainerNetworkBlocked => "container_network_blocked".to_string(),
             Self::ImpersonationStarted => "impersonation_started".to_string(),
             Self::ImpersonationEnded => "impersonation_ended".to_string(),
+            Self::AgentSpawned => "agent_spawned".to_string(),
+            Self::AgentCompleted => "agent_completed".to_string(),
+            Self::AgentKilled => "agent_killed".to_string(),
+            Self::AgentDead => "agent_dead".to_string(),
+            Self::AgentHeartbeat => "agent_heartbeat".to_string(),
+            Self::AgentTokenRevoked => "agent_token_revoked".to_string(),
+            Self::AgentReassigned => "agent_reassigned".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -54,6 +69,13 @@ impl AuditEventType {
             "container_network_blocked" => Self::ContainerNetworkBlocked,
             "impersonation_started" => Self::ImpersonationStarted,
             "impersonation_ended" => Self::ImpersonationEnded,
+            "agent_spawned" => Self::AgentSpawned,
+            "agent_completed" => Self::AgentCompleted,
+            "agent_killed" => Self::AgentKilled,
+            "agent_dead" => Self::AgentDead,
+            "agent_heartbeat" => Self::AgentHeartbeat,
+            "agent_token_revoked" => Self::AgentTokenRevoked,
+            "agent_reassigned" => Self::AgentReassigned,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -169,6 +191,13 @@ mod tests {
             AuditEventType::ContainerNetworkBlocked,
             AuditEventType::ImpersonationStarted,
             AuditEventType::ImpersonationEnded,
+            AuditEventType::AgentSpawned,
+            AuditEventType::AgentCompleted,
+            AuditEventType::AgentKilled,
+            AuditEventType::AgentDead,
+            AuditEventType::AgentHeartbeat,
+            AuditEventType::AgentTokenRevoked,
+            AuditEventType::AgentReassigned,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {

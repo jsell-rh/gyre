@@ -68,6 +68,8 @@ pub enum NotificationType {
     /// Priority 1 — an admin began impersonating this user
     /// (identity-security.md §Impersonation).
     ImpersonationAlert,
+    /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
+    SecretExpiring,
 }
 
 impl NotificationType {
@@ -98,6 +100,7 @@ impl NotificationType {
             Self::MergeQueueEscalation => "MergeQueueEscalation",
             Self::ImpersonationRequest => "ImpersonationRequest",
             Self::ImpersonationAlert => "ImpersonationAlert",
+            Self::SecretExpiring => "SecretExpiring",
         }
     }
 
@@ -128,6 +131,7 @@ impl NotificationType {
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
             "ImpersonationRequest" => Some(Self::ImpersonationRequest),
             "ImpersonationAlert" => Some(Self::ImpersonationAlert),
+            "SecretExpiring" => Some(Self::SecretExpiring),
             _ => None,
         }
     }
@@ -159,6 +163,7 @@ impl NotificationType {
             Self::MergeQueueEscalation => 1,
             Self::ImpersonationRequest => 2,
             Self::ImpersonationAlert => 1,
+            Self::SecretExpiring => 7,
         }
     }
 }
@@ -244,6 +249,7 @@ mod tests {
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
         assert_eq!(NotificationType::MrReverted.default_priority(), 2);
         assert_eq!(NotificationType::MergeQueueEscalation.default_priority(), 1);
+        assert_eq!(NotificationType::SecretExpiring.default_priority(), 7);
     }
 
     #[test]
@@ -271,6 +277,7 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MrReverted,
             NotificationType::MergeQueueEscalation,
+            NotificationType::SecretExpiring,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
