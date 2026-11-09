@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2", "95fdd661d"]
 ---
 
 ## Spec Excerpt
@@ -200,25 +200,55 @@ Repaired the three round-1 review findings:
   `specs/coverage/system/abac-policy-engine.md` flipped to `implemented`
   with evidence notes; SUMMARY.md regenerated.
 
-### Test evidence (run at head d779f1e89)
+### Test evidence (run at merge head 95fdd661d, after the rebase repair)
 
 - Mutation probes (transcripts under `/tmp/stage/review-evidence/`):
   removing the repos-prefix guard fails 2 of the 3 new middleware tests;
   removing child-param precedence as well (full round-1 behavior) fails all
   3; the fail-open `resolve_dynamic_value` mutant is killed by the new
   policy-engine killing case (previously survived the entire suite).
-- `cargo test -p gyre-server --lib` — **1481 passed / 0 failed** (includes
-  `abac_middleware` 28, `policy_engine` 34; the five §Policy Example tests,
+- `cargo test -p gyre-server --lib` — **1513 passed / 0 failed** (includes
+  `abac_middleware` 28, `policy_engine` 34, `auth` incl. the base's
+  `minted_jwt_carries_unique_jti`; the five §Policy Example tests,
   the membership/entity-lookup attribute tests, and the three new
   round-1 tests run end-to-end through live tower oneshot requests with
   non-vacuous controls).
 - `cargo test -p gyre-domain -p gyre-common -p gyre-ports -p gyre-adapters
   --lib` — 116 + 436 + 8 + 387 passed / 0 failed / 12 ignored.
-- All repo invariant scripts pass at this head, including
-  `check-abac-route-registry` (duplicate count 17 = frozen baseline),
-  `check-arch`, `check-task-commit-attribution`, `check-mem-port-contracts`,
-  and the security-pattern checks; repo-wide conflict-marker scan clean
-  (the single grep hit is a quoted command in a task doc).
+- All mechanically-enforced repo invariant scripts pass at this head,
+  including `check-abac-route-registry` (duplicate count 17 = frozen
+  baseline), `check-arch`, `check-task-commit-attribution`,
+  `check-mem-port-contracts`, `check-fabricated-scope-defaults`
+  (3 entries = frozen count after taking the base's task-103 fix), and
+  the security-pattern checks. The additional heuristic checks that
+  fail here fail identically at both merge parents (verified in
+  worktrees at fefde294 and 97c78554c) — pre-existing on both sides,
+  several via mawk-vs-gawk awk syntax errors in this sandbox — none
+  introduced by the merge. Repo-wide conflict-marker scan clean.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
 verification/publication gates.
+
+### Rebase-repair round (merge commit 95fdd661d)
+
+Merged base fefde294 (task-089 Explorer Generated Views + task-103
+secrets lineage) into the branch and resolved the semantic fallout:
+
+- `scripts/fabricated-scope-defaults-exemptions.txt` (the one textual
+  conflict): took the base side — the auth.rs JWT `claims.tenant_id`
+  fallback site the branch still exempted was fixed in task-103's repair
+  round (the "absent claim = default tenant" contract is now the serde
+  schema default `default_tenant_claim` on `JwtClaims`, and "default" is
+  the real bootstrapped Tenant row), so the stale entry is removed;
+  the file matches `FROZEN_EXEMPTION_COUNT=3` and
+  `check-fabricated-scope-defaults.sh` passes.
+- `auth.rs` (semantic conflict the auto-merge missed): task-128's
+  `mint_scoped` (worker repo-scope ABAC attributes) constructs
+  `AgentJwtClaims`, which the base extended with a `jti` field;
+  `mint_scoped` now sets `jti: uuid::Uuid::new_v4()` per mint, matching
+  `mint`/`mint_orchestrator` and the `minted_jwt_carries_unique_jti`
+  contract. Caught by `cargo build`, fixed, full focused suites re-run
+  green.
+- All auto-merged task-128 surfaces (`abac_middleware.rs`, `spawn.rs`,
+  `mcp.rs`, `mem.rs`, `stale_agents.rs`) compile and pass their tests
+  unchanged; no task-128 behavior was altered by the merge.
