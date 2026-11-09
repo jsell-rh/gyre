@@ -736,6 +736,20 @@ pub(crate) async fn spawn_agent_core(
                 {
                     Ok(resolved) => {
                         for (name, value) in resolved {
+                            // Platform Model §7 audit event: secret.accessed
+                            // at spawn time — secret name (never value), the
+                            // agent's resolution scope, and agent_id.
+                            tracing::info!(
+                                event = "secret.accessed",
+                                agent_id = %agent.id,
+                                task_id = %req.task_id,
+                                repo_id = %req.repo_id,
+                                workspace_id = %repo.workspace_id,
+                                tenant_id = %tenant_id,
+                                secret_name = %name,
+                                scope = "tenant>workspace>repo>task",
+                                "secret.accessed: secret resolved for agent spawn (GYRE_CRED_* injection)"
+                            );
                             // Env vars must be UTF-8. Skip (and name, never
                             // log) non-UTF-8 values rather than corrupting
                             // them with replacement chars — same availability
