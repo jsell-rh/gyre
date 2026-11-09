@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a"]
 ---
 
 ## Spec Excerpt
@@ -150,3 +150,14 @@ Both findings from the review round at 152e67033 are fixed:
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
 clean. Evidence recorded under /tmp/stage/review-evidence.
+
+### Review repair (finding e7aa777ea)
+
+Candidate head cea3f23b4 had dropped merge commit 9e5a0171d from the
+`commits:` frontmatter, regressing the 73a69995 process repair (frontmatter
+at 086b140f8 listed it; cea3f23b4 did not). 9e5a0171d is re-listed in
+`commits:` above at head, so the main.rs import-conflict resolution is
+again inside review scoping and the Shipped merge-repair and 73a69995
+notes are accurate. No production code changed in this round; the task's
+production state is unchanged from the 73a69995 repair (1494/0 focused
+suite evidence above).
