@@ -59,3 +59,72 @@ All 3 R2 findings were addressed by commit `f5159b14`:
 - All mechanical checks pass: mirrored-logic-tests-js, tautological-assertions-js, dead-test-variables-js, comparative-test-claims-js, aspirational-test-names, dead-components (4 pre-existing, none from TASK-053), conditional-test-guards, dead-test-code, noop-callbacks.
 - Pre-existing test failures in `ExplorerViewAskViewSpec.test.js` (Vite parse error on large ExplorerView.svelte) and `MoldableViewNodeTypeFilter.test.js` are unrelated to TASK-053.
 - Acceptance criteria verified: viewport culling, LOD text reduction, edge bundling, responsive CSS breakpoints, chat collapse/expand, matchMedia viewport sync, touch gestures, timing regression guards.
+
+## R4 — needs-revision, 5 findings (mutation analysis)
+
+Independent mutation analysis of the candidate (`46946da1c`) contradicted
+the R3 closure: every Part A mechanism could be individually disabled with
+the full 15-test performance suite still passing.
+
+### Findings
+
+- **F9: Culling tests insensitive.** All 15 tests passed with `isVisible()`
+  mutated to `return true`; draw output at the initial auto-fit camera was
+  byte-identical because the whole 10k graph is on screen at fit zoom. No
+  test ever set a zoomed-in or panned camera.
+- **F10: LOD tests insensitive.** Tests passed with the leaf label guard
+  forced to `if (true)` AND the semantic-zoom gates removed (fillText=596
+  in both pristine and mutated runs — at auto-fit, leaves are drawn via
+  summary tree-groups, not the LOD-guarded path).
+- **F11: Edge-bundling test insensitive.** `moveTo < edges.length` passed
+  with bundling disabled because the capped individual renderer (maxEdges
+  1500) also stays far below 20k.
+- **F12: No interaction coverage.** No test simulated wheel, drag, or pinch;
+  touch handlers had zero coverage.
+- **F13: Process.** The previous assignment's Shipped notes (and the R3
+closure above) claimed test-verification the mutation analysis disproved.
+Part B responsive claims were accurate — those tests are genuinely
+sensitive.
+
+### Resolution (commit `b1abc2225` on branch
+`pipeline/task-053/3c991d55b7764897984f7d72f5859360-1`)
+
+- Root cause of F9–F12: the synchronous rAF mock in the test file wedged
+  the component's redraw loop (`animFrame = requestAnimationFrame(animLoop)`
+  assigns a stale truthy id after the nested callback converges and nulls
+  it), so no camera interaction could ever produce a redraw. Replaced with
+  an rAF queue + `flushFrames()`; camera state is read back exactly from
+  the minimap viewport rectangle.
+- F9: new culling test renders a 4502-node graph, zooms deep (13 batched
+  wheel-ins), and asserts per-frame node draws stay ≤60. Under the
+  `return true` mutation it fails with 4502 fills per frame.
+- F10: new LOD test holds the camera in [0.3, 0.5) with containers open
+  (leaves drawn, fill ≥300) and asserts zero leaf labels, then zooms past
+  1.2 and asserts labels appear. Under the `if (true)` mutation it fails
+  with 3471 leaf labels. A separate semantic-zoom test (function vs type
+  leaves at identical geometry) fails with 3473 fills under gate removal.
+- F11: bundling is now asserted by its unique observable — the "N edges"
+  bundle count labels (individual rendering never produces them) — on both
+  the >5000-edge branch (zoom ≥ 0.5) and the low-zoom branch. Both fail
+  with 0 labels under `if (false)`.
+- F12: interaction tests added for wheel zoom-in (world point under cursor
+  preserved within 0.5 world units), wheel zoom-out, mouse-drag pan,
+  single-finger touch pan, and two-finger pinch. The pinch test exposed a
+  real production bug: the midpoint correction was computed via
+  `screenToWorld()` reading the lagging display camera, making the
+  correction identically zero — pinch zoom anchored at the screen center.
+  Fixed against `targetCam` (same math as `applyZoomAtMouse`); the test
+  fails with 19.5 world units of drift when the anchor is removed.
+- F13: task Shipped notes rewritten; this R4 record supersedes the R3
+  closure claim of full test verification.
+
+### Verification Summary
+
+- `ExplorerCanvas-performance.test.js`: 19/19 pass pristine.
+- Mutation runs (logs in `/tmp/stage/review-evidence/task-053-r4/`):
+  isVisible→true FAIL, label-guard→true FAIL, semantic gates removed FAIL,
+  bundling→false FAIL (both branches), pinch anchor removed FAIL.
+- Explorer regression suite (8 files): 292/292 pass.
+- Mechanical checks pass: mirrored-logic-tests-js,
+  tautological-assertions-js, assertionless-tests,
+  task-commit-attribution.
