@@ -278,6 +278,10 @@ impl JudgmentLedgerRepository for PgStorage {
             // (spec_approvals has no workspace column). When a workspace
             // filter is set, entries with unknown workspace are excluded
             // (SQL `workspace_id = ?` drops NULLs on the left-joined side).
+            // The spec approval ledger derives status from which timestamp
+            // column is non-null and keeps them mutually exclusive: the
+            // judgment timestamp is whichever column fired. Pending entries
+            // (all NULL) match no timestamp comparison and drop out here.
             if want_approvals {
                 let mut query = spec_approvals::table
                     .left_join(
@@ -285,7 +289,12 @@ impl JudgmentLedgerRepository for PgStorage {
                             .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
                     )
                     .filter(spec_approvals::approver_id.eq(&approver))
-                    .filter(spec_approvals::approved_at.ge(since_i))
+                    .filter(
+                        spec_approvals::approved_at
+                            .ge(since_i)
+                            .or(spec_approvals::revoked_at.ge(since_i))
+                            .or(spec_approvals::rejected_at.ge(since_i)),
+                    )
                     .select((
                         spec_approvals::spec_path,
                         spec_approvals::approved_at,
@@ -301,7 +310,7 @@ impl JudgmentLedgerRepository for PgStorage {
                 }
                 let rows: Vec<(
                     String,
-                    i64,
+                    Option<i64>,
                     Option<i64>,
                     Option<String>,
                     Option<i64>,
@@ -321,7 +330,9 @@ impl JudgmentLedgerRepository for PgStorage {
                     wid,
                 ) in rows
                 {
-                    // revoked_at/rejected_at indicate a rejection.
+                    // revoked_at/rejected_at indicate a rejection; its
+                    // judgment timestamp is the withdrawal/decline time
+                    // (mutual exclusivity cleared approved_at).
                     let rejected = revoked_at.is_some() || rejected_at.is_some();
                     let jtype = if rejected {
                         JudgmentType::SpecRejection
@@ -336,11 +347,18 @@ impl JudgmentLedgerRepository for PgStorage {
                     } else {
                         None
                     };
+                    let judgment_ts = if rejected {
+                        rejected_at.or(revoked_at)
+                    } else {
+                        approved_at
+                    }
+                    .unwrap_or(0)
+                    .max(0) as u64;
                     entries.push(JudgmentEntry::new(
                         jtype,
                         path,
                         wid.map(Id::new),
-                        approved_at.max(0) as u64,
+                        judgment_ts,
                         detail,
                     ));
                 }

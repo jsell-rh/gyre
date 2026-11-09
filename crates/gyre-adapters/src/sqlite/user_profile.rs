@@ -278,6 +278,10 @@ impl JudgmentLedgerRepository for SqliteStorage {
             // (spec_approvals has no workspace column). When a workspace
             // filter is set, entries with unknown workspace are excluded
             // (SQL `workspace_id = ?` drops NULLs on the left-joined side).
+            // The spec approval ledger derives status from which timestamp
+            // column is non-null and keeps them mutually exclusive: the
+            // judgment timestamp is whichever column fired. Pending entries
+            // (all NULL) match no timestamp comparison and drop out here.
             if want_approvals {
                 let mut query = spec_approvals::table
                     .left_join(
@@ -285,7 +289,12 @@ impl JudgmentLedgerRepository for SqliteStorage {
                             .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
                     )
                     .filter(spec_approvals::approver_id.eq(&approver))
-                    .filter(spec_approvals::approved_at.ge(since_i))
+                    .filter(
+                        spec_approvals::approved_at
+                            .ge(since_i)
+                            .or(spec_approvals::revoked_at.ge(since_i))
+                            .or(spec_approvals::rejected_at.ge(since_i)),
+                    )
                     .select((
                         spec_approvals::spec_path,
                         spec_approvals::approved_at,
@@ -301,7 +310,7 @@ impl JudgmentLedgerRepository for SqliteStorage {
                 }
                 let rows: Vec<(
                     String,
-                    i64,
+                    Option<i64>,
                     Option<i64>,
                     Option<String>,
                     Option<i64>,
@@ -321,7 +330,9 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     wid,
                 ) in rows
                 {
-                    // revoked_at/rejected_at indicate a rejection.
+                    // revoked_at/rejected_at indicate a rejection; its
+                    // judgment timestamp is the withdrawal/decline time
+                    // (mutual exclusivity cleared approved_at).
                     let rejected = revoked_at.is_some() || rejected_at.is_some();
                     let jtype = if rejected {
                         JudgmentType::SpecRejection
@@ -336,11 +347,18 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     } else {
                         None
                     };
+                    let judgment_ts = if rejected {
+                        rejected_at.or(revoked_at)
+                    } else {
+                        approved_at
+                    }
+                    .unwrap_or(0)
+                    .max(0) as u64;
                     entries.push(JudgmentEntry::new(
                         jtype,
                         path,
                         wid.map(Id::new),
-                        approved_at.max(0) as u64,
+                        judgment_ts,
                         detail,
                     ));
                 }
@@ -613,29 +631,25 @@ mod tests {
         SpecLedgerRepository::save(s, &ledger_entry("specs/b.md", None))
             .await
             .unwrap();
-        SpecApprovalRepository::create(
-            s,
-            &SpecApproval::new(Id::new("ap1"), "specs/a.md", "sha1", "u1", 1000),
-        )
-        .await
-        .unwrap();
-        SpecApprovalRepository::create(
-            s,
-            &SpecApproval::new(Id::new("ap2"), "specs/b.md", "sha2", "u1", 1100),
-        )
-        .await
-        .unwrap();
-        // Rejection (rejected_at only) with workspace attribution.
-        let mut rej = SpecApproval::new(Id::new("ap3"), "specs/a.md", "sha1b", "u1", 1150);
-        rej.reject("not coherent", Id::new("u1"), 1160);
+        let mut ap1 = SpecApproval::new(Id::new("ap1"), "specs/a.md", "sha1", "u1");
+        ap1.approve(1000).unwrap();
+        SpecApprovalRepository::create(s, &ap1).await.unwrap();
+        let mut ap2 = SpecApproval::new(Id::new("ap2"), "specs/b.md", "sha2", "u1");
+        ap2.approve(1100).unwrap();
+        SpecApprovalRepository::create(s, &ap2).await.unwrap();
+        // Rejection (Pending → Rejected; mutual exclusivity clears
+        // approved_at, so the judgment timestamp is rejected_at).
+        let mut rej = SpecApproval::new(Id::new("ap3"), "specs/a.md", "sha1b", "u1");
+        rej.reject("u1", "not coherent", 1160).unwrap();
         SpecApprovalRepository::create(s, &rej).await.unwrap();
         // A foreign user's approval must never leak into u1's ledger.
-        SpecApprovalRepository::create(
-            s,
-            &SpecApproval::new(Id::new("ap9"), "specs/a.md", "sha9", "u9", 1190),
-        )
-        .await
-        .unwrap();
+        let mut ap9 = SpecApproval::new(Id::new("ap9"), "specs/a.md", "sha9", "u9");
+        ap9.approve(1190).unwrap();
+        SpecApprovalRepository::create(s, &ap9).await.unwrap();
+        // Pending approval (no timestamp column fired): carries no judgment
+        // yet — must NOT appear in the ledger.
+        let pending = SpecApproval::new(Id::new("ap4"), "specs/a.md", "sha4", "u1");
+        SpecApprovalRepository::create(s, &pending).await.unwrap();
         // Audit-carried judgments.
         AuditRepository::record(
             s,

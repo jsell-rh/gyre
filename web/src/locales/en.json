@@ -1028,7 +1028,17 @@
     "spec_editor_predicting": "Predicting graph impact…",
     "spec_editor_predict_error": "Prediction failed: {error}",
     "spec_editor_no_changes": "No structural changes predicted.",
-    "large_graph_warning": "Large graph ({count} nodes) — viewport culling and zoom-level detail are active; pan/zoom may be slower than usual."
+    "large_graph_warning": "Large graph ({count} nodes) — viewport culling and zoom-level detail are active; pan/zoom may be slower than usual.",
+    "layout_graph": "Graph",
+    "layout_hierarchical": "Hierarchical",
+    "layout_layered": "Layered",
+    "layout_list": "List",
+    "layout_timeline": "Timeline",
+    "layout_side_by_side": "Side by side",
+    "layout_diff": "Structural diff",
+    "layout_flow": "Flow",
+    "layout_active": "View layout: {layout}",
+    "layout_dismiss": "Return to the default graph canvas"
   },
   "detail_panel": {
     "title": "Title",
