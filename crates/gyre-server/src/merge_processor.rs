@@ -7178,6 +7178,93 @@ mod tests {
         );
     }
 
+    /// Verification repair (task-116): `MergeAttestation.meta_specs_used`
+    /// is populated from the spawn-time prompt-set record of the MR's author
+    /// agent. Reverting the wiring in `process_next` to `meta_specs_used:
+    /// vec![]` (or dropping the `load_prompt_set_record` lookup) fails this
+    /// test — the persisted, signed attestation bundle must carry exactly
+    /// the record's meta-spec references (id, kind, content_hash, version,
+    /// required, scope), and the signature must verify over that payload.
+    #[tokio::test]
+    async fn merge_attestation_records_author_prompt_set_meta_specs() {
+        let state = test_state();
+        for policy in crate::abac_middleware::m34_builtin_policies() {
+            state.policies.create(&policy).await.unwrap();
+        }
+        let (_repo, mr) = setup_mr_with_attestation_chain(&state).await;
+
+        // The spawn-time prompt-set record for the MR's author agent, exactly
+        // as `spawn_agent_core` persists via `store_prompt_set_record`: two
+        // meta-specs (required tenant persona, optional bound standard).
+        let record = crate::prompt_assembly::AgentPromptSetRecord {
+            agent_id: Id::new("agent-merge-abac"),
+            task_id: Id::new("task-merge-abac"),
+            spec_path: None,
+            set_sha: "set-sha-meta-specs".to_string(),
+            assembled_at: 1_700_000_000,
+            meta_specs_used: vec![
+                gyre_domain::MetaSpecUsed {
+                    id: Id::new("ms-persona"),
+                    kind: "meta:persona".to_string(),
+                    content_hash: "hash-persona".to_string(),
+                    version: 2,
+                    required: true,
+                    scope: "global".to_string(),
+                },
+                gyre_domain::MetaSpecUsed {
+                    id: Id::new("ms-standard"),
+                    kind: "meta:standard".to_string(),
+                    content_hash: "hash-standard".to_string(),
+                    version: 5,
+                    required: false,
+                    scope: "workspace".to_string(),
+                },
+            ],
+        };
+        crate::prompt_assembly::store_prompt_set_record(&state, &record).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged, "MR must merge");
+
+        let bundle = state
+            .attestation_store
+            .find_by_mr_id(mr.id.as_str())
+            .await
+            .unwrap()
+            .expect("attestation bundle must be persisted for the merged MR");
+        let used = &bundle.attestation.meta_specs_used;
+        assert_eq!(
+            used.len(),
+            2,
+            "both prompt-set meta-specs must be attested, got {used:?}"
+        );
+        for (got, want) in used.iter().zip(record.meta_specs_used.iter()) {
+            assert_eq!(got.id, want.id, "meta-spec id must match the record");
+            assert_eq!(got.kind, want.kind, "meta-spec kind must match the record");
+            assert_eq!(
+                got.content_hash, want.content_hash,
+                "meta-spec content_hash must match the record"
+            );
+            assert_eq!(got.version, want.version, "meta-spec version must match");
+            assert_eq!(got.required, want.required, "required flag must match");
+            assert_eq!(got.scope, want.scope, "scope must match the record");
+        }
+
+        // The signature covers the meta_specs_used payload: the bundle
+        // verifies with the server's real Ed25519 public key.
+        assert!(
+            crate::attestation::verify_bundle(&bundle, &state.agent_signing_key.public_key_bytes),
+            "attestation signature must verify over the full payload incl. meta_specs_used"
+        );
+    }
+
     /// TASK-095 R2-1: post-merge gates must execute against the exact
     /// `head_sha` tree, in a detached worktree, not against whatever the
     /// first registered worktree happens to have checked out.

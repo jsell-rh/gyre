@@ -3814,6 +3814,154 @@ mod tests {
         );
     }
 
+    /// Env-dump variant for the meta-spec prompt delivery (agent-runtime §2):
+    /// the script writes the injected `GYRE_META_SPEC_SET_SHA` on the first
+    /// line and the raw multi-line `GYRE_META_SPEC_PROMPT` after it, atomically
+    /// (temp file + rename) so the reader never observes a partial write.
+    async fn create_meta_prompt_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let script_path = format!("{dump_path}.sh");
+        let script = format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$GYRE_META_SPEC_SET_SHA\" > '{dump_path}.tmp'\n\
+             printf '%s\\n' \"$GYRE_META_SPEC_PROMPT\" >> '{dump_path}.tmp'\n\
+             mv '{dump_path}.tmp' '{dump_path}'\n\
+             exit 0\n"
+        );
+        std::fs::write(&script_path, script).expect("writing meta-prompt dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod meta-prompt dump script");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "meta-prompt dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Agent-runtime §2 server-side delivery (task-116 repair): the
+    /// `container_env` injection of `GYRE_META_SPEC_PROMPT` /
+    /// `GYRE_META_SPEC_SET_SHA` and the `meta_spec_set_sha` spawn-response
+    /// field are guarded here end-to-end. The env-dump compute target
+    /// observes the child process environment of a real spawn with a seeded
+    /// required meta-spec; removing the `container_env.insert` block, the
+    /// `render_system_prompt` call, or the response field fails this test
+    /// while the agent-runner suite alone stays green.
+    #[tokio::test]
+    async fn spawn_delivers_meta_spec_prompt_to_agent_env() {
+        use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+        use sha2::Digest;
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("meta-dump").to_string_lossy().into_owned();
+
+        // One required, approved, tenant-scoped persona: it must be
+        // assembled into the prompt set for every spawn in any workspace.
+        let prompt_text = "You are the meta-spec delivery regression persona.";
+        let content_hash = {
+            let mut h = sha2::Sha256::new();
+            h.update(prompt_text.as_bytes());
+            hex::encode(h.finalize())
+        };
+        state
+            .meta_specs
+            .create(&gyre_domain::MetaSpec {
+                id: gyre_common::Id::new("ms-spawn-delivery"),
+                kind: MetaSpecKind::Persona,
+                name: "spawn-delivery-persona".to_string(),
+                scope: MetaSpecScope::Global,
+                scope_id: None,
+                prompt: prompt_text.to_string(),
+                version: 1,
+                content_hash,
+                required: true,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: Some("system".to_string()),
+                approved_content_hash: None,
+                approved_at: Some(1),
+                created_by: "system".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("seeding required meta-spec must succeed");
+
+        let (app, ws_id) = create_workspace(app, "meta-spec-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Meta-spec delivery task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "meta-dump-ct", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/meta-prompt");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/meta-prompt", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        // The spawn response must carry the real set SHA of the assembled set.
+        let resp_sha = json["meta_spec_set_sha"]
+            .as_str()
+            .expect("meta_spec_set_sha must be present when the prompt set is non-empty")
+            .to_string();
+        assert_eq!(resp_sha.len(), 64, "set SHA must be a SHA-256 hex digest");
+        assert!(
+            resp_sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "set SHA must be hex: {resp_sha}"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("meta-prompt dump script should have written its output");
+        let mut lines = dump.splitn(2, '\n');
+        let env_sha = lines.next().unwrap_or_default().to_string();
+        let env_prompt = lines.next().unwrap_or_default().to_string();
+
+        // The env-var delivery must carry the same set the response attests.
+        assert_eq!(
+            env_sha, resp_sha,
+            "GYRE_META_SPEC_SET_SHA env var must match the spawn response's meta_spec_set_sha"
+        );
+
+        // The rendered system prompt must contain the seeded meta-spec
+        // section: kind, name, scope, version, and the prompt content.
+        assert!(
+            env_prompt.contains("# meta:persona — spawn-delivery-persona (scope: global, v1)"),
+            "rendered prompt must contain the seeded persona section header:\n{env_prompt}"
+        );
+        assert!(
+            env_prompt.contains(prompt_text),
+            "rendered prompt must contain the seeded persona prompt text:\n{env_prompt}"
+        );
+    }
+
     /// Like `do_spawn`, but with an explicit compute_target_id in the request
     /// body so the env-dump target drives the local dispatch.
     async fn do_spawn_with_target(
