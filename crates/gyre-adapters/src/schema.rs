@@ -59,6 +59,7 @@ diesel::table! {
         tenant_id -> Text,
         workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,

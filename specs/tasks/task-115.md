@@ -2,7 +2,7 @@
 title: "Implement spec approval signal chain & orchestrators"
 spec_ref: "agent-runtime.md §1 Agent Lifecycle"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "agent-runtime.md §The Model"
   - "agent-runtime.md §1. Agent Lifecycle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: []
+commits: ["1f50d0dc0574a01176f09d052a6812593f4d73ce", "86415e4bbe32a0e16de22cc5d9e08a43442c788d", "147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
 ---
 
 ## Spec Excerpt
@@ -89,3 +89,59 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
+
+## Shipped
+Rebase repair: merged base `fefde2946` (task-089 head) into this branch
+(candidate `1f83f93ba`) as merge commit `1325137c8`. Two conflicts,
+both resolved without losing either side's behavior:
+
+1. `crates/gyre-server/src/stale_agents.rs` — kept BOTH the task-115
+   budget-slot release (`was_active` -> `decrement_active_agents`,
+   review F3) and the base's agent-lifecycle audit emission
+   (`agent_audit::emit_dead` with `attested_pid_alive`).
+2. `scripts/fabricated-scope-defaults-exemptions.txt` — took the base
+   side: the `auth.rs:773` entry was removed upstream by task-103's
+   repair (the absent-tenant-claim contract is now the serde schema
+   default `default_tenant_claim` on `JwtClaims`, present in the merged
+   `auth.rs`); the file shrank 3 -> 2 entries against the frozen count
+   of 3 — a lowering, never a growth.
+
+### Test evidence (head `1325137c8`)
+
+- `cargo check -p gyre-server --lib` -> clean.
+- `cargo test -p gyre-server --lib stale_detector` -> **4 passed, 0
+  failed** (the base's agent-dead audit-event tests plus the task-115
+  system-orchestrator refresh/restart tests, proving the merged
+  conflict block preserves both behaviors).
+- `cargo test -p gyre-server --lib signal_chain` -> **19 passed, 0
+  failed**; `api::orchestrator` -> **7 passed, 0 failed**.
+- `bash scripts/check-fabricated-scope-defaults.sh` -> OK (exit 0).
+- `python3 scripts/check-rustfmt-diff.py fefde2946` -> changed lines
+  clean (42 Rust files).
+- Evidence:
+  `/tmp/stage/review-evidence/task-115-rebase.txt`.
+- Sandbox transport restriction (unchanged, `/tmp/stage/capabilities.json`):
+  listener-bound tests (`tty::`, `ws::`, `otlp_receiver::`, `git_http::`,
+  gyre-cli `ws_integration`) cannot run here; `cargo test --all` and
+  exact-head GitHub checks remain for the verification gate.
+
+### Prior rounds (context)
+
+Phases 1-3 of the signal chain: approve handler (ledger record + bus
+`SpecApproved` emission + `signal_chain::on_spec_approved` routing behind
+the base's mode-based approval resolution and Approved-transition gate),
+`OrchestratorRegistry` per-workspace/per-repo mutexes, spawn-on-demand
+workspace orchestrator with delegation + coordination tasks and
+cross-workspace p4 notifications, task scheduler distinguishing
+Delegation/Coordination/Implementation, repo orchestrator spawn with
+spec-pinned decomposition into ordered Implementation sub-tasks. Repair
+rounds: scheduler double-processing guards (cycle run lock, re-read after
+repo mutex, LLM latency bounds - `de294c12`), false bulk-ack of the
+orchestrator inbox, sub-task repo/workspace scoping, round-3 (`147d8259`:
+TaskRepository::create workspace_id restoration + empty-SHA spec_ref
+hard-fail), round-4 (`86415e4b`: duplicate migration version renumbered
+to `2026-10-10-000057_task_spec_ref`), rustfmt gate repair (`1f50d0dc0`),
+and rebase repairs (`88e97e0d`,
+`e4a8e9b8`, and `c095cf489` onto base `72ad2a128` — the approve-handler
+conflict resolved by keeping the base's Approved-transition gate around
+the task-115 emission, bus publish, and chain routing).
