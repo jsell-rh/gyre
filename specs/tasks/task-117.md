@@ -122,11 +122,12 @@ review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 (round 4), the `6a9739e`/`722179f0` base merges (`976b339a`,
 `7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
 from merged sources), the round-4 base merge `a2bdf9a2`, the
-round-5 base merge `d9e7785`, and the round-6 base merge
-`4ef962e48` carry the work below. Evidence is saved
+round-5 base merge `d9e7785`, the round-6 base merge
+`4ef962e48`, and the round-7 base merge `37a8193cf` carry the work
+below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
 rounds 4–6 in `round4/`, `round5-merge-repair/`, and
-`round6-merge-repair/`).
+`round6-merge-repair/`; round 7 in `round7-merge-repair/`).
 
 ### Behavior
 
@@ -292,6 +293,26 @@ compression upstream):
   usage sites compile. Focused suites on both merged features pass
   (see Test evidence).
 
+Round 7 (`37a8193cf`, base merge `fefde2946` — task-089 HSI
+Explorer Generated Views + task-098 secrets + agent-audit/rollout
+upstream):
+
+- **Rebase repair only, no behavior change to task-117 semantics.**
+  Three content conflicts resolved by keeping BOTH sides'
+  additions: `abac_middleware.rs` keeps the tenant-scoped
+  compute-target resolver mappings beside base's secrets mappings;
+  `admin_kill_agent` merges HEAD's backend-aware kill
+  (`spawned_backends` routing) with base's `killed_pid` capture
+  (handle PID recorded before registry consumption, `attested_pid`
+  fallback, passed to `emit_killed`); `mem.rs` keeps the 3-tuple
+  `shared_workspace_policy_pair`/`ws_store` plumbing (round-5
+  shape) and updates every test-state builder to base's 7-arg
+  `test_state_inner` (new `kv` parameter). `web/dist` kept as
+  auto-merged from base; locally regenerated artifacts from the
+  cargo-check build were discarded (executor restores dist from
+  the assignment base). Focused suites on both merged features and
+  the shared test-state builders pass (see Test evidence).
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -322,6 +343,22 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   0 failed**; abac-route-registry, migration-versions, arch,
   task-commit-attribution gates -> exit 0 (log in
   `round6-merge-repair/evidence.log`).
+- Round 7 (`37a8193cf`, merge repair): `cargo check -p gyre-server
+  --all-targets` -> exit 0; `cargo test -p gyre-server --lib
+  api::spawn` -> **43 passed, 0 failed**; `compute_target` -> **24
+  passed, 0 failed**; `api::admin` -> **35 passed, 0 failed**
+  (backend-aware kill + `killed_pid` audit); `api::agents` -> **9
+  passed, 0 failed**; `api::workspaces` -> **19 passed, 0 failed**;
+  `reconciliation::` -> **33 passed, 0 failed** (`kv`-store
+  builders); `api::secrets` -> **6 passed, 0 failed**;
+  `cargo test -p gyre-adapters compute --lib` -> **39 passed,
+  0 failed** (4 ignored); `cargo fmt --check` -> exit 0; clippy -> no
+  errors (remaining warnings pre-existing in base's
+  `view_query_resolver.rs`); abac-route-registry,
+  abac-exempt-handlers, forged-scope-fields, inert-enforcement,
+  in-memory-state-stores, scope-literal-defaults,
+  migration-versions, arch, task-commit-attribution gates -> exit 0
+  (log in `round7-merge-repair/evidence.log`).
 - Earlier rounds (`d404a439`): `cargo test -p gyre-server --lib
   compute_target` -> **24 passed**; web vitest on the merged sources
   -> **1624 passed, 41 skipped, 0 failed** (65 files); enforced static
