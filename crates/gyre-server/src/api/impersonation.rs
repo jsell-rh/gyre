@@ -1154,9 +1154,7 @@ mod tests {
     async fn per_handler_surfaces_are_attributed() {
         let (state, _admin_key, _target_key, _request_id, token) = run_full_flow().await;
 
-        async fn ok_handler(
-            auth: crate::auth::AuthenticatedAgent,
-        ) -> StatusCode {
+        async fn ok_handler(auth: crate::auth::AuthenticatedAgent) -> StatusCode {
             assert!(
                 auth.impersonation.is_some(),
                 "impersonation token must resolve with an ImpersonationContext"
@@ -1166,7 +1164,10 @@ mod tests {
         // Same wiring as git_http::git_info_refs / mcp::mcp_handler:
         // per-handler auth extractor, no ABAC middleware.
         let router = Router::new()
-            .route("/git/:workspace_slug/:repo_name/info/refs", axum::routing::get(ok_handler))
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                axum::routing::get(ok_handler),
+            )
             .with_state(state.clone());
 
         let resp = router
@@ -1188,10 +1189,7 @@ mod tests {
                 .query(&audit_filter("impersonation_action"))
                 .await
                 .unwrap();
-            if let Some(e) = events
-                .iter()
-                .find(|e| e.detail["surface"] == "per-handler")
-            {
+            if let Some(e) = events.iter().find(|e| e.detail["surface"] == "per-handler") {
                 found = Some(e.clone());
                 break;
             }
@@ -1214,8 +1212,14 @@ mod tests {
     #[tokio::test]
     async fn non_target_cannot_probe_request_status() {
         let state = test_state();
-        let admin_key =
-            seed_user(&state, "admin-5", "Admin Five", vec![UserRole::Admin], false).await;
+        let admin_key = seed_user(
+            &state,
+            "admin-5",
+            "Admin Five",
+            vec![UserRole::Admin],
+            false,
+        )
+        .await;
         let target_key = seed_user(
             &state,
             "target-5",
@@ -1240,9 +1244,7 @@ mod tests {
                     .oneshot(
                         Request::builder()
                             .method("POST")
-                            .uri(format!(
-                                "/api/v1/admin/impersonate/{request_id}/approve"
-                            ))
+                            .uri(format!("/api/v1/admin/impersonate/{request_id}/approve"))
                             .header("Authorization", format!("Bearer {key}"))
                             .header("Content-Type", "application/json")
                             .body(Body::from(
@@ -1263,11 +1265,9 @@ mod tests {
                     .uri("/api/v1/admin/impersonate")
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(
-                        Body::from(
-                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
-                        ),
-                    )
+                    .body(Body::from(
+                        serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -1323,21 +1323,25 @@ mod tests {
                     .uri("/api/v1/admin/impersonate")
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(
-                        Body::from(
-                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
-                        ),
-                    )
+                    .body(Body::from(
+                        serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT, "admin already has an active session");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "admin already has an active session"
+        );
 
         // End the active session so a second request can be created.
         let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
         let (sid, _raw) = sessions[0].clone();
-        impersonation::end_session(&state, &sid, "test").await.unwrap();
+        impersonation::end_session(&state, &sid, "test")
+            .await
+            .unwrap();
         let resp = app(&state)
             .oneshot(
                 Request::builder()
@@ -1345,11 +1349,9 @@ mod tests {
                     .uri("/api/v1/admin/impersonate")
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(
-                        Body::from(
-                            serde_json::json!({"target_user_id": "target-5"}).to_string(),
-                        ),
-                    )
+                    .body(Body::from(
+                        serde_json::json!({"target_user_id": "target-5"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -1486,7 +1488,9 @@ mod tests {
         assert_eq!(counts, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
         // Ending the session afterwards reports the full count.
-        impersonation::end_session(&state, &session.session_id, "test").await.unwrap();
+        impersonation::end_session(&state, &session.session_id, "test")
+            .await
+            .unwrap();
         let events = state
             .audit
             .query(&audit_filter("impersonation_ended"))
@@ -1581,10 +1585,7 @@ mod tests {
                 impersonation::approve_request(&state, &request_id, &caller, &code).await
             })
         };
-        let (a, b) = (
-            spawn_approve(code.clone()),
-            spawn_approve(code.clone()),
-        );
+        let (a, b) = (spawn_approve(code.clone()), spawn_approve(code.clone()));
         let results = [a.await.unwrap(), b.await.unwrap()];
 
         let ok = results.iter().filter(|r| r.is_ok()).count();

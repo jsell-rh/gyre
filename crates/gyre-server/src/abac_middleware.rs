@@ -948,8 +948,7 @@ async fn record_impersonated_passthrough(
     else {
         return req;
     };
-    let Some(auth) = crate::impersonation::resolve_impersonation_auth(&claims, &state).await
-    else {
+    let Some(auth) = crate::impersonation::resolve_impersonation_auth(&claims, &state).await else {
         // Inactive session — the handler's auth extraction will reject it.
         return req;
     };

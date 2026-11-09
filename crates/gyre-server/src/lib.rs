@@ -524,7 +524,7 @@ impl AppState {
 
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id: Id::new("default"), // scope-literal:ok — task-099 F1 legacy debt
             from: MessageOrigin::Server,
             workspace_id,
             to,
@@ -568,7 +568,7 @@ impl AppState {
         let id = Id::new(uuid::Uuid::new_v4().to_string());
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id: Id::new("default"), // scope-literal:ok — task-099 F1 legacy debt
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),

@@ -718,7 +718,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
-                tenant_id: "default".to_string(),
+                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
                 impersonation: None,
@@ -783,7 +783,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
-                    tenant_id: "default".to_string(),
+                    tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
                     jwt_claims,
                     deprecated_token_auth,
                     impersonation: None,
@@ -817,7 +817,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
-                    tenant_id: "default".to_string(),
+                    tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
                     impersonation: None,
@@ -859,7 +859,7 @@ pub async fn authenticate_token(
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
-            tenant_id: "default".to_string(),
+            tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
             jwt_claims: None,
             deprecated_token_auth: false,
             impersonation: None,
@@ -903,7 +903,7 @@ pub async fn authenticate_token(
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
-                tenant_id: "default".to_string(),
+                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
                 jwt_claims,
                 deprecated_token_auth: false,
                 impersonation: None,
@@ -928,7 +928,7 @@ pub async fn authenticate_token(
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
-                tenant_id: "default".to_string(),
+                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
                 jwt_claims: None,
                 deprecated_token_auth: false,
                 impersonation: None,
@@ -1374,7 +1374,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
-        tenant_id: "default".to_string(),
+        tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
         impersonation: None,

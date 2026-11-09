@@ -130,7 +130,7 @@ async fn save_request(state: &AppState, req: &ImpersonationRequest) -> Result<()
             serde_json::to_string(req).map_err(|e| ApiError::Internal(e.into()))?,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.into()))
+        .map_err(ApiError::Internal)
 }
 
 async fn load_request(
@@ -141,7 +141,7 @@ async fn load_request(
         .kv_store
         .kv_get(REQUEST_NAMESPACE, request_id)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .map_err(ApiError::Internal)?;
     raw.map(|v| serde_json::from_str(&v).map_err(|e| ApiError::Internal(e.into())))
         .transpose()
 }
@@ -155,7 +155,7 @@ async fn save_session(state: &AppState, session: &ImpersonationSession) -> Resul
             serde_json::to_string(session).map_err(|e| ApiError::Internal(e.into()))?,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.into()))
+        .map_err(ApiError::Internal)
 }
 
 async fn load_session(
@@ -166,7 +166,7 @@ async fn load_session(
         .kv_store
         .kv_get(SESSION_NAMESPACE, session_id)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .map_err(ApiError::Internal)?;
     raw.map(|v| serde_json::from_str(&v).map_err(|e| ApiError::Internal(e.into())))
         .transpose()
 }
@@ -176,7 +176,7 @@ async fn list_sessions(state: &AppState) -> Result<Vec<ImpersonationSession>, Ap
         .kv_store
         .kv_list(SESSION_NAMESPACE)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .map_err(ApiError::Internal)?;
     pairs
         .iter()
         .map(|(_, v)| serde_json::from_str(v).map_err(|e| ApiError::Internal(e.into())))
@@ -872,10 +872,8 @@ pub async fn push_notification_to_user(state: &AppState, user_id: &Id, notif: &N
             .get(conn_id)
             .map(|uid| uid == user_id.as_str())
             .unwrap_or(false);
-        if matches {
-            if tx.try_send(payload.clone()).is_ok() {
-                sent += 1;
-            }
+        if matches && tx.try_send(payload.clone()).is_ok() {
+            sent += 1;
         }
     }
     if sent == 0 {
