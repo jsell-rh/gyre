@@ -827,6 +827,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             "API-key auth for user without tenant binding; rejecting. \
                              Re-provision the user via POST /api/v1/users with tenant_id."
                         );
+                        // task-104: AuthFailure audit event — the token is
+                        // rejected because its user has no tenant binding.
+                        record_auth_failure(
+                            state,
+                            "api_key",
+                            "user has no tenant binding; re-provision via POST /api/v1/users",
+                            forensic_ip,
+                            forensic_ua,
+                        )
+                        .await;
                         return Err((
                             StatusCode::FORBIDDEN,
                             "user has no tenant binding; re-provision via POST /api/v1/users",
@@ -1006,6 +1016,16 @@ pub async fn authenticate_token(
                         username = %user.username,
                         "API-key auth for user without tenant binding; rejecting"
                     );
+                    // task-104: AuthFailure audit event — the token is
+                    // rejected because its user has no tenant binding.
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "user has no tenant binding; re-provision via POST /api/v1/users",
+                        None,
+                        None,
+                    )
+                    .await;
                     return Err("user has no tenant binding; re-provision via POST /api/v1/users");
                 }
             };
@@ -2544,6 +2564,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding() {
+        // task-099 F1 + task-104: the fail-closed API-key rejection (user
+        // has no tenant binding) must be visible in the audit trail as an
+        // AuthFailure event naming the credential kind and the reason.
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        let state = test_state();
+        let user = User::new(Id::new("u3"), "ext-3", "orphan-audited", 1000);
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_orphan_audited_key";
+        state
+            .api_keys
+            .create(
+                &super::hash_api_key(raw_key),
+                &user.id,
+                "orphan-audited-key",
+            )
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let events = audit_events_of(&state, "auth_failure").await;
+        assert_eq!(events.len(), 1, "exactly one auth_failure event");
+        let e = &events[0];
+        assert_eq!(e.detail["token_kind"], "api_key");
+        assert_eq!(
+            e.detail["rejection_reason"],
+            "user has no tenant binding; re-provision via POST /api/v1/users"
+        );
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Failure);
+        assert!(e.agent_id.is_none(), "rejected caller has no identity");
     }
 
     #[tokio::test]
