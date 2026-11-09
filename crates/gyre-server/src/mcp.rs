@@ -714,10 +714,7 @@ async fn validate_tool_scope(
         // check at dispatch.
         "gyre_agent_heartbeat" | "gyre_agent_complete" | "gyre_record_activity" => {
             check_repo_write_scope(auth, None, "agent maintenance")?;
-            let target = args
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let target = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
             if !target.is_empty() && target != auth.agent_id {
                 check_agent_target_scope(state, auth, target, tool_name).await?;
             }
@@ -872,8 +869,8 @@ async fn validate_tool_scope(
         // the explicit repo_id target must be the caller's own repo (repo
         // tier) or a repo of the caller's workspace (workspace tier — the
         // repo's real workspace is resolved from state).
-        "graph_summary" | "graph_query_dryrun" | "graph_nodes" | "graph_edges"
-        | "search" | "node_provenance" | "graph_concept" | "spec_assist" => {
+        "graph_summary" | "graph_query_dryrun" | "graph_nodes" | "graph_edges" | "search"
+        | "node_provenance" | "graph_concept" | "spec_assist" => {
             let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
             if repo.is_empty() {
                 return Ok(()); // handler rejects the missing field
@@ -1835,7 +1832,12 @@ async fn handle_list_mrs(state: &AppState, args: &Value, auth: &AuthenticatedAge
         // clamp to). Unscoped callers (global token, API key) keep the
         // ABAC-governed full listing.
         match &auth.repo_id {
-            Some(own) => state.merge_requests.list_by_repo(&Id::new(own.as_str())).await,
+            Some(own) => {
+                state
+                    .merge_requests
+                    .list_by_repo(&Id::new(own.as_str()))
+                    .await
+            }
             None => {
                 return tool_error(
                     "PERMISSION_DENIED: scoped token carries no repo claim; pass repository_id",
@@ -2483,11 +2485,7 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
     if is_agent_jwt(auth) {
         match &auth.workspace_id {
             Some(own) => workspace_id = Some(own.clone()),
-            None => {
-                return tool_error(
-                    "PERMISSION_DENIED: agent token carries no workspace claim",
-                )
-            }
+            None => return tool_error("PERMISSION_DENIED: agent token carries no workspace claim"),
         }
     }
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
@@ -7385,7 +7383,7 @@ mod tests {
             repo.id.clone(),
             Some(gyre_common::Id::new("task-1")),
             "feat/w",
-            &format!("/tmp/worktrees/{agent_id}"),
+            format!("/tmp/worktrees/{agent_id}"),
             0,
         );
         state.worktrees.create(&wt).await.unwrap();
@@ -7507,12 +7505,8 @@ mod tests {
 
         // No repository_id: the fallback listing is clamped to the
         // caller's own repo (r-1) — not the shared unfiltered store.
-        let (_status, json) = mcp_post_with_token(
-            app.clone(),
-            tool_call("gyre_list_mrs", json!({})),
-            &token,
-        )
-        .await;
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), tool_call("gyre_list_mrs", json!({})), &token).await;
         assert!(
             json["error"].is_null(),
             "in-scope fallback listing must not be scope-denied: {json}"
@@ -7535,7 +7529,10 @@ mod tests {
             &token,
         )
         .await;
-        assert!(json["error"].is_null(), "explicit own repo must pass: {json}");
+        assert!(
+            json["error"].is_null(),
+            "explicit own repo must pass: {json}"
+        );
 
         // Sanity: the caller really is the r-1 worker.
         assert_eq!(worker_id, "worker-w-lm");
@@ -7552,12 +7549,8 @@ mod tests {
                 .await;
         let app = crate::build_router(state);
 
-        let (_status, json) = mcp_post_with_token(
-            app.clone(),
-            tool_call("gyre_list_mrs", json!({})),
-            &token,
-        )
-        .await;
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), tool_call("gyre_list_mrs", json!({})), &token).await;
         assert!(
             json["error"].is_object(),
             "workspace-tier fallback listing must be denied, got: {json}"
@@ -7608,10 +7601,7 @@ mod tests {
         // Foreign agent: denied pre-dispatch, naming the target.
         let (_status, json) = mcp_post_with_token(
             app.clone(),
-            tool_call(
-                "gyre_agent_heartbeat",
-                json!({ "agent_id": foreign_id }),
-            ),
+            tool_call("gyre_agent_heartbeat", json!({ "agent_id": foreign_id })),
             &token,
         )
         .await;

@@ -428,14 +428,9 @@ pub async fn spawn_repo_orchestrator(
         .await
         .map_err(ApiError::Forbidden)?;
 
-    let (agent, token) = spawn_repo_orchestrator_core(
-        &state,
-        &repo_id,
-        req,
-        &auth.agent_id,
-        &auth.tenant_id,
-    )
-    .await?;
+    let (agent, token) =
+        spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id, &auth.tenant_id)
+            .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -491,9 +486,10 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, token) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
-            .await
-            .unwrap();
+        let (agent, token) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
 
         assert_eq!(
             agent.orchestrator_type,
@@ -541,36 +537,23 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        spawn_workspace_orchestrator_core(
-                &state,
-                "ws-1",
-                req(Some("ws-orch-a")),
-                "user-1",
-                "t1",
-            )
+        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-a")), "user-1", "t1")
             .await
             .unwrap();
-        let err =
-            spawn_workspace_orchestrator_core(
-                &state,
-                "ws-1",
-                req(Some("ws-orch-b")),
-                "user-1",
-                "t1",
-            )
-                .await
-                .unwrap_err();
+        let err = spawn_workspace_orchestrator_core(
+            &state,
+            "ws-1",
+            req(Some("ws-orch-b")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ApiError::Conflict(_)), "got: {err}");
 
         // Dead orchestrator frees the slot (§3.2 exactly-one-live).
         kill(&state, "ws-orch-a").await;
-        spawn_workspace_orchestrator_core(
-                &state,
-                "ws-1",
-                req(Some("ws-orch-b")),
-                "user-1",
-                "t1",
-            )
+        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-b")), "user-1", "t1")
             .await
             .unwrap();
     }
@@ -581,13 +564,7 @@ mod tests {
         seed(&state).await;
 
         let (agent, token) =
-            spawn_repo_orchestrator_core(
-                &state,
-                "r-1",
-                req(Some("repo-orch-1")),
-                "user-1",
-                "t1",
-            )
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-1")), "user-1", "t1")
                 .await
                 .unwrap();
         assert_eq!(agent.orchestrator_type, OrchestratorType::RepoOrchestrator);
@@ -606,23 +583,12 @@ mod tests {
         );
 
         // One per repo, but a different repo in the same workspace is fine.
-        let err = spawn_repo_orchestrator_core(
-                &state,
-                "r-1",
-                req(Some("repo-orch-2")),
-                "user-1",
-                "t1",
-            )
-            .await
-            .unwrap_err();
+        let err =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-2")), "user-1", "t1")
+                .await
+                .unwrap_err();
         assert!(matches!(err, ApiError::Conflict(_)), "got: {err}");
-        spawn_repo_orchestrator_core(
-                &state,
-                "r-2",
-                req(Some("repo-orch-2")),
-                "user-1",
-                "t1",
-            )
+        spawn_repo_orchestrator_core(&state, "r-2", req(Some("repo-orch-2")), "user-1", "t1")
             .await
             .unwrap();
     }
@@ -652,7 +618,11 @@ mod tests {
         }
 
         // Fail-closed: no orchestrator record and no scoped JWT was minted.
-        let peers = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(
             peers
                 .iter()
@@ -686,7 +656,11 @@ mod tests {
             other => panic!("expected Forbidden, got: {other}"),
         }
 
-        let peers = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(
             peers
                 .iter()
@@ -737,13 +711,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
         let (agent, _token) =
-            spawn_repo_orchestrator_core(
-                &state,
-                "r-1",
-                req(Some("dup-check")),
-                "user-1",
-                "t1",
-            )
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("dup-check")), "user-1", "t1")
                 .await
                 .unwrap();
         let json = serde_json::to_value(orchestrator_response(agent)).unwrap();
@@ -765,13 +733,7 @@ mod tests {
         seed(&state).await;
 
         let (agent, _token) =
-            spawn_workspace_orchestrator_core(
-                &state,
-                "ws-1",
-                req(Some("ws-orch")),
-                "user-1",
-                "t1",
-            )
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -825,23 +787,11 @@ mod tests {
         seed(&state).await;
 
         let (ws_orch, _t1) =
-            spawn_workspace_orchestrator_core(
-                &state,
-                "ws-1",
-                req(Some("ws-orch")),
-                "user-1",
-                "t1",
-            )
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
         let (repo_orch, _t2) =
-            spawn_repo_orchestrator_core(
-                &state,
-                "r-1",
-                req(Some("repo-orch")),
-                "user-1",
-                "t1",
-            )
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 

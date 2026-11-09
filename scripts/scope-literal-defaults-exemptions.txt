@@ -9,13 +9,13 @@
 # task-099 F1 revision round owns these (admin user is never bound to a
 # tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
 # identity; emit_event/emit_telemetry messages carry it):
-crates/gyre-server/src/auth.rs:689
-crates/gyre-server/src/auth.rs:730
-crates/gyre-server/src/auth.rs:773
-crates/gyre-server/src/auth.rs:817
-crates/gyre-server/src/auth.rs:850
-crates/gyre-server/src/auth.rs:882
-crates/gyre-server/src/auth.rs:1338
+crates/gyre-server/src/auth.rs:686
+crates/gyre-server/src/auth.rs:727
+crates/gyre-server/src/auth.rs:770
+crates/gyre-server/src/auth.rs:814
+crates/gyre-server/src/auth.rs:847
+crates/gyre-server/src/auth.rs:879
+crates/gyre-server/src/auth.rs:1335
 crates/gyre-server/src/lib.rs:520
 crates/gyre-server/src/lib.rs:564
 

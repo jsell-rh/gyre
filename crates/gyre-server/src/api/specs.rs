@@ -2648,7 +2648,7 @@ specs:
                 "system",
                 &state.base_url,
                 3600,
-                "default",                    // tenant of ws-e2e (seed_e2e_specs)
+                "default", // tenant of ws-e2e (seed_e2e_specs)
                 "ws-e2e",
                 "repo-e2e",
                 "e2e-repo",

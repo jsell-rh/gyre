@@ -3704,7 +3704,12 @@ mod tests {
         // Fail-closed guarantees: no agent record, hence no token minted
         // and no container dispatched (no env dump, no secret delivery).
         assert!(
-            state.agents.find_by_name("ghost-worker").await.unwrap().is_none(),
+            state
+                .agents
+                .find_by_name("ghost-worker")
+                .await
+                .unwrap()
+                .is_none(),
             "no agent record may be created when the tenant scope cannot be determined"
         );
         assert!(

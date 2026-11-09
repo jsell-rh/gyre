@@ -352,10 +352,7 @@ impl AgentSigningKey {
             let name = repo_name.ok_or_else(|| {
                 "repo orchestrator JWT requires repo_name for repo:... scope".to_string()
             })?;
-            vec![
-                format!("repo:{name}:write"),
-                format!("repo:{name}:spawn"),
-            ]
+            vec![format!("repo:{name}:write"), format!("repo:{name}:spawn")]
         };
         let claims = AgentJwtClaims {
             sub: agent_id.to_string(),
@@ -691,8 +688,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 repo_id: None,
                 scope: Vec::new(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
-            deprecated_token_auth,
-        });
+                deprecated_token_auth,
+            });
         }
 
         // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
@@ -1707,8 +1704,7 @@ mod tests {
             .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert_eq!(
-            body,
-            "t1|ws-1||workspace:ws-1:read,workspace:ws-1:spawn",
+            body, "t1|ws-1||workspace:ws-1:read,workspace:ws-1:spawn",
             "tenant/workspace/scope must mirror the signature-verified claims, got: {body}"
         );
     }
@@ -2506,7 +2502,14 @@ mod tests {
     ) -> String {
         signing_key
             .mint(
-                sub, "task-1", "system", issuer, ttl_secs, "t1", "ws-remote", "repo-remote",
+                sub,
+                "task-1",
+                "system",
+                issuer,
+                ttl_secs,
+                "t1",
+                "ws-remote",
+                "repo-remote",
                 "remote-repo",
             )
             .expect("mint must succeed")
@@ -2743,12 +2746,28 @@ mod tests {
         let issuer = "http://localhost:3000";
         let t1 = key
             .mint(
-                "agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1-name",
+                "agent-1",
+                "task-1",
+                "system",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1-name",
             )
             .expect("mint");
         let t2 = key
             .mint(
-                "agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1-name",
+                "agent-1",
+                "task-1",
+                "system",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1-name",
             )
             .expect("mint");
 
