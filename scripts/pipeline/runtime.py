@@ -17,8 +17,22 @@ def observe(store, force=False):
         if not force and time.time()-store.setting('runtime_observed_at',0)<5:return
         store.set_setting('runtime_observed_at',time.time())
         try:
+            sandboxes=None
+            pending=list(store.db.execute("SELECT * FROM resources WHERE kind='sandbox' AND state='deleting'"))
+            if pending:
+                try:
+                    value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,
+                                          'get','sandboxes.agents.x-k8s.io','-o','json'],capture_output=True,text=True,timeout=10,check=True)
+                    listing=json.loads(value.stdout)
+                    if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete sandbox inventory')
+                    sandboxes={item['metadata']['name']:item for item in listing['items']}
+                except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as exc:
+                    # Capacity diagnostics must not suppress existing OOM evidence.
+                    store.set_setting('runtime_observer_error',{'kind':type(exc).__name__,'at':time.time()})
             value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,'get','pods','-o','json'],capture_output=True,text=True,timeout=10,check=True)
-            pods=json.loads(value.stdout)['items']
+            listing=json.loads(value.stdout)
+            if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete pod inventory')
+            pods=listing['items']
             for pod in pods:
                 meta=pod['metadata'];name=meta['name']
                 if meta.get('labels',{}).get('openshell.ai/boundary-role')!='workload':continue
@@ -34,9 +48,40 @@ def observe(store, force=False):
                     data['runtime']=evidence
                     store.db.execute('UPDATE resources SET data=? WHERE name=?',(json.dumps(data),name))
                     store.event('sandbox_terminated',{'sandbox':name,**evidence},work=row['work'])
-        except (OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
+            if sandboxes is not None:observe_capacity(store,pods,context,namespace,sandboxes,pending)
+        except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as exc:
             # Missing cluster diagnostics must never make an otherwise healthy worker fail.
             store.set_setting('runtime_observer_error',{'kind':type(exc).__name__,'at':time.time()})
+
+
+def observe_capacity(store, pods, context, namespace, sandboxes, pending):
+    """Do not confuse retained gateway metadata with an allocated workload.
+
+    A missing pod alone is insufficient: an active sandbox could recreate it.
+    Require a suspended/deleting or absent Kubernetes sandbox as well. Never
+    change cleanup state or release in-flight creation/admission reservations.
+    """
+    for original in pending:
+        name=original['name'];sandbox=sandboxes.get(name)
+        meta=(sandbox or {}).get('metadata',{})
+        ident=meta.get('labels',{}).get('openshell.ai/sandbox-id')
+        def belongs(pod):
+            pm=pod['metadata'];labels=pm.get('labels',{})
+            return (pm['name']==name or labels.get('openshell.ai/sandbox-name')==name
+                or bool(ident and ident in (labels.get('openshell.ai/sandbox-id'),labels.get('openshell.ai/boundary-pair')))
+                or bool(meta.get('uid') and any(r.get('uid')==meta['uid'] for r in pm.get('ownerReferences',[]))))
+        inactive=(sandbox is None or bool(meta.get('deletionTimestamp'))
+                  or sandbox.get('spec',{}).get('operatingMode')=='Suspended')
+        absent=inactive and not any(belongs(pod) for pod in pods)
+        with store.transaction():
+            row=store.db.execute("SELECT * FROM resources WHERE name=? AND kind='sandbox' AND state='deleting'",(name,)).fetchone()
+            if not row or row['work']!=original['work'] or row['token']!=original['token']:continue
+            data=json.loads(row['data']);old=data.get('compute_observation') or {}
+            data['compute_observation']={'absent':absent,'at':time.time(),'context':context,'namespace':namespace,
+                'work':row['work'],'token':row['token'],'sandbox_uid':meta.get('uid')}
+            store.db.execute('UPDATE resources SET data=? WHERE name=?',(json.dumps(data),name))
+            if old.get('absent')!=absent:
+                store.event('compute_occupancy_observed',{'sandbox':name,'absent':absent,'cleanup_pending':True},work=row['work'])
 
 
 def failure(execution, name):
