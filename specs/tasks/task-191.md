@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c"]
 ---
 
 ## Spec Excerpt
@@ -98,10 +98,15 @@ threshold logic):
 - Computes the higher utilization across `max_tokens_per_day` /
   `max_cost_per_day` (None and zero limits guarded).
 - **≥ 80%, < 100%:** emits `MessageKind::BudgetWarning` per active agent
-  (workspace event tier, persisted) and one `NotificationType::BudgetWarning`
-  (priority 7) per unique spawner via `notifications::notify`. No kill.
+  (both a workspace-feed copy and a **Directed `Destination::Agent`
+  copy** so the agent's MCP poll channel — `messages.list_after`,
+  `GET /api/v1/agents/:id/messages` — actually receives it) and one
+  `NotificationType::BudgetWarning` (priority 7) per unique spawner via
+  `notifications::notify`. No kill.
 - **≥ 100%:** default `GracefulStop` — emits `MessageKind::BudgetExhausted`
-  per active agent, then a `tokio::spawn` grace timer (default 60s,
+  per active agent (workspace feed + Directed agent copy, so the agent
+  learns to hand off within the grace), then a `tokio::spawn` grace timer
+  (default 60s,
   injectable via `check_and_enforce_budget_with_grace` so tests use 0).
   After the grace, still-`Active` agents are killed through the shared
   `kill_agent` helper extracted from `admin_kill_agent` (admin handler
@@ -122,21 +127,51 @@ threshold logic):
 
 ### Test evidence
 
-All commands and outputs in `/tmp/stage/review-evidence/task-191-evidence.md`
-(post-rebase run).
-`cargo test -p gyre-server --lib api::budget` — 17 pass, including the
-acceptance tests that fail if enforcement is removed: 85% warning
-(message + notification, agent alive, no re-fire on subsequent calls),
-below-threshold silence, ≥100% graceful stop (agent `Dead`, counter 0,
-worktree record intact, reassignment task referencing the task id, no
-re-fire), HardKill inline (no timer), QueuePause (kv pause state set, agent
-alive), cost-limit crossing, serde round-trips, and API/SQLite persistence.
-Admin kill tests (35) pass after the helper cutover (including the upstream
-`admin_kill_emits_lifecycle_audit_events`, which pins token revocation with
-reason `admin_kill` and the `AgentKilled` audit attribution); the full
-`gyre-server` lib suite passes post-merge (1492); `check-arch.sh`, the
-migration-version and migration-portability checks, and the other relevant
-mechanical check scripts pass; clippy is clean in the touched files.
+`cargo test -p gyre-server --lib api::budget` — 17 pass (run in the
+previous sandbox with crates.io access; commands and outputs in
+`/tmp/stage/review-evidence/task-191-evidence.md`, post-rebase run),
+including the acceptance tests that fail if enforcement is removed: 85%
+warning (message + notification, agent alive, no re-fire on subsequent
+calls), below-threshold silence, ≥100% graceful stop (agent `Dead`,
+counter 0, worktree record intact, reassignment task referencing the task
+id, no re-fire), HardKill inline (no timer), QueuePause (kv pause state
+set, agent alive), cost-limit crossing, serde round-trips, and
+API/SQLite persistence. Admin kill tests (35) pass after the helper
+cutover (including the upstream `admin_kill_emits_lifecycle_audit_events`,
+which pins token revocation with reason `admin_kill` and the
+`AgentKilled` audit attribution); the full `gyre-server` lib suite passes
+post-merge (1492); `check-arch.sh`, the migration-version and
+migration-portability checks, and the other relevant mechanical check
+scripts pass; clippy is clean in the touched files.
+
+The review-repair commit (75adf7def) could not re-run cargo in its
+sandbox — the egress proxy blocks crates.io (`static.crates.io` /
+`index.crates.io` connect refused; probe output in
+`/tmp/stage/review-evidence/task-191-egress-probe.txt`), and no crate
+cache exists on that filesystem. Verification there was static: a
+`rustc` parse check of the modified file (zero syntax errors; only
+standalone-compile unresolved-import errors), signature checks against
+the ports/adapters (`list_after` returns `Destination::Agent` messages;
+`list_by_workspace` excludes them in all three adapters, so workspace-
+feed counts are unchanged), and all grep-based mechanical check scripts
+(green). **Remote verification must re-run
+`cargo test -p gyre-server --lib api::budget`** — the three threshold
+tests now also pin agent-inbox receipt via the new `agent_inbox` helper
+(`messages.list_after`) and fail if the directed emission is removed.
+
+### Review repair (finding 2441b169079c4baab45e073159c02136)
+
+Budget messages were emitted `Destination::Workspace` only, so the agent
+MCP poll channel (which filters `to_type == "agent"`) never delivered
+them — the agent had no way to learn it should hand off within the grace
+period. `emit_budget_warn` / `emit_budget_exhausted` now emit both a
+workspace-feed copy and a `Destination::Agent(agent.id)` copy per active
+agent (the dual-destination pattern already used by
+`constraint_check.rs`), with identical payloads. Thresholds, per-period
+de-dup, grace timer, kill path, and spawner notifications are unchanged;
+the dispatch consumer is a no-op drain and WS delivery already ignores
+agent-directed messages, so the extra copies have no side effects beyond
+the agent inbox.
 
 ### Rebase resolution (merge of assignment base fefde294)
 
