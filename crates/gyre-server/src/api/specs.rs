@@ -1104,6 +1104,12 @@ pub async fn reject_spec(
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;
 
+                    // Platform Model §7: the task is cancelled and the agent
+                    // stopped (terminal) — its task-scoped one-time secrets
+                    // must not outlive the task. Mirrors the repo-archive
+                    // stop path (review F3).
+                    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
                     // Send shutdown message to agent's inbox.
                     state
                         .emit_event(
@@ -3638,6 +3644,136 @@ specs:
         // Agent should be stopped.
         let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
         assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review F3): the spec-reject cascaded
+        // shutdown cancels the task and stops its Active agents (terminal) —
+        // the cancelled task's Task-scoped one-time secrets must be revoked,
+        // mirroring the repo-archive stop path.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/secret-teardown.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // A resolvable workspace so the teardown can derive the tenant
+        // without fabricating a scope.
+        let ws_id = Id::new("ws-reject-secrets");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                "Reject Secrets WS",
+                "reject-secrets-ws",
+                1700000000,
+            ))
+            .await
+            .unwrap();
+
+        // In-flight task linked to the spec.
+        let task_id = Id::new("reject-secret-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Secret teardown", 1700000000);
+        task.spec_path = Some("system/secret-teardown.md".to_string());
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        state.tasks.create(&task).await.unwrap();
+
+        // Active agent working on that task in the resolvable workspace.
+        let agent_id = Id::new("reject-secret-agent-1");
+        let mut agent = gyre_domain::Agent::new(agent_id.clone(), "reject-worker", 1700000000);
+        agent.workspace_id = ws_id.clone();
+        agent.assign_task(task_id.clone());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let tenant = "default".to_string();
+        let now = 1700000000u64;
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.clone(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-reject-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    task_id.to_string(),
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-reject-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fsecret-teardown.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The stopped agent's task-scoped secret is revoked; unrelated
+        // tasks' secrets survive.
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-reject-task"), &tenant)
+                .await
+                .unwrap()
+                .is_none(),
+            "spec-reject shutdown must revoke the cancelled task's secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-reject-other"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive spec rejection"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

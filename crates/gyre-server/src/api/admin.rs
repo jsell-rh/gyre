@@ -356,6 +356,11 @@ pub async fn admin_kill_agent(
     // authenticate. Revocation is audited as an AgentTokenRevoked event.
     crate::agent_audit::revoke_agent_token(&state, &agent, "admin_kill").await;
 
+    // Platform Model §7: revoke task-scoped ephemeral secrets on kill
+    // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
+    // for the agent's task and logs `secret.revoked` per secret.
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     let killed_by = auth
         .user_id
@@ -1120,6 +1125,105 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+    }
+
+    #[tokio::test]
+    async fn admin_kill_revokes_task_scoped_secrets() {
+        use crate::api::now_secs;
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = now_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-kill-teardown"),
+            Id::new("default"),
+            "Kill Teardown WS",
+            "kill-teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-kill-teardown"), "kill-teardown", now);
+        agent.workspace_id = Id::new("ws-kill-teardown");
+        agent.current_task_id = Some(Id::new("task-kill-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-kill-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-kill-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-teardown/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "admin kill must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive admin kill"
+        );
     }
 
     #[tokio::test]

@@ -78,6 +78,11 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     .kv_remove("interrogation_context", &agent_id_str)
                     .await;
 
+                // Platform Model §7: heartbeat abort is a kill — revoke the
+                // agent's task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
                     ws_id.clone(),
@@ -121,6 +126,13 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     "stopping stale agent (disconnected_behavior=pause)");
                 let _ = agent.transition_status(AgentStatus::Stopped);
                 let _ = state.agents.update(&agent).await;
+
+                // Platform Model §7 (task-100 review round-3 F1): Pause is a
+                // terminal stop — Stopped has no exit transitions — so the
+                // agent's run ends here and its task-scoped ephemeral
+                // secrets must be revoked like the sibling Abort arm
+                // (teardown; logs `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
 
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
@@ -393,5 +405,134 @@ mod tests {
         let events = crate::agent_audit::recorded_events(&state, "agent_dead").await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].detail["pid_alive"], false);
+    }
+
+    #[tokio::test]
+    async fn stale_detector_pause_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review round-3 F1): the Pause arm
+        // of the stale detector terminally stops the agent (Stopped has no
+        // exit transitions) — the task-scoped ephemeral secrets must be
+        // revoked, mirroring the Abort arm. Pause is the default
+        // DisconnectedBehavior, so the default configuration must not leak.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let now = now_secs();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-pause"),
+            Id::new("default"),
+            "Pause WS",
+            "pause-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-stale-pause"), "stale-pause-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.workspace_id = Id::new("ws-pause");
+        agent.current_task_id = Some(Id::new("task-pause"));
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Pause;
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-pause".to_string(),
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-pause".to_string(),
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        let stopped = state
+            .agents
+            .find_by_id(&Id::new("agent-stale-pause"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "pause-behavior stale stop must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive the stale stop"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-other"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive the stale stop"
+        );
     }
 }
