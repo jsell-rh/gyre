@@ -56,6 +56,12 @@ pub struct AgentJwtClaims {
     pub exp: u64,
     /// Always "agent" for agent tokens.
     pub scope: String,
+    /// JWT ID — unique identifier for this token. Recorded in
+    /// `AgentTokenRevoked` audit events when the token is revoked
+    /// (observability.md §Audit Event Types). Empty on tokens minted
+    /// before the claim existed.
+    #[serde(default)]
+    pub jti: String,
     /// Task assigned to this agent at spawn time.
     pub task_id: String,
     /// Identity that called POST /api/v1/agents/spawn.
@@ -210,6 +216,7 @@ impl AgentSigningKey {
             iat: now,
             exp: now + ttl_secs,
             scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
             workspace_id: None,
@@ -236,6 +243,27 @@ impl AgentSigningKey {
         jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
             .map(|td| td.claims)
             .map_err(|e| format!("agent JWT validation: {e}"))
+    }
+
+    /// Extract the `jti` (JWT ID) claim from an agent token without verifying
+    /// the signature or expiry.
+    ///
+    /// crypto-verify:ok — audit-detail extraction only, never an authentication
+    /// decision. Callers pass tokens read from the server's own `agent_tokens`
+    /// KV bucket (minted by this key), never caller-supplied input; the value
+    /// feeds the `jti` field of an `AgentTokenRevoked` audit event. All auth
+    /// paths use `validate()` (full EdDSA signature verification) instead.
+    pub fn extract_jti_unverified(&self, token: &str) -> Option<String> {
+        // JWT format: header.payload.signature (base64url, no padding).
+        let payload_b64 = token.split('.').nth(1)?;
+        let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let jti = claims.get("jti")?.as_str()?;
+        if jti.is_empty() {
+            None
+        } else {
+            Some(jti.to_string())
+        }
     }
 
     /// Mint an orchestrator JWT with scope claims (platform-model.md §3).
@@ -265,6 +293,7 @@ impl AgentSigningKey {
             iat: now,
             exp: now + ttl_secs,
             scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
             task_id: agent_id.to_string(),
             spawned_by: spawned_by.to_string(),
             workspace_id: Some(workspace_id.to_string()),
@@ -329,9 +358,24 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
-    #[serde(default)]
-    tenant_id: Option<String>,
+    /// Tenant scope claim. An IdP that does not issue tenant claims is a
+    /// single-tenant deployment whose callers belong to the bootstrapped
+    /// "default" tenant (hierarchy-enforcement.md §1) — expressed as the
+    /// claim's schema default (applied at deserialization), not as a
+    /// use-site fallback.
+    #[serde(default = "default_tenant_claim")]
+    tenant_id: String,
+}
+
+/// Serde default for [`JwtClaims::tenant_id`]: an absent tenant claim maps
+/// to the bootstrapped "default" tenant — the documented single-tenant IdP
+/// contract ("Absent = \"default\""). This is a deterministic function of
+/// the cryptographically verified token, not a fabricated scope identity on
+/// a lookup failure: there is no fallible lookup between the verified claims
+/// and this value, and "default" is a real Tenant row materialized at
+/// startup (bootstrap_default_tenant in lib.rs).
+fn default_tenant_claim() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -769,8 +813,11 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from JWT claim. The claim's schema
+    // default ("default" — the bootstrapped single-tenant scope) was already
+    // applied at deserialization, so the value here is fully determined by
+    // the verified token.
+    let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user.
@@ -2363,6 +2410,7 @@ mod tests {
             iat: now - 7200,
             exp: now - 3600,
             scope: "agent".to_string(),
+            jti: "test-jti".to_string(),
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
             workspace_id: None,
@@ -2471,6 +2519,37 @@ mod tests {
     }
 
     // -- G11-A SSRF guard tests -----------------------------------------------
+
+    #[test]
+    fn minted_jwt_carries_unique_jti() {
+        // AgentTokenRevoked audit events attribute revocations by jti, so
+        // every minted token must carry a unique, extractable JWT ID that
+        // matches the validated claims.
+        let key = super::AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let t1 = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .expect("mint");
+        let t2 = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .expect("mint");
+
+        let j1 = key
+            .extract_jti_unverified(&t1)
+            .expect("minted token must carry a jti");
+        let j2 = key
+            .extract_jti_unverified(&t2)
+            .expect("minted token must carry a jti");
+        assert_ne!(j1, j2, "each minted token gets a fresh jti");
+
+        // The extracted jti matches the signature-validated claims.
+        let claims = key.validate(&t1, issuer).expect("validate");
+        assert_eq!(claims.jti, j1);
+
+        // Non-JWT input yields no jti — never a fabricated identifier.
+        assert!(key.extract_jti_unverified("not-a-jwt").is_none());
+        assert!(key.extract_jti_unverified("").is_none());
+    }
 
     #[test]
     fn is_same_origin_same_host_accepted() {

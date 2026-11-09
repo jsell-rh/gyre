@@ -4,11 +4,16 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
+  // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
+  // workspace generate endpoint (read-only query translator).
+  import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
+  import { viewSpecToViewQuery } from '../lib/generated-view.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -85,7 +90,15 @@
   let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [], recent_interactions: [] });
   let activeViewQuery = $state(null);
   let explorerFilter = $state('all');
-  let explorerLens = $state('structural');
+  // Lens selection persists in the URL query param (?lens=evaluative) so a
+  // view with an active lens is deep-linkable (HSI §3 Three Lenses).
+  let explorerLens = $state(initialLensFromUrl());
+  // Evaluative lens data (HSI §3): gate outcomes per spec path (from the most
+  // recent gate results of MRs carrying that spec_ref) and the spec approval
+  // ledger. Both are best-effort overlays — the structural base renders fine
+  // without them.
+  let gateStatusBySpec = $state({});
+  let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
@@ -94,6 +107,54 @@
   // repeated clicks on the same step re-trigger the camera move.
   let traceFocusRequest = $state(null);
   let traceFocusNonce = 0;
+
+  // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
+  // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
+  // 'generate' is the LLM view generator (workspace generate endpoint) that
+  // translates natural-language questions into ViewSpec documents.
+  let chatMode = $state('ask');
+  // Trace playback request for generated "flow" views: the nonce lets a new
+  // flow view re-trigger the canvas particle animation.
+  let tracePlaybackRequest = $state(null);
+  let tracePlaybackNonce = 0;
+
+  /**
+   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   *
+   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
+   * node-type filters, callouts, and the LLM's explanation as the query
+   * annotation — the sidebar annotation alongside the graph). A "flow"
+   * layout additionally fetches the trace_source MR's captured trace and
+   * starts particle playback on the evaluative lens; the server already
+   * guarantees flow views are trace-backed, so a fetch failure here falls
+   * back to the structural lens (client mirror of the server fallback).
+   */
+  function applyGeneratedViewSpec(spec) {
+    if (!spec || typeof spec !== 'object') return;
+    const query = viewSpecToViewQuery(spec);
+    if (query) {
+      activeViewQuery = query;
+      pushInteraction({ action: 'query', detail: `generated:${spec.layout ?? 'view'}` });
+    }
+    if (spec.layout === 'flow' && spec.data?.trace_source?.mr_id) {
+      const mrId = spec.data.trace_source.mr_id;
+      api.mrTrace(mrId)
+        .then((trace) => {
+          if (trace?.spans?.length > 0) {
+            traceData = trace;
+            tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+          } else {
+            explorerLens = 'structural';
+          }
+        })
+        .catch((err) => {
+          console.warn('[ExplorerView] flow view trace fetch failed:', err);
+          explorerLens = 'structural';
+        });
+    } else {
+      explorerLens = 'structural';
+    }
+  }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -896,6 +957,34 @@
     }
   }
 
+  /** Read the lens from the current URL (?lens=evaluative). Called once at
+   *  component init (from the explorerLens $state initializer) so a lens
+   * deep link restores on reload/refresh. Structural is the default;
+   *  observable is future work and normalizes back to structural. */
+  function initialLensFromUrl() {
+    try {
+      return lensFromUrl(window.location.href);
+    } catch {
+      return 'structural';
+    }
+  }
+
+  // Lens selection persists in the URL query param (?lens=evaluative) so
+  // an overlaid view is deep-linkable. replaceState (no history entry):
+  // switching lenses is a view concern, not a navigation — browser Back must
+  // not step through lens toggles. The structural default drops the param
+  // to keep URLs clean. Other params (e.g. ?repo=) and the #drill= hash are
+  // preserved.
+  $effect(() => {
+    const lensValue = explorerLens;
+    try {
+      const url = lensToUrl(lensValue, window.location.href);
+      if (url !== window.location.href) {
+        history.replaceState(null, '', url);
+      }
+    } catch { /* URL unavailable (SSR) — skip persistence */ }
+  });
+
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view.
     // Scope drill per ui-layout.md §3: URL updates via pushState (no reload),
@@ -988,6 +1077,8 @@
     graphError = null;
     selectedNode = null;
     traceData = null;
+    gateStatusBySpec = {};
+    specApprovals = [];
     gateRecords = [];
     livenessTimeline = null;
     graphWarnings = [];
@@ -1003,6 +1094,9 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+      // Load evaluative lens overlays: gate outcomes + spec approvals
+      // (best-effort, non-blocking)
+      loadEvaluativeData(repoId);
       // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
       loadGateData(repoId);
       // Load recent ArchitecturalDelta records for the fading change rings
@@ -1066,6 +1160,74 @@
         } catch { /* no trace for this MR, try next */ }
       }
     } catch { /* trace loading is best-effort */ }
+  }
+
+  /** Load Evaluative lens data (HSI §3): gate outcomes and spec approvals.
+   *
+   *  Gate status: gate results are recorded per MR, and each MR carries a
+   *  spec_ref ("path@sha"), so the outcome is joined to graph nodes via the
+   *  node's governing spec paths. For each spec path, the most recent MR
+   *  with concluded gate results decides: pass = every gate passed,
+   *  fail = at least one failed.
+   *
+   *  Spec approvals: the approval ledger (GET /api/v1/specs/approvals)
+   *  provides ✓ approved / ⏳ pending / ✗ rejected status per spec path.
+   *
+   *  Both loads are best-effort and non-blocking — the structural base
+   *  renders fine without them. */
+  async function loadEvaluativeData(repoId) {
+    // Spec approval ledger — one fetch, filtered client-side by the paths
+    // actually present on graph nodes.
+    try {
+      api.specsApprovals()
+        .then((list) => { specApprovals = Array.isArray(list) ? list : []; })
+        .catch(() => { /* ledger unavailable — approval icons omitted */ });
+    } catch { /* ledger endpoint unavailable — approval icons omitted */ }
+
+    // Gate outcomes per spec path from recent MRs.
+    try {
+      // GET /api/v1/merge-requests scopes by `repository_id` and caps via
+      // `per_page` (newest first — ListMrsQuery), so the gate-status window
+      // is requested repo-scoped with a bounded per-MR gate fetch fan-out
+      // (the same ≤10 bound the liveness loaders uphold); a repo_id param
+      // is silently ignored and would attribute other repos' gate outcomes
+      // to this repo's evaluative overlay. A client-side sort keeps the
+      // recency order explicit even if a backend ignores the cap.
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      // Most recent first: the latest MR with concluded gates decides a
+      // spec path's status; older MRs for the same path are ignored.
+      const sorted = [...mrList].sort((a, b) => {
+        const at = Number(a?.created_at ?? 0) || 0;
+        const bt = Number(b?.created_at ?? 0) || 0;
+        return bt - at;
+      }).slice(0, 10);
+      const byPath = {};
+      for (const mr of sorted) {
+        const specRef = mr?.spec_ref;
+        if (!specRef) continue;
+        const path = specRef.split('@')[0];
+        if (!path || byPath[path]) continue;
+        try {
+          const results = await api.mrGates(mr.id);
+          // Keep only the most recent result per gate (re-runs append new
+          // records; the latest run decides the outcome).
+          const latestByGate = new Map();
+          for (const r of results ?? []) {
+            if (r?.status !== 'passed' && r?.status !== 'failed') continue;
+            const gid = r.gate_id ?? r.id;
+            const prev = latestByGate.get(gid);
+            if (!prev || (r.started_at ?? 0) >= (prev.started_at ?? 0)) latestByGate.set(gid, r);
+          }
+          const concluded = [...latestByGate.values()];
+          if (concluded.length === 0) continue;
+          byPath[path] = concluded.some(r => r.status === 'failed') ? 'fail' : 'pass';
+        } catch { /* no gate results for this MR — try older MRs for the path */ }
+      }
+      gateStatusBySpec = byPath;
+    } catch {
+      gateStatusBySpec = {};
+    }
   }
 
   /**
@@ -1683,6 +1845,8 @@
                 activeQuery={activeViewQuery}
                 bind:filter={explorerFilter}
                 bind:lens={explorerLens}
+                gateStatusBySpec={gateStatusBySpec}
+                specApprovals={specApprovals}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
@@ -1708,6 +1872,7 @@
                 onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
+                playbackRequest={tracePlaybackRequest}
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
@@ -2255,6 +2420,26 @@
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
+                  <!-- HSI §3: chat column mode — Explorer agent (ask) vs LLM view
+                       generator (generate). -->
+                  <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'ask'}
+                      role="tab"
+                      aria-selected={chatMode === 'ask'}
+                      onclick={() => { chatMode = 'ask'; }}
+                      type="button"
+                    >{$t('explorer_chat.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'generate'}
+                      role="tab"
+                      aria-selected={chatMode === 'generate'}
+                      onclick={() => { chatMode = 'generate'; }}
+                      type="button"
+                    >{$t('generated_view.title')}</button>
+                  </div>
                   <button
                     class="chat-collapse-btn"
                     onclick={() => { chatCollapsed = true; }}
@@ -2265,6 +2450,7 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
                   </button>
                 </div>
+                {#if chatMode === 'ask'}
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
@@ -2277,6 +2463,13 @@
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
                 />
+                {:else}
+                <GeneratedViewChat
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                />
+                {/if}
               </div>
             {/if}
             {#if chatCollapsed}
@@ -4083,13 +4276,46 @@
 
   /* ── Chat panel collapse/expand controls ─────────────────────────── */
   .chat-collapse-bar {
-    display: none;
+    display: flex;
     flex-shrink: 0;
     align-items: center;
-    justify-content: center;
-    padding: var(--space-1) 0;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface);
+  }
+
+  /* HSI §3: chat mode tabs (Explorer agent | Generated Views) */
+  .chat-mode-tabs {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .chat-mode-tab {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .chat-mode-tab:hover { color: var(--color-text); }
+
+  .chat-mode-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+    font-weight: 600;
+  }
+
+  .chat-mode-tab:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .chat-collapse-btn {
