@@ -168,64 +168,62 @@ priorities in the post-receive hook.
 
 ### Rebase repair rounds
 
-Three assignment bases have been merged into this branch. The first two
-(`ed57c723` task-201 persistent search, as `2bb4d127`; `fefde2946` task-089
-HSI Explorer, as `8e37d4561`) touched no task-109 source semantics — the
-former conflicted only in `web/dist` artifacts (taken from the base
-wholesale), the latter additively in `AppState` wiring and the
-`RepoSettings.svelte` tab bar (both sides kept; the merged bar renders 10
-tabs and the tab-count test was updated accordingly with all labels still
-asserted).
+Three earlier assignment bases were merged with no task-109 semantic
+change (`ed57c723` task-201 persistent search, `fefde2946` task-089 HSI
+Explorer, and `774737638` task-177 rendering technology — the last
+resolved a `process_spec_lifecycle` shape conflict by adopting the base's
+once-per-push `Option<Id>` workspace resolution that skips rather than
+fabricates scope on unresolvable repo rows; evidence
+`rebase-repair-7747376.md`).
 
-**Current round (finding 28f33736, merge commit `e135f37de`):** merged
-assignment base `774737638` (task-177 rendering technology, plus task-099
-bootstrap fallback and spec-approval ledger path normalization). One source
-conflict, in `process_spec_lifecycle`: the candidate had added a
-`workspace_id: &Id` parameter and emitted events unconditionally under the
-push-time resolved workspace; the base hoisted the workspace resolution to
-once-per-push returning `Option<Id>`, skips only the workspace-scoped
-events when the repo row is unresolvable, and keeps approval invalidation
-and cross-workspace notification running (its test
-`push_modifying_spec_revokes_ledger_approvals` relies on that decoupling —
-it drives the hook with a repo id that has no repo row). Resolved by
-adopting the base's shape: the conflict hunk takes the base side, the
-candidate's now-redundant `workspace_id` parameter is removed, and the
-production call site plus the two task-109 hook tests drop the argument
-(their fixture registers the real repo row, so the per-push re-lookup
-resolves the same workspace the tests previously passed explicitly). Both
-sides' invariants hold: no fabricated scope on lookup failure (events are
-skipped), and the task-097 F3 class rule is satisfied. The diff vs the base
-parent now shows only the task-109 config machinery. All auto-merged
-overlap files (`schema.rs`, `lib.rs`s, `abac_middleware.rs`, `api/mod.rs`,
-`mem.rs`, `middleware.rs`, `docs/api-reference.md`, `en.json`, `e2e.yml`)
-verified to carry both sides' symbols. Evidence:
-`/tmp/stage/review-evidence/task-109/rebase-repair-7747376.md`.
+**Current round (merge commit `1705e2a56`):** merged assignment base
+`402142b1` (task-106 jj rebase on target branch movement, task-116
+meta-spec prompt assembly, task-141 repo-defined persona push
+detection). One source conflict, in the `git_http.rs` diff-parser region:
+the base had refactored the parser into an unfiltered `parse_name_status`
+plus a hardcoded `SPEC_WATCHED_PATHS`-filtered `parse_spec_changes`
+wrapper (task-141's `parse_persona_changes` needs the unfiltered entry
+list), while this branch had replaced the hardcoded filtering with
+config-driven `parse_spec_changes_with_config`. Resolved as a union of
+both sides: keep the base's unfiltered `parse_name_status`, redefine
+`parse_spec_changes_with_config` as `parse_name_status` +
+`SpecLifecycleConfig::is_watched` filtering (ignored-over-watched
+precedence preserved), and drop the base's hardcoded `parse_spec_changes`
+wrapper — after the auto-merge it referenced a `SPEC_WATCHED_PATHS` const
+this branch deleted (non-compiling dead code, and exactly the
+hardcoded-path behavior task-109 removes). Both consumers keep their
+semantics: `process_spec_lifecycle` filters by per-repo config,
+`parse_persona_changes` filters persona files. `web/dist` taken from the
+assignment base (regenerated-by-build.rs assets reverted, not committed).
+All auto-merged overlap files (`api/mod.rs`, `abac_middleware.rs`,
+`lib.rs`, `mem.rs`, `en.json`, `e2e.yml`) verified to carry both sides'
+symbols. Evidence:
+`/tmp/stage/review-evidence/task-109/rebase-repair-402142b.md`.
 
 ### Test evidence
 
-Earlier rounds (before the current merge) recorded, at their then-heads:
+Earlier rounds recorded, at their then-heads: `npx vitest run
+RepoSettings.test.js` — 57/57 and `SecretsPanel.test.js` — 9/9;
+`classify_spec_change` — 6/6; clippy-diff clean.
+
+At the current merge head (`1705e2a56`) this sandbox instance had network
+and a cold cargo registry, so the focused Rust suites ran here, all exit 0:
+`cargo fmt --all --check`; `cargo check -p gyre-server --all-targets`;
 `cargo test -p gyre-server --lib spec_lifecycle` — 8/8 (6 API incl. the
 SQLite-backed migration traverse, plus 2 end-to-end hook tests against a
-real bare git repo); `cargo test -p gyre-adapters --lib spec_lifecycle` —
-4/4 against a real fresh SQLite DB; `cargo test -p gyre-domain --lib
-spec_lifecycle` — 5/5; `parse_spec_changes` — 9/9 and
-`classify_spec_change` — 6/6; `npx vitest run RepoSettings.test.js` — 57/57
-and `SecretsPanel.test.js` — 9/9; clippy-diff and fmt clean.
-
-At the current merge head (`e135f37de`) this sandbox instance has NO
-outbound network (direct TCP refused) and no prewarmed cargo registry,
-target dir, or `web/node_modules`, so Rust and vitest suites could not be
-executed here — recorded as a transport restriction for remote
-verification, not a code defect. Probes that did run here, all exit 0:
-`cargo fmt --all --check` (rustfmt parses every workspace crate — syntax
-validation of the merged tree), `check-migration-versions.sh`,
-`check-migration-sql-portability.sh`, `check-arch.sh`,
-`check-abac-route-registry.sh`, `check-task-commit-attribution.sh`, and
-the remaining mechanical gates (byte-slice, relative-path defaults,
-fail-open refs, fabricated/lossy/scope-literal defaults, inert
-enforcement, dead message kinds, mem port contracts, forwarded headers,
-in-memory state stores, unbounded HTTP, forged scope fields, MCP write
-tools, ABAC exempt handlers); `e2e.yml` parses as YAML and `en.json` as
-JSON. Full suites at the exact merge head belong to remote verification;
-the merge-conflict resolution itself is a three-way-diff-verified union
-described above.
+real bare git repo); `cargo test -p gyre-server --lib parse_` — 59/59
+(covers the re-resolved parser: `parse_spec_changes_*` incl.
+custom-watched/ignored-override, and the base's `parse_persona_changes_*`);
+`cargo test -p gyre-server --lib persona` — 24/24 (task-141 persona push
+end-to-end suite); `push_modifying_spec_revokes_ledger_approvals` — ok
+(the prior round's decoupling test, re-checked against the merged tree);
+`cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4 against a real
+fresh SQLite DB; `cargo test -p gyre-domain --lib spec_lifecycle` — 5/5.
+All mechanical gates exit 0: migration versions and SQL portability,
+arch, ABAC route registry, task commit attribution, ABAC exempt handlers,
+MCP write tools, dead message kinds, byte-slice truncation, relative-path
+defaults, fail-open refs, fabricated/lossy/scope-literal defaults, inert
+enforcement, mem port contracts, forwarded headers, in-memory state
+stores, unbounded HTTP, forged scope fields; `en.json` parses as JSON.
+Full workspace suites, all-target clippy, vitest, and GitHub CI at the
+exact merge head belong to remote verification.
