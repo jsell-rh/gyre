@@ -3607,6 +3607,13 @@ mod tests {
             ) -> anyhow::Result<Option<Vec<u8>>> {
                 anyhow::bail!("failing secrets port")
             }
+            async fn find_by_id(
+                &self,
+                _id: &gyre_common::Id,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Option<gyre_common::Secret>> {
+                anyhow::bail!("failing secrets port")
+            }
             async fn list_by_scope(
                 &self,
                 _scope: gyre_common::SecretScope,
