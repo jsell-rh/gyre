@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5626a68fcb94469acc6f6c2504dcd2dbcd204e7c"]
 ---
 
 ## Spec Excerpt
@@ -122,8 +122,12 @@ this branch's `message_dispatcher` import vs. main's new imports):
   `message_dispatcher::spawn_message_consumer`/`spawn_message_expiry`
   wiring present.
 
-Both merge commits are recorded in `commits:` above. No task-owned file
-needed semantic repair in either merge. Focused suites re-run green
+Both merge commits carry no task label, so `check-task-commit-attribution.sh`
+does not force their listing; they are added to `commits:` for review
+scoping at each repaired head (4a10321c3 and the c8626b1b3 repair below),
+and their resolutions are also visible in the base..candidate diff
+regardless of frontmatter state. No task-owned file needed semantic repair
+in either merge. Focused suites re-run green
 post-merge (see Test evidence); `cargo check -p gyre-server --bins`
 clean; arch, dead-message-kinds, fabricated-scope-defaults, and
 task-commit-attribution checks all pass.
@@ -146,14 +150,25 @@ host-tooling issue, unrelated to this task.
   bridge test) and polling for the bridge-created notification. The test
   kills a real regression: removing the bridge's ReconciliationCompleted
   arm or the dispatcher wiring makes it fail again.
-- **Stale frontmatter (73a69995, process):** merge commit 9e5a0171d is
-  listed in `commits:` above, so the main.rs startup-wiring conflict
-  resolution is inside review scoping.
+- **Stale frontmatter (73a69995, process):** merge commit 9e5a0171d was
+  re-listed in `commits:` (086b140f8) so the main.rs startup-wiring
+  conflict resolution is inside review scoping.
 - **Frontmatter regression (e7aa777ea, process):** head cea3f23b4 had
-  again dropped 9e5a0171d from `commits:`, making the 73a69995 repair
-  note false at head. Fixed at the current head: `commits:` now lists
-  51221dc02, 9e5a0171d, 5192ff750, and the new merge 5626a68fc, and this
-  note is accurate at head.
+  again dropped 9e5a0171d from `commits:`; 4a10321c3 restored it and
+  added the new merge 5626a68fc.
+- **Frontmatter regression, third recurrence (c8626b1b3, process):** the
+  executor's own checkpoint commit c1ae3230b ("process: record task-162
+  branch commits") rewrote `commits:` back to the task-labeled commits
+  only, dropping both unlabeled merge commits again and falsifying the
+  prior "recorded in commits: above" claims at that head. Repaired at the
+  current head: 9e5a0171d and 5626a68fc are re-listed in `commits:` by a
+  task-labeled follow-up commit, and this note deliberately states the
+  merge-commit identities and their content directly (main.rs
+  import-conflict union resolutions against main tips fefde294 and
+  3ced150b) rather than claiming frontmatter state, because any executor
+  checkpoint that re-derives `commits:` from task-labeled commits only
+  will drop unlabeled merge commits again. The resolutions remain
+  reviewable via the base..candidate diff even if that recurs.
 
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
