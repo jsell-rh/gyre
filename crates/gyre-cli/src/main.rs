@@ -2163,7 +2163,7 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                         persona.name,
                         persona.slug,
                         &summary.tenant_id,
-                        persona.prompt,
+                        persona.system_prompt,
                         persona.capabilities,
                         persona.protocols,
                     )
