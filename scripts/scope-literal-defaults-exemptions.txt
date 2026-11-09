@@ -1,21 +1,16 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-# Fix a site by resolving the real scope (or refusing to create the entity
-# without it), then DELETE its line and lower FROZEN_EXEMPTION_COUNT in
-# scripts/check-scope-literal-defaults.sh.
+# Frozen at 9 entries (seeded at 24 with 9 task-099-owned sites when
+# the check was introduced; those 9 were fixed and removed in the task-099
+# F1 revision round; the domain Agent constructor default was fixed via the
+# documented `bootstrap_workspace` helper, lowering 13→12; the three
+# merge_request.rs sites were fixed for real in the task-111 verification
+# repair — MergeRequest::new takes workspace_id as a constructor parameter
+# and the SQLite/PG adapters persist under the handle's configured tenant
+# scope — lowering 12→9). Fix a site by resolving the real scope (or
+# refusing to create the entity without it), then DELETE its line and
+# lower FROZEN_EXEMPTION_COUNT in scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
-
-# The former auth.rs / lib.rs sites (task-099 F1) were fixed by attributing
-# the bootstrap tenant identity via crate::DEFAULT_TENANT_ID (see
-# gyre-server/src/lib.rs): the "default" tenant is a real entity created on
-# first startup (specs/system/hierarchy-enforcement.md), not a fabricated
-# scope, and every former site now names it explicitly.
-#
-# The former merge_request.rs sites (task-111 verification repair) were fixed
-# for real: MergeRequest::new now takes the workspace_id as a constructor
-# parameter (callers pass the repository's workspace), and the SQLite/PG
-# adapters persist under the storage handle's configured tenant scope
-# (mirroring TaskRepository::create) instead of a "default" literal.
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:
@@ -27,5 +22,4 @@ crates/gyre-adapters/src/postgres/activity.rs:56
 crates/gyre-adapters/src/postgres/analytics.rs:115
 crates/gyre-adapters/src/postgres/analytics.rs:225
 crates/gyre-adapters/src/postgres/repository.rs:94
-crates/gyre-domain/src/agent.rs:147
 crates/gyre-domain/src/task.rs:92
