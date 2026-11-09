@@ -21,7 +21,7 @@
 # enforce tenant containment in spawn_*_orchestrator_core (caller tenant
 # vs. the target workspace's tenant, Forbidden on mismatch) — the exemption
 # lines were deleted per this file's fix-and-delete contract (task-130).
-
+#
 # --- frozen-baseline legacy debt (routes in abac-route-registry-exemptions.txt
 # before the task-093 extension of this check; handlers never had per-handler
 # authorization). Each is a real F1b-class hazard; exemptions keep the check

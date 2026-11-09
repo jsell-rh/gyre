@@ -1,24 +1,17 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-# Frozen at 24 entries (seeded when this check was introduced by the
-# task-099 process revision). Fix a site by resolving the real scope (or
+# Frozen at 12 entries (seeded at 24 with 9 task-099-owned sites when
+# the check was introduced; those 9 were fixed and removed in the task-099
+# F1 revision round; the domain Agent constructor default was fixed in a
+# later task-099 repair round via the documented `bootstrap_workspace`
+# helper, lowering 13→12). Fix a site by resolving the real scope (or
 # refusing to create the entity without it), then DELETE its line and
 # lower FROZEN_EXEMPTION_COUNT in scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
 
-# task-099 F1 revision round owns these (admin user is never bound to a
-# tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
-# identity; emit_event/emit_telemetry messages carry it):
-crates/gyre-server/src/auth.rs:686
-crates/gyre-server/src/auth.rs:727
-crates/gyre-server/src/auth.rs:770
-crates/gyre-server/src/auth.rs:814
-crates/gyre-server/src/auth.rs:847
-crates/gyre-server/src/auth.rs:879
-crates/gyre-server/src/auth.rs:1335
-crates/gyre-server/src/lib.rs:520
-crates/gyre-server/src/lib.rs:564
-
+# The task-099 F1 auth.rs/lib.rs sites were fixed for real (construction
+# goes through `system_principal_tenant()` / the user's stored binding;
+# emit paths resolve the workspace tenant or skip) — entries deleted.
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:
 crates/gyre-adapters/src/sqlite/activity.rs:56
@@ -31,6 +24,5 @@ crates/gyre-adapters/src/postgres/analytics.rs:115
 crates/gyre-adapters/src/postgres/analytics.rs:225
 crates/gyre-adapters/src/postgres/merge_request.rs:166
 crates/gyre-adapters/src/postgres/repository.rs:94
-crates/gyre-domain/src/agent.rs:147
 crates/gyre-domain/src/merge_request.rs:124
 crates/gyre-domain/src/task.rs:92

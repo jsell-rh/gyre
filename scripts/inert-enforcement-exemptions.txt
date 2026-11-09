@@ -11,8 +11,8 @@
 #
 # See: specs/reviews/task-077.md F5 (the finding that created this check)
 #
-# --- task-077 revision round owns the merge-time ABAC system-subject
-# evaluation (HSI §2) and its human-approval hold path. The original
-# merge-time evaluate_attestation_abac discard sites were fixed for real
-# (task-095 verification repair): the decision now fails the queue entry
-# on Deny, mirroring constraint enforcement. ---
+# (No entries: the merge-time ABAC audit-only sites in merge_processor.rs
+# were fixed by the task-077/task-095 revision rounds (the decision now
+# fails the queue entry on Deny), and the persona-validation sites in
+# api/orchestrator.rs now resolve the persona fail-closed via
+# resolve_orchestrator_persona — an unapproved persona rejects the spawn.)
