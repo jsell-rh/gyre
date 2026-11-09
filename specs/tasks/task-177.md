@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-layout.md §Canvas Rendering"
   - "ui-layout.md §Layout Engines"
   - "ui-layout.md §Interaction Events"
-commits: ["79744b712975e1d1ba5eae7ab1ee4c6800bd1985", "4aec0fd467b2b76a6f7e7d38d5131eb9171c004f", "41e31138e5f8b42d3e55d43866297551c81afd3a", "e1a8686b47ea112f3639e6dabe015dd0a813f060", "825b4145e0f856d30b577bfe76d4247f1fc151dc"]
+commits: ["79744b712975e1d1ba5eae7ab1ee4c6800bd1985", "4aec0fd467b2b76a6f7e7d38d5131eb9171c004f", "41e31138e5f8b42d3e55d43866297551c81afd3a", "e1a8686b47ea112f3639e6dabe015dd0a813f060", "825b4145e0f856d30b577bfe76d4247f1fc151dc", "01f680c7033a57348b09f88b0937088f950968cf"]
 ---
 
 ## Spec Excerpt
@@ -87,20 +87,55 @@ Read `ui-layout.md` §10 for the full rendering technology stack. The existing `
 
 ## Shipped
 
-Rendering technology per ui-layout.md §10. Components and tests landed in the
-earlier checkpoint commits (825b4145, e1a8686b, 41e31138, 4aec0fd4); this
-round resolved the rebase of the candidate onto base fefde294 (task-089
-generated-views lineage), which restructured the Explorer shell around the
-`explorerViewMode` default-views architecture and deleted `MoldableView.svelte`.
+Rendering technology per ui-layout.md §10. Components and tests landed in
+the earlier checkpoint commits (825b4145, e1a8686b, 41e31138, 4aec0fd4);
+the rebase onto base fefde294 (task-089 generated-views lineage) landed as
+c4620c63f; this round (01f680c7) repaired the three review findings from
+the ff311d2f review round: the layout registry had no production consumer
+after that rebase, its labelKeys pointed at the deleted `moldable_view`
+i18n section, and the d3-force test was self-confirming against the
+columnLayout fallback.
 
-### Behavior (post-rebase, commit c4620c63f)
+### Registry production wiring (commit 01f680c7)
+
+- **View spec `layout` selects the renderer** (Implementation Plan item 4):
+  `applyGeneratedViewSpec` (ExplorerView.svelte) resolves the generated
+  ViewSpec's `layout` through `getLayout()` into `activeLayout`
+  (unregistered names fall back to `graph`). The Boundary branch dispatches
+  through the registry: `hierarchical`/`layered` render
+  `SvgGraphCanvas` with the registry's engine selector (real ELK layered
+  DOWN / RIGHT), `side-by-side` renders the CSS-Grid `SideBySideView`,
+  `diff` renders `DiffView`, `list` renders the shell `VirtualNodeList`;
+  `graph`/`flow`/`timeline` stay on the unified `ExplorerCanvas` (Canvas
+  2D + TimelineScrubber, per the task-065 cutover). A chip labeled from
+  the registry's `labelKey` (i18n) dismisses the generated layout back to
+  the default canvas.
+- **Scope projection for registry renderers** (`web/src/lib/view-query-scope.js`,
+  pure): resolves the ViewQuery scope shapes a generated ViewSpec produces
+  (`all`, `filter` node_types/name_pattern, computed `$governed_by('…')`,
+  `concept` seed BFS with expand_edges/depth/direction) so the SVG/Grid/diff
+  renderers receive the same node set the unified canvas would show;
+  unsupported or unmatched scopes yield the full graph, mirroring the
+  canvas's unmatched-scope behavior.
+- **labelKeys**: moved from the deleted `moldable_view.*` section to new
+  `explorer_view.layout_*` keys in `web/src/locales/en.json`; the layout
+  chip renders them, and a registry test asserts every labelKey resolves
+  in the locale (no raw-key UI).
+- **d3-force test hardened**: the old assertion (`some(!'-26px')`) passed
+  with the engine replaced by columnLayout. New fixture (4 same-type
+  nodes, 2 disjoint edges) asserts all nodes resolve and land on 4 distinct
+  x positions — the column fallback stacks same-type nodes in one column
+  (identical x). Mutation-verified: mocking `computeLayout('graph')` to
+  return `columnLayout` makes the exact new assertion fail.
+
+### Behavior (unchanged from c4620c63f)
 
 - **SVG canvas** (`web/src/lib/SvgGraphCanvas.svelte`): SVG rendering for `graph`/`hierarchical`/`layered` views with individually addressable node `<g>`s and edge `<line>`s, pan (background drag, window-level pointer tracking) and zoom (wheel around cursor + toolbar buttons + fit), CSS-transitioned hover/selection state, and keyboard access (tabindex 0 + Enter/Space activation on nodes and edges).
-- **Density policy** (`web/src/lib/canvas-density.js`, pure): <=500 nodes render fully; >500 auto-filter to public-only with a banner + [Show All] (applied inside `ExplorerCanvas.svelte`); >1000 even after filtering switch to the virtualized list (`VirtualNodeList.svelte`, windowed rows via scroll offset + overscan) with a warning. The shell-owned list fallback now nests inside the upstream `explorerViewMode === 'boundary'` branch (Boundary view = the canvas), so the other default views (spec-realization/change/system-trace) are unaffected by canvas density.
-- **Layout engines** (`web/src/lib/layout-engines.js`): `graph` -> d3-force (sync 300-tick simulation), `hierarchical` -> ELK layered DOWN, `layered` -> ELK layered RIGHT (real elkjs `elk.bundled.js`, verified to produce genuine layered positions in plain JS — no mocks), `list` -> virtualized node list, `timeline` -> d3-scale time axis (now in `TimelineScrubber.svelte` — see rebase notes), `side-by-side` -> CSS Grid (`SideBySideView.svelte`), `diff` -> custom `DiffView.svelte`; all eight registered in `layoutRegistry.js`, which the rebase re-pointed at the upstream task-065 cutover (`flow` -> unified `ExplorerCanvas`, `FlowRenderer.svelte` deleted upstream).
-- **ViewEvents** (`web/src/lib/viewEvents.js`): every interactive element (SVG nodes, edges, list rows, insight cards) emits the standardized `ViewEvent` (type/entity_type/entity_id/position); the Explorer shell (`ExplorerView.svelte`) handles all four uniformly — click -> detail panel, dblclick -> drill into the entity's repo graph, hover -> positioned tooltip, context-menu -> actions menu (Escape closes). The uniform handler coexists with upstream's `active_query` canvas-state effect and the `view_spec`/generated-views flow (`openNodeDetail` is shared by the canvas callback and ViewEvent dispatch).
+- **Density policy** (`web/src/lib/canvas-density.js`, pure): <=500 nodes render fully; >500 auto-filter to public-only with a banner + [Show All] (applied inside `ExplorerCanvas.svelte`); >1000 even after filtering switch to the virtualized list (`VirtualNodeList.svelte`, windowed rows via scroll offset + overscan) with a warning. The shell-owned list fallback nests inside the upstream `explorerViewMode === 'boundary'` branch (Boundary view = the canvas), so the other default views (spec-realization/change/system-trace) are unaffected by canvas density.
+- **Layout engines** (`web/src/lib/layout-engines.js`): `graph` -> d3-force (sync 300-tick simulation), `hierarchical` -> ELK layered DOWN, `layered` -> ELK layered RIGHT (real elkjs `elk.bundled.js`, verified to produce genuine layered positions in plain JS — no mocks), `list` -> virtualized node list, `timeline` -> d3-scale time axis (in `TimelineScrubber.svelte`), `side-by-side` -> CSS Grid (`SideBySideView.svelte`), `diff` -> custom `DiffView.svelte`; all eight registered in `layoutRegistry.js` (`flow` -> unified `ExplorerCanvas` per the upstream task-065 cutover) and — since 01f680c7 — consumed by the Explorer shell's generated-view dispatch.
+- **ViewEvents** (`web/src/lib/viewEvents.js`): every interactive element (SVG nodes, edges, list rows, insight cards) emits the standardized `ViewEvent` (type/entity_type/entity_id/position); the Explorer shell (`ExplorerView.svelte`) handles all four uniformly — click -> detail panel, dblclick -> drill into the entity's repo graph, hover -> positioned tooltip, context-menu -> actions menu (Escape closes). The uniform handler coexists with upstream's `active_query` canvas-state effect and the `view_spec`/generated-views flow (`openNodeDetail` is shared by the canvas callback, the ViewEvent dispatch, and the registry renderers' `onSelectNode`).
 
-### Rebase resolution (commit c4620c63f)
+### Rebase resolution (commit c4620c63f, retained context)
 
 The base deleted `MoldableView.svelte` (task-065/088/089 replaced the
 multi-layout tab shell with the default-views architecture: the canvas IS
@@ -133,29 +168,41 @@ had built list/timeline rendering inside `MoldableView.svelte`. Resolution:
    and ViewEvent emission blocks auto-merged cleanly into the upstream
    (liveness/causal-trace/lens) canvas.
 6. `en.json`: took the base's version (the `moldable_view` i18n section was
-   removed upstream together with the component; no remaining code performs
-   those lookups).
+   removed upstream together with the component); since 01f680c7 the
+   registry's replacement `explorer_view.layout_*` keys live there.
 
 ### Test evidence
 
-- Full web unit suite on the merged tree: **96 files, 1982 passed, 41
+- Full web unit suite on the final tree: **98 files, 2000 passed, 41
   skipped (pre-existing skips), 0 failures** (`npx vitest run`, exit 0).
-  Includes the task-177 suites (SvgGraphCanvas, canvas-density,
-  VirtualNodeList, viewEvents, DiffView, SideBySideView,
-  layoutRegistry-engines, ExplorerViewViewEvents, ExplorerCanvas*,
-  TimelineScrubber incl. the two new d3-scale tests, timeline-utils) and
-  every suite touching the merged files (ExplorerView*, ExplorerDefaultViews,
-  ExplorerGeneratedViews, GeneratedViewChat, RepoMode*, WorkspaceHome*,
-  view-spec, canvas-state, generated-view, ...).
+  New this round: `ExplorerViewLayoutRenderers.test.js` (6 tests: SVG
+  dispatch for hierarchical, scope filtering of the rendered node set,
+  list dispatch, canvas retained for graph/flow/timeline, chip dismissal,
+  unregistered-layout fallback — driven through the production
+  `onApplyView` -> `applyGeneratedViewSpec` path) and
+  `view-query-scope.test.js` (11 tests: scope shapes, $governed_by,
+  concept BFS, unsupported-scope null semantics, edge accessors), plus a
+  labelKey-resolves-in-locale registry test and the hardened d3-force test.
+- Mutation check: replacing `computeLayout('graph')` with `columnLayout`
+  makes the new d3-force assertion fail (killed regression); engine probe
+  output retained in
+  `/tmp/stage/review-evidence/task177-force-vs-column-probe.txt`.
+- One pre-existing fixture updated (ExplorerGeneratedViews.test.js
+  AUTH_SPEC `layout: 'hierarchical'` -> `'graph'`): it asserted the *canvas*
+  query annotation, which is only correct for canvas-rendered layouts now
+  that `layout` selects the renderer — the hierarchical dispatch is covered
+  by ExplorerViewLayoutRenderers.test.js.
+- JS verifiers pass on the new tests (assertionless, conditional guards,
+  mirrored logic, self-confirming, tautological, dead test variables,
+  phantom APIs, comparative claims, stale mechanism claims,
+  self-contradicting comments). check-dead-components reports only the 4
+  pre-existing violations on files untouched here.
 - Rust compile/clippy could not be run in this sandbox (crates.io
   unreachable — `cargo check --offline` fails on dependency resolution,
-  same restriction as the prior round) — recorded for remote verification.
-  The merge introduced no Rust conflicts (git auto-merged `explorer_ws.rs`
-  cleanly; the prior round's `useless_conversion` repair at the
-  `message_during_run` reply is intact in the merged file).
-- `web/dist` conflicts were resolved by the executor's staged state and are
-  left untouched per the assignment contract (final integration rebuilds
-  and publishes those assets remotely).
+  same restriction as prior rounds) — recorded for remote verification.
+  No Rust source was touched by the 01f680c7 repair.
+- `web/dist` is left untouched per the assignment contract (final
+  integration rebuilds and publishes those assets remotely).
 
 No exemptions added, no verifiers weakened, no coverage-matrix statuses
 changed (auditor-owned).
