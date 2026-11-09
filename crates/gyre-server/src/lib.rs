@@ -3,6 +3,7 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
+pub mod agent_audit;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -37,6 +38,7 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;

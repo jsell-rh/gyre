@@ -36,7 +36,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
-| `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6); optional `?has_trace=true` filters to MRs with captured gate traces and `?limit=N` returns the N most recent — the MR-discovery list the explorer view generator injects into its LLM prompt (HSI §3, task-089) |
 | `POST/GET` | `/api/v1/workspaces/{workspace_id}/messages` | Send a message to all workspace members / list messages; body: `{to: {"agent": "<id>"}\|{"workspace": "<id>"}\|"broadcast", kind, tier?: "directed", payload?}`; `payload` is validated against the kind's schema (message-bus.md §Payload Schemas) — a non-object payload, a missing/null required field, or a schema-known field with the wrong wire type (string/unsigned-integer/number/string-array per the table) is rejected with 400 naming the field; messages are Ed25519-signed at rest (Message Bus Phase 3) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/presence` | Workspace presence — `[{user_id, session_id, view, workspace_id, last_seen}]`; stale entries evicted every 30 s (HSI §7, S1.5) |
 | `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
@@ -210,7 +210,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/workspaces/{id}/briefing/ask` | SSE Q&A on the workspace briefing — streams LLM-generated answers to a question about recent changes; body: `{question}`; returns `text/event-stream` (S3.2, HSI) |
 | `GET` | `/api/v1/workspaces/{id}/graph/concept/{concept_name}` | Workspace-wide concept search — nodes matching `concept_name` across all repos in the workspace (M30) |
 | `GET/POST` | `/api/v1/workspaces/{id}/explorer-views` | List / create named explorer views (saved graph perspectives); body: `{name, description?, query?, layout?}` (S3.1) |
-| `POST` | `/api/v1/workspaces/{id}/explorer-views/generate` | LLM-generate an explorer view from a natural-language description; body: `{prompt}`; returns a draft `ExplorerView` (S3.1) |
+| `POST` | `/api/v1/workspaces/{id}/explorer-views/generate` | LLM-generate an explorer view (ViewSpec: graph query + layout + explanation) from a natural-language question; body: `{question, repo_id?, previous_spec?}` — `previous_spec` is the prior generated view for refinement turns; returns `text/event-stream` with `partial` and `complete` events (`complete`: `{view_spec, explanation, fallback?}` — invalid LLM output yields `view_spec: null` plus a fallback list view; a `"flow"` layout is only returned when its `trace_source.mr_id` has captured trace data, otherwise it falls back to `"graph"`); the prompt is injected with the workspace's recent MRs with trace data for `trace_source` selection (HSI §3, task-089) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/explorer-views/{view_id}` | Read / update / delete a named explorer view (S3.1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
@@ -235,7 +235,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
 | `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
-| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
+| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task, revoke agent token (Admin only) (M11.1, task-103) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
@@ -267,6 +267,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
+| `POST` | `/api/v1/secrets` | Create a secret, or update the value of an existing secret with the same `(scope, scope_id, name)` in the tenant — body: `{name, scope: "tenant"\|"workspace"\|"repo"\|"task", scope_id?, secret_type: "static"\|"ephemeral"\|"rotated"\|"derived", value, expires_at?}`; **Admin only** (ABAC `secret` resource + in-handler role check); `scope_id` is validated against the caller's tenant (404 unknown, 403 cross-tenant); the plaintext `value` is accepted here and NEVER returned by any endpoint (values encrypted at rest, AES-256-GCM); returns metadata (platform-model.md §7, task-098) |
+| `GET` | `/api/v1/secrets` | List secret metadata by scope — `?scope=tenant\|workspace\|repo\|task&scope_id=<uuid>` (scope_id required for workspace/repo/task); **Admin only**; returns `[{id, name, scope, scope_id, secret_type, created_by, created_at, expires_at, last_rotated_at, tenant_id}]` — never values (platform-model.md §7, task-098) |
+| `DELETE` | `/api/v1/secrets/{id}` | Delete a secret — **Admin only**; 404 if absent (or in another tenant); 204 on success (platform-model.md §7, task-098) |
+| `POST` | `/api/v1/secrets/{id}/rotate` | Force rotation — body: `{new_value, expires_at?}`; replaces the value and updates `last_rotated_at`; **Admin only**; returns metadata, never the value (platform-model.md §7, task-098) |
 | `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
 | `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins (immutable Deny evaluated first); default-deny (M22.6); **400** on create for reserved name prefixes `trust:` / `builtin:` — server-managed (HSI §2, TASK-077) |
@@ -410,6 +414,13 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 | `container_crashed` | Container exited with non-zero code or was force-killed (M23) |
 | `container_oom` | Container OOM-killed by the kernel (M23) |
 | `container_network_blocked` | Outbound network attempt blocked by `--network=none` (G8, M23) |
+| `agent_spawned` | Agent spawned via `POST /api/v1/agents/spawn` (task-103) |
+| `agent_completed` | Agent completed via `POST /api/v1/agents/{id}/complete` (task-103) |
+| `agent_killed` | Admin force-killed an agent (task-103) |
+| `agent_dead` | Stale agent detector marked an agent Dead (task-103) |
+| `agent_heartbeat` | Agent heartbeat received (task-103) |
+| `agent_token_revoked` | Agent auth token revoked — completion, stop, or admin kill (task-103) |
+| `agent_reassigned` | Admin reassigned an agent's task to another agent (task-103) |
 
 `outcome` is `success` | `failure` | `blocked` (default `success`). Unrecognized
 `event_type` strings are preserved as custom events.
@@ -460,6 +471,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `briefing://` | `briefing://{workspace_id}` | Workspace briefing narrative: completed MRs, in-progress tasks, metrics (HSI §9). Optional `?since=<epoch>` query param. |
 | `notifications://` | `notifications://{workspace_id}` | Inbox notifications for authenticated user (HSI §11). Optional `?min_priority=&max_priority=` query params. |
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
+| `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
+| `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
 
 Example MCP `initialize` call:
 ```json
