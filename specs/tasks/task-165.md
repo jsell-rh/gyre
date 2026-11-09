@@ -61,25 +61,30 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Repair round (review findings ccc54b26, one item, resolved at HEAD with
-commit `12a0d0e9` — no production code change, task-165 behavior is
-untouched):
+Rebase-resolution round (merge of assigned base `fefde294` into the
+task-165 branch, resolved in merge commit `bdc156e00` — no task-165
+production behavior changed; all conflicts were source-level):
 
-- **Dead exemption entry in `relative-path-defaults-exemptions.txt`**:
-  the task-099 F6 entry `crates/gyre-cli/src/main.rs:1793` was orphaned
-  by the merge with the assigned base — upstream replaced the
-  starter-kit relative fallback with
-  `args.repo_path.as_deref().map(PathBuf::from)` (main.rs:1869), so
-  the hazard is fixed upstream and the entry anchored a closing brace.
-  Per the file's own header ("When you fix one, DELETE its exemption
-  line"), the entry and its now-orphaned task-099 section header were
-  deleted; the remaining 3 entries were re-verified to anchor live
-  sites (conversation.rs:191, spawn.rs:597, snapshot.rs:9). Gate passes
-  at HEAD before and after; this file has no frozen count. Same flaw
-  class the round-6 repair fixed for the sibling fabricated-scope file.
-- Earlier repair rounds (4492822e: fabricated-scope dead-entry cleanup
-  + L3 record accuracy; SUMMARY sync) remain resolved in history and
-  are not re-ledgered here.
+- **`crates/gyre-server/src/git_http.rs`** (test module): both sides
+  appended tests at the end of the same module. Resolution keeps both
+  sets — task-165's seven stack-attestation/lockfile push tests and
+  the base's task-167 `push_rebases_parent_branch_drops_child_lineage_dep`
+  end-to-end lineage test. All 45 `git_http::` tests pass at the merged
+  HEAD, including both sets.
+- **`scripts/check-fabricated-scope-defaults.sh` +
+  `fabricated-scope-defaults-exemptions.txt`**: adopted the base's state
+  (FROZEN_EXEMPTION_COUNT=3; specs.rs/auth.rs entries removed) because
+  the base's code fixes for those two sites (task-193 workspace-record
+  tenant resolution, task-103 `default_tenant_claim` serde default)
+  auto-merged into this tree — keeping the HEAD-side entries would
+  anchor dead exemption lines, the exact flaw class prior repair
+  rounds removed. Gate passes at merged HEAD (exit 0).
+- **`specs/coverage/SUMMARY.md`**: regenerated mechanically via
+  `scripts/update-coverage-summary.sh` against the merged coverage
+  files (no hand-merged numbers).
+- Earlier repair rounds (12a0d0e9 relative-path dead entry; 4492822e
+  fabricated-scope dead-entry cleanup + L3 record accuracy) remain
+  resolved in history and are not re-ledgered here.
 
 ### Actual behavior
 
@@ -117,27 +122,34 @@ untouched):
 
 ### Test evidence
 
-This repair round changed no Rust code (one exemptions text file), so
-the focused probe set is the affected gates (logs under
+This round resolved the rebase onto base `fefde294` (merge commit
+`bdc156e00`); task-165 production code is unchanged, but the merged
+tree recombined test modules and exemption files, so the focused probe
+set is the affected suites and gates (logs under
 `/tmp/stage/review-evidence/`):
 
-- `bash scripts/check-relative-path-defaults.sh` → OK, exit 0, at HEAD
-  with the entry deleted (log: `task165-repair2-relpath.log`).
-- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at
-  the same HEAD (log: `task165-repair2-fabscope.log`) — confirming the
-  sibling gate from the prior round still passes after the base merge.
-- Remaining 3 exemption entries hand-verified live at their anchored
-  lines (see above).
-- Prior-round suites (implementation unchanged — no Rust file touched
-  this round): gyre-domain `stack` 9, gyre-server `api::stack_attest`
-  14, git_http task-165 push tests 7
+- `cargo test -p gyre-server git_http::` → 45 passed, 0 failed
+  (log: `task165-repair3-githttp-tests.log`), including all seven
+task-165 push tests
   (push_below_min_attestation_level_blocked,
   push_below_min_level_warn_mode_flagged_and_accepted,
   push_meeting_min_level_accepted_and_level_stored,
   level3_detected_from_workload_attestation,
   lockfile_drift_blocked_in_block_mode, lockfile_match_accepted,
-  tampered_lockfile_rejected_by_integrity_check), constraint_check 31,
-  gyre-cli bins 129.
+  tampered_lockfile_rejected_by_integrity_check) and the base's task-167
+  push_rebases_parent_branch_drops_child_lineage_dep — both merged test
+  sets green together.
+- `cargo test -p gyre-server api::stack_attest` → 14 passed, 0 failed
+  (log: `task165-repair3-stackattest-tests.log`).
+- `cargo test -p gyre-domain stack` → 9 passed, 0 failed
+  (log: `task165-repair3-domain-stack-tests.log`).
+- `cargo test -p gyre-cli` → 136 passed, 0 failed (main.rs/client.rs
+  auto-merged from the base; log: `task165-repair3-cli-tests.log`).
+- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at
+  merged HEAD with the base's count-3 state (log:
+  `task165-repair3-fabscope.log`).
+- `bash scripts/check-relative-path-defaults.sh` → OK, exit 0, at the
+  same HEAD (log: `task165-repair3-relpath.log`).
 - `cargo test --all` is owned by the verification/publication stage and
   not repeated here. `ws_integration::test_auth_and_ping_roundtrip`
   fails in this sandbox on `TcpListener::bind` errno 95
