@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d"]
 ---
 
 ## Spec Excerpt
@@ -122,18 +122,22 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 ## Shipped
 
 All three HSI §12 gaps are implemented in production code (checkpoint
-f7f3b081, call-site repair ca1ac78e, base-fefde294 merge 1eadc6d8, and
-this round's base-77473763 merge 960cfb43). Every acceptance criterion
-was re-verified on the final merged tree.
+f7f3b081, call-site repair ca1ac78e, base-77473763 merge 960cfb43, and
+this round's review-repair 94af4aef on the base-fb1f82e31 merge 0cfd963).
+Every acceptance criterion was re-verified on the final merged tree.
 
 ### Behavior shipped
 
 - **Spec amendment (Part 1)** — `specs/system/human-system-interface.md`
   §12 Judgment Ledger carries a concrete Sources table (category →
   table → human-attribution column → workspace-attribution column), states
-  when each event is written, and pins `?type=` values to
+  when each event is written, pins `?type=` values to
   `approval|rejection|gate|trust|meta-spec` (exactly the `JudgmentType`
-  wire strings).
+  wire strings), and — as of 94af4aef — specifies the attribution keys
+  exactly: approvals attribute via `spec_approvals.approver_id` (canonical
+  user Id), rejections/revocations via `rejected_by`/`revoked_by` (the
+  declining human's canonical user Id), with the KeyBinding
+  `user:<display name>` label explicitly named as NOT the ledger key.
 - **Write paths (Part 3)** — `AuditEventType` has `TrustChange` /
   `GateOverride` / `MetaSpecPublish` variants. Trust transition via
   `PUT /api/v1/workspaces/:id` writes a `trust_change` audit event
@@ -160,68 +164,76 @@ was re-verified on the final merged tree.
   rejects unknown notification_type with 400). `GET /users/me` returns
   read-only `oidc_issuer`/`last_login_at`.
 
-### This round's merge resolution (960cfb43, base 77473763 = task-177
-lineage, which also carries task-099 F1 tenant binding, task-140, the
-spec approval ledger, and users.tenant_id migrations)
+### Review repair 94af4aef (review 4d877e50: approval category inert —
+writer/reader identity-key mismatch)
 
-- **Conflicts (4), all resolved keeping both sides**: `schema.rs` —
-  users table union of task-209's `oidc_issuer` with base's TASK-099
-  tenant-binding comment (tenant_id already present from the prior
-  merge; base's `2026-10-09-000056_user_tenant_id` owns it on
-  base-lineage DBs — no Diesel version collision, date included in the
-  version key, `check-migration-versions` OK); `sqlite/user_profile.rs`
-  — task-209's 4-source judgment ledger kept over base's older
-  spec_approvals-only body (strict superset: filters rather than stamps
-  workspace, adds rejected_at and audit sources); `users.rs` —
-  `UserProfileResponse`/get_me fallback carry oidc_issuer + last_login_at
-  AND tenant_id; test module keeps task-209's §12 tests alongside base's
-  `seed_tenant` helper + F1 tenant-binding tests; `mem.rs` —
-  `MemSpecApprovalRepository` keeps both `shared()` (judgment-ledger
-  handle) and base's `transition()` domain-rule helpers.
-- **Spec-approval-ledger adaptation (semantic collision)** — base's
-  `2026-11-08-000058_spec_approval_ledger` makes `approved_at` nullable
-  with status derived from mutually exclusive timestamp columns
-  (Pending = all NULL; reject/revoke clear approved_at). All three
-  `JudgmentLedgerRepository` impls adapted: the since-filter is now
-  `(approved_at >= since OR revoked_at >= since OR rejected_at >=
-  since)` so Pending rows drop out while rejections still surface, and a
-  rejection's judgment timestamp is its decline/withdrawal time, not the
-  cleared approved_at. Without this every rejected approval silently
-  vanished from the ledger. Test seed adapted to the new
-  `SpecApproval::new`/`approve`/`reject` domain API and gains a Pending
-  approval proving pending entries are excluded.
-- **Auto-merge repairs** — 3 base-side `secret_rotation.rs` test call
-  sites adapted to `NotificationRepository::list_for_user`'s
-  `exclude_types` parameter (raw view `&[]` per the port doc);
-  `cargo fmt --all` applied; coverage row 53's stale migration-ownership
-  phrase corrected (oidc_issuer = 2026-10-07-000056, last_login_at =
-  task-120's 2026-10-08-000058).
+The production approval writers stored the KeyBinding label
+(`"user:<display name>"`) into `spec_approvals.approver_id` while
+`GET /users/me/judgments` filtered by the caller's canonical user Id,
+so no production approval row ever matched and the approval/rejection
+category surfaced nothing end-to-end; the adapter tests masked it by
+seeding their own key shape.
 
-### Test evidence (merged tree, post-960cfb43)
+- **Writer** — `approve_spec`/`reject_spec`/`revoke_spec_approval` now
+  write the authenticated user's canonical Id into
+  `spec_approvals.approver_id`/`rejected_by`/`revoked_by`. The
+  `user:<name>` label stays on the `spec_approval_events` history rows
+  where the KeyBinding contract requires it (the KeyBinding lookup and
+  the revoke-authorization check still compare labels, unchanged).
+  Agents and the global system token keep their `agent:<id>` /
+  `user:<name>` labels (not human ledger subjects).
+- **Reader** — all three `JudgmentLedgerRepository` impls attribute an
+  approval to its approver and a rejection/revocation to the human who
+  declined/withdrew it (`rejected_by`/`revoked_by`): a withdrawn
+  approval surfaces in the withdrawer's ledger, not the original
+  approver's (whose approval no longer stands — mutual exclusivity
+  cleared `approved_at`).
+- **Adjacent defect fixed** — `revoke_spec_approval` derived its caller
+  label as `"agent:<name>"` for ANY JWT, but `approve_spec` derives the
+  type from the JWT scope (Keycloak user JWTs are `"user:<name>"`), so
+  the original human approver could never revoke their own approval
+  (403; only Admins could). The derivation now mirrors approve's.
+- **Merge repair** — one base-side `git_http.rs` (task-141) test call
+  site adapted to `NotificationRepository::list_for_user`'s
+  `exclude_types` parameter (same class as the earlier
+  `secret_rotation.rs` call sites; the auto-merge missed it and it broke
+  the test build).
+- **Tests** — the e2e gap that let the mismatch ship green is closed:
+  `approve_via_jwt_surfaces_in_judgment_ledger`,
+  `revoke_via_jwt_surfaces_rejection_in_judgment_ledger`, and
+  `reject_via_jwt_surfaces_rejection_in_judgment_ledger` drive the real
+  endpoints with a real OIDC JWT through the full router and assert
+  both the written ledger key (canonical user Id, not the label) and
+  the surfaced `/users/me/judgments` entry. Adapter test
+  `judgment_ledger_rejection_attributed_to_withdrawer` proves the
+  withdrawal-attribution rule (withdrawer sees the rejection, original
+  approver sees nothing); seed comments now state the key shape matches
+  the production writer.
 
-- `cargo test -p gyre-server --lib`: 1533 passed, 0 failed — includes
+### Test evidence (post-94af4aef, merged tree)
+
+- `cargo test -p gyre-server --lib`: 1545 passed, 0 failed — includes
   the §12 write-path tests (`disabled_preference_excludes_type_from_
   inbox_and_count`, `get_me_returns_recorded_auth_provider_info`,
   `trust_transition_writes_trust_change_audit_event`,
   `human_approval_on_failed_gate_writes_gate_override_event`,
-  `publish_writes_meta_spec_publish_audit_event`) and the base's F1
-  tenant-binding / task-177 / task-140 suites.
-- `cargo test -p gyre-adapters --lib`: 398 passed, 0 failed (includes
-  the 10-test user_profile suite: ledger merge/filter/pagination,
-  notification exclusion, record_login debounce + issuer-change
-  carve-out).
-- `cargo check --workspace`: clean. Focused clippy on the touched
-  crates: no warnings in edited regions.
-- `web/src/locales/en.json` (the only merge-touched web source): valid
-  JSON, no duplicate keys (base's task-177 layout keys, clean
-  auto-merge); no web code authored this round, so the upstream web
-  suite result stands; web/dist restored to the staged merge state
-  (build.rs rebuilt it during cargo test — generated assets are owned
-  by the executor per assignment).
+  `publish_writes_meta_spec_publish_audit_event`), the three new
+  approve/reject/revoke e2e judgment tests, and the base's F1
+  tenant-binding / task-177 / task-140 / task-141 suites.
+- `cargo test -p gyre-adapters --lib`: 399 passed, 0 failed (11-test
+  user_profile suite: ledger merge/filter/pagination/withdrawal-
+  attribution, notification exclusion, record_login debounce +
+  issuer-change carve-out).
+- `cargo check -p gyre-server -p gyre-adapters`: clean; `cargo fmt
+  --all` applied; focused clippy on the touched crates: no warnings in
+  edited regions (workspace clippy warnings are pre-existing elsewhere).
+- No web code authored this round; web/dist restored to the staged
+  state (build.rs rebuilt it during cargo test — generated assets are
+  owned by the executor per assignment).
 - Mechanical checks OK: check-arch, check-migration-versions,
   check-migration-sql-portability, check-mem-port-contracts,
-  check-fabricated-scope-defaults, check-abac-exempt-handlers (88
-  handlers), check-in-memory-state-stores, check-forged-scope-fields,
+  check-fabricated-scope-defaults, check-abac-exempt-handlers,
+  check-in-memory-state-stores, check-forged-scope-fields,
   check-abac-route-registry, check-mcp-write-tools,
   check-dead-message-kinds, check-inert-enforcement,
   check-lossy-secret-conversion, check-scope-literal-defaults,
@@ -229,9 +241,10 @@ spec approval ledger, and users.tenant_id migrations)
   check-forwarded-header-trust, check-unbounded-external-http,
   check-fail-open-ref-resolution. Note: `check-tenant-filter.sh` cannot
   execute under this sandbox's mawk (gawk-only 3-arg `match()`); this
-  round's only SQL changes are the judgment-ledger timestamp filters on
-  caller-scoped queries (approver_id/user_id), no new tenant-crossing
-  surface; CI runs it under gawk.
+  round's only SQL changes add caller-scoped equality filters
+  (rejected_by/revoked_by) to already caller-scoped judgment queries,
+  no new tenant-crossing surface; CI runs it under gawk.
 
-Evidence retained at /tmp/stage/review-evidence/task-209-rebase-77473763.md
-(controller artifact path; commands, exit codes, and outputs above).
+Evidence retained at /tmp/stage/review-evidence/task-209-approval-key-repair.md
+and /tmp/stage/review-evidence/task-209-rebase-77473763.md (controller
+artifact paths; commands, exit codes, and outputs above).
