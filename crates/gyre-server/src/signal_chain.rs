@@ -182,7 +182,7 @@ async fn find_live_repo_orchestrator(
 /// bus message (Workspace-destined, emitted by the approval handler) stays
 /// on the bus untouched; this hook is invoked from the same handler right
 /// after emission.
-pub async fn on_spec_approved(state: &AppState, payload: &serde_json::Value) {
+pub async fn on_spec_approved(state: &Arc<AppState>, payload: &serde_json::Value) {
     // Signal chain only fires for workspace-scoped specs: the ledger entry
     // had no workspace_id (Broadcast destination) means no orchestrator can
     // be scoped to receive it. Mirrors the fallback in the emit side.
@@ -248,13 +248,13 @@ pub async fn on_spec_approved(state: &AppState, payload: &serde_json::Value) {
 /// spawn core (scoped JWT, keypair, budget, restart_on_failure). Returns
 /// the live orchestrator either way.
 async fn ensure_workspace_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     workspace_id: &Id,
 ) -> anyhow::Result<Agent> {
     if let Some(existing) = find_live_workspace_orchestrator(state, workspace_id).await? {
         return Ok(existing);
     }
-    let (agent, _token) = crate::api::orchestrator::spawn_workspace_orchestrator_core(
+    let (agent, _token, _launch) = crate::api::orchestrator::spawn_workspace_orchestrator_core(
         state,
         &workspace_id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
@@ -565,7 +565,7 @@ async fn notify_cross_workspace_change(
 /// here — they are Phase 4's worker-spawn path, intentionally excluded by
 /// the task_type discriminator. Tasks with unresolved repos are left
 /// Backlog.
-pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
+pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     // One cycle at a time: the scan-claim-process sequence must not
     // interleave with another cycle (see the doc comment above).
     let cycle_lock = state.orchestrator_registry.scheduler_run_lock().await;
@@ -725,7 +725,7 @@ pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
 /// repo-scoped JWT, keypair, budget, restart_on_failure) and run one
 /// processing pass for the claimed task.
 async fn run_repo_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     repo: &Repository,
     task: &Task,
 ) -> anyhow::Result<()> {
@@ -734,7 +734,7 @@ async fn run_repo_orchestrator(
     // durable one-live check and the per-repo registry lock (held by the
     // caller) serializes concurrent signals.
     if find_live_repo_orchestrator(state, repo).await?.is_none() {
-        let (agent, _token) = crate::api::orchestrator::spawn_repo_orchestrator_core(
+        let (agent, _token, _launch) = crate::api::orchestrator::spawn_repo_orchestrator_core(
             state,
             &repo.id.to_string(),
             crate::api::orchestrator::SpawnOrchestratorRequest {
@@ -1389,6 +1389,21 @@ mod tests {
                 0,
             );
             state.repos.create(&repo).await.unwrap();
+        }
+        // Production seeds these at startup (lib.rs seed_builtin_personas);
+        // the spawn cores fail closed without an approved persona in the
+        // tenant/workspace/repo scope chain (task-099 F2).
+        for slug in ["workspace-orchestrator", "repo-orchestrator"] {
+            let mut persona = gyre_domain::Persona::new(
+                Id::new(format!("{slug}-persona")),
+                slug,
+                slug,
+                gyre_domain::PersonaScope::Tenant(Id::new("t1")),
+                "test orchestrator persona",
+                0,
+            );
+            persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+            state.personas.create(&persona).await.unwrap();
         }
         let entry = gyre_domain::SpecLedgerEntry {
             path: "specs/system/auth.md".to_string(),
