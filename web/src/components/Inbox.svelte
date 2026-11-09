@@ -28,6 +28,9 @@
   let filterType = $state('all');
   let actionStates = $state({});
   let workspaceMap = $state({});
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after the scope changed.
+  let loadGen = 0;
 
   // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
@@ -80,10 +83,17 @@
   }
 
   async function loadNotifications(isBackground = false) {
+    const gen = ++loadGen;
     try {
       if (!isBackground) loading = true;
       error = null;
-      let raw = await api.myNotifications();
+      // Scope narrowing (HSI §1.5 Inbox row): the workspace filter is
+      // server-side (?workspace_id=); tenant scope passes no filter and the
+      // server returns the queue across all workspaces the user belongs to.
+      const params = {};
+      if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
+      let raw = await api.myNotifications(params);
+      if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case.
       // The server persists NotificationType::as_str() (gyre-common/src/notification.rs),
@@ -121,6 +131,7 @@
         AgentFailed: 'agent_failed',
         SpecApproved: 'spec_approved',
         MrMerged: 'mr_merged',
+        MrCreated: 'mr_created',
         MrNeedsReview: 'mr_needs_review',
         TaskCreated: 'task_created',
         SpecChanged: 'spec_changed',
@@ -130,20 +141,20 @@
         notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
       }));
 
-      // Client-side scope filtering
-      if (repoId) {
+      // Repo scope narrows client-side on repo_id: workspace-scoped
+      // notifications with repo_id NULL (trust suggestions, meta-spec drift)
+      // stay invisible at repo scope (HSI §1.5 Inbox row).
+      if (scope === 'repo' && repoId) {
         data = data.filter(n => n.repo_id === repoId);
-      } else if (workspaceId) {
-        data = data.filter(n => n.workspace_id === workspaceId);
       }
-
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
+      if (gen !== loadGen) return;
       error = e.message || $t('decisions.load_failed');
       notifications = [];
     } finally {
-      if (!isBackground) loading = false;
+      if (gen === loadGen && !isBackground) loading = false;
     }
   }
 
@@ -374,8 +385,28 @@
   }
 
   async function handleIncreaseTrust(n) {
-    goToWorkspaceSettings?.();
-    await handleDismiss(n);
+    const body = getBody(n);
+    // Suggested next level from the job's payload; fall back to the spec's
+    // example target (Autonomous) for notifications without a body.
+    const suggested = body.suggested_level || 'Autonomous';
+    if (!n.workspace_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'trust' } };
+    try {
+      await api.updateWorkspace(n.workspace_id, { trust_level: suggested });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.trust_increased') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.trust_increase_failed') },
+      };
+    }
   }
 
   function handleAdjustMetaSpec(n) {

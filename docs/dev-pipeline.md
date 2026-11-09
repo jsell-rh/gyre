@@ -25,14 +25,125 @@ publication/merge, CI observation, and cleanup. Review and verification bind to 
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
 
+## Thin workers and runtime recovery
+
+Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
+unit tests use one worker; the guarded frontend test command also serializes
+Vitest files. Thin-worker dev/test builds omit DWARF debug symbols (test
+behavior and debug assertions remain enabled) to reduce memory and workspace
+footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
+assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
+memory. Compute choices and the triggering evidence remain in the ledger.
+Build workspaces need 30 GiB persistent disk; this is separate from worker RAM.
+With the scoped Kubernetes runtime context configured, the harness verifies
+gateway ownership and PVC owner UID, expands only that sandbox's volume, and
+waits for the mounted filesystem before starting builds. Other backends must
+provision adequate workspace storage at the gateway. This does not alter
+gateway-wide defaults. Disk or inode exhaustion is reported as storage failure,
+never as transport loss or an OOM; identical attempts require an explicit retry.
+After stopping an implementation agent, its generated build cache can be
+reclaimed to leave room for saving source. Source and symlink targets are never
+deleted by this reclamation.
+
+An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
+and `runtime_namespace` settings to capture workload termination reasons before
+pods disappear. It only records pods matching existing owned resource records;
+cluster diagnostics are not a prerequisite for healthy gateway execution. Read-only
+cgroup counters also detect child-only OOM kills that leave the pod running;
+a compiler failure by itself never raises memory.
+Without an authoritative OOM and its killed allocation size, no memory escalation
+is inferred. The cockpit reports the actual runtime failure instead of calling
+an OOM a model or generic transport failure.
+
+Agent polling refreshes expired gateway authentication. Failed polls preserve
+process identity and output offsets while the sandbox remains Ready, bounded by
+the assignment deadline. A stopped owned sandbox may restart once per claim;
+trusted temporary inputs are restored and Pi resumes its persisted session.
+Agent spool and build cache live on the workspace volume. Another stop requires
+attention. OOM recovery can salvage source before retiring undersized compute;
+it does not restart the coding process at the insufficient tier. Verification
+also reconnects to its detached process and may resume after an owned restart.
+Infrastructure backoff releases the integration lane so another reviewed
+candidate can advance; claims and exact-source checks still gate publication.
+Cleanup salvages source only from implementation assignments; reviewers and
+exact-tree verifiers retain bounded logs and are purged without indexing their
+generated output. Verification defaults to four hours. Exhausting that budget
+requires inspection and an explicit retry, with a budget change if needed, rather than repeating the same cold
+build automatically, including when main advances.
+
+## Scheduling priority and reserved capacity
+
+The harness uses non-preempting priority classes, inspired by Kubernetes
+`PriorityClass` with `preemptionPolicy: Never`. A class changes queue order,
+never authorization, dependencies, backoff, source identity, or running claims.
+Built-in values are `background=-100`, `normal=0`, `high=100`, `repair=200`, and
+`urgent=300`. CI, verification, rebase and review findings automatically use
+`repair`; that priority survives incomplete implementation checkpoints until
+fresh review resolves the findings. Cleanup, PR observation, publication and
+verification have protected system priorities above user classes.
+
+Apply exactly one `priority/<class>` label to a task's associated GitHub PR,
+including a PR whose failed CI is already queued for implementation. The
+observer refreshes these labels without repeating the failed CI handoff. A
+cockpit task's Priority selector or the CLI below sets a durable local override
+that takes precedence over PR labels; clear it to return to labels/automatic
+priority. Unknown classes and conflicting labels block new compute admission
+for that task and appear as a scheduling condition; control/cleanup continue.
+
+```bash
+python3 scripts/dev-pipeline.py priority task-063 urgent
+python3 scripts/dev-pipeline.py priority task-063 --clear
+python3 scripts/dev-pipeline.py priority-classes
+python3 scripts/dev-pipeline.py priority-class hotfix 500
+python3 scripts/dev-pipeline.py reserve-verification 1
+```
+
+Classes accept values from -1000 to 1000. Unlike strict Kubernetes priority,
+the harness adds one point per minute spent queued, with FIFO ties. Execution,
+retry backoff, and obsolete work do not accumulate queue age. Priority changes
+do not reset queue age or invalidate independent review. The claim event records
+the actual class/score used for admission. Custom classes and overrides live
+only in this Gyre ledger, separate from another local dispatcher's settings.
+
+One physical/admission slot is reserved for verification by default. Other model
+stages cannot borrow it even when the verifier is idle; that is what guarantees
+a finishing stage can run without evicting a four-hour coding assignment.
+Reservations count pending creation/deletion, share the existing total sandbox
+budget, and are checked atomically with claims. The reservation clamps to zero
+for a single-slot deployment so it can bootstrap; zero total slots drains all
+compute. Changing reservation/priority lets existing workers finish naturally.
+The cockpit shows the reservation, class, and class source. These are host
+scheduling controls, not PriorityClass objects in the remote Kubernetes cluster.
+
+The adapter ledger owns cross-stage admission. The Go dispatcher preserves
+per-work backoff and deduplication, while the atomic claim permits CI observation
+alongside verification and cleanup alongside model work. Native item serialization
+must not suppress these independently safe operations.
+
 CI observation is a separate, sandbox-free stage bound to the recorded published
 head and its verified base. It can run alongside a verifier, but never races a
 branch publisher. A completed failing check is actionable even while sibling
 checks remain pending or main advances. Head and check state are rechecked after
 evidence collection. A confirmed candidate failure retains the failed head and
 logs, requests implementation, and fences any now-obsolete verifier. Pending CI
-waits; upstream failures and transient CI infrastructure retain their distinct
-recovery paths. PR readiness is visible separately from a successful review run.
+waits. If an Actions check contradicts itself (pending status with a terminal
+conclusion and completion timestamp), the observer requires the exact job and
+completed current workflow attempt on the published head before treating it as
+terminal. Raw observations and reconciliation evidence are retained; missing,
+changed-head, or ambiguous evidence stays pending. GitHub still enforces all
+required checks at merge. A merged PR goes directly to confirmation of its
+original verified tree; its own merge must not start another verification.
+Confirmed PR conflicts (`DIRTY` plus `CONFLICTING`) become durable rebase
+findings immediately, independently of CI readiness or integration-lane ownership.
+The observer rechecks the open PR, exact published head, and current target base
+before handing off. Implementation resumes the retained published head against
+current main, resolves conflicts, and must obtain fresh review and verification
+before the existing PR can merge. The handoff fences obsolete verification,
+releases integration, and creates one repair assignment; later polls cannot
+create duplicate repairs. Unknown mergeability and genuine policy waits remain
+observations. Upstream failures and transient CI infrastructure retain their
+distinct recovery paths. PR readiness is visible separately from a successful
+review run.
 
 A durable **integration lane** admits one candidate at a time to final
 verification, CI, and merge. Implementation and independent review remain
@@ -43,9 +154,36 @@ candidates pick up current main when admitted. This prevents the controller's
 own merges from repeatedly invalidating one another's full integration checks.
 If an external merge advances main, the current lane owner first observes its
 published CI and then refreshes integration once needed. Independent review is
-retained for the unchanged candidate. Checks on a different merge tree are
+retained for the unchanged candidate. An exact-head CI or policy wait lasting
+15 minutes (`integration_wait_timeout` seconds) yields the integration lane so
+other candidates can finish. Sandbox-free observation continues; that task may
+rejoin only after its external gate changes to ready or merged. Receipt changes
+reset the wait, but repeated polls do not. Yielding grants no merge permission
+and discards no candidate or review. A PR with green exact-head CI and GitHub
+merge state `BEHIND` is eligible for base refresh rather than parked: updating
+that base is our integration work, and waiting for GitHub to become ready first
+would deadlock. Pending CI and other policy holds remain parked. The cockpit
+lists waiting tasks separately.
+Checks on a different merge tree are
 never reused as proof of the final tree; protected exact-head GitHub checks
 and authoritative upstream-tree comparison still gate delivery.
+
+Generated `web/dist` is produced by final integration, not coding workers.
+The executor discards worker bundle changes against the assigned base and
+mechanically resolves generated-only merge conflicts. Actual source conflicts
+still go to implementation. For an already-published PR with green checks, the
+observer reproduces conflict paths using Git only; generated-only conflicts
+request integration refresh without an LLM, preserving the source review.
+Classification is bound to both refs and rechecked after inspection.
+
+The remote verifier builds assets from the integrated source, runs the Rust and
+frontend suites, and publishes the generated build on its claim-specific branch.
+The host verifies a linear artifact commit changes only `web/dist`, followed by
+exactly the assigned task's append-only commit attribution. No other source or
+requirement change is accepted. The final receipt records the tested source head
+and published artifact tree; GitHub CI and exact-tree merge confirmation apply
+to the final published head. Generated files are never merely chosen from an old
+branch and shipped without rebuilding.
 
 Model assignments default to four hours (`model_timeout: 14400` seconds in the
 private ledger). Existing assignments retain the harness deadline they started
@@ -111,7 +249,9 @@ A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
 unconfirmed deletion stays charged and is retried independently. A pending
-allocation is retained across fullsend's readiness retries. A deleted sandbox
+allocation is retained across fullsend's readiness retries; a repeated create
+adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
+allocations cannot be recreated within an attempt. A deleted sandbox
 cannot be recreated within the same attempt. A failed run's source checkpoint
 is explicitly incomplete and cannot approve itself. Cleanup also fences and
 stops an orphaned host runner using its boot ID, PID, and process start time.
@@ -121,6 +261,15 @@ A host validator checkpoints and publishes actual source before deletion;
 source guards, exact-candidate independent review, remote verification, CI repair,
 and protected merge observation remain controller responsibilities. Raw fullsend
 logs/transcripts are retained and Pi events feed the existing cockpit stream.
+Pi runs under a detached supervisor with a bounded deadline inside the sandbox.
+Stdout and stderr spool separately and clients resume by verified byte offsets.
+Idle readers long-poll rather than creating a busy RPC loop for every worker.
+A lost launch acknowledgement or broken RPC reconnects to the same claim/command
+identity; it cannot start another coding process. Transport failures retry with
+backoff for up to five minutes before normal source capture and sandbox cleanup.
+A genuine process failure or incomplete verdict remains a failure. Local
+checkpoint adoption also records its originating attempt and a bounded log tail;
+a missing log cannot discard an otherwise recoverable checkpoint.
 The large trusted input checkout is removed after execution, keeping receipts
 and diagnostics without retaining duplicate repository clones indefinitely.
 
@@ -140,9 +289,38 @@ node scripts/loop-dashboard.mjs
 ```
 
 The browser cockpit listens on `http://127.0.0.1:7690` and remains connected to
-the same ledger. The terminal cockpit offers filtering, live logs, attempt
+the same ledger. Type a sandbox count (0–1000) in the header and press Enter or
+Apply; Escape cancels the edit. Zero drains new work. The +/− controls also remain
+available. The terminal cockpit offers filtering, live logs, attempt
 history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
-workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
+workers continue. In a run log, `/` filters source lines, `m` toggles Markdown
+for agent prose, `w` toggles wrapping, and `a` toggles command colors (`NO_COLOR`
+is respected). Left/right arrows pan long lines. Scrolling up pauses following
+without moving the reading position as output arrives; `f` or `G` returns to
+live output. The bordered pane shows follow state, active modes, and line/column
+ranges, including on short terminals. Full logs remain available rather than
+only the last 64 KiB.
+
+The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
+press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
+edit, Enter to save, and Escape to discard. It edits the same private SQLite
+ledger as the browser and CLI, with no HyperShell preference file. External
+changes refresh automatically; an edit based on an older value is rejected
+rather than overwriting another controller's change.
+
+- Capacity, pause state, verification reservations, and per-stage concurrency
+  affect new admission. Existing workers finish. An empty stage limit inherits
+  total capacity; limits never bypass global admission or reservations.
+- Agent and verification deadlines apply to new assignments, in seconds.
+- Verification commands inherit the configured verification deadline; no shorter
+  hidden compiler timeout discards a healthy thin worker's cache.
+- Retry base and ceiling affect future exponential-backoff schedules, retaining
+  jitter. Existing wake times and explicit stage-specific delays remain intact.
+- Model, repository, gateway, and last successful gateway health check are
+  read-only. The pinned model must agree with inference routing and admission;
+  credentials remain outside the editor.
+
+`serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
 preserving the desired slot count; `resume` enables it again. Slots zero also
@@ -182,6 +360,16 @@ browser auth for an unattended supervisor. Fullsend configures its providers;
 `dev-gateway.py --inference` is the older standalone setup helper, not a required
 step of the fullsend harness.
 
+Gateway authentication refresh is coordinated under the private ledger's lock.
+The controller proactively refreshes at most every five minutes, and known
+expired-token errors request a forced refresh before retrying the operation.
+Token-service failures retry with exponential backoff (5 seconds to 5 minutes).
+A real read-only gateway request must succeed before cached authentication can
+be used during refresh failures; known-expired credentials never get that
+fallback. The cockpit reports degraded cached operation and the next retry.
+Status files contain timing/error types only, not credentials, and are scoped
+to this ledger and gateway alias so another local dispatcher is unaffected.
+
 ## Isolation from another local dispatcher
 
 Gyre builds its host orchestration binary into
@@ -203,7 +391,10 @@ registration (`gyre-d-<instance hash>`) snapshots the connection metadata and
 mints its own token; it does not copy a refresh token or modify the source
 registration. This also isolates authentication when HyperShell uses the same
 physical gateway. Gyre's persistent GitHub provider and profile use
-`gyre-gh-<instance hash>` instead of the shared `github` name. Per-run inference
+`gyre-gh-<instance hash>` instead of the shared `github` name. Its credentials are reconciled under a
+private lock: unchanged values are health-checked, never rewritten by each
+Fullsend worker. A changed credential is updated once. This avoids unnecessary
+provider generations propagating to running sandboxes. Per-run inference
 providers remain separate and are purged normally. Sandbox/provider cleanup
 retains the existing owner and claim checks.
 
@@ -329,6 +520,8 @@ Implementation and review use Fullsend/Pi. Verification is a model-free gateway
 job using the same pinned worker image and shared sandbox reservations. The local
 controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
 source guards, npm builds, and tests execute only in the disposable verifier.
+Verification uses the gateway resource defaults, just like coding workers;
+explicit `verification_cpu` and `verification_memory` settings override them.
 Every verifier gets an isolated build target, so cross-checkout host cache
 invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
 can bound verification concurrency independently without changing desired slots.
@@ -336,10 +529,19 @@ can bound verification concurrency independently without changing desired slots.
 The verifier checks the exact assigned head and tree, runs unchanged upstream
 and candidate guards, all-target Clippy, the web build, all Rust tests, and frontend
 tests. GitHub's required checks (including browser E2E) still gate merging. A
-complete source-bound receipt is mandatory; transport loss, missing receipts,
-and timeouts retry as infrastructure. Concrete check failures become durable
-implementation findings. Git retries reuse the allocation. Logs stream to the
-cockpit and remain locally; compute is immediately requested for deletion, with
+complete source-bound receipt is mandatory. Every received receipt is saved
+privately as `remote-verification-raw.json` before validation and sandbox deletion;
+only accepted receipts become `remote-verification.json`. Source-integrity
+failures report changed paths and observed HEAD/tree, stop in Needs attention,
+and release integration for other candidates. A new base cannot bypass that
+hold; operator retry resumes it after inspection. Ordinary transport loss,
+missing receipts, and timeouts retry as infrastructure. Concrete check failures become durable
+implementation findings. When testing upstream's scripts against the candidate,
+the verifier records which upstream-only files it introduces. Restoration removes
+only those unchanged files, leaving candidate deletions intact; modified or
+pre-existing files are never blindly cleaned. This prevents the verifier itself
+from contaminating the exact checkout it later checks. Git retries reuse the
+allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
 unconfirmed deletion charged until authoritative absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.

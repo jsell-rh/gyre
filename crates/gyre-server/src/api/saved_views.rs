@@ -200,6 +200,11 @@ pub fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)>
             r##"{"scope":{"type":"test_gaps"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Untested"}},"dim_unmatched":0.3},"annotation":{"title":"Test coverage gaps","description":"{{count}} functions not reachable from any test"}}"##,
         ),
         (
+            "High-Risk Untested Code",
+            "Complex functions with no test coverage",
+            r##"{"scope":{"type":"filter","computed":"$intersect($where(complexity, '>', 20), $test_unreachable)"},"emphasis":{"heat":{"metric":"complexity","palette":"blue-red"},"dim_unmatched":0.15},"annotation":{"title":"High-risk untested code","description":"{{count}} complex functions with no test coverage"}}"##,
+        ),
+        (
             "Hot Paths",
             "Most-called functions",
             r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"incoming_calls","palette":"blue-red"}},"annotation":{"title":"Hot paths"}}"##,
@@ -502,8 +507,8 @@ mod tests {
         let defaults = system_default_views();
         assert_eq!(
             defaults.len(),
-            6,
-            "Should have exactly 6 system default views"
+            7,
+            "Should have exactly 7 system default views"
         );
     }
 
@@ -513,6 +518,7 @@ mod tests {
         let names: Vec<&str> = defaults.iter().map(|(n, _, _)| *n).collect();
         assert!(names.contains(&"Architecture Overview"));
         assert!(names.contains(&"Test Coverage Gaps"));
+        assert!(names.contains(&"High-Risk Untested Code"));
         assert!(names.contains(&"Hot Paths"));
         assert!(names.contains(&"Blast Radius (click)"));
     }
@@ -574,6 +580,26 @@ mod tests {
             parsed.get("emphasis").is_some(),
             "Test Coverage Gaps should have emphasis"
         );
+    }
+
+    #[test]
+    fn test_high_risk_untested_uses_intersect_where_test_unreachable() {
+        // view-query-grammar.md §14: filter scope composing
+        // $intersect($where(complexity, '>', 20), $test_unreachable) with a
+        // complexity heat map.
+        let defaults = system_default_views();
+        let view = defaults
+            .iter()
+            .find(|(n, _, _)| *n == "High-Risk Untested Code")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(view.2).unwrap();
+        assert_eq!(parsed["scope"]["type"], "filter");
+        assert_eq!(
+            parsed["scope"]["computed"],
+            "$intersect($where(complexity, '>', 20), $test_unreachable)"
+        );
+        assert_eq!(parsed["emphasis"]["heat"]["metric"], "complexity");
+        assert_eq!(parsed["emphasis"]["heat"]["palette"], "blue-red");
     }
 
     #[test]

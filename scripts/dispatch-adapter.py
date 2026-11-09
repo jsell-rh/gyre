@@ -20,6 +20,7 @@ from pipeline.credentials import load
 from pipeline.eligibility import eligible
 from pipeline.execution import ROOT, gateway
 from pipeline.store import Store, StaleClaim, STAGES
+from pipeline.settings import configuration, save_configuration
 
 pipeline = helper('dev-pipeline')
 COMPUTE = {'triage', 'implement', 'review', 'verify'}
@@ -45,16 +46,20 @@ def allowed_tasks(store):
 
 
 def job(store, row, tasks=None):
+    from pipeline.priority import info
     tasks = tasks or {t['name']: t['data'] for t in store.tasks()}
     item = row['task']
     inputs = row['input'] if isinstance(row['input'], dict) else json.loads(row['input'])
     if row['stage'] == 'cleanup':
         item += '/' + inputs['resource']
+    priority=info(store,row)
     return {'key': row['id'], 'scope': scope(store), 'agent': AGENTS.get(row['stage'], row['stage']),
             'item': item, 'title': tasks[row['task']].get('title') or row['task'],
             'url': 'https://github.com/' + store.setting('repository', 'jsell-rh/gyre') + '/blob/main/specs/tasks/' + row['task'] + '.md',
             'repo': store.setting('repository', 'jsell-rh/gyre'),
-            'fingerprint': row['generation'] + ':' + row['input_key'], 'labels': [],
+            'fingerprint': row['generation'] + ':' + row['input_key'] + ':' + priority['class'] + ':' + str(priority['value']),
+            'labels': ['priority/'+priority['class']], 'priority_class':priority['class'],
+            'priority_value':priority['value'], 'effective_priority':priority['effective'],
             'pr_number': '', 'pr_url': tasks[row['task']].get('pr') or '',
             'unmetered': row['stage'] not in COMPUTE}
 
@@ -109,7 +114,8 @@ def authorize(store, request):
         return False
     if row['stage'] in COMPUTE and (store.setting('admission_paused', False) or store.setting('slots', 8) == 0):
         return False
-    return request.get('fingerprint') == row['generation'] + ':' + row['input_key'] and eligible(store, dict(row))
+    return (request.get('fingerprint') == job(store,dict(row))['fingerprint']
+            and store.admission_available(row['stage']) and eligible(store, dict(row)))
 
 
 def launch(store, request):
@@ -141,7 +147,7 @@ def recover(store):
     with store.transaction():
         rows = store.db.execute("SELECT id,task FROM work WHERE state='claimed' AND expires<=?", (time.time(),)).fetchall()
         for row in rows:
-            store.db.execute("UPDATE work SET state='ready',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?", (time.time(), row['id']))
+            store.db.execute("UPDATE work SET state='ready',token=token+1,owner=NULL,expires=NULL,updated=?,ready_since=? WHERE id=?", (time.time(),time.time(), row['id']))
             store.event('lease_expired', {}, row['task'], row['id'])
 
 
@@ -164,7 +170,8 @@ def control(store, request, cancel=False):
                 raise ValueError('cannot retry an active attempt')
             if row['state'] not in ('attention','retry') and not store.setting(f"cancel:{row['id']}:{row['token']}",False):
                 raise ValueError('only a failed or canceled attempt can be retried')
-            store.db.execute("UPDATE work SET state='ready',retry_at=0 WHERE id=? AND state IN ('attention','retry')", (row['id'],))
+            store.db.execute("UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE id=? AND state IN ('attention','retry')", (time.time(),row['id']))
+            store.db.execute('DELETE FROM settings WHERE key=?', (store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
             store.db.execute('DELETE FROM settings WHERE key=?', ('task_paused:'+row['task'],))
             store.db.execute('DELETE FROM settings WHERE key=?', (f"cancel:{row['id']}:{row['token']}",))
         store.event('operator_cancel' if cancel else 'operator_retry', {'token':row['token']}, row['task'], row['id'])
@@ -181,21 +188,26 @@ def main():
     store = Store(args.state)
     load(store)
     try:
-        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history') else None
+        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history','settings-save') else None
         if action == 'config':
             result = {'adapter_backend': True, 'scope':scope(store), 'watch':True, 'plain':args.plain,
                 'concurrency':store.setting('slots',8), 'poll_interval':max(1, int(args.interval)),
                 'auth_retry':15, 'auth_check_interval':60, 'backoff':5, 'backoff_max':900,
                 'repo':store.setting('repository','jsell-rh/gyre'), 'state_dir':str(store.directory/'dispatcher'),
+                'settings_file':str(store.directory/'pipeline.sqlite3'), 'settings':configuration(store),
                 'supervisor_lock':str(store.directory/'supervisor.lock'), 'log_dir':str(store.directory/'dispatcher/logs'),
                 'gateway_name':store.setting('gateway','gyre-gyre'),
                 'environment':{'OPENSHELL_GATEWAY':store.setting('gateway','gyre-gyre'), 'OPENSHELL_GATEWAY_ENDPOINT':None}}
+        elif action == 'settings-save':
+            result = save_configuration(store, request)
         elif action == 'activate':
             store.set_setting('only_task', args.task)
             store.set_setting('dispatcher_engine', 'fullsend-dispatcher')
             result = {}
         elif action == 'rows':
-            result = {'rows':read_rows(store), 'capacity':store.setting('slots',8)}
+            from pipeline.runtime import observe
+            observe(store)
+            result = {'rows':read_rows(store), 'capacity':store.setting('slots',8), 'settings':configuration(store)}
         elif action == 'recover':
             recover(store); result = {}
         elif action in ('authorize','launch'):
@@ -206,7 +218,7 @@ def main():
             selected = isolate_gateway(store)
             os.environ.update(GYRE_OPEN_GATEWAY=selected, OPENSHELL_GATEWAY=selected, OPENSHELL_NO_BROWSER='1', OPENSHELL_GATEWAY_INSECURE='true')
             if action == 'gateway' or previous != selected or time.time()-store.setting('dispatcher_health_at',0)>30:
-                gateway.login(store.directory)
+                gateway.login(store.directory,force=action=='gateway')
                 if previous != selected:
                     # Publish the alias only after its independent login works;
                     # in-flight hooks must never be redirected to an unauthenticated registration.
@@ -224,8 +236,9 @@ def main():
                     pipeline.discover_stage(store, stage, base)
             selected = allowed_tasks(store)
             tasks = {t['name']:t['data'] for t in store.tasks()}
-            rows = store.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') ORDER BY CASE stage WHEN 'cleanup' THEN 0 WHEN 'observe' THEN 1 WHEN 'publish' THEN 2 WHEN 'triage' THEN 3 WHEN 'verify' THEN 4 WHEN 'review' THEN 5 WHEN 'implement' THEN 6 ELSE 7 END,priority DESC,created").fetchall()
-            result = {'jobs':[job(store,dict(r),tasks) for r in rows if (selected is None or r['task'] in selected) and eligible(store,dict(r))], 'errors':[]}
+            rows = store.ordered_ready()
+            result = {'jobs':[job(store,r,tasks) for r in rows if (selected is None or r['task'] in selected)
+                      and eligible(store,r) and store.admission_available(r['stage'])], 'errors':[]}
         elif action == 'retry':
             control(store,request); result = {}
         elif action == 'cancel':

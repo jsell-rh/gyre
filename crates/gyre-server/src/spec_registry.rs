@@ -190,20 +190,20 @@ pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
 }
 
-/// Read the manifest from a commit and return the set of registered spec paths.
+/// Read and parse `specs/manifest.yaml` from a git commit.
 ///
-/// Returns an empty set if the manifest is absent or unparseable.
-pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
+/// Returns `None` when the manifest is absent or unparseable. Callers use
+/// this to resolve per-spec approval policy (agent approvers, attestation
+/// constraints) at approval time (spec-registry.md §9).
+pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = match read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await {
-        Some(content) => content,
-        None => return std::collections::HashSet::new(),
-    };
-    match parse_manifest(&yaml) {
-        Ok(m) => m.specs.iter().map(|e| e.path.clone()).collect(),
+    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
+    let parsed = parse_manifest(&yaml);
+    match parsed {
+        Ok(m) => Some(m),
         Err(e) => {
             warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
-            std::collections::HashSet::new()
+            None
         }
     }
 }
@@ -247,6 +247,122 @@ pub struct SpecLinkEntry {
 
 /// Type alias for the shared spec links store.
 pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
+
+/// Read the manifest from a commit and return the set of registered spec paths.
+///
+/// Returns an empty set if the manifest is absent or unparseable.
+pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
+    read_manifest(repo_path, sha)
+        .await
+        .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Approval status resolution (spec-registry.md §9)
+// ---------------------------------------------------------------------------
+
+/// Resolve the ledger `approval_status` for a spec from its approval mode and
+/// the recorded approval events (spec-registry.md §9 Approval Status
+/// Resolution).
+///
+/// An event is valid when:
+/// - `spec_sha` matches `current_sha` (not stale), and
+/// - `revoked_at` is null (not revoked).
+///
+/// Agent-approval validity additionally requires the event to satisfy a
+/// configured `agent_approvers[]` entry for the spec:
+/// - `persona` matches the approver's persona,
+/// - `attestation_level >= min_attestation_level` (default 1), and
+/// - when the approver pins a `stack_hash`, the event's recorded stack hash
+///   matches exactly.
+///
+/// Human-approval validity requires `approver_type == "human"` and, when the
+/// manifest lists `human_approvers`, the `approver_id` must be in that list.
+///
+/// Status by mode:
+/// - `human_only`        → Approved with ≥1 valid human approval
+/// - `agent_only`        → Approved with ≥1 valid agent approval
+/// - `human_and_agent`   → Approved with ≥1 valid human AND ≥1 valid agent
+///
+/// Specs with `requires_approval: false` are Approved regardless of events
+/// (§17: any SHA is accepted).
+pub fn resolve_approval_status(
+    entry: &SpecEntry,
+    defaults: &ManifestDefaults,
+    current_sha: &str,
+    events: &[SpecApprovalEvent],
+) -> ApprovalStatus {
+    if !entry.effective_requires_approval(defaults) {
+        return ApprovalStatus::Approved;
+    }
+
+    let approval = entry.approval.as_ref();
+    let has_valid_human = events
+        .iter()
+        .any(|e| is_valid_human_approval(e, approval, current_sha));
+    let has_valid_agent = events
+        .iter()
+        .any(|e| is_valid_agent_approval(e, approval, current_sha));
+
+    let approved = match entry.effective_approval_mode() {
+        ApprovalMode::HumanOnly => has_valid_human,
+        ApprovalMode::AgentOnly => has_valid_agent,
+        ApprovalMode::HumanAndAgent => has_valid_human && has_valid_agent,
+    };
+    if approved {
+        ApprovalStatus::Approved
+    } else {
+        ApprovalStatus::Pending
+    }
+}
+
+/// A human approval is valid when it is active, matches `current_sha`, and the
+/// approver is in `human_approvers` (when that list is non-empty).
+fn is_valid_human_approval(
+    event: &SpecApprovalEvent,
+    approval: Option<&ApprovalConfig>,
+    current_sha: &str,
+) -> bool {
+    event.approver_type == "human"
+        && event.spec_sha == current_sha
+        && event.is_active()
+        && approval
+            .map(|a| a.human_approvers.is_empty() || a.human_approvers.contains(&event.approver_id))
+            .unwrap_or(true)
+}
+
+/// An agent approval is valid when it is active, matches `current_sha`, and
+/// satisfies one of the configured `agent_approvers[]` constraints
+/// (persona + min attestation level + optional pinned stack hash).
+fn is_valid_agent_approval(
+    event: &SpecApprovalEvent,
+    approval: Option<&ApprovalConfig>,
+    current_sha: &str,
+) -> bool {
+    if event.approver_type != "agent" || event.spec_sha != current_sha || !event.is_active() {
+        return false;
+    }
+    let approvers: &[AgentApproverConfig] = approval
+        .map(|a| a.agent_approvers.as_slice())
+        .unwrap_or(&[]);
+    approvers.iter().any(|cfg| {
+        // Persona must match the configured approver persona.
+        if event.persona.as_deref() != Some(cfg.persona.as_str()) {
+            return false;
+        }
+        // Attestation level must meet the configured minimum (default 1).
+        let min_level = cfg.min_attestation_level.unwrap_or(1);
+        if event.attestation_level.unwrap_or(0) < min_level {
+            return false;
+        }
+        // When a stack hash is pinned, the event's recorded hash must match exactly.
+        match &cfg.stack_hash {
+            Some(required) => event.stack_hash.as_deref() == Some(required.as_str()),
+            None => true,
+        }
+    })
+}
 
 /// Parsed cross-workspace target from an `@`-prefixed manifest link.
 #[derive(Debug, Clone, PartialEq)]
@@ -1161,6 +1277,270 @@ specs:
     fn test_parse_invalid_yaml() {
         let result = parse_manifest("not: valid: yaml: ][");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // §9 Approval Status Resolution — resolve_approval_status unit tests
+    // -----------------------------------------------------------------------
+
+    const APPROVAL_MANIFEST: &str = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/human-only.md
+    title: Human Only
+    owner: user:jsell
+    approval:
+      mode: human_only
+      human_approvers:
+        - user:jsell
+  - path: system/agent-only.md
+    title: Agent Only
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          min_attestation_level: 3
+  - path: system/agent-only-pinned.md
+    title: Agent Only Pinned Stack
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          stack_hash: "sha256:abc"
+  - path: system/both.md
+    title: Both
+    owner: user:jsell
+    approval:
+      mode: human_and_agent
+      human_approvers:
+        - user:jsell
+      agent_approvers:
+        - persona: accountability
+  - path: system/no-approval.md
+    title: No Approval Required
+    owner: user:jsell
+    requires_approval: false
+"#;
+
+    fn approval_manifest() -> SpecManifest {
+        parse_manifest(APPROVAL_MANIFEST).unwrap()
+    }
+
+    fn manifest_entry<'a>(m: &'a SpecManifest, path: &str) -> &'a SpecEntry {
+        m.specs.iter().find(|e| e.path == path).unwrap_or_else(|| {
+            panic!("manifest has no entry for {path}");
+        })
+    }
+
+    fn approval_event(
+        id: &str,
+        spec_sha: &str,
+        approver_type: &str,
+        approver_id: &str,
+    ) -> SpecApprovalEvent {
+        SpecApprovalEvent {
+            id: id.to_string(),
+            spec_path: String::new(),
+            spec_sha: spec_sha.to_string(),
+            approver_type: approver_type.to_string(),
+            approver_id: approver_id.to_string(),
+            persona: None,
+            attestation_level: None,
+            stack_hash: None,
+            approved_at: 0,
+            revoked_at: None,
+            revoked_by: None,
+            revocation_reason: None,
+        }
+    }
+
+    fn agent_event(id: &str, spec_sha: &str, persona: &str) -> SpecApprovalEvent {
+        let mut ev = approval_event(id, spec_sha, "agent", "agent:a1");
+        ev.persona = Some(persona.to_string());
+        ev
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn test_resolve_human_only_approved_by_valid_human() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/human-only.md");
+        let ev = approval_event("e1", SHA, "human", "user:jsell");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_resolve_human_only_pending_when_only_agent_approved() {
+        // Reverting to "any valid approval" would mark this Approved.
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/human-only.md");
+        let ev = agent_event("e1", SHA, "accountability");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_human_only_pending_when_approver_not_in_list() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/human-only.md");
+        let ev = approval_event("e1", SHA, "human", "user:intruder");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_approved_by_matching_agent() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only.md");
+        let mut ev = agent_event("e1", SHA, "accountability");
+        ev.attestation_level = Some(3);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_pending_when_attestation_below_minimum() {
+        // min_attestation_level: 3, event records level 2 → not valid.
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only.md");
+        let mut ev = agent_event("e1", SHA, "accountability");
+        ev.attestation_level = Some(2);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_pending_when_persona_not_configured() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only.md");
+        let mut ev = agent_event("e1", SHA, "builder");
+        ev.attestation_level = Some(3);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_pending_when_stack_hash_mismatches() {
+        // Pinned stack_hash "sha256:abc", event records a different hash.
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only-pinned.md");
+        let mut ev = agent_event("e1", SHA, "accountability");
+        ev.attestation_level = Some(3);
+        ev.stack_hash = Some("sha256:xyz".to_string());
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_approved_on_stack_hash_match() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only-pinned.md");
+        let mut ev = agent_event("e1", SHA, "accountability");
+        ev.attestation_level = Some(3);
+        ev.stack_hash = Some("sha256:abc".to_string());
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_only_pending_when_stack_hash_missing() {
+        // Pinned stack_hash but the event recorded none (e.g. human typo as agent).
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/agent-only-pinned.md");
+        let mut ev = agent_event("e1", SHA, "accountability");
+        ev.attestation_level = Some(3);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_human_and_agent_requires_both() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/both.md");
+
+        // Human alone → Pending.
+        let human = approval_event("e1", SHA, "human", "user:jsell");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, std::slice::from_ref(&human)),
+            ApprovalStatus::Pending
+        );
+
+        // Agent alone → Pending. Reverting to "any valid approval" would mark
+        // this Approved.
+        let mut agent = agent_event("e2", SHA, "accountability");
+        agent.attestation_level = Some(3);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, std::slice::from_ref(&agent)),
+            ApprovalStatus::Pending
+        );
+
+        // Both → Approved.
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[human, agent]),
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_resolve_stale_sha_is_not_valid() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/human-only.md");
+        let ev = approval_event(
+            "e1",
+            "9999999999999999999999999999999999999999",
+            "human",
+            "user:jsell",
+        );
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_revoked_event_is_not_valid() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/human-only.md");
+        let mut ev = approval_event("e1", SHA, "human", "user:jsell");
+        ev.revoked_at = Some(1);
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
+            ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_requires_approval_false_is_approved_regardless() {
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/no-approval.md");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[]),
+            ApprovalStatus::Approved
+        );
     }
 
     #[tokio::test]
