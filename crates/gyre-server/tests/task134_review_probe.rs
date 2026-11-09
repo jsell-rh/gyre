@@ -81,6 +81,11 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
 #[tokio::test]
 async fn scoped_review_token_denied_outside_allowlist() {
     let state = test_state().await;
+    // Seed builtin policies so the agent role WOULD be permitted on this
+    // route (builtin-agent-scoped-access allows Agent-role reads) — that
+    // way the 403 below is attributable to the scoped-token allow-list,
+    // not to an empty policy store's default-deny.
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let gate_agent_id = "gate-review-probe-2".to_string();
