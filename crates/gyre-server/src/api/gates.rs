@@ -146,7 +146,7 @@ pub struct SpecApprovalResponse {
     pub spec_sha: String,
     pub approver_id: String,
     pub signature: Option<String>,
-    pub approved_at: u64,
+    pub approved_at: Option<u64>,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
     pub revocation_reason: Option<String>,
@@ -157,12 +157,18 @@ pub struct SpecApprovalResponse {
     pub rejected_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected_by: Option<String>,
+    /// Derived from which timestamp column is non-null (never stored).
+    pub status: String,
+    /// True when this entry actively approves the spec SHA.
     pub active: bool,
 }
 
 impl From<SpecApproval> for SpecApprovalResponse {
     fn from(a: SpecApproval) -> Self {
         let active = a.is_active();
+        let status = a.status().to_string();
         Self {
             id: a.id.to_string(),
             spec_path: a.spec_path,
@@ -175,6 +181,8 @@ impl From<SpecApproval> for SpecApprovalResponse {
             revocation_reason: a.revocation_reason,
             rejected_at: a.rejected_at,
             rejected_reason: a.rejected_reason,
+            rejected_by: a.rejected_by,
+            status,
             active,
         }
     }
@@ -197,6 +205,23 @@ pub async fn create_gate(
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Duplicate guard: gate names are unique per repo. Without this, every
+    // re-run of `gyre bootstrap` re-POSTs the same default gate set and
+    // duplicates each row — every subsequent MR then runs each gate once
+    // per bootstrap run.
+    if state
+        .quality_gates
+        .list_by_repo_id(&repo_id)
+        .await?
+        .iter()
+        .any(|g| g.name == req.name)
+    {
+        return Err(ApiError::Conflict(format!(
+            "gate '{}' already exists for repo {repo_id}",
+            req.name
+        )));
+    }
 
     // Validate required fields per gate type.
     match req.gate_type {
@@ -335,7 +360,7 @@ pub async fn list_spec_approvals(
     };
     let mut result: Vec<SpecApprovalResponse> =
         all.into_iter().map(SpecApprovalResponse::from).collect();
-    result.sort_by_key(|a| a.approved_at);
+    result.sort_by_key(|a| a.approved_at.unwrap_or(0));
     Ok(Json(result))
 }
 
@@ -354,12 +379,17 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
         ));
     }
 
-    let active = state
+    // Approval status per SHA (agent-gates.md §Spec Approval Ledger): query
+    // the exact (spec_path, spec_sha) version — the forge's step-8 check —
+    // rather than loading every approval for the path. An entry is active
+    // only when it is Approved (approved_at set) and not since revoked or
+    // rejected; Pending/Revoked/Rejected rows never authorize a merge.
+    let for_sha = state
         .spec_approvals
-        .list_active_by_path(path)
+        .find_by_spec_sha(path, sha)
         .await
         .unwrap_or_default();
-    let has_active_approval = active.iter().any(|a| a.spec_sha == sha);
+    let has_active_approval = for_sha.iter().any(|a| a.is_active());
 
     if has_active_approval {
         Ok(())
@@ -376,6 +406,7 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
 
 #[cfg(test)]
 mod tests {
+    use super::verify_spec_ref;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_domain::{Repository, SpecApproval};
@@ -447,6 +478,62 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_gate_rejects_duplicate_name_per_repo() {
+        // Re-running `gyre bootstrap` re-POSTs the same default gate set;
+        // a second gate with the same name for the same repo must be a
+        // 409, not a silent duplicate row that runs once per bootstrap.
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body_json_val = serde_json::json!({
+            "name": "cargo-test",
+            "gate_type": "test_command",
+            "command": "cargo test"
+        });
+        let post = |app: &Router| {
+            let body = Body::from(serde_json::to_vec(&body_json_val).unwrap());
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(body)
+                    .unwrap(),
+            )
+        };
+        let resp = post(&app).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = post(&app).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "duplicate gate name for the same repo must be a 409 conflict"
+        );
+
+        // The list still holds exactly one row — no duplicate was written.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json.as_array()
+                .unwrap()
+                .iter()
+                .filter(|g| g["name"] == "cargo-test")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -589,20 +676,110 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), 0);
     }
 
-    #[tokio::test]
+    // -----------------------------------------------------------------------
+    // Spec Approval Ledger (agent-gates.md §Spec Approval Ledger)
+    // -----------------------------------------------------------------------
+
+    /// Seed a Pending ledger entry directly through the repository port.
+    async fn seed_ledger_entry(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        spec_path: &str,
+        spec_sha: &str,
+    ) -> gyre_common::Id {
+        let approval_id = gyre_common::Id::new(id);
+        state
+            .spec_approvals
+            .create(&gyre_domain::SpecApproval::new(
+                approval_id.clone(),
+                spec_path,
+                spec_sha,
+                "user:test",
+            ))
+            .await
+            .unwrap();
+        approval_id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approvals_list_returns_full_ledger_data() {
+        let state = test_state();
+        let sha1 = "a".repeat(40);
+        let sha2 = "b".repeat(40);
+        seed_ledger_entry(&state, "apr-1", "system/design.md", &sha1).await;
+        let apr2 = seed_ledger_entry(&state, "apr-2", "system/design.md", &sha2).await;
+
+        // Multiple approvals for the same path (different SHAs) are allowed.
+        let all = state
+            .spec_approvals
+            .list_by_path("system/design.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "multiple approvals per path must be supported"
+        );
+
+        // Transition the second entry: Pending → Approved.
+        state
+            .spec_approvals
+            .approve(&apr2, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // GET /api/v1/specs/approvals returns full ledger data with derived status.
+        // Build the router over the SAME state we seeded — a fresh `app()`
+        // would have its own empty ledger.
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/approvals")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        let approved = arr
+            .iter()
+            .find(|a| a["spec_sha"] == sha2.as_str())
+            .expect("approved entry present");
+        assert_eq!(approved["status"], "approved");
+        assert_eq!(approved["approved_at"], 1700000100);
+        assert_eq!(approved["rejected_at"], serde_json::Value::Null);
+        assert_eq!(approved["rejected_reason"], serde_json::Value::Null);
+        assert_eq!(approved["rejected_by"], serde_json::Value::Null);
+
+        let pending = arr
+            .iter()
+            .find(|a| a["spec_sha"] == sha1.as_str())
+            .expect("pending entry present");
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["approved_at"], serde_json::Value::Null);
+        assert!(!pending["active"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_spec_approvals_includes_rejection_fields() {
         // HSI §3 Evaluative lens: the approval ledger response must let the
         // Explorer distinguish a REJECTED approval (✗) from a revoked one —
         // both are inactive, but rejection is a reviewer decision while
         // revocation returns the spec to pending.
         let state = test_state();
-        let approved = SpecApproval::new(
+        let mut approved = SpecApproval::new(
             gyre_common::Id::new("ap-1"),
             "specs/system/auth.md",
             "1".repeat(40),
             "user:alice",
-            100,
         );
+        approved.approve(100).unwrap();
         state.spec_approvals.create(&approved).await.unwrap();
 
         let mut rejected = SpecApproval::new(
@@ -610,9 +787,8 @@ mod tests {
             "specs/system/billing.md",
             "2".repeat(40),
             "user:bob",
-            110,
         );
-        rejected.reject("out of scope", gyre_common::Id::new("user:carol"), 120);
+        rejected.reject("user:carol", "out of scope", 120).unwrap();
         state.spec_approvals.create(&rejected).await.unwrap();
 
         let app = crate::api::api_router().with_state(state);
@@ -646,6 +822,165 @@ mod tests {
         assert_eq!(
             rejected["rejected_reason"],
             serde_json::json!("out of scope")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoked_approval_no_longer_verifies_spec_ref() {
+        let state = test_state();
+        let sha = "e".repeat(40);
+        let apr = seed_ledger_entry(&state, "apr-3", "system/revoked.md", &sha).await;
+        state
+            .spec_approvals
+            .approve(&apr, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // Before revocation the spec_ref verifies.
+        let spec_ref = format!("system/revoked.md@{sha}");
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_ok(),
+            "active approval must verify"
+        );
+
+        // Approved → Revoked (post-merge withdrawal). Revocation requires a reason.
+        state
+            .spec_approvals
+            .revoke(&apr, "user:admin", "spec withdrawn", 1700000200)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // After revocation the same spec_ref must fail verification (forge
+        // blocks the merge at require_approved_spec).
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_err(),
+            "revoked approval must NOT verify — merge must be blocked"
+        );
+
+        // Mutual exclusivity: approved_at cleared, revoked_at set.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&apr)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.approved_at, None);
+        assert_eq!(reloaded.revoked_at, Some(1700000200));
+        assert_eq!(reloaded.revoked_by.as_deref(), Some("user:admin"));
+        assert_eq!(
+            reloaded.revocation_reason.as_deref(),
+            Some("spec withdrawn")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_transition_pending_to_rejected_and_audit() {
+        let state = test_state();
+        let sha = "f".repeat(40);
+        let apr = seed_ledger_entry(&state, "apr-4", "system/rejected.md", &sha).await;
+
+        // Approved entries cannot be rejected (only revoked).
+        state
+            .spec_approvals
+            .approve(&apr, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(
+            state
+                .spec_approvals
+                .reject(&apr, "user:reviewer", "no", 1700000150)
+                .await
+                .is_err(),
+            "Approved → Rejected must be an invalid transition"
+        );
+
+        // Pending entries reject cleanly and never verify.
+        let apr2 = seed_ledger_entry(&state, "apr-5", "system/rejected2.md", &sha).await;
+        state
+            .spec_approvals
+            .reject(&apr2, "user:reviewer", "not ready", 1700000200)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        let spec_ref = format!("system/rejected2.md@{sha}");
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_err(),
+            "rejected (never approved) entry must not verify"
+        );
+    }
+
+    /// Approval status is queried per SHA (task plan step 6: "on query:
+    /// return approval status per SHA"). The exact-(path, sha) lookup must
+    /// return only that version's rows: an approval for a different SHA of
+    /// the same path must never satisfy a merge check for this SHA, and
+    /// verify_spec_ref must deny while the version is Pending.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_by_spec_sha_scopes_to_exact_version() {
+        let state = test_state();
+        let sha1 = "1".repeat(40);
+        let sha2 = "2".repeat(40);
+        seed_ledger_entry(&state, "apr-6", "system/versioned.md", &sha1).await;
+        let apr2 = seed_ledger_entry(&state, "apr-7", "system/versioned.md", &sha2).await;
+
+        // Approve only sha2.
+        state
+            .spec_approvals
+            .approve(&apr2, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // Per-SHA query returns only that version's rows.
+        let for_sha1 = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &sha1)
+            .await
+            .unwrap();
+        assert_eq!(for_sha1.len(), 1);
+        assert_eq!(for_sha1[0].spec_sha, sha1);
+        assert_eq!(
+            for_sha1[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Pending
+        );
+
+        let for_sha2 = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &sha2)
+            .await
+            .unwrap();
+        assert_eq!(for_sha2.len(), 1);
+        assert_eq!(for_sha2[0].spec_sha, sha2);
+        assert_eq!(
+            for_sha2[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Approved
+        );
+
+        // Unknown SHA for the same path: no rows, no accidental path-wide match.
+        let for_missing = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &"3".repeat(40))
+            .await
+            .unwrap();
+        assert!(
+            for_missing.is_empty(),
+            "per-SHA lookup must not return other versions' rows"
+        );
+
+        // Forge check (step 8): sha2 verifies, sha1 (same path, Pending) must
+        // not — approving one version never approves its siblings.
+        assert!(
+            verify_spec_ref(&state, &format!("system/versioned.md@{sha2}"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_spec_ref(&state, &format!("system/versioned.md@{sha1}"))
+                .await
+                .is_err(),
+            "Pending version must not verify even though a sibling SHA is approved"
         );
     }
 }

@@ -2,6 +2,7 @@
 import json
 import time
 import shutil
+import subprocess
 from pathlib import Path
 
 from .catalog import helper
@@ -27,10 +28,29 @@ def publication(store, task):
     return None
 
 
-def verification_ready(store, task):
+def includes_base(store, base, target):
+    if not base or not target:return False
+    if base==target:return True
+    try:
+        return subprocess.run(['git','-C',str(store.directory/'source'),'merge-base','--is-ancestor',target,base],
+                              capture_output=True,timeout=10).returncode==0
+    except (OSError,subprocess.TimeoutExpired):return False
+
+
+def verification_ready(store, task, base=None):
     published = publication(store,task)
     if not published or published.get('candidate') != task['data'].get('candidate'):
         return True
+    for key in ('ci_refresh','baseline_resolution'):
+        recovery=task['data'].get(key) or {}
+        if (recovery.get('candidate')==task['data'].get('candidate') and recovery.get('published_head')==published['head']
+                and recovery.get('generation')==task['generation']):
+            if key=='ci_refresh':return includes_base(store,base,recovery.get('target_base'))
+            from .repairs import satisfied
+            prerequisite=store.task(recovery['prerequisite'])
+            receipt=recovery.get('receipt') or {}
+            if satisfied(prerequisite['data']) and receipt in (prerequisite['data'].get('delivered'),prerequisite['data'].get('resolved')):
+                return includes_base(store,base,receipt.get('sha') or receipt.get('base') or receipt.get('source'))
     ci = task['data'].get('ci') or {}
     return (ci.get('head') == published['head'] and ci.get('checks') == 'green'
             and ci.get('status') in ('passed','policy_pending','artifact_refresh'))
@@ -65,7 +85,7 @@ def read(execution, task, receipt):
         raise Wait('PR conflict or target base changed during observation; recheck before requesting implementation')
     latest, reconciled = module.reconcile_checks(execution.command,task['data']['pr'],receipt['head'],latest)
     pending, failed, infrastructure = module.check_sets(latest)
-    if observation['status'] in ('candidate_failed','baseline_failed') and (not failed or latest['state'] != 'OPEN'):
+    if observation['status'] in ('candidate_failed','baseline_failed','environment_failed','environment_refresh') and (not failed or latest['state'] != 'OPEN'):
         raise Wait('Failed CI changed while evidence was collected; observe again before requesting implementation')
     if observation['status'] in ('passed','policy_pending') and (pending or failed or infrastructure or not latest.get('statusCheckRollup')):
         raise Wait('CI readiness changed during observation; recheck before publication')
@@ -86,7 +106,7 @@ def read(execution, task, receipt):
     snapshot = {'head':receipt['head'],'base':receipt['base'],'status':observation['status'],
                 'checks':observation.get('checks'), 'merge_state':observation.get('merge_state'),
                 'checked_at':time.time(), 'log':observation.get('log'),
-                'target_base':observation.get('base') if observation['status']=='artifact_refresh' else None,
+                'target_base':observation.get('target_base') if observation['status']=='environment_refresh' else observation.get('base') if observation['status']=='artifact_refresh' else None,
                 'conflicts':observation.get('conflicts',[])}
     with execution.store.transaction():
         execution.store._current(execution.claim['id'],execution.claim['token'])
@@ -111,11 +131,15 @@ def read(execution, task, receipt):
 
 def failure(execution, task, receipt, observation):
     status = observation['status']
-    if status not in ('candidate_failed','baseline_failed','closed','merge_conflict'):
+    if status not in ('candidate_failed','baseline_failed','environment_failed','environment_refresh','closed','merge_conflict'):
         return None
     finding = observation | {'id':execution.claim['id'],'category':'ci','source':receipt['head']}
     if observation.get('log'):
         finding['log_tail'] = Path(observation.get('candidate_log',observation['log'])).read_text()[-16000:]
+    if status=='environment_refresh':
+        return observation, {'verified':None,'ci_refresh':{
+            'candidate':task['data']['candidate'],'published_head':receipt['head'],'generation':task['generation'],
+            'target_base':observation['target_base'],'failure_signature':observation['failure_signature']}}, []
     if status == 'closed':
         # Human closure is not a request for another implementation/PR.
         raise Wait('Associated PR was closed; awaiting an operator decision')
@@ -123,11 +147,14 @@ def failure(execution, task, receipt, observation):
         finding.update(category='rebase',published_head=receipt['head'])
         return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],
                              'review':None,'verified':None}, [finding]
-    if status == 'baseline_failed':
+    if status in ('baseline_failed','environment_failed'):
         from .stages import baseline_repair
         prerequisite = baseline_repair(execution,observation)
         finding.update(category='baseline',prerequisite=prerequisite,
                        source=task['data']['candidate'],published_head=receipt['head'])
+        if status=='environment_failed':
+            finding['shared_environment']=True
+            return observation, {'repair':finding}, [finding]
         return observation, {'repair':finding,
                 'dependencies':sorted(set(task['data'].get('dependencies') or []) | {prerequisite})}, [finding]
     return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],
