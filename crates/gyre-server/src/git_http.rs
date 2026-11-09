@@ -1405,21 +1405,29 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
 ///   override, else the `defaults:` section) is true. Files not registered in
 ///   the manifest create no lifecycle task.
 /// - `None` (manifest-less repo): legacy path-prefix fallback so existing
-///   repos keep working.
+///   repos keep working. A rename (or copy) triggers the fallback when
+///   **either** side of the rename sits under a watched prefix, matching the
+///   pre-manifest behavior of `parse_spec_changes`.
 pub fn should_create_lifecycle_task(
     manifest: Option<&crate::spec_registry::SpecManifest>,
     status_char: char,
     path: &str,
+    old_path: Option<&str>,
 ) -> bool {
     // Change kinds that don't classify into a task never create one.
-    if classify_spec_change(status_char, path, None).is_none() {
+    if classify_spec_change(status_char, path, old_path).is_none() {
         return false;
     }
     match manifest {
+        // Manifest mode matches on the NEW path only (task-194 instruction:
+        // "For renames (R), match on the new path").
         Some(m) => crate::spec_registry::manifest_entry_for_path(m, path)
             .map(|e| e.effective_auto_create_tasks(&m.defaults))
             .unwrap_or(false),
-        None => SPEC_WATCHED_PATHS.iter().any(|p| path.starts_with(p)),
+        None => {
+            let watched = |p: &str| SPEC_WATCHED_PATHS.iter().any(|prefix| p.starts_with(prefix));
+            watched(path) || old_path.is_some_and(watched)
+        }
     }
 }
 
@@ -1539,7 +1547,12 @@ async fn process_spec_lifecycle(
                 }
             }
 
-            if !should_create_lifecycle_task(manifest.as_ref(), status_char, &path) {
+            if !should_create_lifecycle_task(
+                manifest.as_ref(),
+                status_char,
+                &path,
+                old_path.as_deref(),
+            ) {
                 debug!(
                     spec_path = %path,
                     "spec-lifecycle: change excluded from task creation by manifest policy"
@@ -4026,36 +4039,58 @@ specs:
         assert!(!super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/system/spec-a.md"
+            "specs/system/spec-a.md",
+            None
         ));
         assert!(!super::should_create_lifecycle_task(
             Some(&m),
             'A',
-            "specs/system/spec-a.md"
+            "specs/system/spec-a.md",
+            None
         ));
         assert!(!super::should_create_lifecycle_task(
             Some(&m),
             'D',
-            "specs/system/spec-a.md"
+            "specs/system/spec-a.md",
+            None
         ));
         // Registered with auto_create_tasks: true → task.
         assert!(super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/system/spec-b.md"
+            "specs/system/spec-b.md",
+            None
         ));
         // Unregistered specs/ file → no task (manifest is the source of truth).
         assert!(!super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/system/unregistered.md"
+            "specs/system/unregistered.md",
+            None
         ));
         // Registered under a non-watched prefix: the manifest, not the path
         // prefix, decides — defaults.auto_create_tasks is true here.
         assert!(super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/coverage/coverage-matrix.md"
+            "specs/coverage/coverage-matrix.md",
+            None
+        ));
+        // Manifest-mode renames match on the NEW path only (task-194
+        // instruction): a rename whose old path is registered but whose new
+        // path is not registered creates no task.
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            'R',
+            "specs/milestones/renamed-away.md",
+            Some("specs/system/spec-b.md")
+        ));
+        // …while a rename onto a registered path creates one.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            'R',
+            "specs/system/spec-b.md",
+            Some("specs/milestones/renamed-from.md")
         ));
     }
 
@@ -4067,12 +4102,14 @@ specs:
         assert!(super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/system/opt-in.md"
+            "specs/system/opt-in.md",
+            None
         ));
         assert!(!super::should_create_lifecycle_task(
             Some(&m),
             'M',
-            "specs/system/opt-out.md"
+            "specs/system/opt-out.md",
+            None
         ));
     }
 
@@ -4082,28 +4119,77 @@ specs:
         assert!(super::should_create_lifecycle_task(
             None,
             'M',
-            "specs/system/foo.md"
+            "specs/system/foo.md",
+            None
         ));
         assert!(super::should_create_lifecycle_task(
             None,
             'A',
-            "specs/development/bar.md"
+            "specs/development/bar.md",
+            None
         ));
         assert!(!super::should_create_lifecycle_task(
             None,
             'M',
-            "specs/milestones/m1.md"
+            "specs/milestones/m1.md",
+            None
         ));
         assert!(!super::should_create_lifecycle_task(
             None,
             'M',
-            "src/main.rs"
+            "src/main.rs",
+            None
         ));
         // Unclassified change kinds never create tasks.
         assert!(!super::should_create_lifecycle_task(
             None,
             'X',
-            "specs/system/foo.md"
+            "specs/system/foo.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_rename_either_side_watched() {
+        // Manifest-less repo, renames: the legacy prefix fallback admits a
+        // rename when EITHER side sits under a watched prefix (matching base
+        // `parse_spec_changes` + `classify_spec_change('R')`, which always
+        // created a task). Regression test for the task-194 review finding:
+        // the None arm previously checked only the new path.
+        // Old path watched, new path under specs/ but unwatched → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            'R',
+            "specs/milestones/a.md",
+            Some("specs/system/foo.md")
+        ));
+        // Old path watched, new path outside specs/ entirely → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            'R',
+            "docs/b.md",
+            Some("specs/system/foo.md")
+        ));
+        // New path watched, old path unwatched → task (already worked).
+        assert!(super::should_create_lifecycle_task(
+            None,
+            'R',
+            "specs/system/new.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            'R',
+            "docs/b.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched, both outside specs/ → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            'R',
+            "docs/b.md",
+            Some("docs/old.md")
         ));
     }
 
@@ -4319,6 +4405,107 @@ specs:
         // No manifest → no priority override: change-kind default (High).
         assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
         assert!(!titles.iter().any(|t| t.contains("unwatched")));
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_without_manifest_rename_from_watched_prefix_e2e() {
+        // Manifest-less repo, renames whose OLD path sits under a watched
+        // prefix: the legacy fallback must still create the 'Update spec
+        // references' task (base fefde2946 behavior — AC3 'no regression').
+        // Regression test for the task-194 review finding: the manifest-less
+        // arm of `should_create_lifecycle_task` previously checked only the
+        // NEW path, dropping both of these cases.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&["init", "-b", "main"]);
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/system/foo.md"), "# v1\n").unwrap();
+        std::fs::write(repo_path.join("specs/system/bar.md"), "# v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "c1"]);
+        let old_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let old_sha = String::from_utf8_lossy(&old_sha.stdout).trim().to_string();
+
+        // Rename one watched spec to an unwatched specs/ path, another out
+        // of specs/ entirely — both old paths are watched, so base created
+        // tasks for both.
+        std::fs::create_dir_all(repo_path.join("specs/milestones")).unwrap();
+        std::fs::create_dir_all(repo_path.join("docs")).unwrap();
+        git(&["mv", "specs/system/foo.md", "specs/milestones/a.md"]);
+        git(&["mv", "specs/system/bar.md", "docs/b.md"]);
+        git(&["commit", "-m", "c2"]);
+        let new_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let new_sha = String::from_utf8_lossy(&new_sha.stdout).trim().to_string();
+
+        // Sanity: the commit-to-commit diff must show these as renames (R),
+        // otherwise the test would not exercise the rename code path.
+        {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("diff")
+                .arg("--name-status")
+                .arg(format!("{old_sha}..{new_sha}"))
+                .output()
+                .unwrap();
+            let diff = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(diff.contains("R100\tspecs/system/foo.md\tspecs/milestones/a.md"), "diff: {diff}");
+            assert!(diff.contains("R100\tspecs/system/bar.md\tdocs/b.md"), "diff: {diff}");
+        }
+
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+        let state = state_with_registered_repo(&repo_path_str).await;
+        let update = super::RefUpdate {
+            old_sha,
+            new_sha,
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path_str, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(tasks.len(), 2, "tasks: {titles:?}");
+        assert!(
+            titles.contains(&"Update spec references: specs/system/foo.md -> specs/milestones/a.md"),
+            "tasks: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Update spec references: specs/system/bar.md -> docs/b.md"),
+            "tasks: {titles:?}"
+        );
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
