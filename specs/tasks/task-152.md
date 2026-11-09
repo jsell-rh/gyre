@@ -87,123 +87,70 @@ From `realized-model.md` §6 — Narrative Generation:
 
 ## Shipped
 
-Implementation of `realized-model.md` §6 Narrative Generation: `crates/gyre-domain/src/narrative.rs`
-(template generator + grounded facts, pure domain logic, no LLM-port import — the LLM call lives
-in `gyre-server` because `gyre-domain` MUST NOT depend on the LLM port), wired into
-`crates/gyre-server/src/api/graph.rs` (timeline/diff `narrative` field, briefing architecture
-narrative with LLM synthesis and template fallback) with the `PROMPT_GRAPH_NARRATIVE` fallback
-template in `llm_defaults.rs`. The original "stubbed for now" narrative comment in graph.rs is
-gone. Reviewed in `specs/reviews/task-152.md`; the sections below summarize the shipped behavior,
-the repair history, and this round's rebase resolution.
+Implementation of `realized-model.md` §6 Narrative Generation. Reviewed in
+`specs/reviews/task-152.md`; `crates/gyre-domain/src/narrative.rs` holds the template generator
+and grounded-facts builder (pure domain logic — the LLM call lives in `gyre-server` because
+`gyre-domain` must not depend on the LLM port), wired into the timeline/diff/briefing endpoints.
+The original "stubbed for now" narrative comment in `graph.rs` is gone.
 
-### Shipped behavior
+### Behavior
 
-- **Template generator** (`crates/gyre-domain/src/narrative.rs`): `NarrativeGrounding::from_graph`
-  indexes the live graph (Contains parent, Implements traits, FieldOf fields, node `spec_path`/
-  `spec_paths` + GovernedBy edges → specs; soft-deleted nodes/edges excluded, edges to missing
-  nodes skipped). `generate_template_narrative` renders per-node additions with module/trait/field
-  sentences, removals, modifications with old→new field changes (char-boundary-safe truncation),
-  >3 additions grouped per module+type ("N types added to `module`"), the plan's per-edge template
-  `"New {edge_type} relationship: \`{source}\` → \`{target}\`."` from `DeltaEdgeEntry` arrays
-  (grouped by edge type above threshold; legacy count-only `delta_json` renders unchanged),
-  "Governed by spec: X." (grounding specs ∪ commit `spec_ref`, `@sha` stripped), "Produced by
-  agent Y under persona Z." `""` for empty/malformed deltas. Fully deterministic.
-- **Timeline/diff endpoints**: `DeltaResponse.narrative` on every delta; grounding loaded once per
-  request from real `graph_store.list_nodes/list_edges`; per-delta attribution via real
-  `agents.find_by_id` + `agent_personas` kv binding (falls back to the stored agent id when the
-  agent row is gone; `None` only when the delta records no agent).
+- **Template generator**: `NarrativeGrounding::from_graph` indexes the live graph (Contains
+  parent, Implements traits, FieldOf fields, node spec paths + GovernedBy edges; soft-deleted
+  nodes/edges excluded). `generate_template_narrative` renders per-node addition/removal/
+  modification sentences (old→new field changes, char-boundary-safe truncation), groups >3
+  additions per module+type ("N types added to `module`"), renders the per-edge template
+  `"New {edge_type} relationship: `{source}` → `{target}`."` from `DeltaEdgeEntry` arrays, and
+  appends "Governed by spec: X." (grounding specs ∪ commit `spec_ref`, `@sha` stripped) and
+  "Produced by agent Y under persona Z." when present. Empty/malformed deltas → `""`.
+  Fully deterministic.
+- **Timeline/diff**: `DeltaResponse.narrative` on every delta; grounding loaded once per request
+  from real `graph_store` queries; per-delta agent attribution via real `agents.find_by_id` +
+  `agent_personas` binding.
 - **LLM synthesis** (`llm_architecture_narrative`): grounded facts JSON injected into the
-  `graph-narrative` prompt template, model resolved via `resolve_llm_model`, call wrapped in
-  `tokio::time::timeout(10s)`. Falls back to concatenated template narratives on unconfigured LLM,
-  port error, timeout, or empty completion — each branch logged.
-- **Briefing** (`assemble_briefing`): collects the workspace's recent deltas (10 most recent since
-  `since`, grounding cached per repo), renders template narratives, and appends
-  "Architecture: {narrative}" to the summary — LLM-synthesized when configured, template as the
-  quality floor. Both REST and MCP briefing handlers delegate to `assemble_briefing`.
-- **Extractor** (`graph_extraction.rs`): records `DeltaEdgeEntry { edge_type, source, target }`
-  arrays in agent-context deltas (endpoint qualified names resolved from the merged node state;
-  unknown endpoints omit the entry rather than guess a name), bare counts in the compact no-agent
-  branch; the removed-edge count fix (`compact_delta_records_true_removed_edge_count`) is covered
-  by a discriminating test over a real bare git repo.
-- **Docs**: `docs/api-reference.md` timeline row documents `narrative`; briefing row corrected to
-  the actual HSI §9 response shape.
-- **Tests**: domain narrative suite (addition/removal/modification/grouping/edge-template/count-only/
-  empty/malformed, spec governance from GovernedBy edges and `spec_ref` with `@sha` stripped,
-  deleted-node exclusion, agent attribution, facts JSON grounding, char-boundary truncation) plus
-  server tests driving the real router (`timeline_endpoint_returns_grounded_narrative` asserts
-  every clause of the spec's template example; `briefing_summary_falls_back_to_template_narrative_
-without_llm`; `briefing_summary_uses_llm_narrative_when_configured` asserts the LLM path ran AND
-  the template fallback text does not appear; extraction `edge_entry` resolution and unknown-
-  endpoint skipping; `compact_delta_records_true_removed_edge_count`).
+  `graph-narrative` prompt (`llm_defaults.rs`), call latency-bounded (`tokio::time::timeout`
+  10s); falls back to concatenated template narratives on unconfigured LLM, port error, timeout,
+  or empty completion.
+- **Briefing** (`assemble_briefing`, repo-filter aware): collects the workspace's recent deltas,
+  renders template narratives (LLM-synthesized when configured), and appends
+  "Architecture: {narrative}" to the summary. Both REST and MCP briefing handlers delegate to
+  `assemble_briefing`.
+- **Extractor**: `DeltaEdgeEntry { edge_type, source, target }` arrays recorded in agent-context
+  deltas (qualified names resolved from merged node state; unknown endpoints omitted), bare
+  counts in the compact no-agent branch.
+- **Docs**: `docs/api-reference.md` timeline row documents `narrative`; briefing row matches the
+  HSI §9 response shape.
 
-### Repair history (condensed)
+### Test evidence
 
-- Rounds 1–2 (review): edge-detail template renderable from real `delta_json` (above);
-  `check-template-substitution.sh` const-span doc-block-bleed false positives fixed with
-  planted-bug non-blinding proof (pre-commit-only gate).
-- Round 4: `check-template-substitution.sh` SIGPIPE race repaired (single `awk` process, no
-  upstream writer); real bug fixed — dropped `edges_removed_count` increment in the edge-entry
-  refactor; inherited attribution drift recorded per task-210 precedent.
-- Round 5: verification-merge gate failures repaired — rustfmt on the three narrative files and
-  the `clippy::map_entry` site rewritten to the async-safe `Entry::Vacant` slot pattern (exactly
-  one async grounding load per repo, warn-log fallback preserved).
-- Round 6: `cargo test --all` WS integration failure root-caused (process-global
-  `ACTIVE_SESSIONS` map + `max_sessions_per_user()=3` evicting a live session across concurrently
-  running test servers authenticating as the same dev user); fixed with `ExplorerSessionRegistry`
-  scoped to `AppState` plus four `session_registry_*` regression tests, including
-  `session_registry_is_per_instance_not_process_global`. Gate repairs on that merge: the
-  line-pinned `&raw_preview[..500]` byte-slice exemption converted to `chars().take(500)` (strict
-  fix; exemption entry deleted) and `clippy::assertions_on_constants` ×2 read through local
-  bindings. This sandbox cannot `accept()` TCP listeners (errno 95,
-  `/tmp/stage/capabilities.json`), so `cargo test -p gyre-server --test explorer_ws_integration`
-  must run on the exact head on the host / GitHub CI; the `session_registry_*` unit tests are the
-  executable local proof and the failure mechanism is structurally impossible with a
-  per-`AppState` registry.
+At the current merged head (candidate rebased onto base `fefde294`), `CARGO_HOME=/tmp/cargo-home`,
+`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
 
-### Round 7 — rebase onto main `c5deca80` (this round)
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed** (`r8-domain-narrative.log`).
+- `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed, 0 failed**
+  (`r8-server-narrative.log`) — includes `timeline_endpoint_returns_grounded_narrative` (asserts
+  every clause of the spec's template example), `briefing_summary_falls_back_to_template_
+narrative_without_llm`, `briefing_summary_uses_llm_narrative_when_configured`.
+- `cargo test -p gyre-server --lib api::graph` → **31 passed, 0 failed** (`r8-server-api-graph.log`)
+  — narrative generation tests and main's repo-scoped briefing filter tests, both kept through
+  the rebase.
+- Earlier rounds on the pre-merge tree additionally passed: full `gyre-domain --lib` (447),
+  `gyre-common --lib` (116), `graph_extraction` (31), `session_registry` (4), and the repo gate
+  suite (rustfmt/clippy diff-clean vs base, arch/ABAC/migration/attribution checks, exit 0).
 
-Resolved the assigned rebase merge (candidate `bcd2dd6e` onto base `c5deca80`):
+### Final round repairs
 
-- `crates/gyre-server/src/api/graph.rs` (tests, content conflict): kept BOTH test sets — the
-  narrative generation tests (candidate) and the repo-scoped briefing filter tests (main, HSI §1.5
-  / task-083). The candidate's tests were updated to main's new 4-arg `assemble_briefing`
-  signature (`repo_filter`, passing `None`).
-- `crates/gyre-server/src/graph_extraction.rs` (imports, content conflict): union of both sides'
-  `gyre-common` imports (candidate `DeltaEdgeEntry` + main `call_graph::{CallGraphRunRecord,
-  Language}`).
-- Semantic integration beyond marker resolution: (1) `collect_architecture_narratives` now takes
-  `repo_filter` and narrows the briefing architecture narrative to the filtered repo, per main's
-  contract that the repo filter applies "uniformly to every repo-derived section" (the narrative
-  is built from workspace repos' deltas); (2) `compact_delta_records_true_removed_edge_count`
-  passes main's new `pass2_telemetry` argument (`CallGraphTelemetry` with real `MemKvStore` +
-  `Metrics` sinks, task-076) — follow-up commit `173fa028a` (the merge commit itself
-  contains only the marker resolutions and the two semantic integrations above; the
-  test-signature adaptation is committed separately as `fix(task-152)` and recorded in
-  `commits:` via `dev-attribution.py`).
+- Resolved the rebase of the candidate onto base `fefde294`: kept both test sets in
+  `api/graph.rs`, union imports in `graph_extraction.rs`; `collect_architecture_narratives`
+  honors main's briefing `repo_filter` contract (repo filter applied uniformly to every
+  repo-derived section).
+- Verification finding repaired: `git diff --check` vs base flagged a new blank line at EOF in
+  this file (`specs/tasks/task-152.md:209`); the Shipped notes were rewritten concisely with a
+  single trailing newline, and `git diff --check fefde294 HEAD` is now clean.
 
-### Test evidence (round 7, final tree `f9947f11`)
+### Verification scope
 
-All on the resolved merge, `CARGO_HOME=/tmp/cargo-home`, evidence under
-`/tmp/stage/review-evidence/` (`r7-*.log`):
-
-- `cargo build -p gyre-server --lib` → success (cold).
-- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed** (includes main's
-  view-query narrative tests).
-- `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed, 0 failed**.
-- `cargo test -p gyre-server --lib graph_extraction` → **31 passed, 0 failed**.
-- `cargo test -p gyre-server --lib api::graph` → **31 passed, 0 failed** (both merged test sets).
-- `cargo test -p gyre-server --lib session_registry` → **4 passed, 0 failed**.
-- `cargo test -p gyre-domain --lib` → **447 passed, 0 failed**;
-  `cargo test -p gyre-common --lib` → **116 passed, 0 failed**.
-- Gates on the resolved tree vs base `c5deca80`: `check-rustfmt-diff.py` → exit 0;
-  `check-clippy-diff.py` → exit 0 ("changed lines clean, 7 Rust files, 1020 existing warnings
-  outside changes"); `check-arch.sh`, `check-byte-slice-truncation.sh`,
-  `check-migration-versions.sh`, `check-dead-message-kinds.sh`, `check-abac-route-registry.sh`,
-  `check-mcp-write-tools.sh`, `check-task-commit-attribution.sh` → all exit 0
-  (`r7-*.log`); `dev-attribution.py task-152` reports no attribution drift.
-
-Transport restriction (unchanged): this sandbox cannot `accept()` TCP listeners, so the
-`explorer_ws_integration` binary and exact-head GitHub CI checks remain mandatory on the host.
-`web/dist` was restored from the assignment base after each local build (build.rs regenerates
-it); committed `web/dist` in the merge is main's staged state, untouched by this round.
-
+This sandbox cannot `accept()` TCP listeners (errno 95, `/tmp/stage/capabilities.json`), so
+`cargo test -p gyre-server --test explorer_ws_integration` and exact-head GitHub CI checks
+remain mandatory on the host. Committed `web/dist` is the assignment base's staged state;
+local builds ran with `SKIP_WEB_BUILD=1` so it is untouched by this round.
