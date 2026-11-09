@@ -47,3 +47,75 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 3 (final candidate `871d63e6b`, base `fefde2946`)
+
+Independent review of the full task-106 branch (29 commits base..candidate;
+all 8 commits listed in the task frontmatter present and attributed —
+`check-task-commit-attribution.sh` EXIT 0). Evidence:
+`/tmp/stage/review-evidence/task-106-r23/`.
+
+Verified against source-control.md §4 and the task plan:
+
+- **Adapter is real**: `jj_rebase` (gyre-adapters/src/jj_ops.rs) shells to the
+  real `jj` binary via `run_jj_raw` (both streams captured separately), runs
+  `jj git import` first, rebases `-b @ -d <moved branch>` (whole in-flight
+  stack, the documented spec-vs-plan F5 divergence), and classifies conflicts
+  via the `jj resolve --list -r <rev>` exit-code contract (0 = conflicted with
+  paths on stdout, 2 = clean) — no stream-confused or string-matching dead
+  code (R1 F1 class). Workspace layout, bookmark set, git export are real
+  subprocess operations with empirically-documented jj 0.39.0 contracts.
+- **Trigger**: `rebase_inflight_agents` runs as the last step of BOTH merge
+  paths (single-entry and atomic group), only after post-merge gates pass
+  (R2 F3); targets = other Open/Approved MRs on the same target branch in the
+  same repo, author Active, worktree dir exists, merged authors excluded;
+  destination is the branch that MOVED, not the default branch (pinned by
+  `rebase_destination_is_moved_target_branch_not_default`).
+- **Conflict-as-state + notifications**: conflict arm sets the author's MR
+  `has_conflicts` (repo-scoped, R3 F10), emits `SpeculativeConflict` to the
+  workspace and `Escalation` to the agent with the conflicting-file list;
+  success arm emits `baseline_moved` with `new_base_sha` and clears a stale
+  conflict flag (R20 F3). All via `emit_event` (signed, persisted, WS).
+- **Deferral semantics** (plan item 5 / F4 / F8): 60s backoff written only
+  after a terminal outcome; window hits set a `jj_rebase_pending` marker
+  (newest base wins); `replay_pending_rebases` runs on EVERY processor cycle
+  (not only idle — R3 F12), re-derives actionability repo-scoped, and an
+  infrastructure Err keeps the marker on both trigger and replay paths.
+- **Safeguards + audit**: Active-only, worktree-exists, merged-author
+  exclusion, all outcomes audited (`jj_rebase` Custom audit events with
+  outcome/files/new_base_sha); jj workspace teardown on stale-kill and
+  worktree-delete paths.
+- **Completion path** (R20): bookmark SET (not create) onto `@` plus
+  `jj git export` BEFORE MR stats; spawn response reports the effective
+  working directory (R21), legacy relative `repo.path` absolutized before jj
+  child calls (F6), `configured_repos_path` anchors GYRE_REPOS_PATH at cwd.
+
+Probes (logs + exit codes in the evidence dir):
+
+- `cargo test -p gyre-server --lib rebase` → 17 passed; full `--lib` →
+  **1505 passed, 0 failed**; `cargo test -p gyre-adapters --lib` → **399
+  passed, 0 failed** (jj fixtures guard-skip locally — no jj binary in the
+  sandbox, GitHub releases unreachable: curl exit 7; CI leg installs pinned
+  jj 0.39.0 with `GYRE_JJ_TESTS_MUST_RUN=1` and the guard unit-tests prove it
+  panics rather than silently skipping there).
+- Mutation-verified test strength: disabling target selection fails 11/17
+  rebase tests; disabling the conflict flag fails 3. Tree restored
+  byte-identical to the candidate afterward (md5 vs `git show`).
+- Invariant scripts: arch, mem-port-contracts, inert-enforcement,
+  ignored-tool-tests, dead-message-kinds, relative-path-defaults,
+  byte-slice-truncation, fail-open-ref-resolution, task-commit-attribution →
+  all EXIT 0. `check-assertionless-tests.sh` exits 2 only because this
+  sandbox has mawk (script uses gawk 3-arg `match()`); the script is
+  unchanged by this candidate, and its exemption-file changes only REMOVE
+  entries (tests fixed), never add.
+
+Non-blocking observation (no action required): a plain-git fallback worktree
+selected as a rebase target always fails `jj_rebase` (no `.jj`) and records a
+failure audit event per branch movement — loud, not silent, and consistent
+with the spec's jj-based model; fallback agents simply cannot be auto-rebased.
+
+Verdict: **approved** — the §4 contract is implemented in real production
+code with enforcement (not audit-only), tests that kill real bugs, and no
+fakery found. Remaining verification duty: the CI jj leg (pinned jj 0.39.0,
+`GYRE_JJ_TESTS_MUST_RUN=1`) must be green, since this sandbox's transport
+restrictions prevent running the recorded-fixture tests locally.
