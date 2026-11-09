@@ -217,6 +217,30 @@ impl UserRepository for SqliteStorage {
         .await?
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        let pool = Arc::clone(&self.pool);
+        let email = email.to_lowercase();
+        tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Case-insensitive match via lower() (portable across SQLite
+            // and PostgreSQL): invitation emails are normalized to
+            // lowercase, but SSO-provisioned accounts store the IdP's raw
+            // casing. Email is not unique (same person, multiple
+            // tenants), so every match is returned; callers scope by
+            // tenant. Ordered by creation for a deterministic pick.
+            let rows = users::table
+                .filter(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>("lower(users.email) = ")
+                        .bind::<diesel::sql_types::Text, _>(email),
+                )
+                .order(users::created_at.asc())
+                .load::<UserRow>(&mut *conn)
+                .context("find users by email")?;
+            Ok(rows.into_iter().map(User::from).collect())
+        })
+        .await?
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
@@ -678,5 +702,47 @@ mod tests {
             .unwrap();
         ApiKeyRepository::delete(&s, "gyre_key_abc").await.unwrap();
         assert!(s.find_user_id("gyre_key_abc").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_email_is_case_insensitive_and_returns_all_matches() {
+        // Task-110 review F1: invitation acceptance links an existing
+        // SSO-provisioned account by email. SSO accounts store the IdP's
+        // raw casing while invitation emails are normalized to lowercase,
+        // so the lookup must be case-insensitive; and email is NOT unique
+        // (the spec's cross-tenant model has the same person in two
+        // tenants), so every match is returned for the caller to scope by
+        // tenant. Exercises the real SQL (lower() comparison) through
+        // SQLite.
+        let (_tmp, s) = setup();
+        let mut sso = make_user("u-sso", "keycloak-subj-1", "sso-alice");
+        sso.email = Some("Sso-Alice@Example.com".to_string());
+        sso.tenant_id = Some(Id::new("acme"));
+        UserRepository::create(&s, &sso).await.unwrap();
+        let mut other_tenant = make_user(
+            "u-other",
+            "tenant:other:email:sso-alice@example.com",
+            "sso-alice-2",
+        );
+        other_tenant.email = Some("sso-alice@example.com".to_string());
+        other_tenant.tenant_id = Some(Id::new("other"));
+        UserRepository::create(&s, &other_tenant).await.unwrap();
+        let mut no_email = make_user("u-none", "ext-none", "none");
+        no_email.email = None;
+        UserRepository::create(&s, &no_email).await.unwrap();
+
+        let matches = s.find_by_email("sso-alice@example.com").await.unwrap();
+        let ids: Vec<&str> = matches.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["u-sso", "u-other"],
+            "both tenant accounts match (case-insensitive), ordered by creation"
+        );
+        assert!(
+            s.find_by_email("nobody@example.com")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

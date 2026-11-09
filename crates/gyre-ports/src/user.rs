@@ -16,6 +16,13 @@ pub trait UserRepository: Send + Sync {
     async fn find_by_external_id(&self, external_id: &str) -> Result<Option<User>>;
     /// Find a user by their unique, immutable, URL-safe username.
     async fn find_by_username(&self, username: &str) -> Result<Option<User>>;
+    /// Find users by email address, case-insensitive.
+    ///
+    /// Email is NOT unique — the same person may hold accounts in
+    /// multiple tenants (user-management.md §Tenant-Level User
+    /// Onboarding cross-tenant model) — so every match is returned and
+    /// callers MUST scope the result by tenant before using it.
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>>;
     async fn list(&self) -> Result<Vec<User>>;
     /// Persist updated profile fields. `username` and `external_id` are
     /// immutable after creation; implementations MUST reject an update that

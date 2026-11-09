@@ -1047,6 +1047,28 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        // Case-insensitive: invitation emails are normalized to lowercase,
+        // but SSO-provisioned accounts store the IdP's raw casing. Email
+        // is not unique (same person, multiple tenants), so every match is
+        // returned; callers scope by tenant. Ordered by creation for a
+        // deterministic pick.
+        let email = email.to_lowercase();
+        let store = self.store.lock().await;
+        let mut matches: Vec<User> = store
+            .values()
+            .filter(|u| {
+                u.email
+                    .as_ref()
+                    .is_some_and(|e| e.to_lowercase() == email)
+            })
+            .cloned()
+            .collect();
+        drop(store);
+        matches.sort_by_key(|u| u.created_at);
+        Ok(matches)
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }

@@ -66,16 +66,32 @@ pub const EXPIRY_JOB_INTERVAL_SECS: u64 = 3600;
 
 // ─── Policy ──────────────────────────────────────────────────────────────────
 
-/// Load the invitation policy for a tenant (defaults when unset).
-pub async fn load_policy(state: &AppState, tenant_id: &str) -> InvitationPolicy {
-    state
+/// Load the invitation policy for a tenant (spec defaults when unset).
+///
+/// Fails CLOSED on a corrupt stored row: a policy that cannot be read or
+/// parsed must surface as an error instead of silently falling back to
+/// the defaults — the defaults are the *permissive* side
+/// (`allow_re_invite: true`, cap 50), so a silent fallback relaxes
+/// enforcement exactly when the tenant asked for restrictions. The GET
+/// endpoint surfaces the corruption as a 500; the PUT endpoint replaces
+/// the row (the operator's remediation path).
+pub async fn load_policy(state: &AppState, tenant_id: &str) -> Result<InvitationPolicy, ApiError> {
+    match state
         .kv_store
         .kv_get(POLICY_KV_NAMESPACE, tenant_id)
         .await
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
+    {
+        Ok(None) => Ok(InvitationPolicy::default()),
+        Ok(Some(raw)) => serde_json::from_str(&raw).map_err(|e| {
+            tracing::error!(tenant_id, error = %e, "stored invitation policy is corrupt");
+            ApiError::Internal(anyhow::anyhow!(
+                "stored invitation policy for tenant {tenant_id} is corrupt: {e}"
+            ))
+        }),
+        Err(e) => Err(ApiError::Internal(anyhow::anyhow!(
+            "load invitation policy for tenant {tenant_id}: {e}"
+        ))),
+    }
 }
 
 // ─── Token helpers ───────────────────────────────────────────────────────────
@@ -294,7 +310,7 @@ async fn create_tenant_invitation(
         workspace_roles = vec![WorkspaceRole::Developer; workspace_ids.len()];
     }
 
-    let policy = load_policy(state, &auth.tenant_id).await;
+    let policy = load_policy(state, &auth.tenant_id).await?;
     let days = req.expires_in_days.unwrap_or(policy.tenant_invite_expiry_days);
     if days == 0 {
         return Err(ApiError::InvalidInput(
@@ -511,7 +527,7 @@ pub async fn get_invitation_policy(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<InvitationPolicy>, ApiError> {
     require_tenant_admin(&auth)?;
-    let policy = load_policy(&state, &auth.tenant_id).await;
+    let policy = load_policy(&state, &auth.tenant_id).await?;
     Ok(Json(policy))
 }
 
@@ -535,8 +551,23 @@ pub async fn update_invitation_policy(
 ) -> Result<Json<InvitationPolicy>, ApiError> {
     require_tenant_admin(&auth)?;
 
-    // Load-merge-persist: omitted fields keep their current value.
-    let mut policy = load_policy(&state, &auth.tenant_id).await;
+    // Load-merge-persist: omitted fields keep their current value. A
+    // corrupt stored row is replaced rather than propagated: this PUT
+    // persists a fresh valid row, which is the operator's remediation
+    // path for the corruption the GET (and every enforcement path)
+    // surfaces as an error — the unreadable fields fall back to the
+    // spec defaults for the merge basis only.
+    let mut policy = match load_policy(&state, &auth.tenant_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %auth.tenant_id,
+                error = %e,
+                "stored invitation policy is corrupt; PUT replaces it (defaults + updates)"
+            );
+            InvitationPolicy::default()
+        }
+    };
     if let Some(d) = req.tenant_invite_expiry_days {
         policy.tenant_invite_expiry_days = d;
     }
@@ -580,7 +611,11 @@ pub struct AcceptInviteRequest {
     /// local-part). SSO mode ignores this and links on next login.
     #[serde(default)]
     pub display_name: Option<String>,
-    /// Optional username; defaults to the email local-part.
+    /// Optional username; defaults to a handle derived from the email
+    /// local-part (sanitized, with a deterministic unique suffix on
+    /// collision). An explicit username must satisfy the URL-safe handle
+    /// contract (1-64 chars `[a-z0-9_-]`, no leading/trailing or
+    /// consecutive separators) and be free — 400 / 409 otherwise.
     #[serde(default)]
     pub username: Option<String>,
 }
@@ -625,6 +660,16 @@ pub async fn accept_tenant_invitation(
     body: Option<Json<AcceptInviteRequest>>,
 ) -> Result<(StatusCode, Json<AcceptInviteResponse>), ApiError> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
+
+    // An explicit username must satisfy the URL-safe handle contract
+    // (user-management.md §Username vs Display Name — the same
+    // validate_username gate as the auth.rs SSO and SCIM provisioning
+    // paths) BEFORE the single-use claim: invalid input must not consume
+    // (claim and roll back) the invitation.
+    if let Some(username) = req.username.as_deref() {
+        User::validate_username(username)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid username: {e}")))?;
+    }
 
     let token_hash = hash_token(&token);
     let invitation = state
@@ -690,10 +735,10 @@ pub async fn accept_tenant_invitation(
     }
 }
 
-/// Side effects of a successfully claimed tenant invitation: find or
-/// create the user, activate pre-assigned workspace memberships.
+/// Side effects of a successfully claimed tenant invitation: find, link,
+/// or create the user, activate pre-assigned workspace memberships.
 async fn accept_tenant_invitation_claimed(
-    state: &AppState,
+    state: &Arc<AppState>,
     invitation: &TenantInvitation,
     req: &AcceptInviteRequest,
     now: u64,
@@ -704,33 +749,101 @@ async fn accept_tenant_invitation_claimed(
     // compensates by rolling the invitation back to Pending on any error,
     // and a retry dedups — the user is found via find_by_external_id instead
     // of re-created, and membership creation skips existing rows.
-    // Find or create the user in this tenant.
+    // Find, link, or create the user in this tenant:
+    //
+    // 1. Local-mode retry dedupe: a prior accept (whose membership
+    //    activation later failed) already created this account — reuse it.
+    // 2. SSO-provisioned account with the invitation email in this tenant
+    //    (external_id = Keycloak subject, the normal state in SSO-mode
+    //    tenants): LINK it — the pre-assigned memberships and invited
+    //    GlobalRole attach to the real account instead of creating a
+    //    parallel local-mode user that would shadow it (spec
+    //    §Tenant-Level User Onboarding flow step 3: "SSO mode: redirected
+    //    to Keycloak login, then account linked").
+    // 3. Otherwise create a local-mode account — on first SSO login, the
+    //    verified-email link in auth.rs `find_or_create_user_tenant`
+    //    claims this account (re-points its external_id at the Keycloak
+    //    subject) when the emails match within the same tenant.
     let email = invitation.email.clone();
     let tenant_ns = format!("tenant:{}:email:{}", invitation.tenant_id, email);
     let (user, mode) = match state.users.find_by_external_id(&tenant_ns).await? {
         Some(existing) => (existing, "linked"),
-        None => {
-            let local_part = email.split('@').next().unwrap_or("user");
-            let username = req
-                .username
-                .clone()
-                .unwrap_or_else(|| local_part.to_string());
-            let display_name = req
-                .display_name
-                .clone()
-                .unwrap_or_else(|| username.clone());
-            let mut user = User::new(new_id(), tenant_ns, username, now);
-            user.display_name = display_name;
-            user.email = Some(email.clone());
-            user.tenant_id = Some(invitation.tenant_id.clone());
-            user.global_role = invitation.role.clone();
-            user.roles = match invitation.role {
-                GlobalRole::TenantAdmin => vec![UserRole::Admin],
-                GlobalRole::Member => vec![UserRole::Developer],
-            };
-            state.users.create(&user).await?;
-            (user, "created")
-        }
+        None => match find_tenant_user_by_email(state, &invitation.tenant_id, &email).await? {
+            Some(mut sso_user) => {
+                // The inviting TenantAdmin chose the role at invite time;
+                // acceptance applies it to the linked account exactly as
+                // the local-mode path does for a fresh account.
+                sso_user.global_role = invitation.role.clone();
+                sso_user.roles = match invitation.role {
+                    GlobalRole::TenantAdmin => vec![UserRole::Admin],
+                    GlobalRole::Member => vec![UserRole::Developer],
+                };
+                state.users.update(&sso_user).await?;
+                tracing::info!(
+                    user_id = %sso_user.id,
+                    tenant_id = %invitation.tenant_id,
+                    "linked tenant invitation to existing SSO-provisioned account"
+                );
+                (sso_user, "linked")
+            }
+            None => {
+                let id = new_id();
+                // Username: an explicit handle must satisfy the URL-safe
+                // handle contract (user-management.md §Username vs Display
+                // Name; validate_username — same gate as the auth.rs SSO
+                // and SCIM creation paths) and be free (409 the invitee
+                // can retry without). The derived default is sanitized
+                // and resolved to a globally unique handle — usernames
+                // are unique ACROSS tenants (idx_users_username), and the
+                // spec's cross-tenant model explicitly has the same
+                // person in two tenants — with the same deterministic
+                // suffix scheme as the SSO provisioning path
+                // (base, base-2, ...), so "bob@acme.com" after
+                // "bob@google.com" yields bob-2 instead of a 500 that
+                // would roll the invitation back to Pending forever.
+                let username = match req.username.as_deref() {
+                    // Format was validated before the claim; a taken
+                    // explicit handle is a 409 the invitee can retry
+                    // without (the handle derives from the email
+                    // otherwise).
+                    Some(explicit) => {
+                        if state.users.find_by_username(explicit).await?.is_some() {
+                            return Err(ApiError::Conflict(format!(
+                                "username {explicit} is already taken"
+                            )));
+                        }
+                        explicit.to_string()
+                    }
+                    None => {
+                        let local_part = email.split('@').next().unwrap_or("user");
+                        let base = User::sanitize_username(local_part)
+                            .unwrap_or_else(|| format!("u-{}", id.as_str()));
+                        crate::auth::resolve_unique_username(state, &base)
+                            .await
+                            .map_err(|e| {
+                                ApiError::Internal(anyhow::anyhow!(
+                                    "derive unique username: {e}"
+                                ))
+                            })?
+                    }
+                };
+                let display_name = req
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| username.clone());
+                let mut user = User::new(id, tenant_ns, username, now);
+                user.display_name = display_name;
+                user.email = Some(email.clone());
+                user.tenant_id = Some(invitation.tenant_id.clone());
+                user.global_role = invitation.role.clone();
+                user.roles = match invitation.role {
+                    GlobalRole::TenantAdmin => vec![UserRole::Admin],
+                    GlobalRole::Member => vec![UserRole::Developer],
+                };
+                state.users.create(&user).await?;
+                (user, "created")
+            }
+        },
     };
 
     // Activate pre-assigned workspace memberships (idempotent).
@@ -761,19 +874,33 @@ async fn accept_tenant_invitation_claimed(
             .workspace_memberships
             .find_by_user_and_workspace(&user.id, ws_id)
             .await?;
-        if existing.is_some() {
-            continue;
+        match existing {
+            // Already active — nothing to do (idempotent re-accept).
+            Some(m) if m.accepted => continue,
+            // A pending membership (e.g. seeded by an earlier partial
+            // accept): acceptance of the invitation IS the acceptance of
+            // the membership — activate it.
+            Some(m) => {
+                state.workspace_memberships.accept(&m.id, now).await?;
+                activated.push(ws_id.to_string());
+            }
+            None => {
+                let mut membership = WorkspaceMembership::new(
+                    new_id(),
+                    user.id.clone(),
+                    ws_id.clone(),
+                    role,
+                    invitation.invited_by.clone(),
+                    now,
+                );
+                // Activate immediately: the invitee just accepted the
+                // invitation that pre-assigned this membership (same
+                // semantics as the workspace-invitation accept path).
+                membership.accept(now);
+                state.workspace_memberships.create(&membership).await?;
+                activated.push(ws_id.to_string());
+            }
         }
-        let membership = WorkspaceMembership::new(
-            new_id(),
-            user.id.clone(),
-            ws_id.clone(),
-            role,
-            invitation.invited_by.clone(),
-            now,
-        );
-        state.workspace_memberships.create(&membership).await?;
-        activated.push(ws_id.to_string());
     }
 
     Ok(AcceptInviteResponse {
@@ -783,6 +910,33 @@ async fn accept_tenant_invitation_claimed(
         tenant_id: invitation.tenant_id.to_string(),
         workspaces: activated,
     })
+}
+
+/// Find the tenant's user account for an email address — the SSO-mode
+/// link target for invitation acceptance. Emails are not unique across
+/// tenants (the spec's cross-tenant model has the same person in two
+/// tenants), so the lookup is scoped by tenant; when several accounts in
+/// the tenant carry the same email, the earliest-created wins
+/// (deterministic) and the ambiguity is logged.
+async fn find_tenant_user_by_email(
+    state: &Arc<AppState>,
+    tenant_id: &Id,
+    email: &str,
+) -> Result<Option<User>, ApiError> {
+    let matches = state.users.find_by_email(email).await?;
+    let scoped: Vec<User> = matches
+        .into_iter()
+        .filter(|u| u.tenant_id.as_ref() == Some(tenant_id))
+        .collect();
+    if scoped.len() > 1 {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            email,
+            count = scoped.len(),
+            "multiple users share the invitation email in this tenant; linking the earliest"
+        );
+    }
+    Ok(scoped.into_iter().next())
 }
 
 /// POST /api/v1/invite/:token/decline
@@ -1022,7 +1176,7 @@ pub async fn invite_to_workspace(
     }
 
     // max_pending_invitations cap per workspace.
-    let policy = load_policy(&state, &auth.tenant_id).await;
+    let policy = load_policy(&state, &auth.tenant_id).await?;
     let ws_pending = state
         .workspace_invitations
         .list_by_workspace(&ws_id)
@@ -1608,7 +1762,13 @@ pub fn spawn_invitation_expiry(state: Arc<AppState>) {
     let state = state.clone();
     let interval = std::env::var("GYRE_INVITE_EXPIRY_INTERVAL_SECS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        // tokio::time::interval PANICS on a zero duration ("duration must
+        // be non-zero"), so an env misconfiguration
+        // (GYRE_INVITE_EXPIRY_INTERVAL_SECS=0) must fall back to the
+        // default instead of crashing server startup. Unparsable values
+        // already fall through the same way.
+        .filter(|v| *v > 0)
         .unwrap_or(EXPIRY_JOB_INTERVAL_SECS);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
@@ -3324,6 +3484,717 @@ mod tests {
         assert!(
             accept.contains("/api/v1/workspaces/ws-inv/invite/accept"),
             "accept_url names the authenticated accept route: {accept}"
+        );
+    }
+
+    // ─── Review round: SSO linking, username contract, containment, caps ──
+
+    /// HTTP helpers: invite via the admin token, accept via magic link.
+    async fn http_invite(app: &Router, email: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": email}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn http_accept(
+        app: &Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let builder = if body.is_null() {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/invite/{token}/accept"))
+        } else {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/invite/{token}/accept"))
+                .header("content-type", "application/json")
+        };
+        let resp = app
+            .clone()
+            .oneshot(
+                builder
+                    .body(Body::from(
+                        if body.is_null() {
+                            String::new()
+                        } else {
+                            body.to_string()
+                        },
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// Review F1: accepting a tenant invitation must LINK the existing
+    /// SSO-provisioned account (external_id = Keycloak subject, the
+    /// normal state in SSO-mode tenants) instead of creating a parallel
+    /// local-mode account that shadows it — the real account gets the
+    /// pre-assigned memberships and the invited GlobalRole.
+    #[tokio::test]
+    async fn accept_links_existing_sso_user_instead_of_parallel_account() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-sso"),
+            Id::new("default"),
+            "SSO WS",
+            "sso-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // The invitee already auto-provisioned via SSO: external_id is the
+        // Keycloak subject (NOT the tenant:email namespace), and the
+        // stored email carries the IdP's raw casing.
+        let mut sso_user = User::new(
+            Id::new("sso-alice-1"),
+            "keycloak-subj-sso-alice",
+            "sso-alice",
+            now_secs(),
+        );
+        sso_user.email = Some("Sso-Alice@Example.com".to_string());
+        sso_user.tenant_id = Some(Id::new("default"));
+        state.users.create(&sso_user).await.unwrap();
+        let users_before = state.users.list().await.unwrap().len();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .with_state(state.clone());
+
+        let (status, json) = {
+            let app = Router::new()
+                .route("/api/v1/tenant/invite", post(invite_to_tenant))
+                .with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/tenant/invite")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "email": "sso-alice@example.com",
+                                "workspace_ids": ["ws-sso"]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+            )
+        };
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Unauthenticated accept: the magic-link token is the auth factor.
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["mode"], "linked", "the existing SSO account is linked");
+        assert_eq!(json["user_id"], "sso-alice-1");
+        assert_eq!(
+            json["username"],
+            "sso-alice",
+            "the linked account keeps its immutable handle"
+        );
+
+        // No parallel local-mode account was created.
+        assert_eq!(
+            state.users.list().await.unwrap().len(),
+            users_before,
+            "accept must not create a second account for the same person"
+        );
+        assert!(
+            state
+                .users
+                .find_by_external_id("tenant:default:email:sso-alice@example.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "no parallel local-mode (tenant:email-namespace) account"
+        );
+
+        // The pre-assigned membership and the invited role attach to the
+        // REAL account.
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new("sso-alice-1"), &Id::new("ws-sso"))
+            .await
+            .unwrap()
+            .expect("membership granted to the SSO account");
+        assert!(membership.accepted, "membership is active");
+        let linked = state
+            .users
+            .find_by_id(&Id::new("sso-alice-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.global_role, GlobalRole::Member);
+        assert_eq!(
+            linked.roles, vec![UserRole::Developer],
+            "invited Member role applied to the linked account"
+        );
+        // The link must not have disturbed the SSO identity binding.
+        assert_eq!(linked.external_id, "keycloak-subj-sso-alice");
+    }
+
+    /// Review F2: usernames are globally unique across tenants; a second
+    /// accept whose derived handle collides (same local-part, different
+    /// domain — or the same person invited in two tenants) must get the
+    /// deterministic suffix (bob-2), not a 500 that rolls the invitation
+    /// back to Pending and makes it permanently un-acceptable.
+    #[tokio::test]
+    async fn username_collision_on_second_accept_gets_suffix_not_500() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .with_state(state.clone());
+
+        let (status, json) = http_invite(&app, "bob@acme.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token1 = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token1, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["username"], "bob");
+        assert_eq!(json["mode"], "created");
+
+        // Same local-part, different domain, same tenant.
+        let (status, json) = http_invite(&app, "bob@google.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token2 = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token2, serde_json::Value::Null).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a colliding derived handle must resolve with a suffix, not a 500"
+        );
+        assert_eq!(json["username"], "bob-2", "deterministic suffix scheme");
+        assert_eq!(json["mode"], "created");
+
+        // Cross-tenant variant: the same email invited in a second tenant
+        // derives the same local-part handle and must also resolve.
+        let t2_inv = TenantInvitation {
+            id: Id::new("inv-t2"),
+            tenant_id: Id::new("tenant-two"),
+            email: "bob@acme.com".to_string(),
+            invited_by: Id::new("someadmin"),
+            role: GlobalRole::Member,
+            workspace_ids: vec![],
+            workspace_roles: vec![],
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("t2-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state.tenant_invitations.create(&t2_inv).await.unwrap();
+        let (status, json) = http_accept(&app, "t2-token", serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["username"], "bob-3", "global uniqueness across tenants");
+    }
+
+    /// Review F3: an explicit username must satisfy the URL-safe handle
+    /// contract (the same validate_username gate as the auth.rs SSO and
+    /// SCIM provisioning paths) — garbage is a 400, a taken handle is a
+    /// 409 — and both leave the invitation Pending so the invitee can
+    /// retry (e.g. without the username field).
+    #[tokio::test]
+    async fn accept_validates_and_reserves_explicit_username() {
+        let state = test_state();
+        // An existing user owns the handle "bob".
+        let mut bob = User::new(
+            Id::new("bob-1"),
+            "tenant:default:email:bob@x.com",
+            "bob",
+            now_secs(),
+        );
+        bob.email = Some("bob@x.com".to_string());
+        bob.tenant_id = Some(Id::new("default"));
+        state.users.create(&bob).await.unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .with_state(state.clone());
+        let (status, json) = http_invite(&app, "carol@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let inv_id = json["id"].as_str().unwrap().to_string();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Not URL-safe → 400, invitation rolled back to Pending.
+        let (status, _) = http_accept(&app, &token, serde_json::json!({"username": "Carol Smith!!"})).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "non-URL-safe usernames must be rejected, not persisted verbatim"
+        );
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new(inv_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Pending, "retryable");
+
+        // URL-safe but taken → 409, still Pending.
+        let (status, _) = http_accept(&app, &token, serde_json::json!({"username": "bob"})).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new(inv_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Pending, "retryable");
+
+        // Retry without a username: the derived handle succeeds.
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["username"], "carol");
+    }
+
+    /// Review F6: the cross-tenant containment guards must actually fire
+    /// under test — every prior fixture lived in tenant "default", so
+    /// deleting any of these guards would not have failed the suite.
+    /// This fixture spans TWO tenants.
+    #[tokio::test]
+    async fn cross_tenant_guards_reject_foreign_callers() {
+        let state = test_state();
+        // Tenant "other": a workspace, a TenantAdmin, and a plain user,
+        // both with real API keys (the extractor resolves their tenant
+        // from the stored user binding).
+        let ws_other = gyre_domain::Workspace::new(
+            Id::new("ws-other"),
+            Id::new("other"),
+            "Other WS",
+            "other-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws_other).await.unwrap();
+        let mut other_admin = User::new(
+            Id::new("other-admin-1"),
+            "tenant:other:email:admin@other.com",
+            "other-admin",
+            now_secs(),
+        );
+        other_admin.email = Some("admin@other.com".to_string());
+        other_admin.tenant_id = Some(Id::new("other"));
+        other_admin.roles = vec![UserRole::Admin];
+        other_admin.global_role = GlobalRole::TenantAdmin;
+        state.users.create(&other_admin).await.unwrap();
+        let other_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&other_key), &other_admin.id, "test")
+            .await
+            .unwrap();
+        let mut other_user = User::new(
+            Id::new("other-user-1"),
+            "tenant:other:email:user@other.com",
+            "other-user",
+            now_secs(),
+        );
+        other_user.email = Some("user@other.com".to_string());
+        other_user.tenant_id = Some(Id::new("other"));
+        state.users.create(&other_user).await.unwrap();
+
+        // A pending invitation in tenant "default" (system token's
+        // tenant) for the other-admin's revoke probe.
+        let (status, json) = {
+            let app = Router::new()
+                .route("/api/v1/tenant/invite", post(invite_to_tenant))
+                .with_state(state.clone());
+            http_invite(&app, "someone@default.com").await
+        };
+        assert_eq!(status, StatusCode::CREATED);
+        let default_inv_id = json["id"].as_str().unwrap().to_string();
+
+        // A pending workspace invitation in ws-other for the list/revoke
+        // probes (seeded directly: the API path is exercised elsewhere).
+        let ws_inv = WorkspaceInvitation {
+            id: Id::new("ws-inv-other"),
+            tenant_id: Id::new("other"),
+            workspace_id: Id::new("ws-other"),
+            user_id: other_user.id.clone(),
+            invited_by: other_admin.id.clone(),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("other-ws-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state.workspace_invitations.create(&ws_inv).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/:id",
+                delete(revoke_tenant_invitation),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invite",
+                post(invite_to_workspace),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invite/accept",
+                post(accept_my_workspace_invitation),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invitations",
+                get(list_workspace_invitations),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invitations/:id",
+                delete(revoke_workspace_invitation),
+            )
+            .with_state(state.clone());
+
+        // default-tenant caller (system token, tenant "default", Admin
+        // role — passes every role gate) vs the "other"-tenant workspace:
+        // the tenant containment guard must be the thing that fires.
+        let probes = [
+            ("POST", "/api/v1/workspaces/ws-other/invite", Some(serde_json::json!({"user_id": "other-user-1", "role": "Developer"}))),
+            ("GET", "/api/v1/workspaces/ws-other/invitations", None),
+            ("DELETE", "/api/v1/workspaces/ws-other/invitations/ws-inv-other", None),
+            ("POST", "/api/v1/workspaces/ws-other/invite/accept", None),
+        ];
+        for (method, uri, body) in probes {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer test-token");
+            let body = match body {
+                Some(b) => {
+                    builder = builder.header("content-type", "application/json");
+                    Body::from(b.to_string())
+                }
+                None => Body::empty(),
+            };
+            let resp = app
+                .clone()
+                .oneshot(builder.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "default-tenant caller must be contained: {method} {uri}"
+            );
+        }
+
+        // Symmetric probe: the "other"-tenant admin cannot revoke a
+        // tenant "default" invitation.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/tenant/invitations/{default_inv_id}"))
+                    .header("authorization", format!("Bearer {other_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "foreign-tenant admin must not revoke tenant default's invitation"
+        );
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new(default_inv_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Pending, "not burned");
+    }
+
+    /// Review F6: max_pending_invitations must actually be enforced —
+    /// previously only the default value (50) was asserted, never the
+    /// cap itself. Also proves revocation frees capacity.
+    #[tokio::test]
+    async fn workspace_invite_cap_is_enforced() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-cap"),
+            Id::new("default"),
+            "Cap WS",
+            "cap-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut owner = User::new(
+            Id::new("cap-owner"),
+            "tenant:default:email:cap-owner@x.com",
+            "cap-owner",
+            now_secs(),
+        );
+        owner.email = Some("cap-owner@x.com".to_string());
+        owner.tenant_id = Some(Id::new("default"));
+        state.users.create(&owner).await.unwrap();
+        let owner_membership = WorkspaceMembership::new(
+            Id::new("m-cap-owner"),
+            owner.id.clone(),
+            ws.id.clone(),
+            WorkspaceRole::Owner,
+            owner.id.clone(),
+            now_secs(),
+        );
+        state
+            .workspace_memberships
+            .create(&owner_membership)
+            .await
+            .unwrap();
+        let owner_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&owner_key), &owner.id, "test")
+            .await
+            .unwrap();
+        let mut invitee_ids = Vec::new();
+        for n in 1..=3 {
+            let mut invitee = User::new(
+                Id::new(format!("cap-user-{n}")),
+                format!("tenant:default:email:cap-user-{n}@x.com"),
+                format!("cap-user-{n}"),
+                now_secs(),
+            );
+            invitee.email = Some(format!("cap-user-{n}@x.com"));
+            invitee.tenant_id = Some(Id::new("default"));
+            state.users.create(&invitee).await.unwrap();
+            invitee_ids.push(invitee.id.to_string());
+        }
+
+        let app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+            .route(
+                "/api/v1/workspaces/:id/invitations/:id",
+                delete(revoke_workspace_invitation),
+            )
+            .with_state(state.clone());
+
+        // Cap the tenant's workspace invitations at 2.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"max_pending_invitations": 2}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let auth = format!("Bearer {owner_key}");
+        let invite = |user_id: String| {
+            let app = app.clone();
+            let auth = auth.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-cap/invite")
+                        .header("authorization", auth)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"user_id": user_id, "role": "Developer"})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let resp = invite(invitee_ids[0].clone()).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = invite(invitee_ids[1].clone()).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = invite(invitee_ids[2].clone()).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the cap must reject the third pending invitation"
+        );
+
+        // Revoking one frees capacity for the blocked invitee.
+        let all = state
+            .workspace_invitations
+            .list_by_workspace(&Id::new("ws-cap"))
+            .await
+            .unwrap();
+        let first = all
+            .iter()
+            .find(|i| i.user_id.as_str() == invitee_ids[0])
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/ws-cap/invitations/{}", first.id))
+                    .header("authorization", auth.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = invite(invitee_ids[2].clone()).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "revocation frees pending capacity"
+        );
+    }
+
+    /// Review F6: workspace-invitation expiry rejection was untested
+    /// (only the tenant side had an expired-accept test). An expired
+    /// pending workspace invitation must be rejected on accept and
+    /// marked Expired.
+    #[tokio::test]
+    async fn expired_workspace_invitation_cannot_be_accepted() {
+        let state = test_state();
+        // Seed an already-expired pending workspace invitation directly
+        // through the repository (the API enforces >= 1 day expiry).
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-exp"),
+            Id::new("default"),
+            "Exp WS",
+            "exp-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut invitee = User::new(
+            Id::new("exp-user"),
+            "tenant:default:email:exp-user@x.com",
+            "exp-user",
+            now_secs(),
+        );
+        invitee.tenant_id = Some(Id::new("default"));
+        state.users.create(&invitee).await.unwrap();
+        let invitation = WorkspaceInvitation {
+            id: Id::new("ws-inv-exp"),
+            tenant_id: Id::new("default"),
+            workspace_id: Id::new("ws-exp"),
+            user_id: invitee.id.clone(),
+            invited_by: Id::new("someadmin"),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("expired-ws-token"),
+            expires_at: now_secs() - 10,
+            created_at: now_secs() - 100,
+            accepted_at: None,
+        };
+        state.workspace_invitations.create(&invitation).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/api/v1/workspaces/invitations/:token/accept",
+                post(accept_workspace_invitation),
+            )
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/invitations/expired-ws-token/accept")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let stored = state
+            .workspace_invitations
+            .find_by_id(&Id::new("ws-inv-exp"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Expired);
+        // No membership was activated by the expired acceptance.
+        assert!(
+            state
+                .workspace_memberships
+                .find_by_user_and_workspace(&invitee.id, &Id::new("ws-exp"))
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 }
