@@ -472,4 +472,15 @@ impl AuditRepository for IndexingAuditRepository {
     async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
         self.inner.delete_older_than(cutoff_secs).await
     }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<gyre_ports::audit::CompressionStats> {
+        // Compression is storage-level maintenance, not an entity write —
+        // delegate to the inner repository (no search indexing needed;
+        // reads decompress transparently).
+        self.inner.compress_details_before(cutoff_secs, limit).await
+    }
 }

@@ -9,7 +9,7 @@ use gyre_domain::{
     ReviewComment, ReviewDecision,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
 use crate::AppState;
