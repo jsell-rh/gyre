@@ -182,6 +182,169 @@ fn materialize_manifest_gate(repo_id: &Id, mg: &ManifestGateSpec) -> gyre_domain
 /// submit its verdict (plus raise its workload attestation).
 const GATE_AGENT_TOKEN_TTL_SECS: u64 = AGENT_GATE_TIMEOUT_SECS + 600;
 
+/// Launch the forge-spawned gate agent's runtime process (spec-registry.md
+/// §16: "Forge spawns security gate agent and accountability gate agent for
+/// this MR").
+///
+/// Delegates to the platform's single agent-process execution path
+/// (`api::spawn::launch_agent_workload` — the same machinery
+/// `spawn_agent_core` uses): the resolved compute target (workspace
+/// assignment → tenant default → local) launches the agent runtime command
+/// with the gate agent's scoped token in `GYRE_AUTH_TOKEN` — the credential
+/// delivery channel every spawned agent's runtime uses — plus the review
+/// context (MR, gate, persona, attestation constraints). The launch also
+/// writes the gate agent's workload attestation record (the
+/// `workload_attestations` namespace `check_reviewer_attestation` derives
+/// levels from): without it the agent's own reviews would sit at attestation
+/// level 0 and could never satisfy even the manifest-schema default
+/// `min_attestation_level` of 1.
+///
+/// Best-effort: when no runtime command is available (or the launch
+/// fails), the gate still runs — it polls for a qualifying review and fails
+/// closed at its timeout; it never auto-passes.
+async fn launch_gate_agent_runtime(
+    state: &Arc<AppState>,
+    agent: &gyre_domain::Agent,
+    mr: &gyre_domain::MergeRequest,
+    mg: &ManifestGateSpec,
+    gate: &gyre_domain::QualityGate,
+    token: &str,
+) {
+    use gyre_domain::{ComputeTargetEntity, ComputeTargetType};
+
+    // Resolve the compute target with the same priority spawn_agent_core
+    // uses: workspace assignment → tenant default → local.
+    let workspace = state
+        .workspaces
+        .find_by_id(&mr.workspace_id)
+        .await
+        .ok()
+        .flatten();
+    let resolved_ct_entity: Option<ComputeTargetEntity> = if let Some(ws) = &workspace {
+        if let Some(ct_id) = ws.compute_target_id.clone() {
+            state.compute_targets.get_by_id(&ct_id).await.ok().flatten()
+        } else {
+            state
+                .compute_targets
+                .get_default_for_tenant(&ws.tenant_id)
+                .await
+                .ok()
+                .flatten()
+        }
+    } else {
+        None
+    };
+    let compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
+    let resolved_target_config =
+        resolved_ct_entity
+            .as_ref()
+            .map(|e| crate::api::compute::ComputeTargetConfig {
+                id: e.id.to_string(),
+                name: e.name.clone(),
+                target_type: match e.target_type {
+                    ComputeTargetType::Container => "container",
+                    ComputeTargetType::Ssh => "ssh",
+                    ComputeTargetType::Kubernetes => "kubernetes",
+                }
+                .to_string(),
+                config: e.config.clone(),
+            });
+
+    // Command is server-controlled only — never from user input (C-1 RCE
+    // fix): compute target's configured command, GYRE_AGENT_COMMAND env
+    // var, or the platform entrypoint.
+    let command = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("command"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+        .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
+    let args: Vec<String> = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("args"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The gate agent reviews the MR, so the repo checkout is its working
+    // directory (canonicalized to an absolute path — containers require
+    // one; falls back to the platform's absolute /workspace default when
+    // the repo cannot be resolved).
+    let work_dir = state
+        .repos
+        .find_by_id(&mr.repository_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| {
+            std::fs::canonicalize(&r.path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(r.path)
+        })
+        .unwrap_or_else(|| "/workspace".to_string());
+
+    // Review context for the launched runtime: everything it needs to
+    // authenticate (GYRE_AUTH_TOKEN), identify its assignment (MR, gate,
+    // persona), and know the constraints its review must satisfy.
+    let mut env = std::collections::HashMap::new();
+    env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
+    env.insert("GYRE_AUTH_TOKEN".to_string(), token.to_string());
+    env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
+    env.insert("GYRE_PERSONA".to_string(), mg.persona.clone());
+    env.insert("GYRE_MR_ID".to_string(), mr.id.to_string());
+    env.insert("GYRE_REPO_ID".to_string(), mr.repository_id.to_string());
+    env.insert("GYRE_GATE_ID".to_string(), gate.id.to_string());
+    env.insert(
+        "GYRE_DIFF_URL".to_string(),
+        format!("{}/api/v1/merge-requests/{}/diff", state.base_url, mr.id),
+    );
+    if let Some(spec_ref) = &mr.spec_ref {
+        env.insert("GYRE_SPEC_REF".to_string(), spec_ref.clone());
+    }
+    env.insert(
+        "GYRE_MIN_ATTESTATION_LEVEL".to_string(),
+        mg.min_attestation_level.to_string(),
+    );
+    if let Some(stack_hash) = &mg.stack_hash {
+        env.insert("GYRE_STACK_HASH".to_string(), stack_hash.clone());
+    }
+
+    match crate::api::spawn::launch_agent_workload(
+        state,
+        agent,
+        resolved_target_config,
+        command,
+        args,
+        env,
+        work_dir,
+        compute_target_label.clone(),
+    )
+    .await
+    {
+        Ok(_) => info!(
+            agent_id = %agent.id,
+            mr_id = %mr.id,
+            persona = %mg.persona,
+            compute_target = %compute_target_label,
+            "manifest gate: launched gate agent runtime"
+        ),
+        Err(e) => warn!(
+            mr_id = %mr.id,
+            persona = %mg.persona,
+            error = e.to_string(),
+            "manifest gate: gate agent runtime launch rejected; gate will poll reviews"
+        ),
+    }
+}
+
 /// Spawn the ephemeral gate agent for a manifest-declared gate
 /// (spec-registry.md §16: "Forge spawns security gate agent and
 /// accountability gate agent for this MR"; agent-gates.md §Gate Agent
@@ -191,10 +354,13 @@ const GATE_AGENT_TOKEN_TTL_SECS: u64 = AGENT_GATE_TIMEOUT_SECS + 600;
 /// `Agent` record, records the gate persona in the `agent_personas` KV
 /// namespace (the persona source `build_agent_context` and
 /// `evaluate_persona_reviews` read — spawn time is its production writer),
-/// mints a scoped auth token the gate agent runtime authenticates with, and
-/// dispatches a `ReviewRequest` message telling it to review the MR. The
-/// agent submits its verdict through the standard review API; the gate
-/// observes the review and tears the agent down once it resolves
+/// mints a scoped auth token the gate agent runtime authenticates with,
+/// launches the agent's runtime process through the platform's compute-target
+/// machinery (see `launch_gate_agent_runtime` — the token is delivered to the
+/// launched runtime via `GYRE_AUTH_TOKEN`, and its workload attestation is
+/// recorded), and dispatches a `ReviewRequest` message telling it to review
+/// the MR. The agent submits its verdict through the standard review API;
+/// the gate observes the review and tears the agent down once it resolves
 /// (`teardown_gate_agent`).
 ///
 /// Idempotent per (MR, persona) while the gate runs: an already-Active
@@ -202,9 +368,10 @@ const GATE_AGENT_TOKEN_TTL_SECS: u64 = AGENT_GATE_TIMEOUT_SECS + 600;
 /// not double-spawn. A torn-down (terminal) agent is replaced under a
 /// fresh suffixed name.
 async fn spawn_manifest_gate_agent(
-    state: &AppState,
+    state: &Arc<AppState>,
     mr: &gyre_domain::MergeRequest,
     mg: &ManifestGateSpec,
+    gate: &gyre_domain::QualityGate,
 ) -> Option<Id> {
     let base_name = format!("gate-{}-{}", mg.persona, mr.id.as_str());
     let mut name = base_name.clone();
@@ -291,7 +458,7 @@ async fn spawn_manifest_gate_agent(
         });
     if let Err(e) = state
         .kv_store
-        .kv_set("agent_tokens", agent.id.as_str(), token)
+        .kv_set("agent_tokens", agent.id.as_str(), token.clone())
         .await
     {
         warn!(
@@ -329,18 +496,44 @@ async fn spawn_manifest_gate_agent(
         "manifest gate: spawned gate agent"
     );
 
+    // Launch the agent's runtime process (compute-target machinery, token in
+    // GYRE_AUTH_TOKEN, workload attestation recorded). Must happen after the
+    // token registration above so the launched runtime can authenticate
+    // immediately.
+    launch_gate_agent_runtime(state, &agent, mr, mg, gate, &token).await;
+
     Some(agent.id)
 }
 
 /// Tear down a forge-spawned gate agent after its gate resolved
 /// (agent-gates.md §Gate Agent Lifecycle: "Agent is torn down after
-/// submitting its verdict"). Revokes its token (audited via
-/// AgentTokenRevoked) and transitions it to Stopped — the record is kept
+/// submitting its verdict"). Kills its runtime process if one is still
+/// registered (the admin kill path's pattern), revokes its token (audited
+/// via AgentTokenRevoked) and transitions it to Stopped — the record is kept
 /// so its reviews stay attributed.
 async fn teardown_gate_agent(state: &Arc<AppState>, agent_id: &Id) {
     let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await else {
         return;
     };
+    // Kill the runtime process if it is still running (best-effort — the
+    // handle may already be gone if the process exited on its own).
+    if let Some(handle) = state
+        .process_registry
+        .lock()
+        .await
+        .remove(agent_id.as_str())
+    {
+        if let Err(e) =
+            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+                .await
+        {
+            warn!(
+                agent_id = %agent_id,
+                error = format!("{e:#}"),
+                "manifest gate: gate agent process kill failed (may have already exited)"
+            );
+        }
+    }
     crate::agent_audit::revoke_agent_token(state, &agent, "manifest gate resolved").await;
     if let Err(e) = agent.transition_status(AgentStatus::Stopped) {
         warn!(
@@ -385,8 +578,12 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
     // constraints the manifest declares for this spec, which the repo-level
     // gate cannot enforce — skipping the manifest gate instead would let a
     // no-command repo-level AgentReview gate auto-pass and merge without
-    // them. The repo-level duplicate for that persona is skipped, so the
-    // persona still runs exactly once.
+    // them. The manifest gate is not a downgrade of a working repo-level
+    // command gate: it spawns a real gate agent runtime (launched through
+    // the same compute-target machinery `spawn_agent_core` uses, with a
+    // workload attestation — see `launch_gate_agent_runtime`), so the
+    // persona actually reviews either way. The repo-level duplicate for
+    // that persona is skipped, so the persona still runs exactly once.
     let manifest_personas: std::collections::HashSet<&str> = manifest_gates
         .iter()
         .map(|mg| mg.persona.as_str())
@@ -426,11 +623,11 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
         result_ids.push((result_id, gate.clone(), None));
     }
     for mg in &manifest_gates {
+        let gate = materialize_manifest_gate(&repo_id, mg);
         let gate_agent_id = match mr.as_ref() {
-            Some(mr) => spawn_manifest_gate_agent(&state, mr, mg).await,
+            Some(mr) => spawn_manifest_gate_agent(&state, mr, mg, &gate).await,
             None => None,
         };
-        let gate = materialize_manifest_gate(&repo_id, mg);
         let result_id = Id::new(uuid::Uuid::new_v4().to_string());
         let result = GateResult {
             id: result_id.clone(),
@@ -3141,6 +3338,184 @@ specs:
                 "the manifest attestation constraints must reach the gate agent"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn trigger_gates_launches_gate_agent_runtime_with_token() {
+        // Review findings (attempt 94b30b1d): the forge-spawned gate agent
+        // must actually EXECUTE — a real process launched through the
+        // platform's compute-target machinery, receiving its scoped token
+        // via GYRE_AUTH_TOKEN (the credential channel every spawned agent
+        // uses), with a workload attestation recorded so its own reviews can
+        // satisfy the gate's min_attestation_level. The runtime command here
+        // is a stand-in that dumps its environment; what is asserted is the
+        // launch contract, not the runtime's review behavior.
+        let state = test_state();
+        let _dir = setup_manifest_mr(
+            &state,
+            "repo-mg-7",
+            "mr-mg-7",
+            Some("specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567"),
+        )
+        .await;
+
+        // Stand in for the platform agent runtime (/gyre/entrypoint.sh):
+        // dump the launched environment, keyed per agent id so concurrent
+        // gate agents cannot clobber each other's dumps.
+        let dump_dir = tempfile::tempdir().unwrap();
+        let script = dump_dir.path().join("runtime.sh");
+        let dump_root = dump_dir.path().to_str().unwrap().to_string();
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nenv > '{dump_root}/env-'\"$GYRE_AGENT_ID\"\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::env::set_var("GYRE_AGENT_COMMAND", &script);
+
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-7"), Id::new("repo-mg-7")).await;
+        std::env::remove_var("GYRE_AGENT_COMMAND");
+
+        let agent = state
+            .agents
+            .find_by_name("gate-security-mr-mg-7")
+            .await
+            .unwrap()
+            .expect("gate agent for security must be spawned");
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", agent.id.as_str())
+            .await
+            .unwrap()
+            .expect("gate agent token must be registered");
+
+        // The launched runtime received the token and its review context.
+        // The dump appears asynchronously — the launch returns as soon as
+        // the process is forked — so poll briefly for it.
+        let dump_path = dump_dir.path().join(format!("env-{}", agent.id.as_str()));
+        let mut dump = None;
+        for _ in 0..100 {
+            if let Ok(d) = std::fs::read_to_string(&dump_path) {
+                // The shell truncates the file before writing it — wait for
+                // actual content, not mere existence.
+                if d.contains("GYRE_AUTH_TOKEN=") {
+                    dump = Some(d);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let dump = dump.unwrap_or_else(|| {
+            panic!(
+                "launched runtime must dump its env to {}",
+                dump_path.display()
+            )
+        });
+        assert!(
+            dump.contains(&format!("GYRE_AUTH_TOKEN={token}")),
+            "the launched runtime must receive the gate agent's scoped token: {dump}"
+        );
+        assert!(dump.contains("GYRE_PERSONA=security"), "dump: {dump}");
+        assert!(dump.contains("GYRE_MR_ID=mr-mg-7"), "dump: {dump}");
+        assert!(
+            dump.contains(
+                "GYRE_GATE_ID=manifest-gate:repo-mg-7:system/identity-security.md:security"
+            ),
+            "dump: {dump}"
+        );
+        assert!(
+            dump.contains("GYRE_MIN_ATTESTATION_LEVEL=1"),
+            "dump: {dump}"
+        );
+
+        // The launch records the gate agent's workload attestation —
+        // without it the agent's own reviews would derive at level 0 and
+        // could never satisfy even the default min_attestation_level of 1.
+        let att_json = state
+            .kv_store
+            .kv_get("workload_attestations", agent.id.as_str())
+            .await
+            .unwrap()
+            .expect("the gate agent launch must record a workload attestation");
+        let att: crate::workload_attestation::WorkloadAttestation =
+            serde_json::from_str(&att_json).unwrap();
+        assert!(
+            att.pid.is_some(),
+            "the launched process's PID must be attested: {att:?}"
+        );
+        assert!(
+            crate::constraint_check::derive_attestation_level(Some(&att)) >= 1,
+            "the gate agent's own reviews must be able to satisfy the default \
+             min_attestation_level of 1: {att:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_agent_runtime_process_killed_on_teardown() {
+        // agent-gates.md §Gate Agent Lifecycle: teardown terminates the gate
+        // agent's runtime process (via its process-registry handle), not
+        // just the record — an ephemeral agent must not leave its runtime
+        // running after its gate resolved.
+        let state = test_state();
+        let agent_id = Id::new(Uuid::new_v4().to_string());
+        let mut agent = gyre_domain::Agent::new(agent_id.clone(), "gate-security-kill", now_secs());
+        agent.workspace_id = Id::new("ws-gate-agent");
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent.id.as_str(), "tok-secret".to_string())
+            .await
+            .unwrap();
+
+        // A real long-running process standing in for the launched runtime,
+        // registered under the agent's id exactly as the launch path does.
+        let handle = gyre_ports::ComputeTarget::spawn_process(
+            &gyre_adapters::compute::LocalTarget,
+            &gyre_ports::SpawnConfig {
+                name: "gate-runtime".to_string(),
+                command: "sleep".to_string(),
+                args: vec!["60".to_string()],
+                env: std::collections::HashMap::new(),
+                work_dir: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert(agent.id.to_string(), handle.clone());
+
+        teardown_gate_agent(&state, &agent.id).await;
+
+        let agent = state
+            .agents
+            .find_by_id(&agent_id)
+            .await
+            .unwrap()
+            .expect("gate agent record is kept for attribution");
+        assert_eq!(agent.status, AgentStatus::Stopped);
+        assert!(!state
+            .process_registry
+            .lock()
+            .await
+            .contains_key(agent_id.as_str()));
+        // Give the OS a moment to reap the SIGTERMed process.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let alive =
+            gyre_ports::ComputeTarget::is_alive(&gyre_adapters::compute::LocalTarget, &handle)
+                .await
+                .unwrap();
+        assert!(
+            !alive,
+            "the gate agent's runtime process must be killed on teardown"
+        );
     }
 
     #[tokio::test]
