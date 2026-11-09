@@ -1406,6 +1406,23 @@ async fn enforce_stack_policy(
         .map(|p| p.enforcement == crate::api::stack_attest::StackEnforcement::Block)
         .unwrap_or(false);
 
+    // The pushing agent's attested stack (Level 2+). Fetched once here: the
+    // stack fingerprint identifies the attestation in ConstraintViolation
+    // payloads (authorization-provenance.md §7.5 `attestation_id`), and the
+    // same stack is the reference for the gyre-stack.lock drift check below.
+    // A Level-1 pusher has no attestation, so its attestation_id is empty.
+    let attested_stack = state
+        .kv_store
+        .kv_get("agent_stacks", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s).ok());
+    let attestation_id = attested_stack
+        .as_ref()
+        .map(|s| s.fingerprint())
+        .unwrap_or_default();
+
     if let Some(policy) = &policy {
         // Minimum attestation level (supply-chain.md §Policy per Level).
         if level < policy.min_attestation_level {
@@ -1423,8 +1440,22 @@ async fn enforce_stack_policy(
                     gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                     gyre_common::message::MessageKind::ConstraintViolation,
                     Some(serde_json::json!({
-                        "repo_id": repo_id,
+                        "attestation_id": attestation_id,
+                        "constraint_name": "stack_policy_min_attestation_level",
+                        "expression": format!(
+                            "agent.attestation_level >= {}",
+                            policy.min_attestation_level
+                        ),
+                        "context_snapshot": {
+                            "attestation_level": level,
+                            "min_attestation_level": policy.min_attestation_level,
+                            "repo_policy_fingerprint": policy.fingerprint,
+                            "attested_stack_fingerprint": attestation_id,
+                        },
+                        "action": "push",
                         "agent_id": agent_id,
+                        "repo_id": repo_id,
+                        "timestamp": crate::api::now_secs(),
                         "attestation_level": level,
                         "min_attestation_level": policy.min_attestation_level,
                         "reason": reason,
@@ -1436,20 +1467,11 @@ async fn enforce_stack_policy(
 
     // gyre-stack.lock drift detection (supply-chain.md §gyre-stack.lock,
     // §The Laptop Problem): compare the lock in the pushed tree against
-    // the pushing agent's attested stack. Not gated on a repo policy —
-    // the committed lockfile is itself the spec's drift-verification
-    // mechanism, so a repo with a lockfile but no policy still gets
-    // warn-mode flagging (mode_block is false without a policy).
-    // Absent lockfile → opt-in feature not used, no drift check.
-    let attested_stack = state
-        .kv_store
-        .kv_get("agent_stacks", agent_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|s| {
-            serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s).ok()
-        });
+    // the pushing agent's attested stack (fetched above). Not gated on a
+    // repo policy — the committed lockfile is itself the spec's
+    // drift-verification mechanism, so a repo with a lockfile but no
+    // policy still gets warn-mode flagging (mode_block is false without a
+    // policy). Absent lockfile → opt-in feature not used, no drift check.
     if let Some(attested) = &attested_stack {
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
         for update in ref_updates {
@@ -1461,15 +1483,19 @@ async fn enforce_stack_policy(
             )
             .await
             {
-                let drift_result = match crate::api::stack_attest::StackLockfile::parse(
-                    &content,
-                ) {
-                    Err(e) => Err(e),
-                    Ok(lock) => lock
-                        .verify_integrity()
-                        .and_then(|()| lock.check_drift(attested)),
+                let drift_result = match crate::api::stack_attest::StackLockfile::parse(&content) {
+                    Err(e) => Err((None, false, e)),
+                    Ok(lock) => {
+                        let lockfile_fingerprint = lock.fingerprint.clone();
+                        match lock.verify_integrity() {
+                            Err(e) => Err((Some(lockfile_fingerprint), false, e)),
+                            Ok(()) => lock
+                                .check_drift(attested)
+                                .map_err(|e| (Some(lockfile_fingerprint), true, e)),
+                        }
+                    }
                 };
-                if let Err(reason) = drift_result {
+                if let Err((lockfile_fingerprint, integrity_verified, reason)) = drift_result {
                     if mode_block {
                         return Err(format!("push rejected: {reason}"));
                     }
@@ -1483,8 +1509,19 @@ async fn enforce_stack_policy(
                             ),
                             gyre_common::message::MessageKind::ConstraintViolation,
                             Some(serde_json::json!({
-                                "repo_id": repo_id,
+                                "attestation_id": attested.fingerprint(),
+                                "constraint_name": "stack_lockfile_drift",
+                                "expression":
+                                    "gyre-stack.lock.fingerprint == agent.attested_stack.fingerprint",
+                                "context_snapshot": {
+                                    "attested_stack_fingerprint": attested.fingerprint(),
+                                    "lockfile_fingerprint": lockfile_fingerprint,
+                                    "integrity_verified": integrity_verified,
+                                },
+                                "action": "push",
                                 "agent_id": agent_id,
+                                "repo_id": repo_id,
+                                "timestamp": crate::api::now_secs(),
                                 "branch": update
                                     .refname
                                     .trim_start_matches("refs/heads/"),
@@ -4804,8 +4841,8 @@ mod tests {
         assert_eq!(gate[0].gate_name, "Code Review");
     }
 
-    use gyre_domain::Agent;
     use gyre_domain::stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
+    use gyre_domain::Agent;
 
     fn test_stack(model: &str) -> AgentStack {
         AgentStack {
@@ -4897,7 +4934,11 @@ mod tests {
     /// Seed an agent with a registered stack AND a per-agent push token, so
     /// the test pushes AS the agent (the global test token authenticates as
     /// "system", which would resolve the wrong attestation context).
-    async fn seed_agent_and_stack(state: &Arc<crate::AppState>, agent_id: &str, stack: &AgentStack) {
+    async fn seed_agent_and_stack(
+        state: &Arc<crate::AppState>,
+        agent_id: &str,
+        stack: &AgentStack,
+    ) {
         let agent = Agent::new(Id::new(agent_id), "push-agent", 0);
         state.agents.create(&agent).await.unwrap();
         state
@@ -4911,11 +4952,7 @@ mod tests {
             .unwrap();
         state
             .kv_store
-            .kv_set(
-                "agent_tokens",
-                agent_id,
-                format!("tok-{agent_id}"),
-            )
+            .kv_set("agent_tokens", agent_id, format!("tok-{agent_id}"))
             .await
             .unwrap();
     }
@@ -4926,17 +4963,65 @@ mod tests {
         state.agents.create(&agent).await.unwrap();
         state
             .kv_store
-            .kv_set(
-                "agent_tokens",
-                agent_id,
-                format!("tok-{agent_id}"),
-            )
+            .kv_set("agent_tokens", agent_id, format!("tok-{agent_id}"))
             .await
             .unwrap();
     }
 
     fn agent_auth(agent_id: &str) -> String {
         format!("Bearer tok-{agent_id}")
+    }
+
+    /// authorization-provenance.md §7.5 defines the payload schema for
+    /// ConstraintViolation events (attestation_id, constraint_name,
+    /// expression, context_snapshot, action, agent_id, repo_id, timestamp).
+    /// Assert a payload carries every spec-required field with the right
+    /// shape — and the expected constraint_name — so stack-policy and
+    /// lockfile-drift events stay consumable by downstream readers of the
+    /// spec-defined schema (specs/reviews/task-007.md F1 defect class).
+    fn assert_spec_constraint_violation_payload(
+        payload: &serde_json::Value,
+        expected_constraint_name: &str,
+    ) {
+        assert_eq!(
+            payload.get("constraint_name").and_then(|v| v.as_str()),
+            Some(expected_constraint_name),
+            "constraint_name must name the violated constraint, got {payload}"
+        );
+        assert!(
+            payload
+                .get("expression")
+                .and_then(|v| v.as_str())
+                .is_some_and(|e| !e.is_empty()),
+            "expression must carry the evaluated rule, got {payload}"
+        );
+        assert!(
+            payload
+                .get("context_snapshot")
+                .is_some_and(|v| v.is_object()),
+            "context_snapshot must be the evaluation context object, got {payload}"
+        );
+        assert_eq!(
+            payload.get("action").and_then(|v| v.as_str()),
+            Some("push"),
+            "action must be \"push\" for push-time violations, got {payload}"
+        );
+        assert!(
+            payload.get("attestation_id").is_some_and(|v| v.is_string()),
+            "attestation_id must be present (empty string when unattested), got {payload}"
+        );
+        assert!(
+            payload.get("agent_id").and_then(|v| v.as_str()).is_some(),
+            "agent_id must be present, got {payload}"
+        );
+        assert!(
+            payload.get("repo_id").and_then(|v| v.as_str()).is_some(),
+            "repo_id must be present, got {payload}"
+        );
+        assert!(
+            payload.get("timestamp").and_then(|v| v.as_u64()).is_some(),
+            "timestamp must be a u64 epoch, got {payload}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5030,14 +5115,18 @@ mod tests {
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", agent_auth("agent-l1-warn"))
                     .header("content-type", "application/x-git-receive-pack")
-                    .body(Body::from(receive_pack_body(&sha, "refs/heads/warn-branch")))
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/warn-branch",
+                    )))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // ConstraintViolation event was emitted to the workspace.
+        // ConstraintViolation event was emitted to the workspace, carrying
+        // the full §7.5 spec payload schema.
         let msgs = state
             .messages
             .list_by_workspace(
@@ -5050,19 +5139,42 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            msgs.iter().any(|m| m
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("reason"))
-                .and_then(|r| r.as_str())
-                .is_some_and(|r| r.contains("below repo minimum"))),
-            "expected a below-minimum constraint_violation event, got {} messages",
-            msgs.len()
+        let violating = msgs
+            .iter()
+            .filter_map(|m| m.payload.as_ref())
+            .find(|p| {
+                p.get("reason")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r.contains("below repo minimum"))
+            })
+            .expect("expected a below-minimum constraint_violation event");
+        assert_spec_constraint_violation_payload(violating, "stack_policy_min_attestation_level");
+        // Level-1 pusher has no attestation: attestation_id is present but empty.
+        assert_eq!(
+            violating.get("attestation_id").and_then(|v| v.as_str()),
+            Some("")
+        );
+        let snapshot = violating
+            .get("context_snapshot")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            snapshot.get("attestation_level").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot
+                .get("min_attestation_level")
+                .and_then(|v| v.as_u64()),
+            Some(2)
         );
 
         // Agent record stores the resolved level 1.
-        let stored = state.agents.find_by_id(&Id::new("agent-l1-warn")).await.unwrap();
+        let stored = state
+            .agents
+            .find_by_id(&Id::new("agent-l1-warn"))
+            .await
+            .unwrap();
         assert_eq!(stored.and_then(|a| a.attestation_level), Some(1));
     }
 
@@ -5197,11 +5309,7 @@ mod tests {
             .unwrap();
 
         // Commit contains gyre-stack.lock pinning the OLD stack.
-        let sha = make_commit(
-            &repo_path,
-            &[("gyre-stack.lock", lock.to_toml().unwrap())],
-        )
-        .await;
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5219,10 +5327,7 @@ mod tests {
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
-        assert!(
-            text.contains("stack drift"),
-            "unexpected body: {text}"
-        );
+        assert!(text.contains("stack drift"), "unexpected body: {text}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5250,11 +5355,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sha = make_commit(
-            &repo_path,
-            &[("gyre-stack.lock", lock.to_toml().unwrap())],
-        )
-        .await;
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5283,13 +5384,14 @@ mod tests {
         // attested stack that differs from the lockfile's pinned stack.
         let pinned = test_stack("claude-sonnet-4-6");
         let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
-        seed_agent_and_stack(&state, "agent-drift-nopolicy", &test_stack("claude-opus-4-6")).await;
-
-        let sha = make_commit(
-            &repo_path,
-            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+        seed_agent_and_stack(
+            &state,
+            "agent-drift-nopolicy",
+            &test_stack("claude-opus-4-6"),
         )
         .await;
+
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5297,7 +5399,10 @@ mod tests {
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", agent_auth("agent-drift-nopolicy"))
                     .header("content-type", "application/x-git-receive-pack")
-                    .body(Body::from(receive_pack_body(&sha, "refs/heads/drift-nopolicy")))
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/drift-nopolicy",
+                    )))
                     .unwrap(),
             )
             .await
@@ -5305,7 +5410,8 @@ mod tests {
         // No policy → no enforcement mode to escalate to → warn + accept.
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Drift was still flagged via a ConstraintViolation event.
+        // Drift was still flagged via a ConstraintViolation event, carrying
+        // the full §7.5 spec payload schema.
         let msgs = state
             .messages
             .list_by_workspace(
@@ -5318,15 +5424,41 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            msgs.iter().any(|m| m
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("reason"))
-                .and_then(|r| r.as_str())
-                .is_some_and(|r| r.contains("stack drift"))),
-            "expected a stack-drift constraint_violation event without a repo policy, got {} messages",
-            msgs.len()
+        let violating = msgs
+            .iter()
+            .filter_map(|m| m.payload.as_ref())
+            .find(|p| {
+                p.get("reason")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r.contains("stack drift"))
+            })
+            .expect("expected a stack-drift constraint_violation event without a repo policy");
+        assert_spec_constraint_violation_payload(violating, "stack_lockfile_drift");
+        // attestation_id is the pushing agent's attested stack fingerprint.
+        assert_eq!(
+            violating.get("attestation_id").and_then(|v| v.as_str()),
+            Some(test_stack("claude-opus-4-6").fingerprint().as_str())
+        );
+        // The context snapshot names both sides of the comparison.
+        let snapshot = violating
+            .get("context_snapshot")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .get("lockfile_fingerprint")
+                .and_then(|v| v.as_str()),
+            Some(lock.fingerprint.as_str())
+        );
+        assert_eq!(
+            snapshot
+                .get("attested_stack_fingerprint")
+                .and_then(|v| v.as_str()),
+            Some(test_stack("claude-opus-4-6").fingerprint().as_str())
+        );
+        assert_eq!(
+            snapshot.get("integrity_verified").and_then(|v| v.as_bool()),
+            Some(true)
         );
     }
 
@@ -5356,11 +5488,7 @@ mod tests {
         // Lock with an edited component but the ORIGINAL fingerprint.
         let mut lock = StackLockfile::from_stack(&stack, 0);
         lock.model = "claude-opus-4-6".to_string();
-        let sha = make_commit(
-            &repo_path,
-            &[("gyre-stack.lock", lock.to_toml().unwrap())],
-        )
-        .await;
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
         let resp = app
             .oneshot(
                 Request::builder()
