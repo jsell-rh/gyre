@@ -257,6 +257,17 @@ impl SecretRepository for SqliteStorage {
         }
     }
 
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<Secret>> {
+        let mut conn = self.pool.get()?;
+        let row = secrets::table
+            .filter(secrets::id.eq(id.as_str()))
+            .filter(secrets::tenant_id.eq(tenant_id))
+            .select(SecretRow::as_select())
+            .first(&mut conn)
+            .optional()?;
+        Ok(row.map(SecretRow::into_secret).transpose()?)
+    }
+
     async fn list_by_scope(
         &self,
         scope: SecretScope,
