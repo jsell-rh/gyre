@@ -693,12 +693,12 @@ pub async fn save_spec(
     let mut mr = MergeRequest::new(
         mr_id.clone(),
         repo_id_typed.clone(),
+        repo.workspace_id.clone(),
         format!("Spec edit: {}", req.spec_path),
         branch_name.clone(),
         repo.default_branch.clone(),
         now,
     );
-    mr.workspace_id = repo.workspace_id.clone();
     mr.author_agent_id = Some(caller_id.clone());
 
     state

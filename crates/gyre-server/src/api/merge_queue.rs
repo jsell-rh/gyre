@@ -144,6 +144,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new("repo-1"),
+            Id::new("default"),
             "Test MR",
             "feat/test",
             "main",
@@ -316,6 +317,7 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new("mr-rev"),
             Id::new("repo-1"),
+            Id::new("default"),
             "Reverted MR",
             "feat/rev",
             "main",

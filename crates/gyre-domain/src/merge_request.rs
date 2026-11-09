@@ -100,6 +100,7 @@ impl MergeRequest {
     pub fn new(
         id: Id,
         repository_id: Id,
+        workspace_id: Id,
         title: impl Into<String>,
         source_branch: impl Into<String>,
         target_branch: impl Into<String>,
@@ -108,6 +109,7 @@ impl MergeRequest {
         Self {
             id,
             repository_id,
+            workspace_id,
             title: title.into(),
             source_branch: source_branch.into(),
             target_branch: target_branch.into(),
@@ -121,7 +123,6 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
-            workspace_id: Id::new("default"),
             merge_commit_sha: None,
             revert_commit_sha: None,
             reverted_at: None,
@@ -177,6 +178,7 @@ mod tests {
         MergeRequest::new(
             Id::new("mr1"),
             Id::new("repo1"),
+            Id::new("default"),
             "Add feature",
             "feat/thing",
             "main",

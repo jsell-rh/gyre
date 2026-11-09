@@ -5125,13 +5125,13 @@ specs:
                 let mut mr = MergeRequest::new(
                     mr_id.clone(),
                     gyre_common::Id::new("repo-gate"),
+                    gyre_common::Id::new("ws1"),
                     "Test MR",
                     "feature/test",
                     "main",
                     1700000000,
                 );
                 mr.spec_ref = Some(spec_ref.to_string());
-                mr.workspace_id = gyre_common::Id::new("ws1");
                 state.merge_requests.create(&mr).await.unwrap();
 
                 // Enqueue the MR.

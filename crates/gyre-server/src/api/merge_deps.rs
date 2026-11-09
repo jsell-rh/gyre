@@ -358,8 +358,24 @@ mod tests {
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    async fn app() -> Router {
+        let state = test_state();
+        seed_repo(&state).await;
+        crate::api::api_router().with_state(state)
+    }
+
+    /// create_mr resolves the MR's workspace scope from its repository (M34
+    /// hierarchy enforcement) and refuses unknown repositories — seed the
+    /// repository these tests open MRs against.
+    async fn seed_repo(state: &crate::AppState) {
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws1"),
+            "repo-1",
+            "/repos/repo-1",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -397,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_and_get_dependencies() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "MR1").await;
         let (app, mr2_id) = create_mr(app, "MR2").await;
 
@@ -440,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn self_dependency_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "Self-dep").await;
         let body = serde_json::json!({ "depends_on": [mr_id] });
         let resp = app
@@ -460,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn cycle_detection() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Cycle A").await;
         let (app, mr2_id) = create_mr(app, "Cycle B").await;
 
@@ -502,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn transitive_cycle_detection() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Trans A").await;
         let (app, mr2_id) = create_mr(app, "Trans B").await;
         let (app, mr3_id) = create_mr(app, "Trans C").await;
@@ -554,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_dependency() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "RM A").await;
         let (app, mr2_id) = create_mr(app, "RM B").await;
 
@@ -606,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_nonexistent_dependency_returns_404() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "NoRM").await;
         let resp = app
             .oneshot(
@@ -626,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_atomic_group() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "Atomic").await;
         let body = serde_json::json!({ "group": "migration-bundle" });
         let resp = app
@@ -649,6 +665,7 @@ mod tests {
     #[tokio::test]
     async fn queue_graph_empty() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-queue/graph")
@@ -664,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_on_nonexistent_mr_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "No dep target").await;
         let body = serde_json::json!({ "depends_on": ["does-not-exist"] });
         let resp = app
@@ -686,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_source_is_explicit_for_non_jwt_caller() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Source MR").await;
         let (app, mr2_id) = create_mr(app, "Dep MR").await;
 
@@ -720,7 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn reason_persisted_and_retrievable() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Reason A").await;
         let (app, mr2_id) = create_mr(app, "Reason B").await;
 
@@ -765,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_without_reason_has_null_reason() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "NoReason A").await;
         let (app, mr2_id) = create_mr(app, "NoReason B").await;
 
@@ -792,6 +809,7 @@ mod tests {
     #[tokio::test]
     async fn dependency_source_is_agent_declared_for_jwt_caller() {
         let state = test_state();
+        seed_repo(&state).await;
 
         // Mint an agent JWT and register it in the agent_tokens store.
         let agent_jwt = state

@@ -1932,10 +1932,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let sessions = json["sessions"].as_array().unwrap();
-        let ids: Vec<&str> = sessions
-            .iter()
-            .map(|s| s["id"].as_str().unwrap())
-            .collect();
+        let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
         assert_eq!(
             ids.len(),
             2,
@@ -1991,8 +1988,7 @@ mod tests {
             "a revoked session must not appear in the active listing, got {sessions:?}"
         );
         assert_eq!(
-            sessions[0]["user_agent"],
-            "gyre-web/1.0",
+            sessions[0]["user_agent"], "gyre-web/1.0",
             "the remaining listed session must be the live web device"
         );
     }
@@ -2013,10 +2009,10 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .uri("/api/v1/users/me/sessions")
-                    .header("Authorization", format!("Bearer {raw_key}"))
-                    .header("User-Agent", ua)
-                    .body(Body::empty())
-                    .unwrap(),
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
@@ -2060,10 +2056,7 @@ mod tests {
             2,
             "admin listing must show only the two live sessions, got {sessions:?}"
         );
-        let ids: Vec<&str> = sessions
-            .iter()
-            .map(|s| s["id"].as_str().unwrap())
-            .collect();
+        let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
         assert!(
             !ids.contains(&"sess-admin-listing-expired"),
             "an expired session must not appear in the admin active listing"
@@ -2110,8 +2103,7 @@ mod tests {
             "a revoked session must not appear in the admin active listing, got {sessions:?}"
         );
         assert_eq!(
-            sessions[0]["user_agent"],
-            "gyre-web/1.0",
+            sessions[0]["user_agent"], "gyre-web/1.0",
             "the remaining listed session must be the live web device"
         );
     }

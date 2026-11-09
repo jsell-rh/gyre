@@ -265,15 +265,15 @@ mod tests {
         );
         state.workspaces.create(&ws).await.unwrap();
 
-        let mut mr = MergeRequest::new(
+        let mr = MergeRequest::new(
             Id::new(format!("{workspace_id}-mr")),
             Id::new("repo-1"),
+            Id::new(workspace_id),
             format!("{workspace_id} MR"),
             "feat/x",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(workspace_id);
         state.merge_requests.create(&mr).await.unwrap();
 
         let trace = GateTrace {

@@ -1095,13 +1095,12 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-block-1"),
             repo_b.clone(),
+            Id::new("ws-block"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        let mut mr = mr;
-        mr.workspace_id = Id::new("ws-block");
         state.merge_requests.create(&mr).await.unwrap();
 
         // Enqueue the MR.
@@ -1185,15 +1184,15 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
             .unwrap();
 
         // Create an MR and enqueue.
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-ack-1"),
             repo_b.clone(),
+            Id::new("ws-ack"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-ack");
         state.merge_requests.create(&mr).await.unwrap();
 
         let entry =
@@ -1262,15 +1261,15 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         state.workspaces.create(&ws).await.unwrap();
         // Default policy is Warn — no need to set explicitly.
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-warn-1"),
             repo_b.clone(),
+            Id::new("ws-warn"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-warn");
         state.merge_requests.create(&mr).await.unwrap();
 
         let entry =

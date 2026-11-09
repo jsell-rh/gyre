@@ -10,19 +10,22 @@
 # gyre-server/src/lib.rs): the "default" tenant is a real entity created on
 # first startup (specs/system/hierarchy-enforcement.md), not a fabricated
 # scope, and every former site now names it explicitly.
+#
+# The former merge_request.rs sites (task-111 verification repair) were fixed
+# for real: MergeRequest::new now takes the workspace_id as a constructor
+# parameter (callers pass the repository's workspace), and the SQLite/PG
+# adapters persist under the storage handle's configured tenant scope
+# (mirroring TaskRepository::create) instead of a "default" literal.
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:
 crates/gyre-adapters/src/sqlite/activity.rs:56
 crates/gyre-adapters/src/sqlite/analytics.rs:115
 crates/gyre-adapters/src/sqlite/analytics.rs:225
-crates/gyre-adapters/src/sqlite/merge_request.rs:166
 crates/gyre-adapters/src/sqlite/repository.rs:94
 crates/gyre-adapters/src/postgres/activity.rs:56
 crates/gyre-adapters/src/postgres/analytics.rs:115
 crates/gyre-adapters/src/postgres/analytics.rs:225
-crates/gyre-adapters/src/postgres/merge_request.rs:166
 crates/gyre-adapters/src/postgres/repository.rs:94
 crates/gyre-domain/src/agent.rs:147
-crates/gyre-domain/src/merge_request.rs:124
 crates/gyre-domain/src/task.rs:92

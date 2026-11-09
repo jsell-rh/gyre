@@ -1563,12 +1563,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             gyre_common::Id::new(mr_id),
             gyre_common::Id::new("repo-gen"),
+            gyre_common::Id::new(workspace_id),
             title,
             "feat/x",
             "main",
             1000,
         );
-        mr.workspace_id = gyre_common::Id::new(workspace_id);
         mr.spec_ref = Some(
             "specs/system/identity-security.md@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                 .to_string(),
@@ -1884,36 +1884,36 @@ mod tests {
         let mut old = gyre_domain::MergeRequest::new(
             gyre_common::Id::new("mr-old"),
             gyre_common::Id::new("repo-gen"),
+            gyre_common::Id::new("ws-mrs"),
             "Older traced MR",
             "feat/a",
             "main",
             100,
         );
-        old.workspace_id = gyre_common::Id::new("ws-mrs");
         old.updated_at = 100;
         state.merge_requests.create(&old).await.unwrap();
 
         let mut new = gyre_domain::MergeRequest::new(
             gyre_common::Id::new("mr-new"),
             gyre_common::Id::new("repo-gen"),
+            gyre_common::Id::new("ws-mrs"),
             "Newer traced MR",
             "feat/b",
             "main",
             200,
         );
-        new.workspace_id = gyre_common::Id::new("ws-mrs");
         new.updated_at = 200;
         state.merge_requests.create(&new).await.unwrap();
 
         let mut untraced = gyre_domain::MergeRequest::new(
             gyre_common::Id::new("mr-untraced"),
             gyre_common::Id::new("repo-gen"),
+            gyre_common::Id::new("ws-mrs"),
             "Untraced MR",
             "feat/c",
             "main",
             300,
         );
-        untraced.workspace_id = gyre_common::Id::new("ws-mrs");
         untraced.updated_at = 300;
         state.merge_requests.create(&untraced).await.unwrap();
 

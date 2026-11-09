@@ -493,12 +493,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new(mr_id),
             repo_id.clone(),
+            Id::new("ws-1"),
             "Merged MR",
             "feat/x",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.merge_commit_sha = merge_sha.map(|s| s.to_string());

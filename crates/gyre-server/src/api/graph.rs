@@ -2402,12 +2402,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new("repo-grounding"),
+            ws.id.clone(),
             mr_title,
             "feature/grounding",
             "main",
             1000,
         );
-        mr.workspace_id = ws.id.clone();
         mr.spec_ref = Some(spec_ref.to_string());
         mr.status = gyre_domain::MrStatus::Merged;
         mr.updated_at = now_secs();
@@ -2639,12 +2639,12 @@ mod tests {
         let mut mr1 = gyre_domain::MergeRequest::new(
             Id::new("mr-http-r1"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "repo-1 merged work",
             "feat/one",
             "main",
             2000,
         );
-        mr1.workspace_id = Id::new("ws-briefing");
         mr1.updated_at = 2000;
         mr1.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr1).await.unwrap();
@@ -2661,12 +2661,12 @@ mod tests {
         let mut mr_foreign = gyre_domain::MergeRequest::new(
             Id::new("mr-http-foreign"),
             Id::new("repo-foreign"),
+            Id::new("ws-briefing"),
             "foreign repo work",
             "feat/foreign",
             "main",
             2000,
         );
-        mr_foreign.workspace_id = Id::new("ws-briefing");
         mr_foreign.updated_at = 2000;
         mr_foreign.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr_foreign).await.unwrap();
@@ -2937,12 +2937,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-47"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Add billing retry",
             "feat/billing-retry",
             "main",
             2000,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.updated_at = 2000;
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2985,12 +2985,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-old-gate"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Old gate failure MR",
             "feat/old-gate",
             "main",
             400,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.updated_at = 2000; // after since=1500
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -3064,12 +3064,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-99"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Broken migration",
             "feat/migration",
             "main",
             1800,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.revert("f".repeat(40).to_string(), 2100).unwrap();
@@ -3136,12 +3136,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-old"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Old revert",
             "feat/old",
             "main",
             400,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.revert("0".repeat(40).to_string(), 500).unwrap();
@@ -3191,12 +3191,12 @@ mod tests {
         let mut mr1 = gyre_domain::MergeRequest::new(
             Id::new("mr-r1"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "repo-1 merged work",
             "feat/one",
             "main",
             2000,
         );
-        mr1.workspace_id = Id::new("ws-briefing");
         mr1.updated_at = 2000;
         mr1.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr1).await.unwrap();
@@ -3205,12 +3205,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-r2"),
             Id::new("repo-2"),
+            Id::new("ws-briefing"),
             "repo-2 merged work",
             "feat/two",
             "main",
             2000,
         );
-        mr2.workspace_id = Id::new("ws-briefing");
         mr2.updated_at = 2000;
         mr2.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr2).await.unwrap();

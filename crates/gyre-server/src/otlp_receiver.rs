@@ -853,6 +853,7 @@ env:
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-link"),
             Id::new("repo-link"),
+            Id::new("default"),
             "link MR".to_string(),
             "feat/x",
             "main",

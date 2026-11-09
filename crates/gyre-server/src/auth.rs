@@ -3183,18 +3183,27 @@ mod tests {
         // Victim: authenticated only from an HTTP device, then signed out
         // everywhere. The WS device pair ("", "") has no session row, so
         // the per-device check alone would mint a fresh one.
-        let victim = User::new(Id::new("ws-victim-user"), "ext-ws-victim", "ws-victim", 1000);
+        let victim = User::new(
+            Id::new("ws-victim-user"),
+            "ext-ws-victim",
+            "ws-victim",
+            1000,
+        );
         state.users.create(&victim).await.unwrap();
         let victim_key = "gyre_ws_victim_key";
         state
             .api_keys
-            .create(&super::hash_api_key(victim_key), &victim.id, "ws-victim-key")
+            .create(
+                &super::hash_api_key(victim_key),
+                &victim.id,
+                "ws-victim-key",
+            )
             .await
             .unwrap();
         let http_session = gyre_domain::UserSession::new(
             Id::new("sess-ws-victim-http"),
             victim.id.clone(),
-            &super::hash_api_key(victim_key),
+            super::hash_api_key(victim_key),
             "127.0.0.1",
             "gyre-cli/1.0",
             now,
@@ -3231,7 +3240,12 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let victim = User::new(Id::new("ws-device-user"), "ext-ws-device", "ws-device", 1000);
+        let victim = User::new(
+            Id::new("ws-device-user"),
+            "ext-ws-device",
+            "ws-device",
+            1000,
+        );
         state.users.create(&victim).await.unwrap();
         let raw_key = "gyre_ws_device_key";
         let credential_hash = super::hash_api_key(raw_key);

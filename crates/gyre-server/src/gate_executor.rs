@@ -1629,6 +1629,7 @@ mod tests {
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sha-test"),
             repo.id,
+            Id::new("default"),
             "feat",
             "feat/x",
             "main",
@@ -1711,6 +1712,7 @@ mod tests {
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-tpl-test"),
             repo.id,
+            Id::new("default"),
             "feat",
             "feat/y",
             "main",

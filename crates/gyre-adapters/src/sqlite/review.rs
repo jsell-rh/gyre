@@ -224,6 +224,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new("r1"),
+            Id::new("default"),
             "Test MR",
             "feat/x",
             "main",

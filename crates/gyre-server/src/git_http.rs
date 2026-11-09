@@ -4610,28 +4610,28 @@ mod tests {
             .find(|r| r.name == TEST_REPO_NAME)
             .unwrap();
         let mr_a_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-a"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "A",
                 "feat/a".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };
         let mr_b_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-b"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "B",
                 "feat/b".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };

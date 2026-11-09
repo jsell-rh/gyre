@@ -1282,10 +1282,21 @@ pub async fn complete_agent(
 
     let now = now_secs();
 
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, like create_mr). Refuse to create an MR whose scope
+    // cannot be resolved instead of fabricating a "default" workspace
+    // identity.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
+
     // Create MergeRequest
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id,
+        repo.workspace_id.clone(),
         req.title,
         req.branch,
         req.target_branch,
@@ -1310,26 +1321,23 @@ pub async fn complete_agent(
     }
 
     // Compute diff stats + conflict detection (like create_mr does).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &mr.target_branch, &mr.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
     }
 
     state.merge_requests.create(&mr).await?;

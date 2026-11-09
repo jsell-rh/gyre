@@ -672,6 +672,7 @@ pub async fn admin_seed(
     let mr_open = MergeRequest::new(
         Id::new("seed-mr-1"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add agent spawn endpoint",
         "feat/agent-spawn",
         "main",
@@ -680,6 +681,7 @@ pub async fn admin_seed(
     let mut mr_merged = MergeRequest::new(
         Id::new("seed-mr-2"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add Prometheus metrics",
         "feat/metrics",
         "main",

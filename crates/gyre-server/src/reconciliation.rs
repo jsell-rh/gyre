@@ -2659,15 +2659,15 @@ mod tests {
         task.repo_id = Id::new(repo_id);
         state.tasks.create(&task).await.unwrap();
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-auto"),
             Id::new(repo_id),
+            Id::new(ws_id),
             "Reconcile backend-developer v4",
             "reconcile/abc/spec",
             "main",
             now(),
         );
-        mr.workspace_id = Id::new(ws_id);
         state.merge_requests.create(&mr).await.unwrap();
         (mr, task)
     }

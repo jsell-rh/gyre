@@ -1148,9 +1148,23 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
 
     let now = now_secs();
     let rid = Id::new(&repo_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, mirroring REST create_mr). Refuse to create an MR whose
+    // scope cannot be resolved instead of fabricating a "default"
+    // workspace identity.
+    let repo = match state.repos.find_by_id(&rid).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            return tool_error(format!("repository {rid} not found"));
+        }
+        Err(e) => {
+            return tool_error(format!("failed to look up repository {rid}: {e}"));
+        }
+    };
     let mut mr = MergeRequest::new(
         new_id(),
         rid.clone(),
+        repo.workspace_id.clone(),
         title.clone(),
         source.clone(),
         target.clone(),
@@ -1158,20 +1172,17 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
-    // Auto-detect branch lineage dependencies and set workspace_id (mirrors REST create_mr).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
-            state,
-            &rid,
-            &repo.path,
-            &source,
-            &repo.default_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
+    // Auto-detect branch lineage dependencies (mirrors REST create_mr).
+    let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
+        state,
+        &rid,
+        &repo.path,
+        &source,
+        &repo.default_branch,
+    )
+    .await;
+    if !lineage_deps.is_empty() {
+        mr.depends_on = lineage_deps;
     }
 
     // Merge explicit deps with lineage deps: explicit takes precedence,
@@ -5230,6 +5241,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new("mr-trace-test"),
             Id::new("repo-1"),
+            Id::new("default"),
             "Test MR",
             "feat/test",
             "main",
