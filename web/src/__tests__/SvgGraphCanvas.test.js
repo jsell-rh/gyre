@@ -52,17 +52,41 @@ describe('SvgGraphCanvas rendering', () => {
   });
 
   it('positions nodes via the d3-force engine (graph)', { timeout: 60000 }, async () => {
+    // Fixture chosen to discriminate d3-force from the columnLayout
+    // fallback: four nodes of the SAME type with two disjoint edges
+    // (a→b, c→d). columnLayout stacks same-type nodes in a single column
+    // (identical x for all four), and pending nodes stack in the x = -26px
+    // pending column — d3-force's link/charge forces spread all four onto
+    // distinct x positions (probe on this exact fixture: force → 4 distinct
+    // x, connected pair ≈ 89px apart vs ≈ 851px across pairs; column → all
+    // x identical).
+    const FORCE_NODES = [
+      { id: 'a', name: 'A', node_type: 'function', visibility: 'public' },
+      { id: 'b', name: 'B', node_type: 'function', visibility: 'public' },
+      { id: 'c', name: 'C', node_type: 'function', visibility: 'public' },
+      { id: 'd', name: 'D', node_type: 'function', visibility: 'public' },
+    ];
+    const FORCE_EDGES = [
+      { id: 'e1', source_id: 'a', target_id: 'b', edge_type: 'calls' },
+      { id: 'e2', source_id: 'c', target_id: 'd', edge_type: 'calls' },
+    ];
     const { container } = render(SvgGraphCanvas, {
-      props: { nodes: NODES, edges: EDGES, engine: 'graph' },
+      props: { nodes: FORCE_NODES, edges: FORCE_EDGES, engine: 'graph' },
     });
     // Layout resolves asynchronously (dynamic d3-force import + tick run)
     await waitFor(() => {
       const transforms = [...container.querySelectorAll('g.svg-node')]
         .map((g) => g.style.transform);
-      // At least one node has a real (non-pending) position: pending nodes
-      // stack at translate(0px, 0px)-ish (40 - NODE_W/2 = -26); force output
-      // is centered around the 900x600 canvas middle.
-      expect(transforms.some((t) => t && !t.includes('-26px'))).toBe(true);
+      expect(transforms).toHaveLength(4);
+      // No node left in the pending column (x translate -26px)
+      expect(transforms.every((t) => t && !t.includes('-26px'))).toBe(true);
+      // d3-force output: every node on a distinct x position — the column
+      // fallback would put all four on one shared x (same node_type →
+      // single column), so this fails if the engine is swapped out.
+      const xs = transforms.map(
+        (t) => parseFloat(/translate\((-?[\d.]+)px/.exec(t)[1])
+      );
+      expect(new Set(xs).size).toBe(4);
     }, { timeout: 15000 });
   });
 

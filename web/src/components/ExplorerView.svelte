@@ -9,6 +9,11 @@
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import { onViewEvent, dispatchViewEvent, viewEventFromDom } from '../lib/viewEvents.js';
   import { applyDensityPolicy } from '../lib/canvas-density.js';
+  // ui-layout.md §10 Layout Engines: the layout registry (task-170) maps
+  // ViewSpec layout names to renderer components; the generated view's
+  // `layout` field selects the renderer (see applyGeneratedViewSpec).
+  import { getLayout } from '../lib/layoutRegistry.js';
+  import { resolveScopeNodes, edgeSrc, edgeTgt } from '../lib/view-query-scope.js';
   import VirtualNodeList from '../lib/VirtualNodeList.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
@@ -122,18 +127,28 @@
   let tracePlaybackNonce = 0;
 
   /**
-   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   * Apply a generated ViewSpec (HSI §3) to the Explorer.
    *
-   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
-   * node-type filters, callouts, and the LLM's explanation as the query
-   * annotation — the sidebar annotation alongside the graph). A "flow"
-   * layout additionally fetches the trace_source MR's captured trace and
-   * starts particle playback on the evaluative lens; the server already
-   * guarantees flow views are trace-backed, so a fetch failure here falls
-   * back to the structural lens (client mirror of the server fallback).
+   * The ViewSpec's `layout` field selects the renderer through the layout
+   * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
+   * render on the SVG canvas positioned by ELK, 'side-by-side' on the
+   * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
+   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
+   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   *
+   * For the canvas-rendered layouts the ViewSpec is translated to a
+   * ViewQuery the canvas renders (concept / node-type filters, callouts,
+   * and the LLM's explanation as the query annotation — the sidebar
+   * annotation alongside the graph). A "flow" layout additionally fetches
+   * the trace_source MR's captured trace and starts particle playback on
+   * the evaluative lens; the server already guarantees flow views are
+   * trace-backed, so a fetch failure here falls back to the structural
+   * lens (client mirror of the server fallback).
    */
   function applyGeneratedViewSpec(spec) {
     if (!spec || typeof spec !== 'object') return;
+    const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
+    activeLayout = getLayout(layoutName) ? layoutName : 'graph';
     const query = viewSpecToViewQuery(spec);
     if (query) {
       activeViewQuery = query;
@@ -157,6 +172,22 @@
     } else {
       explorerLens = 'structural';
     }
+  }
+
+  // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
+  // The generated ViewSpec's `layout` field (set in applyGeneratedViewSpec)
+  // selects the renderer through the layout registry. Layouts rendered by
+  // the unified canvas (graph/flow/timeline) and the shell-owned list
+  // layout have no dedicated registry component — the boundary branch
+  // below renders them; the rest dispatch to their registered renderer.
+  const CANVAS_LAYOUTS = new Set(['graph', 'flow', 'timeline']);
+  let activeLayout = $state('graph');
+
+  /** Dismiss the generated layout — return to the default graph canvas.
+   *  The active view query is kept (it stays visible via the canvas's own
+   *  annotation UI and can be cleared from the manual query editor). */
+  function clearGeneratedLayout() {
+    activeLayout = 'graph';
   }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
@@ -1570,6 +1601,33 @@
   // (>500) is applied inside ExplorerCanvas with its own banner.
   let graphDensity = $derived(applyDensityPolicy(effectiveGraph?.nodes ?? []));
 
+  // ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ──
+  /** Renderer component for the active layout (capitalized for Svelte's
+   *  dynamic component syntax; null → unified canvas / shell list). */
+  let LayoutRenderer = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout) || activeLayout === 'list') return null;
+    return getLayout(activeLayout)?.component ?? null;
+  });
+
+  /** The active layout's registry entry (label key, engine selector). */
+  let activeLayoutReg = $derived(getLayout(activeLayout));
+
+  /** Nodes/edges the generated layout renderer receives: the active view
+   *  query's scope applied to the effective graph, so a generated
+   *  hierarchical/layered/side-by-side/diff/list view shows the same node
+   *  set the unified canvas would show for the same spec (null scope or an
+   *  unmatched scope → full graph, mirroring the canvas). */
+  let generatedLayoutGraph = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout)) return null;
+    const allNodes = effectiveGraph?.nodes ?? [];
+    const allEdges = effectiveGraph?.edges ?? [];
+    const scoped = resolveScopeNodes(activeViewQuery?.scope, allNodes, allEdges);
+    const nodes = scoped ?? allNodes;
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = allEdges.filter((e) => ids.has(edgeSrc(e)) && ids.has(edgeTgt(e)));
+    return { nodes, edges };
+  });
+
   // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
   // Uses imported functions from timeline-utils.js for testability.
   let timelineDeltaStats = $derived.by(() => {
@@ -1959,7 +2017,57 @@
                 </div>
               {/if}
               {#if explorerViewMode === 'boundary'}
-              {#if graphDensity.mode === 'list'}
+              {#if LayoutRenderer}
+                <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
+                     Engines): the ViewSpec `layout` field selects the renderer
+                     through the layout registry — hierarchical/layered render on
+                     the SVG canvas positioned by ELK, side-by-side on the CSS
+                     Grid composite, diff on the structural-diff component. The
+                     scope of the spec's ViewQuery filters the node set. -->
+                <div class="gen-layout-wrap" data-layout={activeLayout} data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t(activeLayoutReg?.labelKey ?? 'explorer_view.layout_graph')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <LayoutRenderer
+                      nodes={generatedLayoutGraph.nodes}
+                      edges={generatedLayoutGraph.edges}
+                      repoId={selectedRepoId}
+                      engine={activeLayoutReg?.engine ?? 'graph'}
+                      onSelectNode={openNodeDetail}
+                    />
+                  </div>
+                </div>
+              {:else if activeLayout === 'list'}
+                <!-- ui-layout.md §10 `list` engine: native Svelte {#each} rows
+                     with virtual scrolling (registry component is null — the
+                     shell owns the list renderer). -->
+                <div class="gen-layout-wrap" data-layout="list" data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t('explorer_view.layout_list')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <VirtualNodeList
+                      nodes={generatedLayoutGraph.nodes}
+                      viewportHeight={520}
+                    />
+                  </div>
+                </div>
+              {:else if graphDensity.mode === 'list'}
                 <!-- ui-layout.md §10 Canvas Rendering: >1000 nodes even after
                      the public filter → list layout with virtual scrolling +
                      a warning (the shell owns the fallback swap). -->
@@ -4668,6 +4776,47 @@
     background: rgba(30, 41, 59, 0.9);
     color: #f87171;
     font-size: 13px;
+  }
+
+  /* ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ── */
+  .gen-layout-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+  }
+  .gen-layout-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 3px 6px 3px 10px;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #cbd5e1;
+    font-size: 12px;
+  }
+  .gen-layout-chip-clear {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .gen-layout-chip-clear:hover {
+    color: #e2e8f0;
+    background: #1e293b;
+  }
+  .gen-layout-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   /* ── ViewEvent surfaces (ui-layout.md §10 Interaction Events) ───────── */

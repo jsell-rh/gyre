@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import { listLayouts, getLayout, registerLayout } from '../lib/layoutRegistry.js';
 import { LAYOUT_TYPES } from '../lib/types/view-spec.ts';
+import en from '../locales/en.json';
 
 describe('layoutRegistry engine coverage', () => {
   const registered = listLayouts();
@@ -58,6 +59,18 @@ describe('layoutRegistry engine coverage', () => {
     expect(listLayouts().length).toBe(before);
     // Still the original renderer
     expect(getLayout('graph').component).toBeTruthy();
-    expect(getLayout('graph').labelKey).toBe('moldable_view.tab_graph');
+    expect(getLayout('graph').labelKey).toBe('explorer_view.layout_graph');
+  });
+
+  it('points every labelKey at a key that exists in en.json (no raw-key UI)', () => {
+    // The registry's labelKeys are consumed by the Explorer shell's active
+    // layout chip ($t(labelKey)); a key missing from the locale would render
+    // the raw dotted key. (The old moldable_view.* section was deleted with
+    // its component — these keys live under explorer_view.)
+    for (const layout of listLayouts()) {
+      const [section, key] = layout.labelKey.split('.');
+      expect(en[section], `locale section for ${layout.labelKey}`).toBeTruthy();
+      expect(en[section][key], `locale key ${layout.labelKey}`).toBeTruthy();
+    }
   });
 });
