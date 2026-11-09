@@ -470,6 +470,31 @@ pub(crate) async fn spawn_agent_core(
         )));
     }
 
+    // Agent names become container names / remote processes on SSH
+    // compute targets — validate BEFORE any state is written (agent
+    // record, token, worktree, task assignment). The name check used to
+    // live inside the SSH dispatch arm below, i.e. after every one of
+    // those writes, so a rejected name left an Active agent, an
+    // InProgress task assigned to it, and a worktree record behind —
+    // violating this handler's compensating-rollback invariant (the
+    // worktree-creation-failure and interrogation-policy-failure paths
+    // both delete the just-created agent). (M19.5-A.)
+    if resolved_ct_entity
+        .as_ref()
+        .map(|e| e.target_type == ComputeTargetType::Ssh)
+        .unwrap_or(false)
+    {
+        let safe_name = req
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+        if !safe_name || req.name.is_empty() || req.name.len() > 63 {
+            return Err(ApiError::InvalidInput(
+                "agent name must be 1-63 chars of [a-zA-Z0-9._-] for container use".to_string(),
+            ));
+        }
+    }
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
@@ -994,20 +1019,12 @@ pub(crate) async fn spawn_agent_core(
                 // `container_mode: false` is the legacy M19.5 escape hatch
                 // (bare remote process via SshTarget) kept for configs that
                 // predate the spec default.
+                //
+                // NOTE: the agent-name charset/length validation for this
+                // arm lives at the top of spawn_agent_core, beside the
+                // duplicate-name check — it must run before any state is
+                // written (see the comment there).
                 let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(true);
-
-                // Agent names become container names / remote processes —
-                // validate early to keep shell metacharacters out (M19.5-A).
-                let safe_name = agent
-                    .name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
-                if !safe_name || agent.name.is_empty() || agent.name.len() > 63 {
-                    return Err(ApiError::InvalidInput(
-                        "agent name must be 1-63 chars of [a-zA-Z0-9._-] for container use"
-                            .to_string(),
-                    ));
-                }
 
                 // Worktree path: local absolute path for bare remote mode;
                 // the remote container clones its own checkout into
@@ -3497,6 +3514,113 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "rejected spawn must not create an agent"
+        );
+    }
+
+    /// task-117 review repair: the SSH dispatch arm's agent-name
+    /// charset/length validation used to run AFTER the agent record, agent
+    /// token, git worktree + DB record, and task assignment were persisted
+    /// — a rejected name (spaces, shell metacharacters, >63 chars) returned
+    /// 400 but left an Active agent, the task InProgress and assigned to
+    /// that agent, and a worktree record behind, violating this handler's
+    /// compensating-rollback invariant. The check now runs at the top of
+    /// spawn_agent_core, beside the duplicate-name check, before any
+    /// write.
+    #[tokio::test]
+    async fn spawn_rejects_unsafe_agent_name_on_ssh_target_without_orphans() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "workspace-ssh-name").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "ssh name task").await;
+
+        // SSH-typed compute target in the caller's tenant (container_mode
+        // defaults to true — the spec default since task-117).
+        let ct_body = serde_json::json!({
+            "name": "ssh-name-target",
+            "target_type": "Ssh",
+            "config": {"user": "agent", "host": "127.0.0.1", "port": 22},
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&ct_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "ssh compute target create should succeed"
+        );
+        let ct_json = body_json(resp).await;
+        let ct_id = ct_json["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "name": "bad name with space",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/ssh-bad-name",
+            "compute_target_id": ct_id,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unsafe agent name on an SSH compute target must be rejected, got {}",
+            resp.status()
+        );
+
+        // The rejected spawn must leave no orphaned state behind.
+        assert!(
+            state
+                .agents
+                .find_by_name("bad name with space")
+                .await
+                .unwrap()
+                .is_none(),
+            "rejected spawn must not create an agent"
+        );
+        let task = state
+            .tasks
+            .find_by_id(&gyre_common::Id::new(&task_id))
+            .await
+            .unwrap()
+            .expect("task exists");
+        assert!(
+            task.assigned_to.is_none(),
+            "rejected spawn must not assign the task to an agent"
+        );
+        assert_eq!(
+            task.status,
+            gyre_domain::TaskStatus::Backlog,
+            "rejected spawn must not advance the task to InProgress"
+        );
+        let worktrees = state
+            .worktrees
+            .find_by_repo(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap();
+        assert!(
+            worktrees.is_empty(),
+            "rejected spawn must not leave a worktree record behind"
         );
     }
 
