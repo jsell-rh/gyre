@@ -558,6 +558,37 @@ pub async fn assist_spec(
     ))
 }
 
+/// Git blob SHA of `content` as stored at `spec_path` on `branch`.
+///
+/// Primary path: `git rev-parse <branch>:<path>` via the spec registry
+/// (handles any object format). Fallback when git is unavailable: derive the
+/// SHA-1 git blob id directly from the content just written to the branch —
+/// a blob id is sha1("blob <len>\0<content>") over the exact bytes
+/// `write_file` stored, so it matches what rev-parse returns for the same
+/// content (the same value `git hash-object` prints for those bytes).
+///
+/// Never returns "": an empty spec_sha is a fail-open that pushes the Inbox
+/// approve action onto a legacy fallback which approves the pre-edit ledger
+/// version — a no-op masked by an "Approved" success message.
+async fn spec_blob_sha(
+    git_bin: &str,
+    repo_path: &str,
+    branch: &str,
+    spec_path: &str,
+    content: &str,
+) -> String {
+    match crate::spec_registry::get_blob_sha(git_bin, repo_path, branch, spec_path).await {
+        Some(sha) => sha,
+        None => {
+            use sha1::{Digest, Sha1};
+            let mut hasher = Sha1::new();
+            hasher.update(format!("blob {}\0", content.len()).as_bytes());
+            hasher.update(content.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+    }
+}
+
 /// POST /api/v1/repos/:id/specs/save
 ///
 /// Commits a spec change to a `spec-edit/<slug>-<uuid>` feature branch and
@@ -654,6 +685,51 @@ pub async fn save_spec(
             .await
             .map_err(ApiError::Internal)?;
 
+        // task-175 review F1: the SpecPendingApproval cards created by the
+        // first save carry that save's blob SHA in their body, and the Inbox
+        // approve action submits body.spec_sha — approve_spec only records
+        // the approval when it matches the ledger's post-merge current_sha.
+        // Leaving the first save's SHA in place would make every Approve
+        // click on this card record an approval for content that never
+        // becomes current: the card shows "Approved" while the spec stays
+        // Pending, permanently. Refresh the unresolved cards' body with the
+        // blob SHA of the content just appended (resolved cards keep their
+        // historical body — an audit record of what was actually acted on).
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let blob_sha = spec_blob_sha(
+            &git_bin,
+            &repo.path,
+            &mr.source_branch,
+            &req.spec_path,
+            &req.content,
+        )
+        .await;
+        let refreshed_body = serde_json::json!({
+            "spec_path": req.spec_path,
+            "spec_sha": blob_sha,
+            "mr_id": mr.id.to_string(),
+            "mr_title": mr.title.clone(),
+            "branch": mr.source_branch.clone(),
+            "repo_id": repo.id.to_string(),
+        })
+        .to_string();
+        if let Err(e) = state
+            .notifications
+            .update_body_by_entity_ref(
+                mr.id.as_str(),
+                NotificationType::SpecPendingApproval.as_str(),
+                &refreshed_body,
+            )
+            .await
+        {
+            // Non-fatal — the commit is already on the MR branch; the card
+            // body going stale is logged, not silently swallowed.
+            tracing::warn!(
+                mr_id = %mr.id,
+                "failed to refresh spec-pending-approval notification body: {e}"
+            );
+        }
+
         return Ok((
             StatusCode::OK,
             Json(SpecSaveResponse {
@@ -727,29 +803,17 @@ pub async fn save_spec(
     //               current_sha semantics from sync_spec_ledger)
     //   mr_id / branch / repo_id — for the MR quick links
     //
-    // Primary path: `git rev-parse <branch>:<path>` (handles any object
-    // format). Fallback when git is unavailable: derive the SHA-1 git blob id
-    // directly from the content just written to the branch — a blob id is
-    // sha1("blob <len>\0<content>") over the exact bytes `write_file` stored,
-    // so it matches what rev-parse returns for the same content. Never fall
-    // back to "": an empty spec_sha is a fail-open that pushes the Inbox
-    // approve action onto a legacy fallback which approves the pre-edit
-    // ledger version — a no-op masked by an "Approved" success message.
-    let blob_sha = {
-        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-        match crate::spec_registry::get_blob_sha(&git_bin, &repo.path, &branch_name, &req.spec_path)
-            .await
-        {
-            Some(sha) => sha,
-            None => {
-                use sha1::{Digest, Sha1};
-                let mut hasher = Sha1::new();
-                hasher.update(format!("blob {}\0", req.content.len()).as_bytes());
-                hasher.update(req.content.as_bytes());
-                hex::encode(hasher.finalize())
-            }
-        }
-    };
+    // See spec_blob_sha for how the SHA is derived (git rev-parse with a
+    // content-derived fallback — never "", which is a fail-open).
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let blob_sha = spec_blob_sha(
+        &git_bin,
+        &repo.path,
+        &branch_name,
+        &req.spec_path,
+        &req.content,
+    )
+    .await;
     let notif_body = serde_json::json!({
         "spec_path": req.spec_path,
         "spec_sha": blob_sha,
@@ -1259,6 +1323,102 @@ mod tests {
         let json2 = body_json(resp2).await;
         assert_eq!(json2["branch"].as_str().unwrap(), branch1);
         assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id1);
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_refreshes_notification_spec_sha() {
+        // task-175 review F1: the append-to-existing-MR path used to return
+        // early without refreshing the SpecPendingApproval card's body, so it
+        // kept the FIRST save's blob SHA. The Inbox approve action submits
+        // body.spec_sha and approve_spec only records the approval when it
+        // matches the ledger's post-merge current_sha — a stale SHA makes
+        // every Approve click record an approval for content that never
+        // becomes current (card shows "Approved", spec stays Pending).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let create_body = serde_json::json!({
+            "name": "spec-edit-stale-sha",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let do_save = |content: &'static str| {
+            let body = serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": content,
+                "message": "edit",
+            });
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        };
+
+        let resp1 = do_save("# Vision v1").await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let mr_id = json1["mr_id"].as_str().unwrap().to_string();
+
+        // First save's card carries the v1 blob SHA
+        // (`git hash-object` over "# Vision v1").
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let card = notifs
+            .iter()
+            .find(|n| {
+                n.notification_type == NotificationType::SpecPendingApproval
+                    && n.entity_ref.as_deref() == Some(mr_id.as_str())
+            })
+            .expect("SpecPendingApproval card after first save");
+        let body: serde_json::Value = serde_json::from_str(card.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "98537aa01f28c720793d8f199d221ebd97c3bff3");
+
+        // Second save appends to the same MR — the card must be refreshed in
+        // place (still exactly one card for this MR), carrying the v2 blob SHA
+        // (`git hash-object` over "# Vision v2"), not the stale v1 SHA.
+        let resp2 = do_save("# Vision v2").await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id);
+
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let cards: Vec<&gyre_common::Notification> = notifs
+            .iter()
+            .filter(|n| {
+                n.notification_type == NotificationType::SpecPendingApproval
+                    && n.entity_ref.as_deref() == Some(mr_id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            cards.len(),
+            1,
+            "append must refresh the existing card, not create a duplicate"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(cards[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "1a862bdc192b340de10c4e0cd259c1c60c4cca11");
+        assert_eq!(body["mr_id"], mr_id);
     }
 
     #[tokio::test]

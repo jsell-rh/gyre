@@ -79,7 +79,6 @@ export const api = {
     return request(`/agents${qs ? '?' + qs : ''}`);
   },
   agent: (id) => request(`/agents/${id}`),
-  stopAgent: (id) => request(`/agents/${id}/stop`, { method: 'POST' }),
   repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
@@ -150,10 +149,6 @@ export const api = {
     request(`/repos/${repoId}/queue/resume`, {
       method: 'PUT',
     }),
-  // Manual revert of a merged MR (recovery protocol, platform-model.md §6).
-  // Used by Inbox P5 arbitration: "Pick A"/"Pick B" revert the losing side's MR.
-  revertMr: (repoId, mrId) =>
-    request(`/repos/${repoId}/revert/${mrId}`, { method: 'POST' }),
   // jj VCS operations
   jjInit: (repoId) =>
     request(`/repos/${repoId}/jj/init`, { method: 'POST' }),

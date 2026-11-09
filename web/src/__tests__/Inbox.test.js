@@ -102,7 +102,6 @@ vi.mock('../lib/api.js', () => ({
     sendAgentMessage: vi.fn().mockResolvedValue({}),
     mergeRequests: vi.fn().mockResolvedValue([]),
     mergeRequest: vi.fn().mockResolvedValue(null),
-    revertMr: vi.fn().mockResolvedValue({ repo_id: 'repo-1', mr_id: 'mr-lose', revert_commit_sha: 'rev123' }),
     createTask: vi.fn().mockResolvedValue({ id: 'task-42', title: 'Reconcile' }),
   },
 }));
@@ -880,19 +879,12 @@ describe('Inbox', () => {
 
   // HSI §8 P5: Pick A / Pick B create a spec-implementation task to revert
   // the non-selected side's changes (all three options create a task via the
-  // existing task domain model — no direct revert). The merged-MR list rows
-  // carry merge_commit_sha because the server list endpoint enriches merged
-  // rows from the attestation store (anchored by the Rust test
-  // `list_mrs_enriches_merged_rows_with_merge_commit_sha` in
-  // crates/gyre-server/src/api/merge_requests.rs) — this mock mirrors that
-  // real wire format.
-  const mergedMrsForConflict = [
-    { id: 'mr-a', repository_id: 'repo-1', status: 'merged', title: 'agent-1 payments', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
-    { id: 'mr-b', repository_id: 'repo-1', status: 'merged', title: 'agent-2 payments', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
-  ];
-
+  // existing task domain model — no direct revert). The task description
+  // identifies the losing side by agent + commit SHA: the divergence body's
+  // commit SHAs are default-branch push tips, which can never equal an MR's
+  // merge_commit_sha (a merge commit created by the merge processor), so no
+  // MR lookup is performed — the SHA alone is actionable (`git revert <sha>`).
   it('Pick B creates a revert task for agent A\'s conflicting implementation (HSI §8 P5)', async () => {
-    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
@@ -909,24 +901,22 @@ describe('Inbox', () => {
         })
       );
     });
-    // The task description must reference the losing side (agent-1, its
-    // commit SHA, and its MR resolved via merge_commit_sha) and keep the
-    // winning side as the reference implementation.
+    // The task description must reference the losing side (agent-1 and its
+    // commit SHA) and keep the winning side as the reference implementation.
     const call = api.createTask.mock.calls[0][0];
     expect(call.description).toContain('agent-1');
     expect(call.description).toContain('aaaa000000000000000000000000000000000000');
-    expect(call.description).toContain('mr-a');
     expect(call.description).toContain('agent-2');
     expect(call.description).toContain('bbbb000000000000000000000000000000000000');
-    // Spec mechanism: a task is created — no direct revert from the Inbox.
-    expect(api.revertMr).not.toHaveBeenCalled();
+    // Spec mechanism: a task is created — no direct revert, and no dead MR
+    // lookup keyed on the push-tip SHA (it can never match a merge commit).
+    expect(api.mergeRequests).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(document.body.textContent).toContain('Picked — revert task created');
     });
   });
 
   it('Pick A creates a revert task for agent B\'s conflicting implementation (HSI §8 P5)', async () => {
-    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
@@ -938,26 +928,8 @@ describe('Inbox', () => {
     const call = api.createTask.mock.calls[0][0];
     expect(call.description).toContain('agent-2');
     expect(call.description).toContain('bbbb000000000000000000000000000000000000');
-    expect(call.description).toContain('mr-b');
-    expect(api.revertMr).not.toHaveBeenCalled();
-  });
-
-  it('Pick still creates the revert task when the losing MR cannot be resolved — the description carries the commit SHA', async () => {
-    // Real deployments can hold divergence notifications whose losing MR
-    // predates attestation retention; the commit SHA is still actionable.
-    api.mergeRequests.mockResolvedValue([]);
-    api.myNotifications.mockResolvedValue([conflictNotif]);
-    const { findByRole, findByText } = render(Inbox);
-    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
-    await fireEvent.click(header);
-    await fireEvent.click(await findByText('Pick A'));
-    await waitFor(() => {
-      expect(api.createTask).toHaveBeenCalled();
-    });
-    const call = api.createTask.mock.calls[0][0];
-    expect(call.description).toContain('bbbb000000000000000000000000000000000000');
-    expect(call.description).toContain('unresolved');
-    expect(api.revertMr).not.toHaveBeenCalled();
+    expect(call.description).toContain('aaaa000000000000000000000000000000000000');
+    expect(api.mergeRequests).not.toHaveBeenCalled();
   });
 
   // HSI §8 P2: the expanded spec_approval accordion shows the spec-edit/*
@@ -994,7 +966,6 @@ describe('Inbox', () => {
   });
 
   it('Pick surfaces the failure when the revert task cannot be created', async () => {
-    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
     api.createTask.mockRejectedValueOnce(new Error('workspace offline'));
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -1004,7 +975,6 @@ describe('Inbox', () => {
     await waitFor(() => {
       expect(document.body.textContent).toContain('workspace offline');
     });
-    expect(api.revertMr).not.toHaveBeenCalled();
   });
 
   it('Reconcile creates a reconciliation task scoped to the contested spec', async () => {

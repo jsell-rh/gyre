@@ -576,18 +576,16 @@
   // create a task via the existing task domain model: picking a side creates
   // a spec-implementation task to REVERT the non-selected side's changes
   // (with the selected implementation as reference); Reconcile creates a
-  // reconciliation task. The losing side's MR is resolved best-effort from
-  // the repo's merged MR list by merge-commit SHA (the list endpoint
-  // enriches merged rows from the attestation store) so the task description
-  // can reference it — the commit SHA alone is enough to act on when the MR
-  // cannot be resolved.
-  async function resolveConflictMr(n, commitSha) {
-    if (!commitSha || !n.repo_id) return null;
-    const mrs = (await api.mergeRequests({ repository_id: n.repo_id })) ?? [];
-    const merged = mrs.filter(m => m.status === 'merged');
-    return merged.find(m => m.merge_commit_sha === commitSha) ?? null;
-  }
-
+  // reconciliation task.
+  //
+  // The task description identifies the losing side by agent + commit SHA.
+  // Deliberately NOT resolved to an MR: the divergence body's commit SHAs
+  // are default-branch push tips (the graph extraction records them from
+  // git-http push ref updates), while an MR's merge_commit_sha is a merge
+  // commit created by the merge processor (which never fast-forwards) — the
+  // two can never be equal in any emitter flow, so any MR lookup keyed on
+  // the losing SHA is dead code. The commit SHA alone is concretely
+  // actionable (`git show <sha>` / `git revert <sha>`).
   async function handlePickSide(n, keepSide) {
     const body = getBody(n);
     const repoId = n.repo_id ?? body.repo_id;
@@ -599,7 +597,6 @@
     actionStates = { ...actionStates, [n.id]: { loading: true, action: `pick_${keepSide}` } };
     try {
       const specRef = body.spec_ref || n.entity_ref;
-      const loseMr = await resolveConflictMr(n, loseSha);
       const task = await api.createTask({
         title: $t('decisions.revert_task_title', {
           values: { spec: specRef?.split('/').pop() ?? specRef ?? '' },
@@ -611,7 +608,6 @@
             keep_sha: keepSha ?? '',
             lose_agent: loseAgent ?? '',
             lose_sha: loseSha,
-            lose_mr: loseMr ? `${loseMr.id} (${loseMr.title})` : $t('decisions.revert_task_no_mr'),
             count: body.conflict_count ?? (Array.isArray(body.conflicting_nodes) ? body.conflicting_nodes.length : 0),
           },
         }),
