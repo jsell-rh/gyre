@@ -10,6 +10,7 @@
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId, entityName } from '../lib/entityNames.svelte.js';
+  import SecretsPanel from './SecretsPanel.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -23,7 +24,7 @@
     repo = null,
   } = $props();
 
-  const TAB_IDS = ['general', 'gates', 'policies', 'spec-lifecycle', 'budget', 'dependencies', 'release', 'audit', 'danger-zone'];
+  const TAB_IDS = ['general', 'gates', 'policies', 'spec-lifecycle', 'budget', 'dependencies', 'release', 'secrets', 'audit', 'danger-zone'];
   const TAB_KEYS = {
     'general': 'repo_settings.tabs.general',
     'gates': 'repo_settings.tabs.gates',
@@ -32,6 +33,7 @@
     'budget': 'repo_settings.tabs.budget',
     'dependencies': 'Dependencies',
     'release': 'Release',
+    'secrets': 'Secrets',
     'audit': 'repo_settings.tabs.audit',
     'danger-zone': 'repo_settings.tabs.danger_zone',
   };
@@ -1295,6 +1297,18 @@
               <button class="btn-secondary" onclick={prepareRelease}>Regenerate</button>
             </div>
           </div>
+        {/if}
+      </div>
+
+    <!-- Secrets tab (platform-model.md §7 UI) -->
+    {:else if activeTab === 'secrets'}
+      <div class="tab-body" data-testid="repo-secrets-tab">
+        <h2 class="tab-title">Secrets</h2>
+        <p class="tab-desc">{$t('secrets_panel.hint')}</p>
+        {#if repo?.id}
+          <SecretsPanel scope="repo" scopeId={repo.id} />
+        {:else}
+          <p class="empty-text">A repository must be loaded before managing its secrets.</p>
         {/if}
       </div>
 

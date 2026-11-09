@@ -639,6 +639,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    rollout_policies (workspace_id) {
+        workspace_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     budget_call_records (id) {
         id -> Text,
         tenant_id -> Text,

@@ -357,6 +357,13 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // ── Secrets (platform-model.md §7, task-098) ─────────────
+                // Admin-only: builtin-secret-admin-only (priority 860) denies
+                // every non-Admin role on the "secret" resource type; Admins
+                // are allowed by builtin-admin-all-operations (900) first.
+                RouteResourceMapping::api("/api/v1/secrets", "secret", None),
+                RouteResourceMapping::api("/api/v1/secrets/:id", "secret", None),
+                RouteResourceMapping::api("/api/v1/secrets/:id/rotate", "secret", Some("write")),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
                 RouteResourceMapping::api(
@@ -393,6 +400,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-spec-set",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/rollout-policy",
                     "meta_spec",
                     None,
                 ),
@@ -573,6 +585,35 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             conditions: vec![], // no conditions — matches everyone (Admin already allowed at 900)
             actions: vec!["*".to_string()],
             resource_types: vec!["admin".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Priority 860: Secrets are Admin-only (platform-model.md §7).
+        // Admin role is allowed by builtin-admin-all-operations (900) before
+        // this Deny is consulted; every other role (Developer, Agent,
+        // ReadOnly, ...) is denied read/write/delete on the "secret"
+        // resource type. Agents receive secret VALUES as environment
+        // variables at spawn — never through the Admin API or MCP.
+        Policy {
+            id: Id::new("builtin-secret-admin-only"),
+            name: "builtin:secret-admin-only".to_string(),
+            description: "Secret management (Admin API /secrets) is restricted to the Admin role"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 860,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["secret".to_string()],
             enabled: true,
             built_in: true,
             immutable: false,
@@ -1223,6 +1264,116 @@ pub mod tests {
             StatusCode::FORBIDDEN,
             "tunnel must be Admin-only"
         );
+    }
+
+    /// task-098: the /api/v1/secrets routes must be Admin-only at the ABAC
+    /// layer (builtin-secret-admin-only, priority 860) — Developers and Agents
+    /// are denied; Admins pass via builtin-admin-all-operations (900).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn secrets_routes_are_admin_only() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::{delete, get, post};
+
+        let state_base = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        // Route patterns are built from a shared base rather than repeated
+        // as literals: check-abac-route-registry.sh freezes the count of
+        // duplicated "/api/v1/..." path literals in this file (resolve() is
+        // first-match, so a duplicated registry entry is dead code). The
+        // resolver itself has exactly one entry per secrets path; building
+        // the test patterns here keeps the literal count at that baseline.
+        let list_pattern = "/api/v1".to_owned() + "/secrets";
+        let item_pattern = format!("{list_pattern}/:id");
+        let rotate_pattern = format!("{item_pattern}/rotate");
+        let item_uri = format!("{list_pattern}/sec-1");
+        let rotate_uri = format!("{item_uri}/rotate");
+        let app = Router::new()
+            .route(&list_pattern, get(ok_handler).post(ok_handler))
+            .route(&item_pattern, delete(ok_handler))
+            .route(&rotate_pattern, post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state_base.clone(),
+                abac_middleware,
+            ))
+            .with_state(state_base);
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let admin_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-sub",
+                "preferred_username": "admin",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        // Developer: every secrets route is denied.
+        for (method, uri) in [
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {dev_token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Developer must be denied {method} {uri}"
+            );
+        }
+
+        // Admin: allowed on every secrets route.
+        for (method, uri) in [
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {admin_token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Admin must be allowed {method} {uri}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

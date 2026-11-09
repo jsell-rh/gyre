@@ -1198,6 +1198,17 @@ pub(crate) async fn spawn_agent_core(
     // Best-effort: omit when workspace cannot be efficiently determined.
     let meta_spec_set_sha: Option<String> = None;
 
+    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    crate::agent_audit::emit_spawned(
+        state,
+        &agent,
+        &req.task_id,
+        &compute_target_label,
+        &req.branch,
+        &auth.agent_id,
+    )
+    .await;
+
     Ok(SpawnAgentResponse {
         agent: {
             let mut r = AgentResponse::from(agent);
@@ -1335,6 +1346,14 @@ pub async fn complete_agent(
             let _ = task.transition_status(TaskStatus::Review);
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
+
+            // meta-spec-reconciliation.md §7 auto_merge: when the workspace's
+            // rollout policy sets auto_merge, a reconciliation MR merges
+            // automatically once its gates pass — enqueue it into the merge
+            // queue here (gate passage is still required; the merge processor
+            // merges only after gates pass). Default (auto_merge: false)
+            // leaves the MR for a human/agent-triggered enqueue.
+            crate::reconciliation::maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
         }
     }
 
@@ -1352,8 +1371,19 @@ pub async fn complete_agent(
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
 
+    // Agent lifecycle audit events (observability.md §Audit Event Types).
+    crate::agent_audit::emit_completed(
+        &state,
+        &agent,
+        agent.current_task_id.as_ref(),
+        &mr.id,
+        &mr.source_branch,
+    )
+    .await;
+
     // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
-    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
+    // Revocation is audited as an AgentTokenRevoked event carrying the token's jti.
+    crate::agent_audit::revoke_agent_token(&state, &agent, "agent_completed").await;
 
     // HSI §4: Clean up interrogation ABAC policies on completion.
     cleanup_interrogation_policies(&state, &id).await;
@@ -1645,7 +1675,8 @@ pub async fn stop_agent(
     state.agents.update(&agent).await?;
 
     // Revoke the agent's token so it can no longer authenticate.
-    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
+    // Revocation is audited as an AgentTokenRevoked event carrying the token's jti.
+    crate::agent_audit::revoke_agent_token(&state, &agent, "agent_stopped").await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
@@ -2474,6 +2505,87 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let mr_json = body_json(resp).await;
         assert_eq!(mr_json["author_agent_id"].as_str().unwrap(), &agent_id);
+    }
+
+    #[tokio::test]
+    async fn spawn_emits_agent_spawned_audit_event() {
+        // observability.md §Audit Event Types: a successful spawn must record
+        // an AgentSpawned audit event with name/task_id/compute_target/branch/
+        // spawned_by detail fields.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "audit spawn task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/audit-spawn").await;
+        let agent_id = json["agent"]["id"].as_str().unwrap();
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_spawned").await;
+        assert_eq!(events.len(), 1, "exactly one agent_spawned event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some(agent_id));
+        assert_eq!(ev.agent_id.as_ref().map(|id| id.as_str()), Some(agent_id));
+        assert_eq!(ev.detail["name"], "worker-1");
+        assert_eq!(ev.detail["task_id"], task_id);
+        assert_eq!(ev.detail["compute_target"], "local");
+        assert_eq!(ev.detail["branch"], "feat/audit-spawn");
+        // Global test token authenticates as "system".
+        assert_eq!(ev.detail["spawned_by"], "system");
+    }
+
+    #[tokio::test]
+    async fn complete_emits_agent_completed_and_token_revoked_audit_events() {
+        // observability.md §Audit Event Types: a successful complete must
+        // record AgentCompleted (task_id/mr_id/branch) and the token
+        // revocation must be audited with the revoked token's jti.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "audit complete task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/audit-complete").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/audit-complete",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        let mr_id = mr_json["id"].as_str().unwrap().to_string();
+
+        let completed = crate::agent_audit::recorded_events(&state, "agent_completed").await;
+        assert_eq!(completed.len(), 1, "exactly one agent_completed event");
+        let ev = &completed[0];
+        assert_eq!(ev.resource_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.detail["task_id"], task_id);
+        assert_eq!(ev.detail["mr_id"], mr_id);
+        assert_eq!(ev.detail["branch"], "feat/audit-complete");
+
+        let revoked = crate::agent_audit::recorded_events(&state, "agent_token_revoked").await;
+        assert_eq!(revoked.len(), 1, "exactly one agent_token_revoked event");
+        assert_eq!(revoked[0].detail["reason"], "agent_completed");
+        let jti = revoked[0].detail["jti"]
+            .as_str()
+            .unwrap_or_else(|| panic!("jti must be a string: {}", revoked[0].detail));
+        assert!(!jti.is_empty(), "revocation must carry the token's jti");
+        // The audited jti must match the jti actually embedded in the minted token.
+        let minted_jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&agent_token)
+            .expect("minted token must carry a jti");
+        assert_eq!(jti, minted_jti);
     }
 
     #[tokio::test]
@@ -3597,6 +3709,13 @@ mod tests {
                 _id: &gyre_common::Id,
                 _tenant_id: &str,
             ) -> anyhow::Result<Option<Vec<u8>>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn find_by_id(
+                &self,
+                _id: &gyre_common::Id,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Option<gyre_common::Secret>> {
                 anyhow::bail!("failing secrets port")
             }
             async fn list_by_scope(
