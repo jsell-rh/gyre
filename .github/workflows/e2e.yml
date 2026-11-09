@@ -11,7 +11,16 @@ env:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-24.04: ubuntu-latest now resolves to ubuntu-26.04,
+    # where Playwright 1.58.2 cannot install browsers ("Playwright does not
+    # support chromium on ubuntu26.04-x64"; ubuntu-26.04 host support first
+    # shipped in later Playwright releases). Upgrading Playwright would move
+    # the bundled chromium from r1208 to a newer build and invalidate the
+    # committed visual baselines under
+    # web/tests/e2e/explorer-visual.spec.js-snapshots. Stay on ubuntu-24.04
+    # (fully supported by 1.58.2) until a Playwright upgrade is deliberately
+    # paired with a baseline regeneration.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
