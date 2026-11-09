@@ -20,9 +20,10 @@
 #   gate_executor.rs gate-event ws_id fallback — FIXED in task-134's
 #   gate-executor rewrite: an unresolvable MR now skips the scope-scoped
 #   event emission and logs instead of fabricating a "default" workspace.
-#   The task-134 rebase onto fefde294 combines both fixes in one tree
-#   (task-103's auth.rs fix from the base, task-134's gate-executor fix
-#   from the branch), leaving exactly one flagged site (verified by
-#   running the checker's scan on the merged tree); entries removed and
-#   count lowered 3→1 per the any-growth-fails freeze principle.
+#   The task-134 rebases (fefde294, then task-177's 7747376) combine both
+#   sides' fixes in one tree (task-103's auth.rs fix from the base,
+#   task-134's gate-executor fix from the branch), leaving exactly one
+#   flagged site (verified by running the checker's scan on the merged
+#   tree); entries removed and count lowered 3→1 per the any-growth-fails
+#   freeze principle.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification

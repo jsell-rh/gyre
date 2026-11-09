@@ -104,6 +104,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/diff", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/mirror/sync", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/sync-specs", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
@@ -946,8 +947,11 @@ pub async fn abac_middleware(
     // policy evaluation).
     let action = action_override.unwrap_or_else(|| method_to_action(&method));
 
-    // System token bypasses ABAC entirely.
-    if auth.agent_id == "system" {
+    // System token bypasses ABAC entirely. `is_system_principal()` (not an
+    // agent_id string match): API-key/JWT auth sets agent_id from the user's
+    // display_name, so a user named "system" would otherwise spoof this
+    // bypass (task-099 F1 revision).
+    if auth.is_system_principal() {
         return next.run(req).await;
     }
 

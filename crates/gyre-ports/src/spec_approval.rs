@@ -1,24 +1,61 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
+use gyre_domain::spec_approval::ApprovalTransitionError;
 use gyre_domain::SpecApproval;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async-trait 0.1.89 injects #[must_use] into every
+                                  // expanded method while the boxed-future return type is
+                                  // already #[must_use] (Future); upstream-suppressed set
+                                  // (lint_suppress_without_body) does not cover this lint.
 pub trait SpecApprovalRepository: Send + Sync {
+    /// Insert a new ledger entry. Fails if an entry with the same id already
+    /// exists (ids are freshly generated; a duplicate indicates a bug).
+    /// Multiple approvals for the same spec path (different SHAs) are allowed.
     async fn create(&self, approval: &SpecApproval) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<SpecApproval>>;
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
-    async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
+    /// Ledger entries for one exact spec version ((spec_path, spec_sha)),
+    /// newest first. Backs "on query: return approval status per SHA" and
+    /// the forge's per-SHA approval check (agent-gates.md §The Provenance
+    /// Chain step 8); uses the (spec_path, spec_sha) index.
+    async fn find_by_spec_sha(&self, spec_path: &str, spec_sha: &str) -> Result<Vec<SpecApproval>>;
     async fn list_all(&self) -> Result<Vec<SpecApproval>>;
-    async fn revoke(&self, id: &Id, revoked_by: &str, reason: &str, now: u64) -> Result<()>;
+    /// Active approvals for a path: approved and not revoked/rejected.
+    async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
+
+    /// Transition an entry to Approved (Pending → Approved).
+    /// Returns Ok(None) when the entry does not exist, Err on invalid transition.
+    async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError>;
+
+    /// Transition an entry to Revoked (Approved → Revoked).
+    /// Revocation requires a non-empty reason and is audited by the caller.
+    async fn revoke(
+        &self,
+        id: &Id,
+        revoked_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<Option<()>, ApprovalTransitionError>;
+
+    /// Transition an entry to Rejected (Pending → Rejected).
+    async fn reject(
+        &self,
+        id: &Id,
+        rejected_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<Option<()>, ApprovalTransitionError>;
+
+    /// Revoke every active approval for a spec path (spec-file changed in a
+    /// push: an approval is stale once the spec content changes).
+    /// Returns the number of approvals invalidated.
     async fn revoke_all_for_path(
         &self,
         spec_path: &str,
         revoked_by: &str,
         reason: &str,
         now: u64,
-    ) -> Result<()>;
-
-    /// Mark a spec approval as rejected by a human reviewer.
-    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()>;
+    ) -> Result<u64>;
 }

@@ -73,22 +73,46 @@ fn service_header(service: &str) -> Vec<u8> {
 ///
 /// Resolution steps:
 ///   1. Look up the workspace by slug under the caller's tenant.
+///      For the genuine system principal (the global dev/system token —
+///      `is_system_principal()`, never a bare agent_id string match), a
+///      tenant-scoped miss falls back to a slug-only lookup: the system
+///      principal is the bootstrap principal that created the tenant and
+///      workspace (gyre bootstrap --dev creates tenant "dev" while the
+///      system principal's tenant_id stays "default"), so a strict filter
+///      would 404 the bootstrap flow's own push. The fallback grants
+///      nothing the token lacks elsewhere (it bypasses ABAC on REST), and
+///      the repo is still resolved inside the workspace the slug names.
 ///   2. Look up the repo by name within that workspace.
 async fn resolve_repo_by_slug(
     state: &Arc<AppState>,
-    tenant_id: &str,
+    auth: &crate::auth::AuthenticatedAgent,
     workspace_slug: &str,
     repo_name: &str,
 ) -> Result<gyre_domain::Repository, Response> {
     let repo_name = repo_name.strip_suffix(".git").unwrap_or(repo_name);
-    let tid = Id::new(tenant_id);
 
-    let workspace = state
+    let mut workspace = state
         .workspaces
-        .find_by_slug(&tid, workspace_slug)
+        .find_by_slug(&Id::new(&auth.tenant_id), workspace_slug)
         .await
-        .map_err(|e| git_err(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
+        .map_err(|e| git_err(format!("db error: {e}")))?;
+    if workspace.is_none() && auth.is_system_principal() {
+        // System-principal fallback (see doc comment). `find_by_slug` is
+        // tenant-scoped, so the fallback scans by slug alone. The system
+        // principal is the bootstrap principal that created the tenant and
+        // workspace; a strict tenant filter would 404 the bootstrap flow's
+        // own push (gyre bootstrap --dev creates tenant "dev" while the
+        // system principal's tenant_id stays "default").
+        workspace = state
+            .workspaces
+            .list()
+            .await
+            .map_err(|e| git_err(format!("db error: {e}")))?
+            .into_iter()
+            .find(|ws| ws.slug == workspace_slug);
+    }
+    let workspace =
+        workspace.ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
 
     state
         .repos
@@ -105,11 +129,11 @@ async fn resolve_repo_by_slug(
 /// Resolve to just the filesystem path (convenience wrapper).
 async fn resolve_repo_path_by_slug(
     state: &Arc<AppState>,
-    tenant_id: &str,
+    auth: &crate::auth::AuthenticatedAgent,
     workspace_slug: &str,
     repo_name: &str,
 ) -> Result<String, Response> {
-    resolve_repo_by_slug(state, tenant_id, workspace_slug, repo_name)
+    resolve_repo_by_slug(state, auth, workspace_slug, repo_name)
         .await
         .map(|r| r.path)
 }
@@ -132,7 +156,6 @@ pub struct GitPath {
 pub struct InfoRefsQuery {
     service: String,
 }
-
 pub async fn git_info_refs(
     State(state): State<Arc<AppState>>,
     Path(GitPath {
@@ -153,8 +176,7 @@ pub async fn git_info_refs(
     let content_type = format!("application/x-{service}-advertisement");
 
     let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
+        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
             Ok(p) => p,
             Err(r) => return r,
         };
@@ -207,8 +229,7 @@ pub async fn git_upload_pack(
     req: Request,
 ) -> Response {
     let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
+        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
             Ok(p) => p,
             Err(r) => return r,
         };
@@ -274,11 +295,10 @@ pub async fn git_receive_pack(
         }
     }
 
-    let resolved =
-        match resolve_repo_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
+    let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     if resolved.is_mirror {
         warn!(
             agent_id = %auth.agent_id,
@@ -1482,6 +1502,29 @@ async fn process_spec_lifecycle(
             continue;
         }
 
+        // Resolve the repo's workspace scope once per push. Events are scoped
+        // to the workspace the repo actually belongs to; if the repo cannot be
+        // resolved there is no valid scope to emit under, so skip the events
+        // and log rather than fabricating one (task-097 F3 class). Approval
+        // invalidation is independent of the repo row: it is keyed by spec
+        // path against the on-disk repo, so it still runs below.
+        let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+            Ok(Some(repo)) => Some(repo.workspace_id),
+            Ok(None) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo not found, skipping workspace events"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo lookup failed: {e}, skipping workspace events"
+                );
+                None
+            }
+        };
         let existing_tasks = state.tasks.list().await.unwrap_or_default();
         let now = crate::api::now_secs();
 
@@ -1490,6 +1533,12 @@ async fn process_spec_lifecycle(
             // deleted, or renamed. An approval is stale once the spec content changes.
             {
                 // For renames, the old path is stale; for M/D, the current path is stale.
+                // Diff paths are git paths ("specs/system/foo.md"); approval rows are
+                // keyed by ledger paths ("system/foo.md" — spec_registry strips the
+                // specs/ prefix). Normalize so revocation actually matches rows.
+                fn ledger_path(p: &str) -> &str {
+                    p.strip_prefix("specs/").unwrap_or(p)
+                }
                 let stale_paths: Vec<&str> = match status_char {
                     'M' | 'D' => vec![path.as_str()],
                     'R' => old_path
@@ -1511,10 +1560,15 @@ async fn process_spec_lifecycle(
                         default_branch
                     );
                     let mut invalidated = 0usize;
-                    for &stale_path in &stale_paths {
+                    for stale_path in &stale_paths {
                         let _ = state
                             .spec_approvals
-                            .revoke_all_for_path(stale_path, "system:spec-lifecycle", &reason, now)
+                            .revoke_all_for_path(
+                                ledger_path(stale_path),
+                                "system:spec-lifecycle",
+                                &reason,
+                                now,
+                            )
                             .await;
                         invalidated += 1;
                     }
@@ -1559,27 +1613,9 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    // A lookup failure means the scope cannot be determined —
-                    // skip the workspace-scoped emission rather than
-                    // fabricating a "default" identity (task-097 F3 class).
-                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
-                        Ok(Some(repo)) => repo.workspace_id,
-                        Ok(None) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: repo not found; skipping task events"
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: failed to resolve repo workspace: {e}"
-                            );
-                            continue;
-                        }
-                    };
+                    // ws_id resolved once per push above; None when the repo
+                    // row is unresolvable — skip workspace-scoped events
+                    // rather than emitting under a fabricated scope.
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
@@ -1587,27 +1623,29 @@ async fn process_spec_lifecycle(
                         'R' => "renamed",
                         _ => "unknown",
                     };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    if let Some(ws_id) = ws_id.as_ref() {
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path
@@ -3574,6 +3612,106 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn system_token_resolves_workspace_in_foreign_tenant() {
+        // Dev-mode bootstrap shape (task-099): `gyre bootstrap --dev`
+        // creates tenant "dev" and a workspace under it, but the global
+        // system token's tenant_id is "default". The git smart-HTTP push
+        // the bootstrap flow performs must still resolve the workspace —
+        // via the system-principal slug-only fallback — or the dev-mode
+        // spec-registry step 404s forever while reporting success-ish
+        // output. Non-system principals keep the strict tenant filter.
+        let state = test_state();
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("dev-demo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init --bare failed");
+
+        // Workspace under a NON-"default" tenant — the dev-mode topology.
+        let ws = Workspace {
+            id: Id::new("ws-dev"),
+            tenant_id: Id::new("t-dev"),
+            name: "Default".to_string(),
+            slug: "default".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-dev"),
+            Id::new("ws-dev"),
+            "gyre-demo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .with_state(state.clone());
+
+        // System token (tenant "default") resolves the foreign-tenant
+        // workspace via the fallback.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "system token must resolve the dev-mode (foreign-tenant) workspace"
+        );
+
+        // A user principal from an unrelated tenant is still contained.
+        // (agent token path: Agent role, tenant "default".)
+        let mut user = gyre_domain::User::new(Id::new("u-x"), "ext-x", "someone", 0);
+        user.tenant_id = Some(Id::new("t-other"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_git_foreign_key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "non-system principals must keep the strict tenant filter"
+        );
+    }
+
     fn auth_header() -> &'static str {
         "Bearer test-token"
     }
@@ -4584,6 +4722,126 @@ mod tests {
         assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
         assert_eq!(gate.len(), 1, "should have 1 gate constraint");
         assert_eq!(gate[0].gate_name, "Code Review");
+    }
+
+    /// Spec Approval Ledger regression (agent-gates.md §Spec Approval Ledger):
+    /// a push that modifies a spec file must auto-invalidate active approvals.
+    ///
+    /// Approval rows are keyed by ledger paths ("system/foo.md") while the push
+    /// diff carries git paths ("specs/system/foo.md"); without normalization
+    /// the revocation silently matched nothing and stale approvals stayed
+    /// active (forge then merged against a spec version nobody approved).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_modifying_spec_revokes_ledger_approvals() {
+        let state = test_state();
+
+        // Real repo with two commits: v1 of the spec, then a modification.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v1\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "v1"]);
+        let old_sha = git(&["rev-parse", "HEAD"]);
+
+        // Active approval keyed by the LEDGER path (as approve_spec records).
+        let approval = gyre_domain::SpecApproval::new(
+            gyre_common::Id::new("apr-stale"),
+            "system/payments.md",
+            "a".repeat(40),
+            "user:approver",
+        );
+        state.spec_approvals.create(&approval).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&approval.id, 1700000000)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active());
+
+        // Second commit modifies the spec file on main.
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v2\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "v2"]);
+        let new_sha = git(&["rev-parse", "HEAD"]);
+
+        // Drive the push-time lifecycle hook (default-branch update).
+        process_spec_lifecycle(
+            &state,
+            "repo-stale",
+            repo_path.to_str().unwrap(),
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        // The approval must now be Revoked — the spec content changed.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .expect("approval row survives invalidation");
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked,
+            "push modifying spec must revoke the ledger approval (it was keyed by ledger path, diff by git path)"
+        );
+        assert_eq!(
+            reloaded.approved_at, None,
+            "mutual exclusivity: approved_at cleared"
+        );
+        assert!(reloaded
+            .revocation_reason
+            .as_deref()
+            .unwrap()
+            .contains("modified"));
+
+        // And the revoked approval no longer authorizes merges (forge check).
+        let spec_ref = format!("system/payments.md@{}", "a".repeat(40));
+        assert!(
+            crate::api::gates::verify_spec_ref(&state, &spec_ref)
+                .await
+                .is_err(),
+            "revoked approval must fail verify_spec_ref"
+        );
     }
 
     /// TASK-167 / merge-dependencies.md §2: an end-to-end push through
