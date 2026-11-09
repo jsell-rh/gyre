@@ -52,6 +52,7 @@ const PERSONAS_ID_ROUTE: &str = "/api/v1/personas/:id";
 const REPOS_GATES_ROUTE: &str = "/api/v1/repos/:id/gates";
 const REPOS_GATES_ID_ROUTE: &str = "/api/v1/repos/:id/gates/:gate_id";
 const REPOS_WORKTREES_ID_ROUTE: &str = "/api/v1/repos/:id/worktrees/:worktree_id";
+const REPOS_SPECS_ASSIST_ROUTE: &str = "/api/v1/repos/:id/specs/assist";
 
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
@@ -284,7 +285,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
                 // ── Spec editing backend (S3.3) ────────────────────────────
                 RouteResourceMapping::api(
-                    "/api/v1/repos/:id/specs/assist",
+                    REPOS_SPECS_ASSIST_ROUTE,
                     "spec",
                     Some("generate"),
                 ),
@@ -1341,6 +1342,12 @@ pub fn init_resolver() {
 /// - `repo_id` (spawn scope) → `subject.repo_scope`
 /// - `attestation_level` (numeric claim) → `subject.attestation_level` (number)
 ///
+/// Called only for agent-type subjects — the middleware gates the whole
+/// claim-merge block (allowlisted `merge_agent_jwt_claims` + this
+/// normalization) on `subject.type == "agent"`. §Attributes sources these
+/// names from the "Agent OIDC claim", so a HUMAN token carrying them must
+/// not define them either.
+///
 /// Only sets an attribute when the claim is present and non-empty; a missing
 /// claim leaves the attribute unset so conditions on it fail closed. Never
 /// overwrites an attribute already present in the context.
@@ -1445,14 +1452,26 @@ pub async fn abac_middleware(
     // from here.
     ctx.set("subject.tenant_id", &auth.tenant_id);
     // OIDC-claim-sourced subject attributes (§Attributes: persona, stack_hash,
-    // attestation_level, repo_scope — source "Agent OIDC claim"). Raw claims
-    // merge first; spec-named normalization maps the agent-JWT `wl_stack_hash`
-    // claim onto the spec's `stack_hash` attribute name. Claims never override
-    // the auth-extractor identity facts already set above (merge_jwt_claims
-    // inserts; identity keys already present keep the extractor value).
-    if let Some(claims) = &auth.jwt_claims {
-        ctx.merge_jwt_claims(claims);
-        normalize_agent_jwt_attributes(&mut ctx, claims);
+    // attestation_level, repo_scope — source "Agent OIDC claim"), for AGENT
+    // subjects only. Claim merging is allowlisted to those four names
+    // (merge_agent_jwt_claims) and gated on subject.type == "agent": every
+    // other subject attribute has a canonical non-claim source — the auth
+    // extractor for type/id/global_role/tenant_id, the membership and team
+    // stores for workspace_role/workspace_ids/team_ids — and a verified
+    // JWT's claim CONTENT is caller-chosen, so a raw claim carrying e.g.
+    // {"workspace_role": "Admin"} must never define the attribute. Before
+    // the gate + allowlist (review round 2) such a claim defined the
+    // attribute on any request whose membership block did not overwrite it
+    // (membership-less caller, unaddressed workspace, repo-parented route)
+    // and satisfied membership-keyed Allow policies; the same channel let
+    // human tokens define persona/attestation_level (spec source: agent
+    // claim). The spec-named normalization maps the agent-JWT
+    // `wl_stack_hash` claim onto the spec's `stack_hash` attribute name.
+    if subject_type == "agent" {
+        if let Some(claims) = &auth.jwt_claims {
+            ctx.merge_agent_jwt_claims(claims);
+            normalize_agent_jwt_attributes(&mut ctx, claims);
+        }
     }
 
     // Resource identity attributes from the request path (§Attributes:
@@ -1472,11 +1491,12 @@ pub async fn abac_middleware(
     extract_entity_attributes(&state, &mut ctx, &pattern, req.uri().path(), resource_type).await;
 
     // Membership-sourced subject attributes (§Attributes: source "Membership",
-    // "Memberships", "Team memberships"). JWT claims above may carry richer
-    // claim sets, but membership stores are the canonical source for human
-    // users authenticated via JWT or API key. An empty/failed lookup leaves
-    // the attributes unset — conditions on them then fail closed (a missing
-    // attribute never matches), which is the safe direction.
+    // "Memberships", "Team memberships"). The membership and team stores
+    // are the canonical — and ONLY — source for these names: raw JWT claims
+    // never define them (the agent-only claim allowlist above excludes the
+    // names entirely). An empty/failed lookup leaves the attributes unset —
+    // conditions on them then fail closed (a missing attribute never
+    // matches), which is the safe direction.
     if let Some(user_id) = &auth.user_id {
         match state.workspace_memberships.list_by_user(user_id).await {
             Ok(memberships) if !memberships.is_empty() => {
@@ -1640,6 +1660,7 @@ pub mod tests {
     const WS_TASKS_URI: &str = "/api/v1/workspaces/ws-1/tasks";
     const REPO_GATES_URI: &str = "/api/v1/repos/repo-1/gates";
     const REPO_WORKTREE_URI: &str = "/api/v1/repos/repo-1/worktrees/wt-42";
+    const REPO_SPECS_ASSIST_URI: &str = "/api/v1/repos/repo-1/specs/assist";
 
     fn build_test_app(state: Arc<AppState>) -> Router {
         init_resolver();
@@ -2373,6 +2394,287 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "subject.team_ids must be populated from the team store"
+        );
+    }
+
+    // --- Review round 2: raw JWT claims must not define non-claim ---------
+    // subject attributes (membership-sourced names, agent-claim names for
+    // human subjects). A verified JWT's claim CONTENT is caller-chosen. ----
+
+    /// Common setup for the claim-spoofing tests: JWT-enabled state with a
+    /// ReadOnly user who holds NO workspace membership. On routes that do
+    /// not address a workspace the membership block cannot extract (or
+    /// overwrite) the membership-sourced attributes — the exact condition
+    /// under which a raw claim used to define them.
+    async fn setup_membershipless_state() -> (Arc<AppState>, gyre_common::Id) {
+        use crate::auth::test_helpers::make_test_state_with_jwt;
+        use gyre_domain::{User, UserRole};
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        let user_id = gyre_common::Id::new("22222222-2222-2222-2222-222222222222");
+        let mut user = User::new(user_id.clone(), "nomember-sub", "nomember-user", 0);
+        user.roles = vec![UserRole::ReadOnly];
+        state.users.create(&user).await.unwrap();
+
+        (state, user_id)
+    }
+
+    /// A validly-signed HUMAN JWT whose claim set carries spoofed ABAC
+    /// attributes: `workspace_role` (membership-sourced) plus `persona` and
+    /// `attestation_level` (agent-claim-sourced). The signature verifies —
+    /// the claim content is the attack surface (review round 2).
+    fn spoof_claims_jwt() -> String {
+        use crate::auth::test_helpers::sign_test_jwt;
+        sign_test_jwt(
+            &serde_json::json!({
+                "sub": "nomember-sub",
+                "preferred_username": "nomember-user",
+                "realm_access": { "roles": ["readonly"] },
+                "workspace_role": "Admin",
+                "workspace_ids": ["ws-1"],
+                "team_ids": ["team-platform"],
+                "persona": "repo-orchestrator",
+                "attestation_level": 3
+            }),
+            3600,
+        )
+    }
+
+    /// Review round 2 (killing test): a membership-less user's raw JWT claim
+    /// (`workspace_role: "Admin"`) must NOT define the membership-sourced
+    /// `subject.workspace_role` on a repo-parented route, where the
+    /// membership block has no addressed workspace to extract the role
+    /// from. Before the claim allowlist + agent gate the claim defined the
+    /// attribute and satisfied a workspace_role-keyed Allow end-to-end
+    /// (200 OK); the correct behavior is that no policy matches and the
+    /// builtin default deny stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_role_claim_cannot_spoof_membership_attribute() {
+        let (state, _user_id) = setup_membershipless_state().await;
+
+        // Tenant Allow keyed on the membership-sourced attribute, ABOVE the
+        // builtin role allows (700-800) so only it can grant.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-spoof-ws-role-allow"),
+                name: "spoof-ws-role-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 850,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.workspace_role".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("Admin".to_string()),
+                }],
+                actions: vec!["generate".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_SPECS_ASSIST_ROUTE, post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = spoof_claims_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(REPO_SPECS_ASSIST_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a workspace_role claim must not satisfy a workspace_role-keyed Allow \
+             for a membership-less caller on a repo-parented route"
+        );
+    }
+
+    /// Review round 2 (same class, killing test): §Attributes sources
+    /// `subject.persona` and `subject.attestation_level` from the "Agent
+    /// OIDC claim" — a HUMAN token carrying them must not define them.
+    /// Before the agent gate the claims merged (and normalized) for human
+    /// subjects too, satisfying persona-keyed Allows end-to-end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_persona_claim_cannot_define_agent_attribute() {
+        let (state, _user_id) = setup_membershipless_state().await;
+
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-spoof-persona-allow"),
+                name: "spoof-persona-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 850,
+                effect: PolicyEffect::Allow,
+                conditions: vec![
+                    Condition {
+                        attribute: "subject.persona".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("repo-orchestrator".to_string()),
+                    },
+                    Condition {
+                        attribute: "subject.attestation_level".to_string(),
+                        operator: ConditionOp::GreaterThan,
+                        value: ConditionValue::Number(2),
+                    },
+                ],
+                actions: vec!["generate".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_SPECS_ASSIST_ROUTE, post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = spoof_claims_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(REPO_SPECS_ASSIST_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a human token's persona/attestation_level claims must not satisfy \
+             an agent-claim-keyed Allow"
+        );
+    }
+
+    /// Review round 2 (deny side): a real workspace Viewer whose token
+    /// carries `workspace_role: "Admin"` must still trip a
+    /// persona-management-style NotIn deny — the membership-extracted role
+    /// (Viewer) is the value the deny evaluates, and claim merging may never
+    /// overwrite it. This kills any reordering that merges claims AFTER
+    /// membership extraction: the Admin claim would flip
+    /// NotIn [Owner, Admin] to non-matching and let the builtin Developer
+    /// Allow (priority 800) grant the write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn viewer_with_admin_claim_still_trips_notin_deny() {
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Persona-management-style deny (§Policy Examples): workspace roles
+        // outside {Owner, Admin} cannot write — above the Developer Allow.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-spoof-notin-deny"),
+                name: "spoof-notin-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.workspace_role".to_string(),
+                    operator: ConditionOp::NotIn,
+                    value: ConditionValue::StringList(vec![
+                        "Owner".to_string(),
+                        "Admin".to_string(),
+                    ]),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        // The member JWT (Viewer in ws-1) plus the spoofed Admin claim.
+        let token = crate::auth::test_helpers::sign_test_jwt(
+            &serde_json::json!({
+                "sub": "member-sub",
+                "preferred_username": "member-user",
+                "realm_access": { "roles": ["developer"] },
+                "workspace_role": "Admin"
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the membership-extracted Viewer role must trip the NotIn deny; \
+             the Admin claim must not overwrite it"
         );
     }
 

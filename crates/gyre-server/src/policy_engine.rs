@@ -58,17 +58,15 @@ impl AttributeContext {
         self.attrs.get(key)
     }
 
-    /// Merge JWT claims into the context under the `subject.` namespace.
+    /// Merge arbitrary claims into the context under the `subject.`
+    /// namespace (insert-only: a key already present keeps its value).
     ///
-    /// Insert-only: a key already present in the context keeps its existing
-    /// value. The middleware sets auth-extractor identity facts
-    /// (`subject.type`, `subject.id`, `subject.global_role`) before merging
-    /// claims, and a raw claim must not override them — `subject.global_role`
-    /// is sourced from the User entity by the extractor (§Attributes), and
-    /// `subject.id`/`subject.type` are the authenticated identity. Claims
-    /// sourced by the spec from "Auth context / OIDC" (e.g.
-    /// `subject.tenant_id`) still flow through when the extractor set
-    /// nothing.
+    /// For DRY-RUN / what-if evaluation only (api/policies.rs
+    /// `evaluate_policy`): the caller explicitly supplies hypothetical
+    /// attribute values to test policies against. NEVER use this on a live
+    /// access-decision path — a verified JWT's claim content is
+    /// caller-chosen, so live extraction must use the allowlisted
+    /// [`merge_agent_jwt_claims`] instead.
     pub fn merge_jwt_claims(&mut self, claims: &serde_json::Value) {
         if let Some(obj) = claims.as_object() {
             for (key, val) in obj {
@@ -97,6 +95,60 @@ impl AttributeContext {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    /// Merge the agent-JWT claims that the spec sources from the "Agent OIDC
+    /// claim" into the context under the `subject.` namespace.
+    ///
+    /// Allowlisted to exactly those four attribute names (persona,
+    /// stack_hash, attestation_level, repo_scope) and called only for
+    /// agent-type subjects. Every other `subject.*` attribute has a
+    /// canonical NON-claim source — `type`/`id`/`global_role`/`tenant_id`
+    /// from the auth extractor (§Attributes: "Auth context / OIDC"),
+    /// `workspace_role`/`workspace_ids`/`team_ids` from the membership and
+    /// team stores — so a raw claim carrying those names must never define
+    /// the attribute. A verified JWT's claim CONTENT is caller-chosen
+    /// (whoever controls token minting picks the JSON), and the membership
+    /// block only overwrites `subject.workspace_role` when the request
+    /// addresses a workspace the caller belongs to: before the allowlist,
+    /// a human JWT carrying `{"workspace_role": "Admin"}` defined the
+    /// attribute on repo-parented or unscoped routes and satisfied Allow
+    /// policies keyed on it (spoofing channel, review round 2).
+    ///
+    /// Insert-only: a key already present in the context keeps its existing
+    /// value, so a claim cannot override an extractor-resolved identity
+    /// fact even for the allowlisted names.
+    pub fn merge_agent_jwt_claims(&mut self, claims: &serde_json::Value) {
+        /// The only `subject.*` attributes a raw JWT claim may define
+        /// (§Attributes, source column "Agent OIDC claim").
+        const AGENT_CLAIM_ATTRIBUTES: [&str; 4] =
+            ["persona", "stack_hash", "attestation_level", "repo_scope"];
+        let Some(obj) = claims.as_object() else {
+            return;
+        };
+        for key in AGENT_CLAIM_ATTRIBUTES {
+            let Some(val) = obj.get(key) else {
+                continue;
+            };
+            let full_key = format!("subject.{key}");
+            if self.attrs.contains_key(&full_key) {
+                continue;
+            }
+            match val {
+                serde_json::Value::String(s) => {
+                    self.set(full_key, s.clone());
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        self.set_number(full_key, i);
+                    }
+                }
+                serde_json::Value::Bool(b) => {
+                    self.set_bool(full_key, *b);
+                }
+                _ => {}
             }
         }
     }
@@ -587,42 +639,104 @@ mod tests {
     }
 
     #[test]
-    fn merge_jwt_claims_into_context() {
+    fn merge_agent_jwt_claims_allowlisted_to_agent_claim_names() {
+        // Only the four §Attributes "Agent OIDC claim" names may be defined
+        // by a raw claim. Before the allowlist this test fails: the claim
+        // set defined subject.workspace_role (a membership-sourced
+        // attribute) and subject.groups, so a policy keyed on
+        // subject.workspace_role matched a caller who holds no membership —
+        // the review round-2 spoofing channel.
         let mut ctx = AttributeContext::default();
         let claims = serde_json::json!({
-            "workspace_role": "Developer",
+            "workspace_role": "Admin",
+            "workspace_ids": ["ws-1"],
+            "team_ids": ["team-x"],
             "groups": ["infra", "dev"],
+            "global_role": "Admin",
+            "persona": "repo-orchestrator",
+            "repo_scope": "repo-9",
             "attestation_level": 2
         });
-        ctx.merge_jwt_claims(&claims);
-        assert!(ctx.has("subject.workspace_role"));
-        assert!(ctx.has("subject.groups"));
-        assert!(ctx.has("subject.attestation_level"));
+        ctx.merge_agent_jwt_claims(&claims);
+
+        // Allowlisted agent-claim names merge with their types.
+        assert_eq!(
+            ctx.get("subject.persona"),
+            Some(&AttrValue::Single("repo-orchestrator".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.repo_scope"),
+            Some(&AttrValue::Single("repo-9".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.attestation_level"),
+            Some(&AttrValue::Number(2))
+        );
+
+        // Membership-sourced and identity names are NEVER claim-definable.
+        assert!(!ctx.has("subject.workspace_role"));
+        assert!(!ctx.has("subject.workspace_ids"));
+        assert!(!ctx.has("subject.team_ids"));
+        assert!(!ctx.has("subject.global_role"));
+        assert!(!ctx.has("subject.groups"));
+
+        // Behavioral assertion: an Allow keyed on subject.workspace_role
+        // must NOT match the claim-injected value — the attribute is
+        // absent, so the condition fails closed and default deny stands.
+        let allow_admin = Policy {
+            id: Id::new("allow-admin"),
+            name: "admin-allow".to_string(),
+            description: String::new(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 900,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+            actions: vec!["write".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("test"),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = evaluate(vec![allow_admin], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a workspace_role claim must not satisfy a workspace_role-keyed Allow"
+        );
     }
 
     #[test]
-    fn merge_jwt_claims_never_overrides_existing_attributes() {
+    fn merge_agent_jwt_claims_never_overrides_existing_attributes() {
         // The middleware sets auth-extractor identity facts before merging
-        // raw JWT claims. A claim sharing an attribute's name (e.g. a
-        // Keycloak `global_role` claim) must NOT override the extractor-
-        // resolved value — `subject.global_role` is sourced from the User
-        // entity (§Attributes), not from arbitrary claims. Before the
-        // insert-only fix this test fails: HashMap::insert let the claim
-        // overwrite the resolved "ReadOnly" with "Admin", so the
-        // readonly Allow no longer matched and the request fell to
-        // default deny.
+        // claims. A claim sharing an attribute's name must NOT override the
+        // extractor-resolved value — and with the allowlist, non-claim
+        // names do not even enter the context. Before the insert-only fix
+        // this test fails: HashMap::insert let the claim overwrite the
+        // resolved "ReadOnly" with "Admin", so the readonly Allow no
+        // longer matched and the request fell to default deny.
         let mut ctx = AttributeContext::default();
         ctx.set("subject.global_role", "ReadOnly");
         ctx.set("subject.type", "user");
+        // An extractor- or normalizer-set allowlisted name also stands.
+        ctx.set("subject.persona", "gate-approver");
         let claims = serde_json::json!({
             "global_role": "Admin",
             "type": "agent",
-            "tenant_id": "tenant-a"
+            "tenant_id": "tenant-a",
+            "persona": "spoofed-persona"
         });
-        ctx.merge_jwt_claims(&claims);
+        ctx.merge_agent_jwt_claims(&claims);
 
-        // Direct attribute assertions: extractor facts stand, unclaimed
-        // spec attributes still merge.
+        // Direct attribute assertions: extractor/normalizer facts stand,
+        // non-claim names never merge.
         assert_eq!(
             ctx.get("subject.global_role"),
             Some(&AttrValue::Single("ReadOnly".to_string()))
@@ -631,9 +745,10 @@ mod tests {
             ctx.get("subject.type"),
             Some(&AttrValue::Single("user".to_string()))
         );
+        assert!(!ctx.has("subject.tenant_id"));
         assert_eq!(
-            ctx.get("subject.tenant_id"),
-            Some(&AttrValue::Single("tenant-a".to_string()))
+            ctx.get("subject.persona"),
+            Some(&AttrValue::Single("gate-approver".to_string()))
         );
 
         // Behavioral assertion: an Allow keyed on the extractor value must
