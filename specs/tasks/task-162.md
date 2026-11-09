@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5192ff750f58b79d2553a317e9d9b802292ad3e1"]
 ---
 
 ## Spec Excerpt
@@ -150,3 +150,15 @@ Both findings from the review round at 152e67033 are fixed:
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
 clean. Evidence recorded under /tmp/stage/review-evidence.
+
+### Review repair (finding e7aa777ea)
+
+Head cea3f23b4 had regressed the 73a69995 process repair: the `commits:`
+frontmatter again listed only 5192ff750 and 51221dc02, dropping merge
+commit 9e5a0171d (the main.rs import-conflict resolution) from review
+scoping and falsifying the merge-repair note's claim above. Fixed by
+restoring the full three-commit list (51221dc02, 9e5a0171d, 5192ff750) in
+the frontmatter; no production code changed in this round.
+`scripts/check-task-commit-attribution.sh` passes and the merge-repair and
+review-repair notes are accurate at head. Full test suites unchanged from
+the evidence above.
