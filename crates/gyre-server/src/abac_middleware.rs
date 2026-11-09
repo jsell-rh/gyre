@@ -570,6 +570,12 @@ fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
 ///   parent, not the addressed entity, so no `resource.id` is fabricated
 ///   from it; the addressed entity surfaces via its `{resource_type}_id`
 ///   param when the route names one (e.g. `/repos/:id/worktrees/:worktree_id`).
+/// - A `:path` param names the addressed entity by its registry path,
+///   URL-encoded (spec and meta-spec routes: `/specs/:path`,
+///   `/repos/:id/specs/:path/assertions`, `/meta-specs/:path/blast-radius`).
+///   The percent-DECODED path is the resource identity (§Attributes:
+///   `resource.id`, source "Request path", example `system/identity-security.md`);
+///   invalid percent-encoding leaves `resource.id` unset (fail closed).
 ///
 /// Attributes requiring entity lookup (`resource.tenant_id`, `owner`, `team`,
 /// `approval_status`, `visibility`) are populated by
@@ -635,6 +641,22 @@ fn extract_path_attributes(
     });
     if let Some(id) = resource_id {
         ctx.set("resource.id", id);
+    }
+
+    // A `:path` param names the addressed entity by its registry path,
+    // URL-encoded (spec/meta-spec routes — the spec's own §Attributes
+    // example for resource.id is a spec path, `system/identity-security.md`).
+    // The DECODED path is the identity; a value that is not valid
+    // percent-encoding cannot name an entity, so `resource.id` stays unset
+    // and conditions on it fail closed.
+    if let Some(raw) = params.get("path") {
+        match percent_decode(raw) {
+            Some(decoded) => ctx.set("resource.id", decoded),
+            None => tracing::warn!(
+                %raw,
+                "path param is not valid percent-encoding; resource.id unset"
+            ),
+        }
     }
 }
 
@@ -1351,24 +1373,28 @@ pub fn init_resolver() {
 ///
 /// Only sets an attribute when the claim is present and non-empty; a missing
 /// claim leaves the attribute unset so conditions on it fail closed. Never
-/// overwrites an attribute already present in the context.
+/// overwrites an attribute already present in the context (guarded below
+/// with `contains_key`, matching the insert-only `merge_agent_jwt_claims`
+/// that runs immediately before it on the same claims object).
 fn normalize_agent_jwt_attributes(ctx: &mut AttributeContext, claims: &serde_json::Value) {
     let obj = match claims.as_object() {
         Some(o) => o,
         None => return,
     };
     if let Some(hash) = obj.get("wl_stack_hash").and_then(|v| v.as_str()) {
-        if !hash.is_empty() {
+        if !hash.is_empty() && !ctx.has("subject.stack_hash") {
             ctx.set("subject.stack_hash", hash);
         }
     }
     if let Some(repo) = obj.get("repo_id").and_then(|v| v.as_str()) {
-        if !repo.is_empty() {
+        if !repo.is_empty() && !ctx.has("subject.repo_scope") {
             ctx.set("subject.repo_scope", repo);
         }
     }
     if let Some(level) = obj.get("attestation_level").and_then(|v| v.as_i64()) {
-        ctx.set_number("subject.attestation_level", level);
+        if !ctx.has("subject.attestation_level") {
+            ctx.set_number("subject.attestation_level", level);
+        }
     }
 }
 
@@ -2754,6 +2780,102 @@ pub mod tests {
         assert_eq!(attr_str(&ctx, "resource.id"), Some("dep-3"));
     }
 
+    /// Unit-level check of the `:path` convention (review round 3: spec
+    /// routes address the resource by a URL-encoded registry path, and
+    /// `resource.id` was never populated — no `:id` or `{resource_type}_id`
+    /// param exists on those routes, so no policy could condition on the
+    /// addressed spec's identity).
+    #[test]
+    fn path_attributes_path_param_names_addressed_spec() {
+        // Spec document route: the percent-DECODED registry path is the
+        // resource identity (§Attributes example: `system/identity-security.md`).
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(&mut ctx, SPECS_PATH_ROUTE, SPEC_DOC_URI, "spec");
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            Some("system/design.md"),
+            "resource.id on a :path-addressed spec route must be the decoded registry path"
+        );
+
+        // Spec child route: still the decoded spec path, not the literal
+        // `history` segment or the raw encoded param. (Pattern derived from
+        // SPECS_PATH_ROUTE so no new `/api/v1/...` literal is introduced —
+        // the registry check freezes the duplicate-literal count.)
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            &format!("{SPECS_PATH_ROUTE}/history"),
+            "/api/v1/specs/system%2Fdesign.md/history",
+            "spec",
+        );
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("system/design.md"));
+
+        // Repo-parented spec child route: `:id` names the parent repo
+        // (resource.repo_id), `:path` names the addressed spec. (Pattern
+        // derived from REPOS_ID_ROUTE for the same duplicate-literal reason.)
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            &format!("{REPOS_ID_ROUTE}/specs/:path/assertions"),
+            "/api/v1/repos/repo-1/specs/system%2Fdesign.md/assertions",
+            "spec",
+        );
+        assert_eq!(attr_str(&ctx, "resource.repo_id"), Some("repo-1"));
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("system/design.md"));
+
+        // Invalid percent-encoding cannot name an entity: `resource.id`
+        // stays unset so conditions on it fail closed.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            SPECS_PATH_ROUTE,
+            "/api/v1/specs/bad%ZZ.md",
+            "spec",
+        );
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            None,
+            "invalid percent-encoding must leave resource.id unset (fail closed)"
+        );
+    }
+
+    /// Review round 3 (doc/code divergence): `normalize_agent_jwt_attributes`
+    /// documents "never overwrites an attribute already present in the
+    /// context" — the exact invariant the round-2 anti-spoofing fix relies
+    /// on — but its setters were unconditional. A future reordering (calling
+    /// the normalizer before extractor-resolved attributes exist, or with a
+    /// different claims source) would silently violate the stated guarantee
+    /// with no test catching it. This test pins the invariant directly.
+    #[test]
+    fn normalize_agent_jwt_attributes_never_overwrites_existing_attributes() {
+        let mut ctx = AttributeContext::default();
+        // Pre-set values the normalizer must not clobber (e.g. set by an
+        // earlier extraction pass from a different source).
+        ctx.set("subject.stack_hash", "sha256:already-set");
+        ctx.set("subject.repo_scope", "repo-already");
+        ctx.set_number("subject.attestation_level", 1);
+
+        let claims = serde_json::json!({
+            "wl_stack_hash": "sha256:claim-value",
+            "repo_id": "repo-claim",
+            "attestation_level": 3
+        });
+        normalize_agent_jwt_attributes(&mut ctx, &claims);
+
+        assert_eq!(
+            ctx.get("subject.stack_hash"),
+            Some(&AttrValue::Single("sha256:already-set".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.repo_scope"),
+            Some(&AttrValue::Single("repo-already".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.attestation_level"),
+            Some(&AttrValue::Number(1))
+        );
+    }
+
     /// Review round 1 (code finding), live-middleware reproduction: on the
     /// gate collection route under a repo, `resource.id` must NOT carry the
     /// parent repo id. A Deny keyed on `resource.id == <repo id>` must not
@@ -3946,6 +4068,121 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "resource.owner == user:bob must trip the NotEquals deny"
+        );
+    }
+
+    /// `resource.id` on `:path`-addressed spec routes must be the
+    /// percent-DECODED registry path and reach live evaluation (review
+    /// round 3: no `:id`/`{resource_type}_id` param exists on those routes,
+    /// so `resource.id` was never populated and no policy could condition
+    /// on the addressed spec's identity — §Attributes defines resource.id
+    /// with the spec-path example `system/identity-security.md`).
+    ///
+    /// Discriminating form: a Deny at priority 810 (above the builtin
+    /// Developer read allow at 800) keyed on `resource.id Equals
+    /// "system/design.md"`. Without the attribute the condition fails
+    /// closed, the builtin allow grants, and the request returns 200 — the
+    /// killing direction. The raw (still-encoded) param value would NOT
+    /// match the decoded constant, so the deny firing also proves the
+    /// percent-decoding. A second Deny keyed on a DIFFERENT spec path must
+    /// not fire, proving the attribute is the addressed spec's path, not a
+    /// constant.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_resource_id_from_decoded_path_reaches_live_evaluation() {
+        let state = setup_entity_state().await;
+
+        let deny_policy = |path: &str| Policy {
+            id: gyre_common::Id::new("test-spec-resource-id-deny"),
+            name: "spec-path-deny".to_string(),
+            description: String::new(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 810,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "resource.id".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String(path.to_string()),
+            }],
+            actions: vec!["read".to_string()],
+            resource_types: vec!["spec".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("system"),
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        // Deny reads of exactly system/design.md (the seeded spec's path).
+        state
+            .policies
+            .create(&deny_policy("system/design.md"))
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(SPECS_PATH_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // GET /api/v1/specs/system%2Fdesign.md: the decoded resource.id
+        // matches the deny's constant → 403. (Without resource.id populated
+        // — the round-3 defect — the builtin Developer read allow at 800
+        // grants and this returns 200.)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "resource.id (decoded spec path) must reach live evaluation and deny"
+        );
+
+        // Retarget the deny to a different spec path: the addressed spec's
+        // resource.id must not match → the builtin Developer read allow
+        // grants → 200. Proves the attribute carries the addressed spec's
+        // path, not any constant.
+        state
+            .policies
+            .delete("test-spec-resource-id-deny")
+            .await
+            .unwrap();
+        state
+            .policies
+            .create(&deny_policy("system/other.md"))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a deny keyed on a different spec path must not fire"
         );
     }
 
