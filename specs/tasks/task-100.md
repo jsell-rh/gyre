@@ -4,7 +4,7 @@ spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on:
   - task-097
   - task-098
-progress: ready-for-review
+progress: complete
 coverage_sections: []
 commits: ["abd7dab3b2755cfef567d8669dcad7e77b24f22e", "afd5ab18bb1b17954e04de5aafdcb6a6f4f690fe", "c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347"]
 ---
