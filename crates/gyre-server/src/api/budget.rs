@@ -512,18 +512,35 @@ async fn workspace_tenant_id(state: &AppState, ws_id: &Id) -> Option<String> {
 
 /// Emit `MessageKind::BudgetWarning` to each active agent in the workspace
 /// and a `NotificationType::BudgetWarning` (priority 7) to their spawner(s).
+///
+/// Each agent gets BOTH a workspace-feed copy and a Directed
+/// `Destination::Agent` copy: the agent MCP poll channel
+/// (GET /api/v1/agents/:id/messages -> `messages.list_after`) only returns
+/// messages addressed `to_type == "agent"`, so a workspace-only emission
+/// would never reach the agent the warning is about.
 async fn emit_budget_warn(state: &AppState, ws_id: &Id, agents: &[Agent], usage_pct: f64) {
     for agent in agents {
+        let payload = serde_json::json!({
+            "agent_id": agent.id.to_string(),
+            "workspace_id": ws_id.to_string(),
+            "usage_pct": usage_pct,
+        });
+        // Broadcast to the workspace feed.
         state
             .emit_event(
                 Some(ws_id.clone()),
                 Destination::Workspace(ws_id.clone()),
                 MessageKind::BudgetWarning,
-                Some(serde_json::json!({
-                    "agent_id": agent.id.to_string(),
-                    "workspace_id": ws_id.to_string(),
-                    "usage_pct": usage_pct,
-                })),
+                Some(payload.clone()),
+            )
+            .await;
+        // Directed to the agent (MCP notification channel).
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                Destination::Agent(agent.id.clone()),
+                MessageKind::BudgetWarning,
+                Some(payload),
             )
             .await;
     }
@@ -556,18 +573,34 @@ async fn emit_budget_warn(state: &AppState, ws_id: &Id, agents: &[Agent], usage_
 }
 
 /// Emit `MessageKind::BudgetExhausted` to each active agent in the workspace.
+///
+/// Directed `Destination::Agent` copies are emitted alongside the workspace
+/// broadcast so the agent learns (via its MCP message poll) that it must
+/// hand off work within the grace period — a workspace-only emission is
+/// invisible to the agent's channel.
 async fn emit_budget_exhausted(state: &AppState, ws_id: &Id, agents: &[Agent], grace_secs: u64) {
     for agent in agents {
+        let payload = serde_json::json!({
+            "agent_id": agent.id.to_string(),
+            "workspace_id": ws_id.to_string(),
+            "grace_secs": grace_secs,
+        });
+        // Broadcast to the workspace feed.
         state
             .emit_event(
                 Some(ws_id.clone()),
                 Destination::Workspace(ws_id.clone()),
                 MessageKind::BudgetExhausted,
-                Some(serde_json::json!({
-                    "agent_id": agent.id.to_string(),
-                    "workspace_id": ws_id.to_string(),
-                    "grace_secs": grace_secs,
-                })),
+                Some(payload.clone()),
+            )
+            .await;
+        // Directed to the agent (MCP notification channel).
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                Destination::Agent(agent.id.clone()),
+                MessageKind::BudgetExhausted,
+                Some(payload),
             )
             .await;
     }
@@ -1231,6 +1264,21 @@ mod tests {
             .len()
     }
 
+    /// The agent MCP poll channel (GET /api/v1/agents/:id/messages →
+    /// `list_after`) only returns messages addressed `to_type == "agent"`;
+    /// workspace-feed copies are invisible to it. Budget warnings must land
+    /// here for the agent to act on them.
+    async fn agent_inbox(
+        state: &Arc<crate::AppState>,
+        agent: &str,
+    ) -> Vec<gyre_common::message::Message> {
+        state
+            .messages
+            .list_after(&gyre_common::Id::new(agent), 0, None, 100)
+            .await
+            .unwrap()
+    }
+
     async fn budget_notifications(
         state: &Arc<crate::AppState>,
         ws: &str,
@@ -1279,6 +1327,18 @@ mod tests {
             1,
             "one BudgetWarning message must be emitted at 85%"
         );
+        // The agent itself must receive the warning via its MCP poll
+        // channel (Directed copy), not just the workspace feed.
+        let inbox = agent_inbox(&state, "agent-enf-1").await;
+        assert_eq!(
+            inbox
+                .iter()
+                .filter(|m| m.kind.as_str() == "budget_warning")
+                .count(),
+            1,
+            "agent inbox must contain budget_warning, got: {:?}",
+            inbox.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>()
+        );
         let notifs = budget_notifications(&state, "ws-enf-warn").await;
         assert_eq!(notifs.len(), 1, "spawner must get one BudgetWarning notification");
         assert_eq!(
@@ -1308,6 +1368,15 @@ mod tests {
             "warning must not re-fire within the same period"
         );
         assert_eq!(budget_notifications(&state, "ws-enf-warn").await.len(), 1);
+        assert_eq!(
+            agent_inbox(&state, "agent-enf-1")
+                .await
+                .iter()
+                .filter(|m| m.kind.as_str() == "budget_warning")
+                .count(),
+            1,
+            "agent inbox must not receive a duplicate warning in the same period"
+        );
     }
 
     #[tokio::test]
@@ -1336,6 +1405,15 @@ mod tests {
         assert_eq!(count_messages(&state, "ws-enf-below", "budget_warning").await, 0);
         assert_eq!(count_messages(&state, "ws-enf-below", "budget_exhausted").await, 0);
         assert!(budget_notifications(&state, "ws-enf-below").await.is_empty());
+        assert!(
+            agent_inbox(&state, "agent-enf-1")
+                .await
+                .iter()
+                .all(|m| {
+                    m.kind.as_str() != "budget_warning" && m.kind.as_str() != "budget_exhausted"
+                }),
+            "below-threshold usage must not deliver budget messages to the agent inbox"
+        );
         let agent = state
             .agents
             .find_by_id(&gyre_common::Id::new("agent-enf-1"))
@@ -1375,6 +1453,18 @@ mod tests {
         assert_eq!(
             count_messages(&state, "ws-enf-kill", "budget_exhausted").await,
             1
+        );
+        // ... and the agent received it directly, so the grace period is
+        // meaningful from the agent's side (hand-off signal).
+        let inbox = agent_inbox(&state, "agent-enf-1").await;
+        assert_eq!(
+            inbox
+                .iter()
+                .filter(|m| m.kind.as_str() == "budget_exhausted")
+                .count(),
+            1,
+            "agent inbox must contain budget_exhausted, got: {:?}",
+            inbox.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>()
         );
 
         handle.await.expect("grace timer must run to completion");
@@ -1436,6 +1526,15 @@ mod tests {
         assert_eq!(
             count_messages(&state, "ws-enf-kill", "budget_exhausted").await,
             1
+        );
+        assert_eq!(
+            agent_inbox(&state, "agent-enf-1")
+                .await
+                .iter()
+                .filter(|m| m.kind.as_str() == "budget_exhausted")
+                .count(),
+            1,
+            "agent inbox must not receive a duplicate exhausted message in the same period"
         );
     }
 
