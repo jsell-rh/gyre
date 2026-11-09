@@ -66,24 +66,40 @@ URLs. Storage: `user_channel_preferences` table (migration
 `UserChannelPreferenceRepository` port with SQLite, Postgres, and mem
 adapters (all enforce the upsert contract).
 
-### Merge round (fefde294, commit 6703a0353)
+### Merge rounds (latest: 774737638, commit c4ebdc2d0)
 
-Rebase merge from main resolved. `gyre-common/src/notification.rs`: both
-sides appended `NotificationType` variants at the same arms — resolution
-keeps both sets (task-112's PersonaApprovalRequested/MergeQueuePaused/
-BudgetExhausted/SecurityFinding and main's SecretExpiring).
-`check-fabricated-scope-defaults.sh`: both sides lowered
-`FROZEN_EXEMPTION_COUNT`; the exemption file auto-merged to main's 2-entry
-version (auth.rs:773 entry removed upstream by task-103's repair), so the
-script takes main's count=3 — keeping our 4 would reintroduce the off-by-one
-slack the gate exists to close. Merge seam: `for_notification_type` is
-exhaustive, so SecretExpiring is banded High (same approaching-deadline class
-as BudgetWarning, numeric 7); the spec's type→band amendment table records
-the banding with a footnote and the dispatcher's membership test asserts it.
-Prior merge rounds (ed57c723, 9bef21a4, 72ad2a128, c5deca80) resolved with
-conflicts confined to the seams noted in their merge commits; generated
-`web/dist` assets are restored from the assignment base by the executor and
-rebuilt remotely.
+Latest rebase merge from main (task-177 rendering round) resolved two
+conflicts. `api/spawn.rs` (`fail_agent`): main added task-scoped secret
+revocation on the Failed terminal transition (`revoke_agent_task_secrets`,
+platform-model.md §7) plus a plain spawned_by notify; our branch had
+replaced that notify with the full §Notification Routing for Agent
+Escalations chain. Resolution keeps both — the secret revocation runs
+first, then `notify_agent_escalation`, which subsumes the plain spawned_by
+notify it replaced (spawned_by is always the primary escalation
+recipient). `git_http.rs` (spec-lifecycle push hook): our branch resolved
+the repo's workspace inline per task with an else-warn; main hoisted the
+same lookup-once-per-push-with-warn-on-None resolution above the task
+loop. Resolution adopts main's hoisted structure — behavior identical
+(skip workspace-scoped events when the repo row is unresolvable, never
+fabricate a scope); the redundant inline lookup is dropped. Generated
+`web/dist` assets are restored from the assignment base by the executor
+and rebuilt remotely.
+
+Prior merge round (fefde294, commit 6703a0353):
+`gyre-common/src/notification.rs`: both sides appended `NotificationType`
+variants at the same arms — resolution keeps both sets (task-112's
+PersonaApprovalRequested/MergeQueuePaused/BudgetExhausted/SecurityFinding
+and main's SecretExpiring). `check-fabricated-scope-defaults.sh`: both
+sides lowered `FROZEN_EXEMPTION_COUNT`; the exemption file auto-merged to
+main's 2-entry version (auth.rs:773 entry removed upstream by task-103's
+repair), so the script takes main's count=3 — keeping our 4 would
+reintroduce the off-by-one slack the gate exists to close. Merge seam:
+`for_notification_type` is exhaustive, so SecretExpiring is banded High
+(same approaching-deadline class as BudgetWarning, numeric 7); the spec's
+type→band amendment table records the banding with a footnote and the
+dispatcher's membership test asserts it. Earlier merge rounds (ed57c723,
+9bef21a4, 72ad2a128, c5deca80) resolved with conflicts confined to the
+seams noted in their merge commits.
 
 ### Review repair history
 
@@ -107,29 +123,37 @@ type→band table amended into the spec, plus the full-path regression
 `agent_escalation_notifies_owners_even_when_spawner_online`. (2) A dead
 channel-prefs defaults test (missing `#[tokio::test]`) now executes.
 
-### Test evidence (merge-round HEAD 6703a0353, this sandbox)
+### Test evidence (merge-round HEAD c4ebdc2d0, this sandbox)
 
-- `SKIP_WEB_BUILD=1 cargo build -p gyre-common -p gyre-domain -p gyre-server`:
-  clean.
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-server`: clean.
 - `cargo test -p gyre-server --lib notification_dispatcher`: 16 passed
   (HMAC signing + threshold filtering, slack posting + channel override,
   email outbox, escalation recipient chain incl. offline-spawner and Urgent
   fan-out, full-path agent-escalation → Owners regression, band membership
   incl. SecretExpiring → High).
-- `cargo test -p gyre-server --lib secret_rotation`: 3 passed (main's new
-  SecretExpiring emitter flowing through the dispatcher).
+- `cargo test -p gyre-server --lib secret_rotation`: 8 passed (main's new
+  SecretExpiring emitter flowing through the dispatcher, plus task-177's
+  rotation-handler tests).
 - `cargo test -p gyre-server --lib notifications`: 13 passed;
   `api::users`: 18 passed (incl. four channel-prefs API tests);
-  `api::spawn`: 38 passed.
+  `api::spawn`: 41 passed (incl. main's
+  `stop_agent_revokes_task_scoped_secrets`);
+  `git_http`: 40 passed.
 - `cargo test -p gyre-common --lib notification`: 4 passed;
   `cargo test -p gyre-domain --lib user`: 11 passed.
+- `cargo clippy -p gyre-server --lib --tests`: exit 0 (warnings are the
+  pre-existing merged baseline, none in the resolved seams).
+  `cargo fmt -p gyre-server -- --check`: clean.
 - Text gates OK this round: fabricated-scope-defaults, migration-versions
-  (full-prefix Diesel versions unique across the merged set), arch,
-  dead-message-kinds, abac-route-registry, unbounded-external-http,
-  inert-enforcement. Other gates are unaffected (no routes, migrations,
-  ports, or stores touched by the seam edits).
-- Web (`web/src`) untouched by this round; prior vitest evidence stands.
-- Evidence: `/tmp/stage/review-evidence/task-112-merge-round.txt`.
+  and migration-sql-portability (the merge rides main's new migrations
+  000056–000058; versions unique and portable across the merged set),
+  arch, dead-message-kinds, abac-route-registry,
+  unbounded-external-http, inert-enforcement. Other gates are unaffected
+  (no routes, ports, or stores touched by the seam edits).
+- Web (`web/src`) untouched by this round's resolution (task-177's web
+  changes ride the merge from main unmodified); prior vitest evidence
+  stands.
+- Evidence: `/tmp/stage/review-evidence/task-112-merge-round-two.txt`.
 
 **Standing sandbox restriction for remote verification** (infrastructure,
 not a code defect): `awk` is mawk-only, so the gawk-syntax gates
