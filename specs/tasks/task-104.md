@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
+commits: ["0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
 ---
 
 ## Spec Excerpt
@@ -81,19 +81,21 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 ## Shipped
 
-All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–8; current head `47190ed90`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–9; current head `0e487df7f`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
 
-### Review repair (round 8, commit `47190ed90`): five uninstrumented role guards now record RbacDenied
+### Review repair (round 9, commit `0e487df7f`): five remaining uninstrumented role guards now record RbacDenied
 
-Review finding `a42d6a7254` F1 (on candidate `90ee7e745`): five pure role guards rejected with 403 while recording no `rbac_denied` audit event, so those rejections were invisible to the audit trail and SIEM forwarding. All five now record the spec'd detail fields (`user_id`, `required_role`, `actual_role`, `endpoint`) via the shared `rbac::record_rbac_denied` helper:
+Review finding `301748df18` F1/F2 (on candidate `0fbf50527`): the update_peer and delete_peer Admin guards (network.rs) and the put_rollout_policy Admin guard (meta_specs.rs, arrived via the task-157 base merge) rejected with 403 while recording no `rbac_denied` audit event — the same class as the round-8 finding. A same-class sweep of every handler in `api/` found two more sites that would keep the "all live per-handler role guards" claim false: the secrets `require_admin` helper (four endpoints, arrived via the task-098 base merge) and the send_message broadcast guard. All five now record the spec'd detail fields (`user_id`, `required_role`, `actual_role`, `endpoint`) via the shared `rbac::record_rbac_denied` helper:
 
-- `POST /api/v1/workspaces/:id/meta-specs/preview` (Admin-or-Developer, meta_specs.rs)
-- `GET /api/v1/meta-specs-registry` (Admin; ABAC-exempt route where the handler guard is the only authorization surface, meta_specs.rs)
-- `POST /api/v1/specs/:path/approve` (ReadOnly rejection, specs.rs)
-- `POST /api/v1/specs/:path/reject` (Admin-or-Developer, specs.rs)
-- `PUT /api/v1/merge-requests/:id/status` (Agent role may not set Approved — supervised-trust guard, merge_requests.rs)
+- `PUT /api/v1/network/peers/:id` (Admin guard for non-JWT callers, update_peer, network.rs)
+- `DELETE /api/v1/network/peers/:id` (Admin guard for non-JWT callers, delete_peer, network.rs)
+- `PUT /api/v1/workspaces/:id/meta-specs/rollout-policy` (Admin guard, put_rollout_policy, meta_specs.rs)
+- `POST /api/v1/secrets`, `GET /api/v1/secrets`, `DELETE /api/v1/secrets/:id`, `POST /api/v1/secrets/:id/rotate` (Admin guard via the shared `require_admin` helper, secrets.rs)
+- `POST /api/v1/workspaces/:workspace_id/messages` with a Broadcast destination (Server-or-Admin guard, messages.rs)
 
-Regression test `uninstrumented_role_guards_record_rbac_denied_audit_event` covers all five sites against the full `api_router` (including the reviewer's exact probe: Developer JWT → GET /api/v1/meta-specs-registry → 403 with exactly one `rbac_denied` event). Mutation-verified: deleting one of the new emissions makes the test fail on the missing event.
+Hybrid owner-or-Admin guards that reject on ownership rather than role (messages inbox poll/ack, saved views, explorer views, key bindings, spec approval revocation) are a different denial class and remain uninstrumented as RbacDenied.
+
+Regression test `round9_uninstrumented_role_guards_record_rbac_denied_audit_event` covers all five sites against the full `api_router`, including the reviewer's exact probes (uuid agent token → PUT/DELETE on another agent's peer → 403 with exactly one `rbac_denied` event; Developer JWT → PUT rollout-policy → 403 with exactly one `rbac_denied` event). Mutation-verified: deleting the rollout-policy or secrets emission makes the test fail on the missing event.
 
 ### Source control events
 
@@ -106,7 +108,7 @@ Regression test `uninstrumented_role_guards_record_rbac_denied_audit_event` cove
 
 - **AuthSuccess / AuthFailure** — wired into the `AuthenticatedAgent` extractor, the global `require_auth_middleware`, and the WebSocket `authenticate_token` path. `token_kind` distinguishes global / agent_jwt / uuid_token / api_key / user_jwt / federated_jwt; failures carry `rejection_reason` (invalid, expired, revoked). A request-extension marker dedupes AuthSuccess to exactly one event per request even when the token is validated by both the ABAC middleware and the handler extractor.
 - **AbacDenied** — emitted from the ABAC middleware deny path (with `policy_id` from the matched policy, `resource`, `action`, `claims`) and from the repo-level ABAC check that guards git push.
-- **RbacDenied** — emitted from the `RequireAgent` extractor and from every live per-handler role guard (budget, compute targets, llm config/prompts, meta-specs incl. preview and registry list, release, spec/stack policy, spec approve/reject, tenants, trust anchors, users, network peers, MR approve guard) with `required_role`, `actual_role`, `endpoint`.
+- **RbacDenied** — emitted from the `RequireAgent` extractor and from every live pure per-handler role guard (budget, compute targets, llm config/prompts, meta-specs incl. preview, registry list and rollout policy, release, spec/stack policy, spec approve/reject, tenants, trust anchors, users, secrets, network peers incl. register/update/delete, message broadcast, MR approve guard) with `required_role`, `actual_role`, `endpoint`. Owner-or-Admin hybrid guards that reject on ownership, not role, are a different denial class and are not RbacDenied emissions.
 - **ImpersonationStarted / ImpersonationEnded** — enum variants, as_str/from_str, and CEF severity 7 exist; emission points are deferred to task-108 (impersonation itself is not implemented yet), per the task plan.
 
 ### CEF severity mapping
@@ -115,19 +117,20 @@ Regression test `uninstrumented_role_guards_record_rbac_denied_audit_event` cove
 
 ### Test evidence
 
-Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the per-request AuthSuccess dedupe, an ABAC policy denial, and the RbacDenied paths (extractor, handler guard, and the five round-8 guards).
+Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the per-request AuthSuccess dedupe, an ABAC policy denial, and the RbacDenied paths (extractor, handler guard, the five round-8 guards, and the five round-9 guard sites).
 
-At the round-8 repair head `47190ed90` on merged base `def0add9e`:
+At the round-9 repair head `0e487df7f` on merged base `71a02247c` (task-098 base merge):
 
-- `cargo test -p gyre-server --lib`: **1465 passed, 0 failed** (includes the new round-8 regression test).
-- Mutation check: removing the registry-list `record_rbac_denied` emission fails `uninstrumented_role_guards_record_rbac_denied_audit_event`; with the emission it passes.
+- `cargo test -p gyre-server --lib`: **1481 passed, 0 failed** (includes the round-8 and round-9 regression tests).
+- Mutation checks: removing the rollout-policy or the secrets `record_rbac_denied` emission fails `round9_uninstrumented_role_guards_record_rbac_denied_audit_event`; with the emissions it passes.
 - `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has zero findings in touched files.
-- Round-8 probe evidence: `/tmp/stage/review-evidence/task-104-round8-*.log`.
+- Round-9 probe evidence: `/tmp/stage/review-evidence/task-104-round9-*.log`.
 - Full workspace suites, arch checks, and GitHub CI are owned by verification.
 
-### Repair and merge history (rounds 1–7, summarized)
+### Repair and merge history (rounds 1–8, summarized)
 
 - Rounds 1–2: implementation `ac5f88365` preserved through merges of bases `233664cf8` (task-087) and `72ad2a128` (task-096).
 - Round 5 (base `414fe9aa1b`, task-120): git-declined ref updates no longer record GitPushAccepted (`ca905fe43`, `verify_applied_ref_updates`).
 - Round 6 (base `c5deca801a`, task-105, merge `0aad7a51a`): coverage-table conflict recomputed row-by-row; no source touched.
 - Round 7 (verification repair `8e6ed8ecc` on candidate `6336881de`, finding `0a67d2762`): exemption-free JWT tenant-claim serde default (task-103 precedent), clippy and rustfmt findings fixed; no emission logic changed.
+- Round 8 (commit `47190ed90`, finding `a42d6a7254` on candidate `90ee7e745`): five uninstrumented role guards (meta-specs preview, meta-specs registry list, spec approve/reject, MR approve) now record RbacDenied; regression test `uninstrumented_role_guards_record_rbac_denied_audit_event`.
