@@ -6,7 +6,7 @@ depends_on:
   - task-098
 progress: ready-for-review
 coverage_sections: []
-commits: ["a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347", "c7f6d13d5049ee53a0bcbc4d24f613cb418722a4"]
+commits: ["c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347"]
 ---
 
 ## Spec Excerpt
