@@ -2550,6 +2550,7 @@ mod tests {
             branch: "feat/f6".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
@@ -2642,6 +2643,7 @@ mod tests {
             branch: "feat/brand-new".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
@@ -2761,6 +2763,7 @@ mod tests {
                 branch: "feat/jj-provisioned".to_string(),
                 parent_id: None,
                 compute_target_id: None,
+                persona_slug: None,
                 disconnected_behavior: None,
                 loop_config: None,
                 agent_type: None,
@@ -2826,6 +2829,7 @@ mod tests {
                 branch: "feat/plain/fallback".to_string(),
                 parent_id: None,
                 compute_target_id: None,
+                persona_slug: None,
                 disconnected_behavior: None,
                 loop_config: None,
                 agent_type: None,
@@ -2916,6 +2920,7 @@ mod tests {
             branch: "feat/r19".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
@@ -5098,6 +5103,34 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod meta-prompt dump script");
         }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "meta-prompt dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
     /// Seed an approved persona at tenant scope (the test caller's tenant).
     async fn seed_spawn_persona(state: &Arc<AppState>, slug: &str, system_prompt: &str) -> String {
         let mut persona = gyre_domain::Persona::new(
@@ -5338,7 +5371,7 @@ mod tests {
         );
 
         // Unapproved (Pending) slug: rejected — never inject unapproved behavior.
-        let mut persona = gyre_domain::Persona::new(
+        let persona = gyre_domain::Persona::new(
             Id::new("persona-pending-spawn"),
             "Persona pending-spawn",
             "pending-spawn".to_string(),
