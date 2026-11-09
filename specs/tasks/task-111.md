@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["99c293d06efa90d6454f92ef8b9b52c1fda7463d", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
 ---
 
 ## Spec Excerpt
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management (base `f4acb4eb`, merged up to base `98a5299b9` in `f0d541c75`; review-repair killing tests in `5a0816fe6`):
+Session management is implemented end-to-end against `user-management.md` §Session Management (base `f4acb4eb`, merged up to base `fefde2946` in `99c293d06`; review-repair killing tests in `5a0816fe6`):
 
 - **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields (id, user_id, token_hash, ip_address, user_agent, created_at, last_active_at, expires_at, revoked); only the SHA-256 of the API key is stored (`hash_api_key`), never plaintext. `is_active(now)` = not revoked and not expired.
 - **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — they are the durable sign-out record).
@@ -96,15 +96,15 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants `GET|DELETE|POST /users/:user_id/sessions[...]` with Admin-role per-handler checks (ABAC-exempt routes), target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### Test evidence (run at head `5a0816fe6` in this sandbox)
+### Test evidence (focused re-verification at head `99c293d06`; original full-suite run at `5a0816fe6`)
 
-- `cargo test -p gyre-server --lib` — **1435 passed, 0 failed** (full crate suite; includes every session test named below).
+- At `5a0816fe6`: `cargo test -p gyre-server --lib` — **1435 passed, 0 failed** (full crate suite; includes every session test named below).
+- At `99c293d06` (after the merge into `fefde2946`): `cargo check --all` passes; all 17 session tests named below pass; the 8 `sqlite::user_profile::tests::session*` adapter tests pass; the 6 JWT tenant-claim/jti tests in `auth.rs` pass (including `jwt_missing_tenant_id_defaults_to_default`, which pins the resolved conflict region); mechanical checks pass: `check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-scope-literal-defaults.sh` (13 entries), `check-fabricated-scope-defaults.sh` (3 entries), `check-inert-enforcement.sh`, `check-task-commit-attribution.sh`, `check-mem-port-contracts.sh`, `check-forged-scope-fields.sh`, `check-forwarded-header-trust.sh`, `check-lossy-secret-conversion.sh`, `check-fail-open-ref-resolution.sh`, `check-in-memory-state-stores.sh`.
 - `cargo test -p gyre-adapters --lib -- sqlite::user_profile::tests::session` — 8 passed (roundtrip, duplicate-id, device-match on all four fields, newest-match, TTL slide, owner-scoped revoke, revoke-all scope, retention-never-deletes-revoked).
 - Session coverage is listed by exact test name rather than by a `-- session` filter count, because substring filters also match unrelated name-colliding tests (e.g. ws `ws_session_cap`, spec_patrol `supersession`) while missing tests whose names lack the substring:
   - `api/users.rs`: `sessions_endpoint_lists_session_created_by_auth`; `revoke_session_then_credential_is_rejected`; `revoking_one_device_session_does_not_sign_out_other_devices`; `revoke_all_sessions_signs_out_everywhere`; `revoke_all_blocks_credential_from_never_seen_device`; `my_session_listing_excludes_revoked_and_expired_sessions`; `admin_session_listing_excludes_revoked_and_expired_sessions`; `revoke_cannot_target_another_users_session`; `tenant_admin_can_view_and_revoke_another_users_sessions`; `non_admin_cannot_view_or_revoke_another_users_sessions`; `tenant_admin_revoke_all_signs_user_out_everywhere`; `admin_session_endpoints_unknown_user_is_404`.
   - `auth.rs`: `session_last_active_touch_is_throttled`; `expired_session_is_reminted_not_zombified`; `signout_everywhere_survives_retention_cleanup`; `ws_auth_rejects_signed_out_everywhere_credential`; `ws_auth_rejects_revoked_ws_device_session`.
 - Mutation-verified killing strength (logs under `/tmp/stage/review-evidence/task-111-mutation-*.log`): removing the `credential_revoked` check, the `track_session` rejection, or both from `authenticate_token` each fails at least one WS-path test; neutering the `.filter(|s| s.is_active(now))` in either listing handler fails both listing tests.
-- Mechanical checks pass: `check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-inert-enforcement.sh`, `check-task-commit-attribution.sh`.
 
 ### Review repairs
 
@@ -116,4 +116,6 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 
 ### Merge history
 
-Merged up to base `98a5299b9` in `f0d541c75`: `gyre-domain/src/lib.rs` combined re-exports (base's UserPreferences additions plus `UserSession`); `api/users.rs` kept both test suites (base's user-preferences tests with `bootstrap_user`, our session tests; `provision_user_with_key` reduced to a thin wrapper); migration renumbered `000058`→`000059` (base added `2026-10-08-000058_user_entity_profile_fields`, colliding with `user_sessions` at Diesel version `20261008000058` — only the alphabetically first would ever run; pure directory rename, SQL byte-identical). Earlier rebase repairs (merge into `72ad2a12` as `b62fa0f16`): migration 000056→000057→000058 chain, fail-closed `seed_builtin_policies` kept, CWE-348 comment kept, exemption files matched to base, exemption line re-pins for shifted frozen sites (none added).
+Merged up to base `fefde2946` in `99c293d06` (rebase repair, finding `47ccac97b`): the only conflict was `auth.rs` `JwtClaims::tenant_id`, where both sides had reworked the JWT tenant-claim handling — the base's task-103 fix (serde schema default `default_tenant_claim`, exemption entry removed, count 4→3) supersedes the branch's interim `unwrap_or(crate::DEFAULT_TENANT_ID)` use-site form; both hunks took the base side, the branch's own scope-literal fixes (`DEFAULT_TENANT_ID` construction sites, exemption lines removed, count 22→13) and all session-management code auto-merged unchanged. Migration numbering unchanged (`2026-10-08-000059_user_sessions`; the base's new `2026-11-06/07-000057_*` migrations use different dates, no Diesel version collision).
+
+Earlier: merged up to base `98a5299b9` in `f0d541c75`: `gyre-domain/src/lib.rs` combined re-exports (base's UserPreferences additions plus `UserSession`); `api/users.rs` kept both test suites (base's user-preferences tests with `bootstrap_user`, our session tests; `provision_user_with_key` reduced to a thin wrapper); migration renumbered `000058`→`000059` (base added `2026-10-08-000058_user_entity_profile_fields`, colliding with `user_sessions` at Diesel version `20261008000058` — only the alphabetically first would ever run; pure directory rename, SQL byte-identical). Earliest rebase repairs (merge into `72ad2a12` as `b62fa0f16`): migration 000056→000057→000058 chain, fail-closed `seed_builtin_policies` kept, CWE-348 comment kept, exemption files matched to base, exemption line re-pins for shifted frozen sites (none added).
