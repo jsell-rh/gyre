@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Item Structure"
   - "ui-layout.md §Action Buttons per Item Type"
   - "ui-layout.md §8. Briefing Layout"
-commits: ["f5d3446bb5bfbb680caa429b748ac881ad791024", "3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901"]
+commits: ["f5d3446bb5bfbb680caa429b748ac881ad791024", "3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901", "98f6c2345a4a5e21a9b95c88a2be60ac4b9fa3ab"]
 ---
 
 ## Spec Excerpt
@@ -62,9 +62,10 @@ Read `ui-layout.md` §6-§8 for the exact layout specifications. Also reference 
 ## Shipped
 
 The full §6-§8 surface was built across earlier rounds (spec table + detail tabs + editor split,
-all-10-priority Inbox cards with per-type actions, briefing narrative with entity links and chat).
-This round repaired the four review findings from the prior verification round
-(commit `f5d3446bb5bfbb680caa429b748ac881ad791024`).
+all-10-priority Inbox cards with per-type actions, briefing narrative with entity links and chat),
+and prior review rounds repaired the MR-list enrichment, the P3 Override gate, the empty-`spec_sha`
+fail-open, and the P5 task-creation mechanism. This round repaired the three findings from the
+latest review round (commit `98f6c2345a4a5e21a9b95c88a2be60ac4b9fa3ab`).
 
 ### §6-§8 surface (unchanged from earlier rounds)
 
@@ -82,62 +83,69 @@ This round repaired the four review findings from the prior verification round
 
 ### Review repairs (this round)
 
-- **F1 (major) — P5 arbitration could not resolve MRs**: `GET /merge-requests` (list) never
-  serialized `merge_commit_sha` (`MrResponse::from` hardcoded `None`; only the single-MR `get_mr`
-  enriched it from the attestation store), so Pick A/Pick B always failed with "Could not find the
-  merged MR". Fix: extracted `enrich_merged_attestation()` (the same attestation lookup `get_mr`
-  performs) and applied it in `list_mrs`, `list_workspace_mrs`, and `get_mr`
-  (`crates/gyre-server/src/api/merge_requests.rs`). Anchored server-side by the new Rust test
-  `list_mrs_enriches_merged_rows_with_merge_commit_sha` (open→approved→merged transition + stored
-  attestation, then asserts the list row carries `merge_commit_sha`/`merged_at`) — the web test
-  mock now mirrors that real wire format instead of fabricating it.
-- **F2 (moderate) — P3 Override gated nothing**: `handleOverrideGate` only recorded an approval
-  review, but the merge processor's human-approval escape is `mr.status == Approved` set via
-  `PUT /merge-requests/:id/status` (`supervised_trust_hold` returns `None` only for
-  `MrStatus::Approved`). Fix: Override now submits the review AND sets the MR status to `approved`;
-  the test asserts both calls.
-- **F3 (minor) — silent pre-edit approval**: the server wrote `spec_sha: ""` into the
-  spec-pending-approval notification when git was unavailable (`get_blob_sha(...).unwrap_or_default()`
-  fail-open), and the Inbox ledger fallback then approved the PRE-edit version for a still-open
-  spec-edit MR (invalidated on merge). Fixes: (a) server derives the blob SHA from the exact saved
-  content (`sha1("blob <len>\0<content>")`, the same value `git rev-parse`/`git hash-object`
-  returns for those bytes) instead of `""`; (b) the client ledger fallback now requires the
-  spec-edit MR to be merged (ledger then holds the approved content) and otherwise fails with
-  `missing_spec_sha`. The Rust test asserts the exact git-produced SHA constant
-  (`8035a516…79d4`, produced by `git hash-object`); web tests cover both the open-MR failure and
-  merged-MR success paths.
-- **F4 (minor) — spec divergence in P5 mechanism**: HSI §8 P5 speccs Pick A/Pick B as creating a
-  task via the existing task domain model; the code performed a direct revert
-  (`POST /repos/:id/revert/:mr_id`), contradicting the spec. Fix: Pick A/Pick B now create a
-  `spec-implementation` revert task (`api.createTask`, labels `['spec-implementation', 'revert']`)
-  with the selected implementation as reference; the losing MR is resolved best-effort by
-  merge-commit SHA (exercising the F1 list enrichment) so the task description is concretely
-  actionable, and the commit SHA alone carries the task when the MR cannot be resolved. The direct
-  `revertMr` call is removed from the Inbox; the recovery endpoint remains for its other consumers.
-  No spec amendment needed — the code now implements the specced mechanism.
+- **F1 (moderate) — P2 card `spec_sha` went stale on iterative saves**: `save_spec`'s
+   append-to-existing-MR path wrote the new content to the MR branch and returned early (HTTP 200)
+  without touching the notification, so the SpecPendingApproval card kept the FIRST save's blob
+  SHA — every Approve click then recorded an approval for a SHA that never becomes the ledger's
+  `current_sha` after merge (card shows "Approved", spec stays Pending, permanently). Fix: the
+  append path now recomputes the blob SHA for the appended content (shared `spec_blob_sha` helper,
+  extracted from the create path: `git rev-parse` primary, content-derived SHA-1 fallback) and
+  refreshes the unresolved cards' body in place via a new
+  `NotificationRepository::update_body_by_entity_ref(entity_ref, type, body)` port method,
+  implemented by the SQLite, PostgreSQL, and mem adapters with the same unresolved/undismissed
+  guard (resolved cards keep their historical body — the audit record of what was acted on).
+  Anchored by two new tests: `save_spec_existing_mr_refreshes_notification_spec_sha`
+  (gyre-server; two saves → still exactly one card, carrying the v2 `git hash-object` constant,
+  not the stale v1 one) and
+  `update_body_by_entity_ref_updates_only_unresolved_matches` (gyre-adapters; real SQLite —
+  updates both fan-out recipients, skips resolved/dismissed/other-entity/other-type rows, returns
+  the matched count, and updates nothing for an unknown entity).
+- **F2 (minor) — P5 `resolveConflictMr` could never match in production**: the divergence body's
+  `commit_sha_a/b` are default-branch push tips (graph extraction records them from git-http push
+  ref updates), while `merge_commit_sha` is always a true merge commit created by the merge
+  processor (never a fast-forward) — the two can never be equal in any emitter flow, so the
+  losing-MR lookup was dead code and every Pick A/Pick B description fell back to "unresolved".
+  Fix: dropped the resolution step entirely; the revert task description now identifies the
+  losing side by agent + commit SHA (concretely actionable via `git show`/`git revert <sha>`),
+  and the tests assert the description carries both sides' agents/SHAs and that no dead MR fetch
+  occurs. The server-side list enrichment from the prior round remains (anchored by its Rust
+  test; the single-MR `get_mr` consumer still relies on it).
+- **F3 (minor) — dead API wrappers**: removed `api.revertMr` (its only caller was removed by the
+  prior round's F4 repair; it survived only in negative test assertions and a comment falsely
+  claiming Inbox P5 still used it) and `api.stopAgent` (zero references; `DetailPanel`'s stop
+  action calls `api.adminKillAgent` through its own local function). The recovery endpoint
+  `POST /repos/:id/revert/:mr_id` remains for its other consumers.
 
 ### Test evidence (focused probes; full gates owned by verification)
 
-- `cargo test -p gyre-server --lib api::merge_requests` — 34 passed, 0 failed (includes the new
-  list-enrichment test).
-- `cargo test -p gyre-server --lib api::specs_assist` — 22 passed, 0 failed (includes the
-  strengthened exact-SHA assertion).
-- `cd web && npx vitest run src/__tests__/Inbox.test.js` — 75 passed, 0 failed (rewritten P5
-  task-creation tests with wire-format mock, F2 dual-call override assertion, F3 open/merged
-  fallback tests, task-creation failure path).
+- `cargo test -p gyre-server --lib api::specs_assist` — 23 passed, 0 failed (includes the new
+  stale-SHA refresh test).
+- `cargo test -p gyre-adapters --lib sqlite::notification` — 2 passed, 0 failed (includes the new
+  `update_body_by_entity_ref` SQL test).
+- `cargo test -p gyre-server --lib notification` — 26 passed, 0 failed (no regressions in
+  notification consumers: trust suggestions, retention, graph extraction).
+- `cd web && npx vitest run src/__tests__/Inbox.test.js` — 74 passed, 0 failed (rewritten P5
+  tests: SHA+agent description assertions, no-MR-fetch assertion, failure path; one test whose
+  premise was the removed MR resolution was deleted with the dead code).
 - `cd web && npx vitest run src/__tests__/AccordionItem.test.js src/__tests__/AccordionScoping.test.js
   src/__tests__/Briefing.test.js` — 43 passed, 0 failed.
 - i18n key audit: every `$t('...')` key in Inbox/Briefing/SpecDashboard/Inbox.test resolves in
-  `en.json`; removed keys (`side_picked`, `no_conflict_mr`) have zero remaining references.
-- `cargo fmt -p gyre-server --check` clean; `scripts/check-arch.sh`,
-  `check-fail-open-ref-resolution.sh`, `check-inert-enforcement.sh`,
-  `check-lossy-secret-conversion.sh`, `check-mem-port-contracts.sh`,
+  `en.json`; the removed key `revert_task_no_mr` and the `{lose_mr}` placeholder have zero
+  remaining references.
+- `cargo fmt -p gyre-server -p gyre-adapters -p gyre-ports --check` clean; `scripts/check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
+  `check-fail-open-ref-resolution.sh`, `check-lossy-secret-conversion.sh`,
   `check-byte-slice-truncation.sh`, `check-unbounded-external-http.sh`,
+  `check-relative-path-defaults.sh`, `check-scope-literal-defaults.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-forwarded-header-trust.sh`,
+  `check-forged-scope-fields.sh`, `check-dead-message-kinds.sh`,
   `check-task-commit-attribution.sh` all pass.
-- `cd web && npx vite build` clean (dist not committed, per task-210 convention).
+- `cargo clippy -p gyre-server -p gyre-adapters -p gyre-ports --lib` — no errors; the new port
+  method adds one instance of the pre-existing async-trait `#[must_use]` lint class that already
+  fires for every method of every port trait (338 → 339 warnings in gyre-ports).
+- The `cargo build` of gyre-server ran the web production build (`npm run build`) successfully —
+  all changed Svelte/JS sources compile; `web/dist` output was restored, not committed.
 
-Sandbox notes: frontend deps installed via `npm ci` (locked versions); `sha1 = "0.10"` was already
-in Cargo.lock (transitive) so the new gyre-server dependency adds no new crate version. Clippy on
-this toolchain flags a pre-existing `explicit_counter_loop` in untouched `gyre-common` code — not
-introduced by this round. TCP listener probe unsupported, so no local server/browser end-to-end
-run; component tests + production build stand in.
+Sandbox notes: frontend deps installed via `npm ci` (locked versions); `sha1`/`hex` were already
+direct gyre-server dependencies from the prior round. TCP listener probe unsupported, so no local
+server/browser end-to-end run; component tests + production build stand in.
