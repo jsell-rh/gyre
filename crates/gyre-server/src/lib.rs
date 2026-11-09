@@ -3,6 +3,7 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
+pub mod agent_audit;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -23,6 +24,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -36,6 +38,7 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
@@ -66,17 +69,18 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
-    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
     ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
     GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -269,8 +273,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -335,6 +341,8 @@ pub struct AppState {
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §Budget Tracking).
+    pub budget_calls: Arc<dyn BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -363,6 +371,8 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
+    pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
@@ -931,7 +941,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
@@ -1016,6 +1026,10 @@ pub fn build_state(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
         ),
+        budget_calls: store!(
+            dyn BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
+        ),
         search: store!(
             dyn gyre_ports::SearchPort,
             gyre_adapters::MemSearchAdapter::new()
@@ -1062,6 +1076,10 @@ pub fn build_state(
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        rollout_policies: store!(
+            dyn RolloutPolicyRepository,
+            mem::MemRolloutPolicyRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: {
