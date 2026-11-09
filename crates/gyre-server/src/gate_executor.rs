@@ -369,6 +369,17 @@ async fn run_review_agent_process(
 
     let diff_url = format!("{}/api/v1/merge-requests/{}/diff", state.base_url, mr_id);
 
+    // agent-gates.md §Integration with Agent Gates step 1: the gate agent
+    // receives the MR diff AND the spec at the pinned SHA (not HEAD). The
+    // endpoint serves the blob content at the MR's spec_ref SHA, so a spec
+    // edited after the MR was opened cannot silently change what the gate
+    // reviews against.
+    let spec_url = if spec_ref.is_empty() {
+        String::new()
+    } else {
+        format!("{}/api/v1/merge-requests/{}/spec", state.base_url, mr_id)
+    };
+
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         revoke_gate_token(state, &gate_agent_id).await;
@@ -392,6 +403,7 @@ async fn run_review_agent_process(
         .env("GYRE_GATE_AGENT_ID", &gate_agent_id)
         .env("GYRE_DIFF_URL", &diff_url)
         .env("GYRE_SPEC_REF", &spec_ref)
+        .env("GYRE_SPEC_URL", &spec_url)
         .env("GYRE_PERSONA", persona)
         .output();
 
@@ -601,6 +613,15 @@ async fn run_validation_agent_process(
 
     let diff_url = format!("{}/api/v1/merge-requests/{}/diff", state.base_url, mr_id);
 
+    // Same pinned-SHA spec delivery as the review gate (agent-gates.md
+    // §Integration with Agent Gates): validation agents compare behavior
+    // against the spec version the code was written for.
+    let spec_url = if spec_ref.is_empty() {
+        String::new()
+    } else {
+        format!("{}/api/v1/merge-requests/{}/spec", state.base_url, mr_id)
+    };
+
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         revoke_gate_token(state, &gate_agent_id).await;
@@ -624,6 +645,7 @@ async fn run_validation_agent_process(
         .env("GYRE_GATE_AGENT_ID", &gate_agent_id)
         .env("GYRE_DIFF_URL", &diff_url)
         .env("GYRE_SPEC_REF", &spec_ref)
+        .env("GYRE_SPEC_URL", &spec_url)
         .env("GYRE_PERSONA", persona)
         .output();
 

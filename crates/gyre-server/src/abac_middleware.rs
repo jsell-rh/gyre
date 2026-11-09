@@ -220,6 +220,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/merge-requests/:id/diff", "merge_request", None),
                 RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/spec",
+                    "merge_request",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",
                     None,
