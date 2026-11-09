@@ -292,6 +292,40 @@ lines clean (13 Rust files, 1020 existing warnings outside changes)";
 --lib prompt_assembly` — 10 passed, 0 failed. Evidence:
 `/tmp/stage/review-evidence/task116-clippy-repair.md`.
 
+### Assignment-base merge (base fefde2946, merge b327102a8)
+
+The assignment base (upstream task-089 HSI Explorer Generated Views,
+secret rotation, rollout policies) was merged into the branch with three
+source conflicts, all in `gyre-server`:
+
+- **jobs.rs / main.rs:** both job registrations kept — the branch's hourly
+  `meta_spec_stale_pin_check` (§2 stale pin detection) and the base's
+  5-minute `secret_rotation_check` (platform-model.md §7). Both are
+  registered in `start_job_registry` and spawned at startup.
+- **mem.rs:** the branch's `agent_inbox_max`/`user_workspace_state` kept;
+  the base's new `rollout_policies` field adopted
+  (`MemRolloutPolicyRepository`, wired via `store!` in auto-merged
+  `lib.rs`); the base's `default()` meta-spec store initializers dropped
+  because the branch wires `meta_specs`/`meta_spec_bindings`/
+  `meta_spec_sets` after `message_dispatch_tx` against the shared
+  `meta_spec_binding_store` (round-6 mem port-contract fix wiring). No
+  duplicate field initializers remain.
+
+Post-merge probes at `b327102a8` (`SKIP_WEB_BUILD=1`): `cargo check` lib+
+ bins exit 0; filtered suites meta_spec (37), prompt_assembly (10),
+`mem::` (14), spawn (45), secret_rotation+stale_pin (4), rollout (9) —
+all passed, including all six named round-6 regression tests
+(`pending_required_meta_spec_excluded`, `pending_bound_meta_spec_skipped`,
+`spec_bindings_require_membership_in_owning_workspace`,
+`registry_writes_reject_non_admin`/`required_gate_rejects_non_admin`,
+`stale_pin_detection_creates_notification`); `cargo fmt --all --check`
+clean; check-arch, check-abac-route-registry,
+check-mem-port-contracts, check-migration-versions,
+check-task-commit-attribution — all OK; `check-clippy-diff.py
+fefde2946` — exit 0. web/dist merged cleanly (no rebuild performed,
+per assignment constraints). Evidence:
+`/tmp/stage/review-evidence/task116-rebase-fefde2946.md`.
+
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §2 (Meta-Spec Prompt Assembly) in its entirety. The existing Persona model is in `gyre-domain/src/` — grep for `Persona`. Meta-spec API stubs may exist in `gyre-server/src/api/meta_specs.rs`. The persona scope enum is in `gyre-domain`. Agent spawn is in `gyre-server/src/api/spawn.rs`. MCP prompt delivery is in `gyre-server/src/mcp.rs` — look for `system://persona`. Bootstrap seeding patterns: grep for `seed` or `bootstrap` in the server startup code.
