@@ -1360,16 +1360,22 @@ async fn store_attestation_level(state: &Arc<AppState>, agent_id: &str, level: u
 }
 
 /// Enforce the repo's stack policy (TASK-165): minimum attestation level and
-/// gyre-stack.lock drift. Runs for every push to a repo with a policy
-/// (unlike pre-accept gates, which only run when a repo registers them —
-/// the spec's "Policy per Level" is repo policy, not gate opt-in).
+/// gyre-stack.lock drift.
 ///
-/// - Below `min_attestation_level`: Block mode → `Err(reason)` (caller
+/// - Minimum attestation level runs for every push to a repo with a policy
+///   (unlike pre-accept gates, which only run when a repo registers them —
+///   the spec's "Policy per Level" is repo policy, not gate opt-in).
+///   Below `min_attestation_level`: Block mode → `Err(reason)` (caller
 ///   undoes refs and rejects); Warn mode → `constraint_violation` event +
 ///   log, push accepted.
-/// - gyre-stack.lock present in the pushed tree: integrity-check the
-///   embedded fingerprint, then compare against the pushing agent's
-///   attested stack (drift). Drift follows the same enforcement mode.
+/// - gyre-stack.lock drift runs whenever the pushed tree carries a lockfile
+///   and the pushing agent has an attested stack — the committed lockfile
+///   itself is the spec's "verification that the stack hasn't drifted
+///   between commits" (supply-chain.md §gyre-stack.lock), so it is NOT
+///   gated on a repo policy. Integrity-check the embedded fingerprint,
+///   then compare against the pushing agent's attested stack. Drift follows
+///   the policy's enforcement mode; with no policy there is no mode to
+///   escalate to, so findings default to warn (flag + accept).
 ///
 /// Returns the resolved attestation level so the caller can store it on the
 /// agent record.
@@ -1392,9 +1398,15 @@ async fn enforce_stack_policy(
 
     let level = resolve_push_attestation_level(state, agent_id, jwt_claims).await;
 
-    if let Some(policy) = &policy {
-        let mode_block = policy.enforcement == crate::api::stack_attest::StackEnforcement::Block;
+    // Drift enforcement mode: the repo policy's mode when one is set; a
+    // lockfile committed without any policy defaults to warn-mode flagging
+    // (an undefined enforcement mode cannot block).
+    let mode_block = policy
+        .as_ref()
+        .map(|p| p.enforcement == crate::api::stack_attest::StackEnforcement::Block)
+        .unwrap_or(false);
 
+    if let Some(policy) = &policy {
         // Minimum attestation level (supply-chain.md §Policy per Level).
         if level < policy.min_attestation_level {
             let reason = format!(
@@ -1420,66 +1432,69 @@ async fn enforce_stack_policy(
                 )
                 .await;
         }
+    }
 
-        // gyre-stack.lock drift detection (supply-chain.md §gyre-stack.lock,
-        // §The Laptop Problem): compare the lock in the pushed tree against
-        // the pushing agent's attested stack. Absent lockfile → opt-in
-        // feature not used, no drift check.
-        let attested_stack = state
-            .kv_store
-            .kv_get("agent_stacks", agent_id)
+    // gyre-stack.lock drift detection (supply-chain.md §gyre-stack.lock,
+    // §The Laptop Problem): compare the lock in the pushed tree against
+    // the pushing agent's attested stack. Not gated on a repo policy —
+    // the committed lockfile is itself the spec's drift-verification
+    // mechanism, so a repo with a lockfile but no policy still gets
+    // warn-mode flagging (mode_block is false without a policy).
+    // Absent lockfile → opt-in feature not used, no drift check.
+    let attested_stack = state
+        .kv_store
+        .kv_get("agent_stacks", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s).ok()
+        });
+    if let Some(attested) = &attested_stack {
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        for update in ref_updates {
+            if let Some(content) = crate::spec_registry::read_git_file(
+                &git_bin,
+                repo_path,
+                &update.new_sha,
+                "gyre-stack.lock",
+            )
             .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s).ok()
-            });
-        if let Some(attested) = &attested_stack {
-            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-            for update in ref_updates {
-                if let Some(content) = crate::spec_registry::read_git_file(
-                    &git_bin,
-                    repo_path,
-                    &update.new_sha,
-                    "gyre-stack.lock",
-                )
-                .await
-                {
-                    let drift_result = match crate::api::stack_attest::StackLockfile::parse(
-                        &content,
-                    ) {
-                        Err(e) => Err(e),
-                        Ok(lock) => lock
-                            .verify_integrity()
-                            .and_then(|()| lock.check_drift(attested)),
-                    };
-                    if let Err(reason) = drift_result {
-                        if mode_block {
-                            return Err(format!("push rejected: {reason}"));
-                        }
-                        warn!(repo_id, agent_id, refname = %update.refname, %reason,
-                              "stack drift detected (warn mode)");
-                        state
-                            .emit_event(
-                                Some(repo_workspace_id.clone()),
-                                gyre_common::message::Destination::Workspace(
-                                    repo_workspace_id.clone(),
-                                ),
-                                gyre_common::message::MessageKind::ConstraintViolation,
-                                Some(serde_json::json!({
-                                    "repo_id": repo_id,
-                                    "agent_id": agent_id,
-                                    "branch": update
-                                        .refname
-                                        .trim_start_matches("refs/heads/"),
-                                    "reason": reason,
-                                })),
-                            )
-                            .await;
+            {
+                let drift_result = match crate::api::stack_attest::StackLockfile::parse(
+                    &content,
+                ) {
+                    Err(e) => Err(e),
+                    Ok(lock) => lock
+                        .verify_integrity()
+                        .and_then(|()| lock.check_drift(attested)),
+                };
+                if let Err(reason) = drift_result {
+                    if mode_block {
+                        return Err(format!("push rejected: {reason}"));
                     }
-                    // One lockfile per tree — first ref update settles it.
-                    break;
+                    warn!(repo_id, agent_id, refname = %update.refname, %reason,
+                          "stack drift detected (warn mode)");
+                    state
+                        .emit_event(
+                            Some(repo_workspace_id.clone()),
+                            gyre_common::message::Destination::Workspace(
+                                repo_workspace_id.clone(),
+                            ),
+                            gyre_common::message::MessageKind::ConstraintViolation,
+                            Some(serde_json::json!({
+                                "repo_id": repo_id,
+                                "agent_id": agent_id,
+                                "branch": update
+                                    .refname
+                                    .trim_start_matches("refs/heads/"),
+                                "reason": reason,
+                            })),
+                        )
+                        .await;
                 }
+                // One lockfile per tree — first ref update settles it.
+                break;
             }
         }
     }
@@ -5253,6 +5268,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// supply-chain.md §gyre-stack.lock frames the committed lockfile itself
+    /// as the drift-verification mechanism, so drift flagging must not be
+    /// gated on a repo stack policy: a repo with a gyre-stack.lock but NO
+    /// policy entry still gets warn-mode flagging (ConstraintViolation
+    /// event + accept), never a silent pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lockfile_drift_without_policy_warned_and_accepted() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // NO repo_stack_policies entry for this repo. Pushing agent has an
+        // attested stack that differs from the lockfile's pinned stack.
+        let pinned = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
+        seed_agent_and_stack(&state, "agent-drift-nopolicy", &test_stack("claude-opus-4-6")).await;
+
+        let sha = make_commit(
+            &repo_path,
+            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-drift-nopolicy"))
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/drift-nopolicy")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No policy → no enforcement mode to escalate to → warn + accept.
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Drift was still flagged via a ConstraintViolation event.
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new("ws-test"),
+                Some("constraint_violation"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter().any(|m| m
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("reason"))
+                .and_then(|r| r.as_str())
+                .is_some_and(|r| r.contains("stack drift"))),
+            "expected a stack-drift constraint_violation event without a repo policy, got {} messages",
+            msgs.len()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
