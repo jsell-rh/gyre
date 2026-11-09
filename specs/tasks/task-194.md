@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §15"
-commits: ["a13cf69d74a1a2d2a4852c94b488c8386a90675e", "236056d9510cffefda2c3143321b5b92ba8bb142"]
+commits: ["a13cf69d74a1a2d2a4852c94b488c8386a90675e", "236056d9510cffefda2c3143321b5b92ba8bb142", "06a78d19e07aea4c0a7fe9a489b814e5a3e28df7"]
 ---
 
 ## Spec Excerpt
@@ -61,30 +61,28 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 
 ## Shipped
 
-§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95`; the verification findings against candidate `6bd8fb491` are repaired in commit `a13cf69d7`.
+§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95`; verification findings against candidate `6bd8fb491` are repaired in commit `a13cf69d7`; the review finding on the manifest-less rename fallback (finding `c3db9fd41`, candidate `1848d17f`) is repaired in commit `06a78d19e`.
 
 ### Behavior
 
 - `process_spec_lifecycle` (`git_http.rs`) reads `specs/manifest.yaml` at the pushed HEAD via task-193's `crate::spec_registry::read_manifest` (single reader, reused) and gates every task-creation decision on it. A manifest present but unparseable is treated as absent (`read_manifest` logs and returns `None` → prefix fallback).
-- New pure gate `should_create_lifecycle_task(Option<&SpecManifest>, status_char, path)` in `git_http.rs`: with a manifest, a task is created only when the changed file resolves to a manifest entry whose effective `auto_create_tasks` (per-entry override, else the `defaults:` section) is true; unregistered `specs/…` files create no task (manifest is the single source of truth). With no manifest at HEAD, the legacy `specs/system/` + `specs/development/` prefix fallback applies (logged at debug) — no regression for manifest-less repos.
-- New `manifest_entry_for_path()` in `spec_registry.rs` resolves diff paths (`specs/system/foo.md`) to entries using the same `specs/`-relative identity `sync_spec_ledger` uses; renames match on the new path.
-- `parse_spec_changes` now admits all `specs/` changes (eligibility decided by the manifest), fixing the missed case of manifest-registered specs under non-watched prefixes.
+- Pure gate `should_create_lifecycle_task(Option<&SpecManifest>, status_char, path, old_path)` in `git_http.rs`: with a manifest, a task is created only when the changed file (renames match on the new path, per the task instruction) resolves to a manifest entry whose effective `auto_create_tasks` (per-entry override, else the `defaults:` section) is true; unregistered `specs/…` files create no task (manifest is the single source of truth). With no manifest at HEAD, the legacy `specs/system/` + `specs/development/` prefix fallback applies (logged at debug), and a rename triggers the fallback when **either** side of the rename sits under a watched prefix — matching the pre-manifest behavior of base `parse_spec_changes` (no regression for manifest-less repos).
+- New `manifest_entry_for_path()` in `spec_registry.rs` resolves diff paths (`specs/system/foo.md`) to entries using the same `specs/`-relative identity `sync_spec_ledger` uses.
+- `parse_spec_changes` now admits all `specs/` changes on either side of a rename (eligibility decided by the manifest), fixing the missed case of manifest-registered specs under non-watched prefixes.
 - Per-spec priority: optional `priority` field on `SpecEntry` and `ManifestDefaults` with `effective_priority()` — entry override, else `defaults:`, else the `classify_spec_change` change-kind default. No priority is hardcoded; an override applies only when declared.
 - Auto-invalidation of stale approvals, title dedup, and `SpecChanged`/`TaskCreated` emission are unchanged and now fire only for specs that actually get tasks.
 
 ### Test evidence
 
-- `should_create_lifecycle_task_manifest_gate`, `…_defaults_section_applies`, `…_no_manifest_falls_back_to_prefixes` (pure unit tests): per-entry `false` excludes, `true` includes, unregistered excluded, non-watched-prefix registered included, defaults section applies, manifest-less fallback preserved.
+- `should_create_lifecycle_task_manifest_gate`, `…_defaults_section_applies`, `…_no_manifest_falls_back_to_prefixes`, `…_no_manifest_rename_either_side_watched` (pure unit tests): per-entry `false` excludes, `true` includes, unregistered excluded, non-watched-prefix registered included, defaults section applies, manifest-less fallback preserved (including renames with a watched old path and a new path outside `specs/`), manifest-mode renames match on the new path only.
 - `spec_lifecycle_manifest_gates_task_creation_e2e`: drives `process_spec_lifecycle` against a real git repo; a diff touching spec-a (`auto_create_tasks: false`), spec-b (`true`, `priority: Critical`) and unregistered spec-c yields exactly one task — `Review spec change: specs/system/spec-b.md` with priority `Critical` — and exactly one `SpecChanged` (payload spec_path == spec-b) + one `TaskCreated` on the broadcast bus; nothing for spec-a/spec-c by title and spec_path.
 - `spec_lifecycle_without_manifest_uses_prefix_fallback_e2e`: manifest-less repo still creates the watched-prefix task (priority defaults to High, no override).
-- Mutation check: replacing the manifest branch of the gate with prefix matching makes 3 tests fail (both gate unit tests + the e2e, which then sees tasks for spec-a and spec-c) — the tests kill a removed manifest gate.
+- `spec_lifecycle_without_manifest_rename_from_watched_prefix_e2e`: manifest-less push renaming `specs/system/foo.md` → `specs/milestones/a.md` and `specs/system/bar.md` → `docs/b.md` (real `R100` diff lines asserted) yields exactly the two legacy `Update spec references` tasks — base `fefde2946` behavior restored.
+- Mutation checks: replacing the manifest branch of the gate with prefix matching makes 3 tests fail (both gate unit tests + the manifest-gate e2e); reverting the rename-fallback fix (None arm ignoring `old_path`) makes `…_rename_either_side_watched` and `…_rename_from_watched_prefix_e2e` fail (0 tasks instead of 2). The tests kill both a removed manifest gate and a removed rename fallback.
 - `spec_registry::tests`: `manifest_entry_for_path_resolves_with_and_without_prefix`, `effective_priority_entry_override_beats_defaults`, `effective_priority_falls_back_to_defaults_then_none`.
-- Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1381 passed / 0 failed; `bash scripts/check-arch.sh` passed.
+- Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1495 passed / 0 failed; `bash scripts/check-arch.sh`, `bash scripts/check-in-memory-state-stores.sh`, `python3 scripts/check-rustfmt-diff.py fefde2946`, and `python3 scripts/check-clippy-diff.py fefde2946` all pass.
 
-### Verification repair (commit `a13cf69d7`)
+### Review repair (commit `06a78d19e`, finding `c3db9fd41`)
 
-The verification run of candidate `6bd8fb491` failed two gates; both are repaired:
-
-- **rustfmt changed-lines** (`git_http.rs` 4082/4088/4089/4091/4261/4295, `spec_registry.rs` 1363/1373): task-194's own test asserts exceeded line width. rustfmt (edition 2021, `skip_children`) applied to both files; the reformat touches only task-194 test code. `python3 scripts/check-rustfmt-diff.py fefde2946` now reports changed lines clean.
-- **check-in-memory-state-stores FAIL**: false positive on pre-existing legacy debt — task-194's insertions above the exempted `SpecLedger`/`SpecApprovalHistory`/`SpecLinksStore` aliases shifted them from `spec_registry.rs:218/220/249` to `:260/262/291`, so the frozen `path:line` exemptions stopped matching the same three sites. The exemption coordinates were refreshed to the current positions of the byte-identical alias statements: same sites, entry count still 5, `FROZEN_EXEMPTION_COUNT` untouched, no new site exempted. `bash scripts/check-in-memory-state-stores.sh` now passes.
-- Post-repair gates: `cargo test -p gyre-server --lib` 1493 passed / 0 failed; `python3 scripts/check-clippy-diff.py fefde2946` clean; `bash scripts/check-arch.sh` passed.
+- **Manifest-less rename fallback regression vs base `fefde2946` (AC3)**: the gate's `None` arm previously checked only the NEW path against `SPEC_WATCHED_PATHS`, but base `parse_spec_changes` admitted renames when EITHER side was watched and `classify_spec_change('R')` always created a task — a manifest-less push renaming a watched spec away (e.g. `specs/system/foo.md` → `specs/milestones/a.md` or `docs/b.md`) silently stopped creating the legacy `Update spec references` task. Fixed by threading `old_path` into `should_create_lifecycle_task` and accepting the prefix fallback when either side of the rename sits under a watched prefix. Manifest-mode new-path-only matching is unchanged (per the task's explicit instruction; the reviewer confirmed it is not a defect).
+- Evidence retained at `/tmp/stage/review-evidence/rename-fallback-repair.log` (gates, mutation check, test listing).
