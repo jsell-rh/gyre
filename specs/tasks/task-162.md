@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5192ff750f58b79d2553a317e9d9b802292ad3e1"]
 ---
 
 ## Spec Excerpt
@@ -146,6 +146,22 @@ Both findings from the review round at 152e67033 are fixed:
   `commits:` above, so the main.rs startup-wiring conflict resolution is
   inside review scoping; the Shipped merge-repair note is now accurate at
   head.
+
+### Frontmatter repair (finding e7aa777ea, review round at cea3f23b4)
+
+The automated `process: record task-162 branch commits` commit cea3f23b4
+regenerated the `commits:` list and dropped merge commit 9e5a0171d,
+regressing the 73a69995 process repair above (frontmatter at 086b140f8
+listed 51221dc02, 9e5a0171d, 5192ff750; cea3f23b4 kept only the two
+non-merge SHAs while the Shipped note still claimed 9e5a0171d was listed).
+Fixed by re-adding 9e5a0171d11dc6fff1d5634b1a3348266177ce5a to the
+`commits:` frontmatter in this repair commit, restoring the exact list that
+passed the 73a69995 review round. No production change in this round —
+`check-task-commit-attribution.sh` re-verified green (9e5a0171d is not
+task-labeled, and the task-owned main.rs message_dispatcher wiring is
+present in listed commit 51221dc02, so nothing escaped review scoping even
+while the list was stale).
+
 
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
