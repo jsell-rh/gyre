@@ -197,3 +197,58 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+## Round 7 (candidate 181ef274a, base fefde2946)
+
+Verdict: **rejected** — two test findings on explicit acceptance criteria.
+Evidence: `/tmp/stage/review-evidence/task116-review-round7.md`.
+
+Probes run independently this round:
+
+- `cd docker/gyre-agent && node --test agent-runner.test.mjs` → 3/3 pass
+  (real runner child process, stubbed SDK, captured prompt: meta-spec block
+  leads, separator present, absent-env path unchanged).
+- `check-arch`, `check-abac-route-registry` (exemptions shrank by 4),
+  `check-mem-port-contracts`, `check-migration-versions`,
+  `check-task-commit-attribution`, `check-rustfmt-diff.py fefde2946` → all
+  pass.
+- Rust suites and `check-clippy-diff.py` could NOT run in the review sandbox
+  (no crates.io route, no vendored registry, empty target cache —
+  infrastructure, not a code defect). Deferred to verification:
+  `cargo test -p gyre-server --lib` filtered to prompt_assembly / meta_spec /
+  spawn / mem::, `cargo test -p gyre-adapters --lib meta_spec`, and
+  `check-clippy-diff.py fefde2946`, all at the exact candidate.
+
+Static verification confirmed the §2 core is real: injection order with kind
+ranking and stable tiebreak, same-id dedup keeping the required section,
+approval fail-close on all three bands, pinned-version resolution from
+immutable history, membership + visibility + pin validation on the bindings
+PUT (agent tokens and non-members 403, unscoped specs admin-only),
+priority-6 drift notifications with kv dedup and pin-update key clearing, mem
+delete guard against the shared binding store, 9-default bootstrap seeding,
+and the ABAC resolver entries replacing the frozen exemption lines.
+
+Findings (both category: test):
+
+1. **Merge-attestation population is unguarded.** `merge_processor.rs`
+   `process_next` populates `MergeAttestation.meta_specs_used` from the
+   spawn-time prompt-set record — no test anywhere exercises this path, so
+   reverting the wiring to `vec![]` leaves every suite green. The acceptance
+   criterion "Meta-spec SHAs recorded in merge attestation" has zero durable
+   coverage. Repair: a `process_next` test that stores an
+   `AgentPromptSetRecord` for the MR's author agent and asserts the persisted
+   attestation bundle's `meta_specs_used` matches (ids, versions, hashes).
+2. **Server-side env delivery is unguarded.** `agent-runner.test.mjs` injects
+   `GYRE_META_SPEC_PROMPT` directly into the child env, so removing the
+   `container_env.insert("GYRE_META_SPEC_PROMPT", ...)` block in `spawn.rs`
+   (or the `render_system_prompt` call) fails no test — the runner suite
+   stays green while spawned agents receive no meta-spec prompt, silently
+   reverting §2's core claim. The `meta_spec_set_sha` spawn-response field is
+   likewise unasserted. Repair: a spawn test using the env-dump
+   compute-target pattern (`spawn_delivers_scoped_secrets_across_all_scopes`)
+   asserting the env var content, or at minimum a spawn-response assertion on
+   `meta_spec_set_sha` with a seeded required meta-spec.
+
+Non-blocking, previously adjudicated and re-confirmed: the
+`unwrap_or_default()` on repo listing in `assemble_prompt_set` records an
+empty set rather than a wrong one (agents must still spawn).
