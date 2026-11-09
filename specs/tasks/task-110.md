@@ -99,35 +99,33 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round 7 (review findings F1/F2 from checkpoint `04455398`),
-committed as `c1de316bd`.**
+**Repair round 8 — rebase onto upstream `774737638` (finding
+`12a2256d8d53414c82451831daebeaeb`), merge commit `b53fa1484`.**
 
-- **F1 — `allow_re_invite` is now enforced, not just stored.**
-  `create_tenant_invitation` and `invite_to_workspace` reject with 409
-  when the per-tenant policy sets `allow_re_invite: false` and the
-  (tenant, email) / (workspace, user) already has an invitation in a
-  terminal state (Accepted/Declined/Expired/Revoked); the default
-  (`true`) keeps the spec's re-invite-with-fresh-token flow. Pending
-  duplicates keep their pre-existing 409. Two HTTP-layer tests cover
-  both surfaces; both were verified to fail when their check is
-  removed. `docs/api-reference.md` now documents the policy endpoints
-  (`GET/PUT /api/v1/tenant/invitations/policy`) and the re-invite 409
-  semantics.
-- **F2 — pending-scope uniqueness is enforced by the database.**
-  Migration `2026-11-08-000059_invitation_pending_unique` adds partial
-  unique indexes `ON tenant_invitations (tenant_id, email) WHERE
-  status = 'Pending'` and the `(workspace_id, user_id)` workspace
-  variant (plain portable SQL — correlated-EXISTS dedupe + partial
-  index, runs identically on SQLite and PostgreSQL; the dedupe marks
-  superseded raced duplicates `Expired` so `CREATE UNIQUE INDEX`
-  cannot fail on a deployment that already raced). The SQLite and
-  PostgreSQL adapters keep the friendly pre-check and map the unique
-  violation to the same port-contract error as the race backstop; the
-  mem adapter already enforced the contract atomically under its
-  store lock. Terminal statuses never conflict with the partial
-  index, so re-invite after expiry/revocation is unaffected.
+- **`auth.rs` conflict:** kept `find_or_create_user_tenant` (the
+task-110 invitation email-link path) at the call site — the merged
+body already carries upstream's F1 tenant binding and username
+escape hatch. Repaired the auto-merge graft that had duplicated the
+`tenant_id` parameter (8-arg call against the 7-param signature,
+double tenant binding): restored the reviewed 7-parameter signature;
+the sole caller always passes `Some(&validated_tenant)` (the
+schema-defaulted JWT claim), so upstream's F1 invariant — an OIDC
+user is never created tenant-less — holds identically.
+- **`fabricated-scope-defaults-exemptions.txt` conflict:** both sides
+carried the same 2 entries; adopted the upstream prose ("count
+lowered to 2"), matching the merged `FROZEN_EXEMPTION_COUNT=2`.
+- **Migration version collision (beyond the flagged conflicts):**
+upstream landed `2026-10-09-000057_agent_persona_id` under Diesel
+version `20261009000057`, which the candidate's
+`2026-10-09-000057_user_tenant_scope` also held — Diesel would have
+silently dropped the tenant-scope index on fresh databases.
+Renumbered the task-110 migration to
+`2026-11-08-000060_user_tenant_scope` (next unused sequence; the
+upstream version string stays immutable), and updated the
+`migration_000058_backfills_unique_url_safe_usernames` test
+exclusion accordingly. `check-migration-versions` went FAIL → OK.
 
-Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-7.md`.
+Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-8.md`.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -158,50 +156,52 @@ Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-7.md`.
   resolver mappings and per-handler enforcement; HTTP-layer negative
   tests prove non-admins get 403 (tenant invite) and non-members get
   403 (workspace invite) through the full routing chain.
+- **Policy enforcement (round 7):** `allow_re_invite: false` rejects
+  re-invites after a terminal-state invitation with 409 on both
+  surfaces; pending-scope uniqueness is enforced by partial unique
+  indexes (migration `2026-11-08-000059_invitation_pending_unique`)
+  with raced-duplicate dedupe, so terminal statuses never conflict
+  and re-invite after expiry/revocation is unaffected.
 - **SSO/local account linking (round 4):**
   `UserRepository::claim_external_id` is the single sanctioned
   external_id transition (SQLite/Postgres/mem); the auth email-link
   path claims through it after external_id match and verified
   same-tenant email, and stamps `last_login_at` per upstream's
   every-login contract.
-- **Rebase (round 6):** rebased onto upstream `fefde2946`
-  (JwtClaims merged with both task-103's schema-default tenant claim
-  and task-110's `email_verified`; exemption file took upstream's
-  count).
 - **Docs:** `docs/api-reference.md` covers all invitation routes,
   selectors and the policy endpoints; `docs/server-config.md`
   documents `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
 
-### Test evidence (round 7, at head `c1de316bd`)
+### Test evidence (round 8, at merge commit `b53fa1484`)
 
-- `cargo test -p gyre-adapters invitation` — 5 passed / 0 failed,
-  including the two new adapter tests:
-  `pending_scope_unique_index_enforced_by_database` (raw-SQL
-  duplicate inserts against the real index; asserts the
-  pending-scope violation is recognized and the token_hash
-  violation is NOT misclassified) and
-  `migration_000059_dedupes_raced_pending_invitations_before_index`
-  (drives the real embedded up.sql against a seeded raced database;
-  asserts superseded duplicates → `Expired`, newest per scope survives
-  `Pending`, and the index rejects new duplicates).
-- `cargo test -p gyre-adapters` (full) — 390 passed / 0 failed /
-  12 ignored (includes the duplicate-migration-version and
-  migrations-create-tables guards).
+- `cargo check --all` (SKIP_WEB_BUILD=1) — clean.
+- `cargo test -p gyre-server --lib auth` — 69 passed / 0 failed.
 - `cargo test -p gyre-server --lib api::invitations` — 20 passed /
-  0 failed, including the two new F1 tests
-  (`allow_re_invite_false_blocks_tenant_reinvite_after_revoke`,
-  `allow_re_invite_false_blocks_workspace_reinvite_after_revoke`).
-  Both were separately verified to fail when their policy check is
-  disabled (check removed → test fails), then restored.
-- `cargo check --all` (SKIP_WEB_BUILD=1) — clean; `cargo clippy -p
-  gyre-adapters --all-targets` and `-p gyre-server --lib` show no
-  warnings in the changed invitation files.
-- Mechanical guards at the round-7 head: `check-migration-versions`,
-  `check-migration-sql-portability`, `check-mem-port-contracts`,
-  `check-arch`, `check-non-atomic-creation`,
-  `check-abac-route-registry`, `check-inert-enforcement`, and
-  `check-fabricated-scope-defaults` — all exit 0.
-- Known pre-existing (inherited from upstream base `fefde2946`,
-  verified identical there in round 6):
+  0 failed.
+- `cargo test -p gyre-adapters --lib migration` — 8 passed /
+  0 failed, including `no_duplicate_migration_version_prefixes`,
+  `migration_000058_backfills_unique_url_safe_usernames` (exercising
+  the renumbered migration in its target batch),
+  `migrations_create_tables`, `migrations_pending_zero_after_startup`
+  (full embedded set on a fresh database), and
+  `migration_000059_dedupes_raced_pending_invitations_before_index`.
+- `cargo test -p gyre-adapters` (full) — 399 passed / 0 failed /
+  12 ignored.
+- Mechanical guards at the merge head — all exit 0:
+  `check-migration-versions` (FAIL at the auto-merged tree before the
+  renumber, OK after), `check-migration-sql-portability`,
+  `check-fabricated-scope-defaults`, `check-scope-literal-defaults`,
+  `check-arch`, `check-abac-route-registry`,
+  `check-abac-exempt-handlers`, `check-inert-enforcement`,
+  `check-mem-port-contracts`, `check-mcp-write-tools`,
+  `check-dead-message-kinds`, `check-byte-slice-truncation`,
+  `check-relative-path-defaults`, `check-fail-open-ref-resolution`,
+  `check-lossy-secret-conversion`, `check-forwarded-header-trust`,
+  `check-in-memory-state-stores`, `check-unbounded-external-http`,
+  `check-non-atomic-creation`, `check-forged-scope-fields`, and
+  `check-task-commit-attribution`.
+- Known pre-existing (verified identical at upstream base `774737638`
+  via a scratch worktree this round):
   `check-dependent-scope-resolution.sh` reports 2 findings in
-  task-089/157 code; left for upstream-side fixes.
+  task-089/157 code (`explorer_views.rs:736`, `reconciliation.rs:925`);
+  left for upstream-side fixes.
