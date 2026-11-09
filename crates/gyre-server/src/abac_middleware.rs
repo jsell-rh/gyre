@@ -49,6 +49,9 @@ const REPOS_ID_ROUTE: &str = "/api/v1/repos/:id";
 const SPECS_ROUTE: &str = "/api/v1/specs";
 const SPECS_PATH_ROUTE: &str = "/api/v1/specs/:path";
 const PERSONAS_ID_ROUTE: &str = "/api/v1/personas/:id";
+const REPOS_GATES_ROUTE: &str = "/api/v1/repos/:id/gates";
+const REPOS_GATES_ID_ROUTE: &str = "/api/v1/repos/:id/gates/:gate_id";
+const REPOS_WORKTREES_ID_ROUTE: &str = "/api/v1/repos/:id/worktrees/:worktree_id";
 
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
@@ -131,13 +134,9 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/agent-commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/worktrees", "worktree", None),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/worktrees/:worktree_id",
-                    "worktree",
-                    None,
-                ),
-                RouteResourceMapping::api("/api/v1/repos/:id/gates", "gate", None),
-                RouteResourceMapping::api("/api/v1/repos/:id/gates/:gate_id", "gate", None),
+                RouteResourceMapping::api(REPOS_WORKTREES_ID_ROUTE, "worktree", None),
+                RouteResourceMapping::api(REPOS_GATES_ROUTE, "gate", None),
+                RouteResourceMapping::api(REPOS_GATES_ID_ROUTE, "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
@@ -548,24 +547,34 @@ fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
 /// `resource.repo_id` — source "Request path").
 ///
 /// Path-parameter conventions in the route registry:
-/// - `:workspace_id` / `:repo_id` name those entities explicitly wherever
-///   they appear.
+/// - `:workspace_id` names the workspace explicitly wherever it appears.
 /// - On parent-scoped routes (`/api/v1/workspaces/:id/...`,
 ///   `/api/v1/repos/:id/...`) the `:id` names the PARENT entity, exposed as
 ///   `resource.workspace_id` / `resource.repo_id` respectively.
+/// - A param named `{resource_type}_id` (`:worktree_id` on a "worktree"
+///   route, `:gate_id` on a "gate" route, `:team_id` on a "team" route)
+///   names the addressed entity wherever it appears and takes precedence
+///   over `:id`.
 /// - Elsewhere `:id` names the route's own entity → `resource.id`.
-///   On workspace-parented child routes (e.g. `/workspaces/:id/tasks`,
-///   resource type ≠ workspace) the `:id` is the workspace, not the
-///   addressed entity, so no `resource.id` is set.
+///   On parent-scoped child routes (e.g. `/workspaces/:id/tasks`,
+///   `/repos/:id/gates` — resource type ≠ parent type) the `:id` is the
+///   parent, not the addressed entity, so no `resource.id` is fabricated
+///   from it; the addressed entity surfaces via its `{resource_type}_id`
+///   param when the route names one (e.g. `/repos/:id/worktrees/:worktree_id`).
 ///
 /// Attributes requiring entity lookup (`resource.tenant_id`, `owner`, `team`,
 /// `approval_status`, `visibility`) are populated by
 /// [`extract_entity_attributes`] below. Nested child ids like `:node_id` are
 /// not resource identity attributes and stay unpopulated.
-/// Path prefix for workspace-scoped routes; shared by the workspace-id and
-/// resource-id extraction branches below so the literal is spelled once
-/// (the ABAC registry check flags duplicate `/api/v1/...` literals).
+
+/// Path prefix for workspace-scoped routes; shared by the workspace-id,
+/// repo-id and resource-id extraction branches below so the literal is
+/// spelled once (the ABAC registry check flags duplicate `/api/v1/...`
+/// literals).
 const WORKSPACES_PATH_PREFIX: &str = "/api/v1/workspaces/";
+
+/// Path prefix for repo-scoped routes; see [`WORKSPACES_PATH_PREFIX`].
+const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
 
 fn extract_path_attributes(
     ctx: &mut AttributeContext,
@@ -587,7 +596,7 @@ fn extract_path_attributes(
 
     let repo_id = params.get("repo_id").cloned().or_else(|| {
         pattern
-            .starts_with("/api/v1/repos/")
+            .starts_with(REPOS_PATH_PREFIX)
             .then(|| params.get("id").cloned())
             .flatten()
     });
@@ -595,12 +604,26 @@ fn extract_path_attributes(
         ctx.set("resource.repo_id", repo);
     }
 
-    let resource_id =
-        if pattern.starts_with(WORKSPACES_PATH_PREFIX) && resource_type != "workspace" {
+    // A param named `{resource_type}_id` names the addressed entity wherever
+    // it appears — including on parent-scoped child routes, where the `:id`
+    // names the parent instead (e.g. `:worktree_id` on
+    // `/repos/:id/worktrees/:worktree_id`, `:gate_id` on
+    // `/repos/:id/gates/:gate_id`, `:dependency_id` on
+    // `/merge-requests/:id/dependencies/:dependency_id`).
+    let child_param = format!("{resource_type}_id");
+    let resource_id = params.get(&child_param).cloned().or_else(|| {
+        // On parent-scoped child routes (`/workspaces/:id/tasks`,
+        // `/repos/:id/gates`, ...) the `:id` names the PARENT entity — already
+        // exposed as resource.workspace_id / resource.repo_id above — not the
+        // addressed entity, so it must not leak into resource.id.
+        if (pattern.starts_with(WORKSPACES_PATH_PREFIX) && resource_type != "workspace")
+            || (pattern.starts_with(REPOS_PATH_PREFIX) && resource_type != "repo")
+        {
             None
         } else {
             params.get("id").cloned()
-        };
+        }
+    });
     if let Some(id) = resource_id {
         ctx.set("resource.id", id);
     }
@@ -1579,6 +1602,8 @@ pub mod tests {
     const REPO_HEALTH_URI: &str = "/api/v1/repos/repo-health";
     const PERSONA_E_URI: &str = "/api/v1/personas/persona-e";
     const WS_TASKS_URI: &str = "/api/v1/workspaces/ws-1/tasks";
+    const REPO_GATES_URI: &str = "/api/v1/repos/repo-1/gates";
+    const REPO_WORKTREE_URI: &str = "/api/v1/repos/repo-1/worktrees/wt-42";
 
     fn build_test_app(state: Arc<AppState>) -> Router {
         init_resolver();
@@ -2202,6 +2227,332 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "subject.team_ids must be populated from the team store"
+        );
+    }
+
+    /// Unit-level check of the path-attribute conventions on parent-scoped
+    /// child routes (review round 1: the repos prefix lacked the
+    /// `resource_type != "repo"` guard, so gate/worktree/policy resources
+    /// carried the PARENT REPO id as resource.id, and
+    /// /repos/:id/worktrees/:worktree_id never surfaced the worktree id).
+    #[test]
+    fn path_attributes_repos_parented_child_routes() {
+        // Gate collection under a repo: `:id` names the repo (exposed as
+        // resource.repo_id); no resource.id may be fabricated from it.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(&mut ctx, REPOS_GATES_ROUTE, REPO_GATES_URI, "gate");
+        assert_eq!(attr_str(&ctx, "resource.repo_id"), Some("repo-1"));
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            None,
+            "gate collection route must not expose the parent repo id as resource.id"
+        );
+
+        // Gate child route: `:gate_id` names the addressed gate.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            REPOS_GATES_ID_ROUTE,
+            "/api/v1/repos/repo-1/gates/gate-9",
+            "gate",
+        );
+        assert_eq!(attr_str(&ctx, "resource.repo_id"), Some("repo-1"));
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("gate-9"));
+
+        // Worktree child route (the round-1 flagged route): the worktree id
+        // surfaces, not the parent repo id.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            REPOS_WORKTREES_ID_ROUTE,
+            REPO_WORKTREE_URI,
+            "worktree",
+        );
+        assert_eq!(attr_str(&ctx, "resource.repo_id"), Some("repo-1"));
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("wt-42"));
+
+        // Repo-typed repos routes keep `:id` as resource.id (regression
+        // guard for the guard itself).
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(&mut ctx, REPOS_ID_ROUTE, "/api/v1/repos/repo-1", "repo");
+        assert_eq!(attr_str(&ctx, "resource.repo_id"), Some("repo-1"));
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("repo-1"));
+
+        // Workspace-parented suppression unchanged: the tasks collection
+        // under a workspace exposes the workspace id, not a resource.id.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            "/api/v1/workspaces/:workspace_id/tasks",
+            WS_TASKS_URI,
+            "task",
+        );
+        assert_eq!(attr_str(&ctx, "resource.workspace_id"), Some("ws-1"));
+        assert_eq!(attr_str(&ctx, "resource.id"), None);
+
+        // Merge-request-parented dependency child route: the dependency id
+        // surfaces via its `{resource_type}_id` param, not the parent MR id.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            "/api/v1/merge-requests/:id/dependencies/:dependency_id",
+            "/api/v1/merge-requests/mr-1/dependencies/dep-3",
+            "dependency",
+        );
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("dep-3"));
+    }
+
+    /// Review round 1 (code finding), live-middleware reproduction: on the
+    /// gate collection route under a repo, `resource.id` must NOT carry the
+    /// parent repo id. A Deny keyed on `resource.id == <repo id>` must not
+    /// fire; the same Deny keyed on `resource.repo_id` (which DOES name the
+    /// parent repo) must fire — proving the policy machinery is live on
+    /// this very route, so the non-deny is not vacuous.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repos_parented_collection_route_does_not_leak_parent_repo_id() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny gate reads when resource.id equals the parent repo id. With
+        // the round-1 defect (resource.id = repo id) this fires → 403;
+        // correct behavior leaves resource.id unset, the condition fails,
+        // and the Developer role Allow (priority 800) grants the read.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-gate-resource-id-deny"),
+                name: "gate-resource-id-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("repo-1".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["gate".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_GATES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(REPO_GATES_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "resource.id must not carry the parent repo id on the gate collection route"
+        );
+
+        // Control on a fresh state: the same Deny keyed on resource.repo_id
+        // (present — the `:id` names the parent repo) must fire.
+        let (state2, _user_id2) = setup_membership_state().await;
+        state2
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-gate-repo-id-deny"),
+                name: "gate-repo-id-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.repo_id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("repo-1".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["gate".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let app2 = Router::new()
+            .route(REPOS_GATES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state2.clone(),
+                abac_middleware,
+            ))
+            .with_state(state2);
+
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(REPO_GATES_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::FORBIDDEN,
+            "control: resource.repo_id names the parent repo — the Deny must fire"
+        );
+    }
+
+    /// Review round 1 (code finding), live-middleware reproduction: the
+    /// worktree child route must surface the worktree id as resource.id.
+    /// DELETE maps to action "delete", which no built-in role policy
+    /// allows, so only the condition-bearing Allow can grant — it keys on
+    /// resource.id == the worktree id. With the round-1 defect resource.id
+    /// carried the parent repo id and the Allow could not match.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repos_parented_child_route_surfaces_worktree_id_as_resource_id() {
+        use axum::routing::delete;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-worktree-id-allow"),
+                name: "worktree-id-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "resource.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("wt-42".to_string()),
+                }],
+                actions: vec!["delete".to_string()],
+                resource_types: vec!["worktree".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_WORKTREES_ID_ROUTE, delete(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(REPO_WORKTREE_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the worktree id must surface as resource.id on /repos/:id/worktrees/:worktree_id"
+        );
+
+        // Control on a fresh state: an Allow keyed on the leaked parent
+        // value ("repo-1") must NOT grant — resource.id is the worktree id.
+        let (state2, _user_id2) = setup_membership_state().await;
+        state2
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-worktree-parent-id-allow"),
+                name: "worktree-parent-id-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "resource.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("repo-1".to_string()),
+                }],
+                actions: vec!["delete".to_string()],
+                resource_types: vec!["worktree".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let app2 = Router::new()
+            .route(REPOS_WORKTREES_ID_ROUTE, delete(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state2.clone(),
+                abac_middleware,
+            ))
+            .with_state(state2);
+
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(REPO_WORKTREE_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::FORBIDDEN,
+            "control: the parent repo id must not surface as resource.id"
         );
     }
 

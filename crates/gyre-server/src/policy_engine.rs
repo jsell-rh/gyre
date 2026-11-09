@@ -1024,6 +1024,29 @@ mod tests {
         };
         let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
         assert_eq!(result.effect, PolicyEffect::Deny);
+
+        // Killing case for fail-open mutations (review round 1: the Contains
+        // case above cannot distinguish fail-closed from a resolver that
+        // fabricates an empty string — both yield Deny). Here the operator's
+        // outcome FLIPS under that mutation: `subject.type NotEquals
+        // $resource.missing` is TRUE against a fabricated "" ("agent" != ""),
+        // so a fail-open resolver would ALLOW. Only fail-closed resolution
+        // — the condition cannot be established — yields Deny.
+        let mut ctx2 = AttributeContext::default();
+        ctx2.set("subject.type", "agent");
+
+        let cond2 = Condition {
+            attribute: "subject.type".to_string(),
+            operator: ConditionOp::NotEquals,
+            value: ConditionValue::String("$resource.missing".to_string()),
+        };
+        let result2 = evaluate(vec![allow_policy(10, vec![cond2])], &ctx2, "read", "repo");
+        assert_eq!(
+            result2.effect,
+            PolicyEffect::Deny,
+            "an Allow policy with an unresolvable $reference must not grant — \
+             a fabricated empty-string resolution would flip NotEquals to true"
+        );
     }
 
     #[test]
