@@ -198,6 +198,23 @@ pub async fn create_gate(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
+    // Duplicate guard: gate names are unique per repo. Without this, every
+    // re-run of `gyre bootstrap` re-POSTs the same default gate set and
+    // duplicates each row — every subsequent MR then runs each gate once
+    // per bootstrap run.
+    if state
+        .quality_gates
+        .list_by_repo_id(&repo_id)
+        .await?
+        .iter()
+        .any(|g| g.name == req.name)
+    {
+        return Err(ApiError::Conflict(format!(
+            "gate '{}' already exists for repo {repo_id}",
+            req.name
+        )));
+    }
+
     // Validate required fields per gate type.
     match req.gate_type {
         GateType::TestCommand | GateType::LintCommand => {
@@ -447,6 +464,62 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_gate_rejects_duplicate_name_per_repo() {
+        // Re-running `gyre bootstrap` re-POSTs the same default gate set;
+        // a second gate with the same name for the same repo must be a
+        // 409, not a silent duplicate row that runs once per bootstrap.
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body_json_val = serde_json::json!({
+            "name": "cargo-test",
+            "gate_type": "test_command",
+            "command": "cargo test"
+        });
+        let post = |app: &Router| {
+            let body = Body::from(serde_json::to_vec(&body_json_val).unwrap());
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(body)
+                    .unwrap(),
+            )
+        };
+        let resp = post(&app).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = post(&app).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "duplicate gate name for the same repo must be a 409 conflict"
+        );
+
+        // The list still holds exactly one row — no duplicate was written.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json.as_array()
+                .unwrap()
+                .iter()
+                .filter(|g| g["name"] == "cargo-test")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -283,7 +283,16 @@ pub async fn rotate_secret(
         rewrite_secret(&state, &updated, req.new_value.as_bytes()).await?;
     }
 
-    info!(tenant_id = %tenant_id, secret_id = %secret_id, "secret.rotated");
+    // §7 audit event: secret.rotated — name (never value), scope, actor.
+    info!(
+        event = "secret.rotated",
+        tenant_id = %tenant_id,
+        secret_id = %secret_id,
+        secret_name = %updated.name,
+        scope = updated.scope.as_str(),
+        rotated_by = %auth.agent_id,
+        "secret.rotated: admin force-rotate"
+    );
     Ok(Json(updated.into()))
 }
 
