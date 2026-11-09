@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "64536dbccf6bb5b1d7fcfef754ab7342ad256cba"]
+commits: ["64536dbccf6bb5b1d7fcfef754ab7342ad256cba", "14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
 ---
 
 ## Spec Excerpt
