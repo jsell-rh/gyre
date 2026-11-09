@@ -81,7 +81,18 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 ## Shipped
 
-All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–13; current head `f32cd89d7`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–14; current head `bd81b48e4`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+
+### Rebase repair (round 14, merge `bd81b48e4`): task-141/task-177 base merge, union of the divergent git_http.rs test tails
+
+Rebase finding `f74348f3b` on candidate `c4b978846`: merging base `fb1f82e31` (task-141 repo-defined persona push detection and approval reset, carried forward through the task-177 web-asset build and the deletion-compute-accounting PR #751) conflicted in `crates/gyre-server/src/git_http.rs`. The conflict was confined to the `mod tests` tail: both sides had appended divergent test blocks after the same shared last test (the MR lineage re-evaluation test), and the merge aligned their similar git-command scaffolding into six interleaved conflict hunks. Resolved as a plain union of both sides:
+
+- HEAD's task-104 test helpers (`audit_events_of`, `wait_for_audit_event`, `git_with_input`) and all five source-control audit event tests (`push_records_git_push_accepted_audit_event`, `push_declined_by_git_records_no_git_push_accepted_audit_event`, `push_rejected_by_gate_records_git_push_rejected_audit_event`, `push_spec_change_records_spec_changed_audit_event`, `clone_records_git_clone_audit_event`) kept.
+- The base's task-141 test helpers (`persona_content_hash`, `git_bare`, `write_blob`, `write_tree`, `commit_files`, `push_ref`, `wait_for_task_title`) and all persona push detection tests (`parse_persona_changes_*`, `persona_slug_from_path_direct_files_only`, `persona_approval_task_shape`, `push_persona_change_updates_entity_resets_approval_and_notifies_owner`, `push_new_persona_file_registers_pending_repo_scoped_entity`, `push_without_persona_changes_leaves_personas_untouched`) kept.
+- No helper-name collisions between the two tails; the shared test scaffolding (`pkt_line`, `git_app_with_repo`) is unchanged and serves both.
+- The production code auto-merged cleanly with both sides intact: all task-104 emission points (`emit_git_clone_audit`, `emit_git_push_rejected_audit` at the four gate-rejection paths, `emit_git_push_accepted_audit`, `emit_spec_changed_audit` in `process_spec_lifecycle`) coexist with the base's `process_persona_changes` call in post-receive. The base's production changes were independently reviewed (task-141, task-177, PR #751); no new emission repair was required — the base's new code paths introduce no auth rejection or gate denial surfaces.
+
+Regression coverage over the resolved region is both sides' test suites in one module: all five task-104 source-control audit event tests and all nine task-141 persona push detection tests pass at the merge head, so neither side's assertions were weakened by the union.
 
 ### Rebase repair (round 13, merge `f32cd89d7`): task-138 base merge, union resolution in the spec-lifecycle hook
 
@@ -134,18 +145,20 @@ Regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` driv
 
 Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the round-12 API-key tenant-binding rejection (AuthFailure with reason), the per-request AuthSuccess dedupe, the ABAC policy denial paths (middleware, git push, and the nine round-11 per-handler guards), and the RbacDenied paths (extractor, handler guards, the round-8/9 guards, and the round-10 MCP tools/call gate).
 
-At the round-13 head `f32cd89d7` (merge of base `22f275e26a` task-138, on top of the round-12 head `2d4faab3a` and its earlier base merges):
+At the round-14 head `bd81b48e4` (merge of base `fb1f82e31` task-141/task-177/deletion-compute-accounting, on top of the round-13 head lineage):
 
-- `cargo test -p gyre-server --lib`: **1544 passed, 0 failed** (the round-8/9/10/11/12 regression tests plus the task-100, task-103, task-089, and task-138 tests that arrived with the base merges; 1537 before the task-138 base merge).
+- `cargo test -p gyre-server --lib`: **1553 passed, 0 failed** (the round-8/9/10/11/12 regression tests plus the task-100, task-103, task-089, task-138, and task-141 tests that arrived with the base merges; 1544 before the round-14 base merge).
 - `cargo test -p gyre-server --test git_integration`: 17 passed, 0 failed (includes the base's `push_modifying_spec_revokes_ledger_approvals`).
+- `git_http::tests`: 54 passed, 0 failed — both sides' tests in one suite (five task-104 audit event tests + nine task-141 persona detection tests over the resolved tail).
 - Mutation checks: removing the round-12 extractor-path AuthFailure emission fails `auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding`; the round-11 worktrees/conversations checks and earlier rounds' checks (rollout-policy, secrets, MCP-gate RbacDenied) still hold.
-- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has no findings in code touched by the round-13 resolution (remaining warnings pre-existing at the candidate and in the merged base).
-- `bash scripts/check-fabricated-scope-defaults.sh`, `bash scripts/check-inert-enforcement.sh`, and `bash scripts/check-arch.sh` pass.
-- Round-13 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-round13*.log`.
+- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` findings in `git_http.rs` are the same 13 pre-existing at both the candidate and the merged base (verified by running clippy on each side's version of the file); none in code touched by the round-14 resolution.
+- `scripts/check-arch.sh`, `check-fabricated-scope-defaults.sh`, `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`, `check-migration-versions.sh`, `check-byte-slice-truncation.sh`, `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`, and `check-forwarded-header-trust.sh` all pass.
+- Round-14 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-round14*.log`.
 - Full workspace suites, arch checks, and GitHub CI are owned by verification.
 
-### Repair and merge history (rounds 1–12, summarized)
+### Repair and merge history (rounds 1–13, summarized)
 
+- Round 14 (rebase finding `f74348f3b`, merge `bd81b48e4` of base `fb1f82e31` task-141/task-177/PR #751): git_http.rs test-module tail conflict resolved as a plain union — both sides' helpers and tests kept, no collisions, production emission points and the base's `process_persona_changes` auto-merged intact (details in the section above).
 - Round 13 (rebase finding `0b70463af`, merge `f32cd89d7` of base `22f275e26a` task-138): spec-lifecycle hook conflict resolved as a union — base's once-per-push `ws_id` resolution kept, task-104's redundant per-change lookup removed, all SpecChanged audit emissions scoped from the per-push resolution, base's conditional workspace-event emission adopted (details in the section above).
 - Round 11 (commit `07794b483`, finding on candidate `1345a7cac`): nine uninstrumented per-handler repo/workspace ABAC guards now record AbacDenied via the shared `record_abac_denied` helper; regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` (details in the section above). Round 12 (rebase finding `c112f2c10`) is described in its own section above.
 - Rounds 1–2: implementation `ac5f88365` preserved through merges of bases `233664cf8` (task-087) and `72ad2a128` (task-096).
