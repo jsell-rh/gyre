@@ -2,10 +2,10 @@
 title: "Externalize spec lifecycle configuration"
 spec_ref: "spec-lifecycle.md §Configuration"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: ["2fb3ca466628b677a612cad2b14706469c6eeb8b", "5b2b0684ed92530fceec3293d9472ae13120daca", "696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28", "e667278c839308ee3fbb591930b2c4b717090f8b"]
+commits: ["2fb3ca466628b677a612cad2b14706469c6eeb8b", "5b2b0684ed92530fceec3293d9472ae13120daca", "696c03f2df6a0459c3e3d1d2971e6a3340414cae", "0dbe7863b4677f170458f24b1f6d76565a26ce24", "c8936f051f24811d4708d5350ee3f0adc7335bb2", "caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
 ---
 
 ## Spec Excerpt
@@ -239,6 +239,26 @@ Current-round probes: `SKIP_WEB_BUILD=1 cargo test -p gyre-server
 2 hook tests, re-run at this repair head); `cargo fmt --all --check`
 — clean.
 
+**CI repair round (finding bc54e343, candidate head `d74e10da0`, e2e
+run 42594335429):** the `E2E Tests` job failed in "Install Playwright
+browsers" — GitHub's `ubuntu-latest` now resolves to ubuntu 26.04, and
+the locked `playwright-core@1.58.2` has zero browser-download registry
+entries for `ubuntu26.*`/`ubuntu25.*`, so `npx playwright install
+--with-deps chromium` throws before any test runs. Not a candidate
+defect (the base→candidate diff never touched `.github/` or
+`web/package*.json`); verified against the locked package source in
+this sandbox (`npm ci` installs exactly `playwright-core@1.58.2`; its
+registry has 20 `ubuntu24` entries and the failing throws are
+`registry/index.js:1152` and `registry/dependencies.js:108`). Fixed by
+pinning the `e2e` job to `runs-on: ubuntu-24.04` in
+`.github/workflows/e2e.yml` (with a comment naming the lockfile
+constraint); `ci.yml` jobs stay on `ubuntu-latest` since they passed on
+26.04 in the same run set. Workflow-only change — no Rust or web
+source touched, matching the identical repair on sibling task branches
+(task-140 `2992e44c8`, task-106 `27b946cbc`). Live exact-head re-run
+belongs to remote verification. Evidence:
+`/tmp/stage/review-evidence/task-109/ci-bc54e343.md`.
+
 **Test evidence** (focused probes re-run at the current head, merge
 commit `8e37d4561`; earlier rounds recorded under
 `/tmp/stage/review-evidence/task-109/`):
@@ -269,6 +289,15 @@ commit `8e37d4561`; earlier rounds recorded under
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle`
   — 5/5 and `gyre-server` `git_http::tests::parse_spec_changes` — 9/9,
   `classify_spec_change` — 6/6, re-run at this head
+- CI repair round (finding bc54e343, this sandbox): workflow-only
+  change, no Rust/web source touched. Probes: `npm ci` in `web/`
+  installs the locked `playwright-core@1.58.2`; its registry contains 20
+  `ubuntu24` download-URL entries and zero `ubuntu25`/`ubuntu26` entries;
+  both CI error strings match its throw/warn sites verbatim; edited
+  `e2e.yml` parses as valid YAML with `jobs.e2e.runs-on ==
+  ubuntu-24.04` and all 12 steps intact;
+  `check-task-commit-attribution.sh` passes. Full-log evidence:
+  `/tmp/stage/review-evidence/task-109/ci-bc54e343.md`.
 
 `cargo test --all`, the full web suite, and exact-head GitHub checks are
 owned by the verification stage per assignment instructions; this repair
