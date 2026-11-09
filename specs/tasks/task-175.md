@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Item Structure"
   - "ui-layout.md §Action Buttons per Item Type"
   - "ui-layout.md §8. Briefing Layout"
-commits: ["3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901"]
+commits: ["3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901", "f5d3446bb5bfbb680caa429b748ac881ad791024"]
 ---
 
 ## Spec Excerpt
@@ -61,84 +61,83 @@ Read `ui-layout.md` §6-§8 for the exact layout specifications. Also reference 
 
 ## Shipped
 
-The full §6-§8 surface was built across earlier rounds; this round resolved the merge onto base
-fefde2946f3a0af1f212588f54591516fee0f7b2 (task-089 HSI Explorer Generated Views).
+The full §6-§8 surface was built across earlier rounds (spec table + detail tabs + editor split,
+all-10-priority Inbox cards with per-type actions, briefing narrative with entity links and chat).
+This round repaired the four review findings from the prior verification round
+(commit `f5d3446bb5bfbb680caa429b748ac881ad791024`).
 
-**§6 Specs View** (`SpecDashboard.svelte` + `DetailPanel.svelte`): workspace/tenant scope renders
-the sortable table (Path, Status, Kind, Owner, Last Updated) with status/kind filter pills and the
-`owner=me` toggle; repo scope renders the progress table (path, status badge, `N/M tasks`
-progressbar, last updated) with per-spec `GET /specs/:path/progress` rollups. Row click opens the
-spec detail panel whose tab set is Content/Edit/Progress/Links/History (DetailPanel `computeTabs`,
-each tab lazily backed by its real endpoint: content, progress, links, history-repo). `[+ New
-Spec]` opens the editor modal (markdown editor + preview split) that calls `POST
-/repos/:repo_id/specs/save` on a `spec-edit/*` branch.
+### §6-§8 surface (unchanged from earlier rounds)
 
-**§7 Inbox** (`Inbox.svelte`): cards render priority badge (`P1`-`P10`), title/subtitle, type
-badge, workspace-name badge at tenant scope, and relative timestamp; accordion expand reveals the
-full context (message, gate name/command, conflict nodes, related spec/agent/MR reference links)
-and the per-type action row. All 10 HSI §8 priority types render their specced buttons with real
-API calls: P1 Respond/View Spec/Open in Explorer/Dismiss, P2 Approve/Reject/Open Spec + inline
-spec-edit/* MR diff (`mrDiff`) before approving, P3 View Diff/View Output/Retry/Override (`submitReview`
-approved)/Close MR (`mrStatus` closed), P4 Review Changes/Dismiss, P5 View Both/Pick A/Pick B
-(`revertMr` of the losing merged MR)/Reconcile (`createTask` reconciliation task), P6 View
-Results/Adjust Meta-spec, P7 Increase Limit/Pause Work (repo merge-queue pause or workspace-wide
-`pause_requested` agent messages), P8 Increase Trust/Dismiss, P9 View Code/Update Spec, P10
-Confirm/Dismiss. PascalCase server wire types normalize to snake_case before rendering. Dismissed
-items hidden by default with the "Show Dismissed" toggle.
+- **§6 Specs View** (`SpecDashboard.svelte` + `DetailPanel.svelte`): sortable table (Path, Status,
+  Kind, Owner, Last Updated) at tenant/workspace scope with status/kind filters and the `owner=me`
+  toggle; repo-scope progress table (path, status badge, `N/M tasks` progressbar, last updated);
+  detail panel tabs Content/Edit/Progress/Links/History, each lazily backed by its real endpoint;
+  `[+ New Spec]` opens the editor modal calling `POST /repos/:repo_id/specs/save`.
+- **§7 Inbox** (`Inbox.svelte`): cards with priority badge, title/subtitle, type badge,
+  workspace-name badge at tenant scope, relative timestamp; accordion expand with full context and
+  per-type action rows for all 10 HSI §8 priority types; P2 fan-out server-side to every eligible
+  workspace member with a structured body.
+- **§8 Briefing** (`Briefing.svelte`): five narrative sections, inline action buttons, clickable
+  entity references, time-range selector, "Ask about this briefing" chat.
 
-**Server fan-out (HSI §8 P2)** (`specs_assist.rs save_spec`): the spec-pending-approval
-notification now fans out to every workspace Owner/Admin/Developer member (previously a single
-hardcoded "system" recipient) with a structured body (spec_path, spec_sha blob SHA, mr_id,
-mr_title, branch, repo_id) that the Inbox approve action consumes directly; the "system" fallback
-fires only when a workspace has no eligible members.
+### Review repairs (this round)
 
-**§8 Briefing** (`Briefing.svelte`): full-width narrative with the five section headers
-(COMPLETED / IN PROGRESS / CROSS-WORKSPACE / EXCEPTIONS / METRICS), inline action buttons per
-item (Respond to agent, View spec, Review changes/Dismiss, View Diff/View Output/Override/Close
-MR), entity references as clickable links opening the detail panel (spec, agent, MR), time-range
-selector (last visit/24h/7d/30d/custom with since epoch passed to `GET
-/workspaces/:id/briefing`), and the "Ask about this briefing" InlineChat at the bottom. Tenant
-scope aggregates all workspaces with per-item workspace badges.
+- **F1 (major) — P5 arbitration could not resolve MRs**: `GET /merge-requests` (list) never
+  serialized `merge_commit_sha` (`MrResponse::from` hardcoded `None`; only the single-MR `get_mr`
+  enriched it from the attestation store), so Pick A/Pick B always failed with "Could not find the
+  merged MR". Fix: extracted `enrich_merged_attestation()` (the same attestation lookup `get_mr`
+  performs) and applied it in `list_mrs`, `list_workspace_mrs`, and `get_mr`
+  (`crates/gyre-server/src/api/merge_requests.rs`). Anchored server-side by the new Rust test
+  `list_mrs_enriches_merged_rows_with_merge_commit_sha` (open→approved→merged transition + stored
+  attestation, then asserts the list row carries `merge_commit_sha`/`merged_at`) — the web test
+  mock now mirrors that real wire format instead of fabricating it.
+- **F2 (moderate) — P3 Override gated nothing**: `handleOverrideGate` only recorded an approval
+  review, but the merge processor's human-approval escape is `mr.status == Approved` set via
+  `PUT /merge-requests/:id/status` (`supervised_trust_hold` returns `None` only for
+  `MrStatus::Approved`). Fix: Override now submits the review AND sets the MR status to `approved`;
+  the test asserts both calls.
+- **F3 (minor) — silent pre-edit approval**: the server wrote `spec_sha: ""` into the
+  spec-pending-approval notification when git was unavailable (`get_blob_sha(...).unwrap_or_default()`
+  fail-open), and the Inbox ledger fallback then approved the PRE-edit version for a still-open
+  spec-edit MR (invalidated on merge). Fixes: (a) server derives the blob SHA from the exact saved
+  content (`sha1("blob <len>\0<content>")`, the same value `git rev-parse`/`git hash-object`
+  returns for those bytes) instead of `""`; (b) the client ledger fallback now requires the
+  spec-edit MR to be merged (ledger then holds the approved content) and otherwise fails with
+  `missing_spec_sha`. The Rust test asserts the exact git-produced SHA constant
+  (`8035a516…79d4`, produced by `git hash-object`); web tests cover both the open-MR failure and
+  merged-MR success paths.
+- **F4 (minor) — spec divergence in P5 mechanism**: HSI §8 P5 speccs Pick A/Pick B as creating a
+  task via the existing task domain model; the code performed a direct revert
+  (`POST /repos/:id/revert/:mr_id`), contradicting the spec. Fix: Pick A/Pick B now create a
+  `spec-implementation` revert task (`api.createTask`, labels `['spec-implementation', 'revert']`)
+  with the selected implementation as reference; the losing MR is resolved best-effort by
+  merge-commit SHA (exercising the F1 list enrichment) so the task description is concretely
+  actionable, and the commit SHA alone carries the task when the MR cannot be resolved. The direct
+  `revertMr` call is removed from the Inbox; the recovery endpoint remains for its other consumers.
+  No spec amendment needed — the code now implements the specced mechanism.
 
-**i18n defect fixed in an earlier round**: `web/src/locales/en.json` was missing 6 `decisions.*`
-keys referenced by Inbox.svelte (view_mr, view_agent, resume_queue, resuming_queue,
-queue_resumed, resume_failed) - those buttons rendered raw key text. Key-extraction audit
-reports zero missing keys for Inbox/Briefing/SpecDashboard.
+### Test evidence (focused probes; full gates owned by verification)
 
-**Repairs this round (rebase repair 4417ddd7, base fefde2946f3a0af1f212588f54591516fee0f7b2)**:
-Three conflicted files resolved as source-conflict unions (merge commit 04dd1c3ef):
-- `Inbox.svelte` typeNormMap: kept this branch's full map (all HSI §8 priority types +
-  extended NotificationType variants + legacy rows) and re-added base's `MrCreated` legacy
-  entry; verified against the merged `gyre-common/src/notification.rs` variant list.
-- `en.json`: dropped base's `decisions.reconciliation_note` — superseded by the real Reconcile
-  action (createTask) and unreferenced after the merge; kept this branch's
-  `decisions.accept = "Confirm"` (HSI §8 P10 specced label Confirm/Dismiss).
-- `Inbox.test.js`: kept BOTH suites — this branch's P5 conflict-action, spec_approval
-  inline-diff, and PascalCase wire-format tests, plus base's HSI §1.5 scope-filtering and
-  system-explorer §9 assertion-failure tests. No duplicate test names in the union.
-No Rust source conflicts this round; the earlier rustfmt/clippy repairs in `specs_assist.rs`
-ride through the merge unchanged.
+- `cargo test -p gyre-server --lib api::merge_requests` — 34 passed, 0 failed (includes the new
+  list-enrichment test).
+- `cargo test -p gyre-server --lib api::specs_assist` — 22 passed, 0 failed (includes the
+  strengthened exact-SHA assertion).
+- `cd web && npx vitest run src/__tests__/Inbox.test.js` — 75 passed, 0 failed (rewritten P5
+  task-creation tests with wire-format mock, F2 dual-call override assertion, F3 open/merged
+  fallback tests, task-creation failure path).
+- `cd web && npx vitest run src/__tests__/AccordionItem.test.js src/__tests__/AccordionScoping.test.js
+  src/__tests__/Briefing.test.js` — 43 passed, 0 failed.
+- i18n key audit: every `$t('...')` key in Inbox/Briefing/SpecDashboard/Inbox.test resolves in
+  `en.json`; removed keys (`side_picked`, `no_conflict_mr`) have zero remaining references.
+- `cargo fmt -p gyre-server --check` clean; `scripts/check-arch.sh`,
+  `check-fail-open-ref-resolution.sh`, `check-inert-enforcement.sh`,
+  `check-lossy-secret-conversion.sh`, `check-mem-port-contracts.sh`,
+  `check-byte-slice-truncation.sh`, `check-unbounded-external-http.sh`,
+  `check-task-commit-attribution.sh` all pass.
+- `cd web && npx vite build` clean (dist not committed, per task-210 convention).
 
-**Test evidence** (focused probes; full gates owned by verification):
-- `cd web && npx vitest run src/__tests__/Inbox.test.js src/__tests__/AccordionItem.test.js
-  src/__tests__/AccordionScoping.test.js` - 83 passed, 0 failed (up from 78 pre-merge:
-  base's scope-filtering + assertion-failure tests joined the suite).
-- `cd web && npx vitest run src/__tests__/Briefing.test.js src/__tests__/SpecDashboard.test.js
-  src/__tests__/DetailPanel.test.js src/__tests__/EditorSplit.test.js` - 133 passed, 0 failed
-  (up from 127 pre-merge).
-  Together the probes cover: accordion behavior, all 10 priority types' action buttons incl.
-  the PascalCase wire-format matrix, tenant-scope workspace badges, P2 inline diff before
-  approve, P3 override/close-MR API calls, P5 revert arbitration, P7 pause paths, briefing
-  sections, entity-ref detail-panel navigation, time-range selector, spec table
-  columns/sorting/filters, repo-scope progressbar aria attributes, spec detail-panel tab set,
-  HSI §1.5 scope filtering, and the merged AccordionItem header/quick-link structure.
-- i18n key audit (every `$t('...')` key in Inbox/Briefing/SpecDashboard/Inbox.test resolved
-  against `en.json`) - zero missing keys; dropping `reconciliation_note` broke no reference.
-- `cd web && npx vite build` - clean (dist rebuild not committed, per task-210 convention
-  08361ee0).
-
-Sandbox notes: frontend deps installed via `npm ci` (locked versions). No Rust conflicts
-this round so no cargo probes repeated. TCP listener probe unsupported, so no local
-server/browser end-to-end run; component tests + production build stand in.
-Probe commands, exit codes, and outputs are recorded in
-`/tmp/stage/review-evidence/task-175-probes.md`.
+Sandbox notes: frontend deps installed via `npm ci` (locked versions); `sha1 = "0.10"` was already
+in Cargo.lock (transitive) so the new gyre-server dependency adds no new crate version. Clippy on
+this toolchain flags a pre-existing `explicit_counter_loop` in untouched `gyre-common` code — not
+introduced by this round. TCP listener probe unsupported, so no local server/browser end-to-end
+run; component tests + production build stand in.
