@@ -2,7 +2,7 @@
 title: "Implement automatic jj rebase on target branch movement"
 spec_ref: "source-control.md §4. Automatic Rebasing"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
