@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
 ---
 
 ## Spec Excerpt
@@ -61,35 +61,46 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Repair round (commit `c1ad62f94`, responding to review
-`7de814ab95e745639162e0bbb564e4ad` on candidate `66677b96`):
+Repair round 3 (commit `27227f6b6`, responding to review
+`01b41fe107be40a3b0435327a4668f4e` on candidate `26cc85e5`):
 
-- **Migration collision fixed (blocking finding)**: the task's
-  `2026-10-10-000056_agent_attestation_level` collided with the base's
-  `2026-10-10-000056_meta_spec_approved_content_hash` (both map to diesel
-  version `20261010000056`; diesel runs only one per version, silently
-  dropping the other on fresh databases). Renumbered to
-  `2026-10-10-000059_agent_attestation_level`. Verified empirically:
-  `scripts/check-migration-versions.sh` exit 0; fresh-DB replay of all 63
-  migrations in version order applies BOTH 20261010 versions and the
-  agents table gains `attestation_level`;
-  `cargo test -p gyre-adapters sqlite::agent` → 17 passed (was 9 FAILED
-  with 'no such column: attestation_level'); full `sqlite::` adapter
-  suite → 284 passed, 0 failed.
-- **Lockfile drift ungated from repo policy (spec-fidelity note)**:
-  `enforce_stack_policy` previously short-circuited the gyre-stack.lock
-  drift check inside `if let Some(policy)` — a repo committing a lockfile
-  without a stack policy got zero drift verification. The drift check now
-  runs whenever the pushed tree carries a gyre-stack.lock and the pushing
-  agent has an attested stack: with a policy it follows the policy's
-  enforcement mode (block/warn); without a policy there is no mode to
-  escalate to, so findings default to warn (ConstraintViolation event +
-  accept). New test `lockfile_drift_without_policy_warned_and_accepted`
-  proves the flag fires with no policy entry; kill-checked by temporarily
-  restoring the policy gate (test fails 'got 0 messages' at the old
-  behavior, passes at the fix).
-- Coverage rows 7/8 updated: row 7 records the no-policy default-warn
-  drift behavior; row 8's migration reference corrected to 000059.
+- **§7.5 ConstraintViolation payload schema fixed (blocking finding)**:
+  the two emit sites this task added in `enforce_stack_policy`
+  (`git_http.rs` — below-minimum warn mode and the no-policy lockfile-drift
+  warn flag) omitted the six fields the spec requires for this message
+  kind (attestation_id, constraint_name, expression, context_snapshot,
+  action, timestamp — authorization-provenance.md §7.5, the task-007 F1
+  defect class) and regressed `scripts/check-event-payload.sh` (6
+  violations, exit 1 at the candidate; exit 0 at the base). Both payloads
+  now carry the full schema:
+  - attestation_id = the pushing agent's attested stack fingerprint
+    (empty string for a level-1 unattested pusher, where the violation is
+    precisely the absence of attestation);
+  - constraint_name = `stack_policy_min_attestation_level` /
+    `stack_lockfile_drift`; expression = the evaluated rule;
+    context_snapshot = the resolved levels/fingerprints
+    (attestation_level, min_attestation_level, repo_policy_fingerprint,
+    attested_stack_fingerprint, and for drift also lockfile_fingerprint
+    + integrity_verified, distinguishing parse failure / integrity
+    failure / genuine drift); action = `push`; timestamp = now_secs().
+  Task-specific fields (attestation_level, min_attestation_level,
+  branch, reason) retained alongside. The attested stack is now fetched
+  once before the policy check so the same stack serves both the
+  attestation_id context and the drift comparison.
+- **Tests strengthened**: both warn-mode tests
+  (`push_below_min_level_warn_mode_flagged_and_accepted`,
+  `lockfile_drift_without_policy_warned_and_accepted`) now assert the
+  full §7.5 schema via a shared `assert_spec_constraint_violation_payload`
+  helper (field presence, types, constraint_name, and both sides of the
+  comparison in context_snapshot). Kill-checked: reverting the emit
+  payload to the old form fails the test on `constraint_name` (log:
+  `task165-r3-killcheck.log`); the fix passes.
+
+Earlier rounds (retained context): round 2 (`c1ad62f94`, review
+`7de814ab`) renumbered the attestation-level migration past the base's
+`2026-10-10-000056` collision (now `...-000059`) and ungated the
+lockfile drift check from repo policy (lockfile present + no policy →
+default warn-mode flagging).
 
 ### Actual behavior
 
@@ -120,29 +131,24 @@ Repair round (commit `c1ad62f94`, responding to review
 5. **Push enforcement** — `enforce_stack_policy` (`git_http.rs`):
    min-attestation-level check runs on every push to a policy-bearing
    repo — below-minimum level → Block: 403 + `undo_ref_updates` +
-   PushRejected event; Warn: accept + ConstraintViolation event.
-   gyre-stack.lock in the pushed tree is read via `read_git_file` at the
-   new SHA, integrity-checked, and drift-checked against the pushing
-   agent's attested stack — not gated on a policy (defaults to warn-mode
-   flagging when no policy is set).
+   PushRejected event; Warn: accept + ConstraintViolation event carrying
+   the full §7.5 payload schema. gyre-stack.lock in the pushed tree is
+   read via `read_git_file` at the new SHA, integrity-checked, and
+   drift-checked against the pushing agent's attested stack — not gated
+   on a policy (defaults to warn-mode flagging when no policy is set),
+   with drift findings also carrying the full §7.5 schema.
 
 ### Test evidence
 
-Focused probes at HEAD `c1ad62f94` (logs under `/tmp/stage/review-evidence/`):
+Focused probes at HEAD `27227f6b6` (logs under `/tmp/stage/review-evidence/`):
 
-- `bash scripts/check-migration-versions.sh` → OK, exit 0 (log:
-  `task165-repair4-migration-gate.log`); `no_duplicate_migration_version_prefixes`
-  guard test → ok.
-- Fresh-DB migration replay (all 63 up.sql in diesel version order):
-  both `20261010000056` and `20261010000059` apply; `attestation_level`
-  present in `pragma table_info('agents')` (log:
-  `task165-repair4-fresh-db-pragma.log`).
-- `cargo test -p gyre-adapters sqlite::agent` → 17 passed, 0 failed
-  (log: `task165-repair4-sqlite-agent.log`); full `sqlite::` suite →
-  284 passed, 0 failed.
+- `bash scripts/check-event-payload.sh` → exit 0, 1 event kind checked
+  (was exit 1 with 6 violations at candidate `26cc85e5`; log:
+  `task165-r3-event-payload-fixed.log`).
 - `cargo test -p gyre-server git_http::` → 46 passed, 0 failed (log:
-  `task165-repair4-githttp-tests.log`), including all eight task-165
-  push tests (push_below_min_attestation_level_blocked,
+  `task165-r3-githttp-tests.log`), including all eight task-165 push
+  tests with the strengthened §7.5 payload assertions
+  (push_below_min_attestation_level_blocked,
   push_below_min_level_warn_mode_flagged_and_accepted,
   push_meeting_min_level_accepted_and_level_stored,
   level3_detected_from_workload_attestation,
@@ -150,15 +156,21 @@ Focused probes at HEAD `c1ad62f94` (logs under `/tmp/stage/review-evidence/`):
   tampered_lockfile_rejected_by_integrity_check,
   lockfile_drift_without_policy_warned_and_accepted) and the base's
   task-167 push_rebases_parent_branch_drops_child_lineage_dep.
-- Kill-check for the new no-policy drift test: with the old policy gate
-  temporarily restored the test fails ('expected a stack-drift
-  constraint_violation event without a repo policy, got 0 messages');
-  green again at the fix (log: `task165-repair4-killcheck.log`).
-- `cargo test -p gyre-server api::stack_attest` → 14 passed, 0 failed
-  (log: `task165-repair4-stackattest-tests.log`);
-  `cargo test -p gyre-domain stack` → 9 passed, 0 failed (log:
-  `task165-repair4-domain-stack-tests.log`).
-- `bash scripts/check-arch.sh` → exit 0 (log: `task165-repair4-arch.log`).
+- Kill-check for the §7.5 payload assertions: with the below-minimum
+  emit payload temporarily reverted to the old field set the test fails
+  ('constraint_name must name the violated constraint, got {…only
+  repo_id/agent_id/levels/reason…}'); green again at the fix (log:
+  `task165-r3-killcheck.log`).
+- `cargo test -p gyre-server api::stack_attest` → 14 passed, 0 failed;
+  `cargo test -p gyre-domain stack` → 9 passed, 0 failed.
+- `bash scripts/check-arch.sh` → exit 0 (log: `task165-r3-arch.log`);
+  `bash scripts/check-inert-enforcement.sh` → exit 0;
+  `bash scripts/check-dead-message-kinds.sh` → exit 0;
+  `cargo fmt -p gyre-server -- --check` → clean.
+- Round-2 evidence (migration renumbering, fresh-DB replay,
+  `sqlite::agent` 17 passed / full `sqlite::` 284 passed) remains valid:
+  no migration or adapter code changed in round 3 (single-file change
+  to `git_http.rs` + this task file).
 - `cargo test --all` is owned by the verification/publication stage and
   not repeated here. `ws_integration::test_auth_and_ping_roundtrip`
   fails in this sandbox on `TcpListener::bind` errno 95
