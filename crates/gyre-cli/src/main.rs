@@ -226,6 +226,95 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommands,
     },
+    /// Secret management (platform-model.md §7 CLI)
+    ///
+    /// Admin-only server-side. Values are write-only: they are sent on
+    /// set/rotate and never displayed or returned by list.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
+    },
+}
+
+/// Scope selector shared by every `gyre secret` subcommand.
+///
+/// Resolution rules (mirrors `gyre budget`):
+/// - `--repo <name>` selects repo scope; the workspace is taken from
+///   `--workspace-name` or inferred from the git remote, then the repo id
+///   is resolved within it.
+/// - `--scope tenant` selects tenant scope (the caller's own tenant).
+/// - Otherwise workspace scope: `--workspace-name` or the git remote.
+#[derive(Subcommand)]
+enum SecretCommands {
+    /// Create a secret, or update the value of an existing secret with the
+    /// same name in the same scope (the spec's "create/update")
+    Set {
+        /// Secret name, e.g. DATABASE_URL
+        name: String,
+        /// Secret value (plaintext; sent to the server, never displayed)
+        value: String,
+        /// Scope level: workspace (default), repo, or tenant
+        #[arg(long)]
+        scope: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose scope to target (selects repo scope)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Lifecycle class: static (default), ephemeral, rotated, or derived
+        #[arg(long)]
+        secret_type: Option<String>,
+        /// Expiry as Unix epoch seconds
+        #[arg(long)]
+        expires_at: Option<u64>,
+    },
+    /// List secret metadata for a scope (names and rotation/expiry state —
+    /// the server never returns values)
+    List {
+        /// Scope level: workspace (default), repo, or tenant
+        #[arg(long)]
+        scope: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose scope to target (selects repo scope)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Delete a secret by name in the target scope
+    Delete {
+        /// Secret name to delete
+        name: String,
+        /// Scope level: workspace (default), repo, or tenant
+        #[arg(long)]
+        scope: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose scope to target (selects repo scope)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Replace a secret's value (force rotation)
+    Rotate {
+        /// Secret name to rotate
+        name: String,
+        /// New plaintext value
+        new_value: String,
+        /// Scope level: workspace (default), repo, or tenant
+        #[arg(long)]
+        scope: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose scope to target (selects repo scope)
+        #[arg(long)]
+        repo: Option<String>,
+        /// New expiry as Unix epoch seconds (omit to keep the current expiry)
+        #[arg(long)]
+        expires_at: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1753,6 +1842,102 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Secret { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
+                SecretCommands::Set {
+                    name,
+                    value,
+                    scope,
+                    workspace_name,
+                    repo,
+                    secret_type,
+                    expires_at,
+                } => {
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
+                    let req = client::CreateSecretRequest {
+                        name,
+                        scope: target.scope.clone(),
+                        scope_id: target.scope_id.clone(),
+                        secret_type: secret_type.unwrap_or_else(|| "static".to_string()),
+                        value,
+                        expires_at,
+                    };
+                    let created = api.create_secret(&req).await?;
+                    println!("Secret '{}' set in {}", created.name, target.describe());
+                    print_secret(&created);
+                }
+
+                SecretCommands::List {
+                    scope,
+                    workspace_name,
+                    repo,
+                } => {
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
+                    let secrets = api
+                        .list_secrets(&target.scope, target.scope_id.as_deref())
+                        .await?;
+                    println!("Secrets in {}:", target.describe());
+                    println!();
+                    print_secret_table(&secrets);
+                }
+
+                SecretCommands::Delete {
+                    name,
+                    scope,
+                    workspace_name,
+                    repo,
+                } => {
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
+                    let id = find_secret_id_by_name(&api, &target, &name).await?;
+                    api.delete_secret(&id).await?;
+                    println!("Secret '{name}' deleted from {}", target.describe());
+                }
+
+                SecretCommands::Rotate {
+                    name,
+                    new_value,
+                    scope,
+                    workspace_name,
+                    repo,
+                    expires_at,
+                } => {
+                    let target = resolve_secret_scope(
+                        &api,
+                        scope.as_deref(),
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                    )
+                    .await?;
+                    let id = find_secret_id_by_name(&api, &target, &name).await?;
+                    let rotated = api.rotate_secret(&id, &new_value, expires_at).await?;
+                    println!("Secret '{}' rotated in {}", rotated.name, target.describe());
+                    print_secret(&rotated);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1854,7 +2039,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             );
         }
         if args.admin_user.is_some() {
-            anyhow::bail!("--dev cannot be combined with --admin-user (dev mode uses static tokens)");
+            anyhow::bail!(
+                "--dev cannot be combined with --admin-user (dev mode uses static tokens)"
+            );
         }
         if args.oidc_issuer.is_some() {
             anyhow::bail!("--dev cannot be combined with --oidc-issuer (dev mode skips OIDC)");
@@ -1865,7 +2052,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
 
     let repo_name = args.repo.clone().unwrap_or_else(|| "main".to_string());
     let tenant_name = args.tenant.clone().unwrap_or_else(|| "dev".to_string());
-    let workspace_name = args.workspace.clone().unwrap_or_else(|| "default".to_string());
+    let workspace_name = args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let repo_path = args.repo_path.as_deref().map(std::path::PathBuf::from);
 
     let api = client::GyreClient::new(args.server.clone(), args.token.clone());
@@ -1883,7 +2073,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if health["status"].as_str() != Some("ok") {
         anyhow::bail!("server health check returned unexpected status: {health}");
     }
-    println!("  Server healthy (version {}).", health["version"].as_str().unwrap_or("?"));
+    println!(
+        "  Server healthy (version {}).",
+        health["version"].as_str().unwrap_or("?")
+    );
 
     let mut step = StepTracker::new("create tenant");
 
@@ -1899,7 +2092,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
         Err(create_err) => match api.find_tenant_by_slug(&tenant_slug).await {
             Ok(Some(existing)) => {
-                println!("  Tenant '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Tenant '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -1924,9 +2120,11 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     agent_name: Some(created.user.username.clone()),
                 };
                 cfg.save()?;
-                println!("  Admin user '{}' created; credentials saved to {}",
+                println!(
+                    "  Admin user '{}' created; credentials saved to {}",
                     created.user.username,
-                    config::Config::path().display());
+                    config::Config::path().display()
+                );
                 // Continue authenticating as the new admin via its API key.
                 client_api =
                     client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
@@ -1941,7 +2139,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     .filter(|t| !t.is_empty());
                 match reuse {
                     Some(token) => {
-                        println!("  Admin user '{username}' already exists - reusing saved credentials");
+                        println!(
+                            "  Admin user '{username}' already exists - reusing saved credentials"
+                        );
                         summary.admin_username = Some(username.to_string());
                         client_api = client::GyreClient::new(args.server.clone(), token);
                     }
@@ -1981,7 +2181,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register repo");
 
     // ── Step 4: add repo (resume: reuse existing by name) ──
-    let repo = match client_api.create_repo(&summary.workspace_id, &repo_name).await {
+    let repo = match client_api
+        .create_repo(&summary.workspace_id, &repo_name)
+        .await
+    {
         Ok(r) => {
             println!("  Repo '{}' created ({})", r.name, r.id);
             r
@@ -1991,7 +2194,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             .await
         {
             Ok(Some(existing)) => {
-                println!("  Repo '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Repo '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -2019,7 +2225,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     )
                     .await
                     .map_err(|e| step.fail(e))?;
-                client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+                client_api
+                    .approve_persona(&created.id)
+                    .await
+                    .map_err(|e| step.fail(e))?;
             }
         }
         summary.personas_registered.push(persona.slug.to_string());
@@ -2033,10 +2242,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     // ── Step 6: spec registry (report-only; sync happens on push) ──
     match &repo_path {
         Some(path) if path.join("specs").join("manifest.yaml").exists() => {
-            println!("  Spec manifest found at {} - ledger syncs on push to the default branch",
-                path.join("specs").join("manifest.yaml").display());
+            println!(
+                "  Spec manifest found at {} - ledger syncs on push to the default branch",
+                path.join("specs").join("manifest.yaml").display()
+            );
         }
-        _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
+        _ => {
+            println!("  No spec manifest found - spec registry stays empty until specs are pushed")
+        }
     }
     if args.starter_kit {
         // A bare `repo_name` here would default to a RELATIVE path resolved
@@ -2065,7 +2278,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if summary.gates_configured.is_empty() {
         println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
     } else {
-        println!("  Gates configured: {}", summary.gates_configured.join(", "));
+        println!(
+            "  Gates configured: {}",
+            summary.gates_configured.join(", ")
+        );
     }
     step.advance("spawn repo orchestrator");
 
@@ -2162,6 +2378,159 @@ async fn resolve_budget_workspace(
             })?;
             api.resolve_workspace_slug(&ws_slug).await
         }
+    }
+}
+
+/// The target scope of a `gyre secret` subcommand, resolved from the
+/// `--scope`/`--workspace-name`/`--repo` flags.
+struct SecretScopeTarget {
+    /// "tenant" | "workspace" | "repo" — sent as the API `scope` value.
+    scope: String,
+    /// The scoped entity's id (tenant scope has none server-side; the
+    /// caller's own tenant is used).
+    scope_id: Option<String>,
+}
+
+impl SecretScopeTarget {
+    /// Human-readable description for error messages and output.
+    fn describe(&self) -> String {
+        match &self.scope_id {
+            Some(id) => format!("{} scope ({id})", self.scope),
+            None => format!("{} scope", self.scope),
+        }
+    }
+}
+
+/// Resolve the (scope, scope_id) a `gyre secret` command operates on.
+///
+/// Precedence:
+/// - `--scope repo` (or a bare `--repo <name>`) → repo scope; the repo id
+///   is resolved inside the workspace named by `--workspace-name` or
+///   inferred from the git remote.
+/// - `--scope tenant` → the caller's own tenant (no scope_id needed).
+/// - `--scope workspace` / default → workspace scope via
+///   `--workspace-name` or the git remote; a `--repo` alongside it only
+///   validates that the repo belongs to the resolved workspace.
+async fn resolve_secret_scope(
+    api: &client::GyreClient,
+    scope: Option<&str>,
+    workspace_name: Option<&str>,
+    repo: Option<&str>,
+) -> Result<SecretScopeTarget> {
+    let scope = scope.unwrap_or(if repo.is_some() { "repo" } else { "workspace" });
+    match scope {
+        "tenant" => Ok(SecretScopeTarget {
+            scope: "tenant".to_string(),
+            scope_id: None,
+        }),
+        "workspace" => {
+            let ws_id = resolve_budget_workspace(api, workspace_name, repo).await?;
+            Ok(SecretScopeTarget {
+                scope: "workspace".to_string(),
+                scope_id: Some(ws_id),
+            })
+        }
+        "repo" => {
+            let repo_name = repo.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "repo scope needs --repo <name> (or use --scope workspace / --scope tenant)"
+                )
+            })?;
+            let ws_id = resolve_budget_workspace(api, workspace_name, None).await?;
+            let repo_id = api.resolve_repo_name(&ws_id, repo_name).await?;
+            Ok(SecretScopeTarget {
+                scope: "repo".to_string(),
+                scope_id: Some(repo_id),
+            })
+        }
+        other => anyhow::bail!("unknown scope '{other}' (expected workspace, repo, or tenant)"),
+    }
+}
+
+/// Find the id of the secret named `name` in the target scope. The Admin
+/// API is id-keyed, while the CLI is name-keyed (the spec's
+/// `gyre secret delete <name>` / `gyre secret rotate <name> ...`).
+async fn find_secret_id_by_name(
+    api: &client::GyreClient,
+    target: &SecretScopeTarget,
+    name: &str,
+) -> Result<String> {
+    let secrets = api
+        .list_secrets(&target.scope, target.scope_id.as_deref())
+        .await?;
+    secrets
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.id.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "secret '{name}' not found in {} — check `gyre secret list` for names",
+                target.describe()
+            )
+        })
+}
+
+/// Format a Unix epoch (seconds) as a local datetime string, or "-".
+fn fmt_secret_epoch(secs: Option<u64>) -> String {
+    match secs {
+        Some(s) => {
+            // No chrono dependency in the CLI: render as epoch seconds with
+            // a stable, testable label. Users needing precision can convert.
+            format!("epoch {s}")
+        }
+        None => "-".to_string(),
+    }
+}
+
+/// Print one secret's metadata (`gyre secret set`/`rotate` result).
+/// Never prints a value — the client type cannot even represent one.
+fn print_secret(secret: &client::SecretResponse) {
+    println!("Secret '{}' ({})", secret.name, secret.secret_type);
+    println!("  ID:              {}", secret.id);
+    println!("  Scope:           {} ({})", secret.scope, secret.scope_id);
+    println!(
+        "  Created:         {}",
+        fmt_secret_epoch(Some(secret.created_at))
+    );
+    println!("  Expires:         {}", fmt_secret_epoch(secret.expires_at));
+    println!(
+        "  Last rotated:    {}",
+        fmt_secret_epoch(secret.last_rotated_at)
+    );
+}
+
+/// Print a scope's secrets as a table (`gyre secret list`).
+fn print_secret_table(secrets: &[client::SecretResponse]) {
+    if secrets.is_empty() {
+        println!("No secrets in this scope.");
+        return;
+    }
+    let name_w = secrets
+        .iter()
+        .map(|s| s.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let type_w = secrets
+        .iter()
+        .map(|s| s.secret_type.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    println!(
+        "{:<name_w$}  {:<type_w$}  {:<12}  {:<16}  {:<16}  CREATED",
+        "NAME", "TYPE", "SCOPE", "EXPIRES", "LAST ROTATED"
+    );
+    for s in secrets {
+        println!(
+            "{:<name_w$}  {:<type_w$}  {:<12}  {:<16}  {:<16}  {}",
+            s.name,
+            s.secret_type,
+            s.scope,
+            fmt_secret_epoch(s.expires_at),
+            fmt_secret_epoch(s.last_rotated_at),
+            fmt_secret_epoch(Some(s.created_at))
+        );
     }
 }
 
@@ -4565,6 +4934,172 @@ mod tests {
         } else {
             panic!("Expected Budget Set with all limits");
         }
+    }
+
+    // ── `gyre secret` command parsing (platform-model.md §7 CLI) ──────────
+
+    #[test]
+    fn cli_secret_set_repo_scope_parses() {
+        // Spec shape: `gyre secret set --repo gyre DATABASE_URL "postgres://..."`
+        let args = Cli::try_parse_from([
+            "gyre",
+            "secret",
+            "set",
+            "--repo",
+            "gyre",
+            "DATABASE_URL",
+            "postgres://user:pass@host/db",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Secret {
+            command:
+                SecretCommands::Set {
+                    name,
+                    value,
+                    scope,
+                    workspace_name,
+                    repo,
+                    secret_type,
+                    expires_at,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(name, "DATABASE_URL");
+            assert_eq!(value, "postgres://user:pass@host/db");
+            assert_eq!(scope, None); // --repo selects repo scope by default
+            assert_eq!(repo.as_deref(), Some("gyre"));
+            assert_eq!(workspace_name, None);
+            assert_eq!(secret_type, None);
+            assert_eq!(expires_at, None);
+        } else {
+            panic!("Expected Secret Set with --repo");
+        }
+    }
+
+    #[test]
+    fn cli_secret_set_tenant_with_type_and_expiry_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "secret",
+            "set",
+            "--scope",
+            "tenant",
+            "--secret-type",
+            "rotated",
+            "--expires-at",
+            "1893456000",
+            "API_KEY",
+            "secret-value",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Secret {
+            command:
+                SecretCommands::Set {
+                    name,
+                    value,
+                    scope,
+                    secret_type,
+                    expires_at,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(name, "API_KEY");
+            assert_eq!(value, "secret-value");
+            assert_eq!(scope.as_deref(), Some("tenant"));
+            assert_eq!(secret_type.as_deref(), Some("rotated"));
+            assert_eq!(expires_at, Some(1_893_456_000));
+        } else {
+            panic!("Expected Secret Set with tenant scope");
+        }
+    }
+
+    #[test]
+    fn cli_secret_set_requires_value() {
+        // A missing value positional must fail to parse, not silently create
+        // an empty secret.
+        let args = Cli::try_parse_from(["gyre", "secret", "set", "API_KEY"]);
+        assert!(args.is_err());
+    }
+
+    #[test]
+    fn cli_secret_list_workspace_parses() {
+        let args = Cli::try_parse_from(["gyre", "secret", "list", "--workspace-name", "platform"]);
+        assert!(args.is_ok());
+        if let Commands::Secret {
+            command:
+                SecretCommands::List {
+                    scope,
+                    workspace_name,
+                    repo,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(scope, None);
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+            assert_eq!(repo, None);
+        } else {
+            panic!("Expected Secret List");
+        }
+    }
+
+    #[test]
+    fn cli_secret_delete_and_rotate_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "secret",
+            "rotate",
+            "--scope",
+            "workspace",
+            "--workspace-name",
+            "platform",
+            "API_KEY",
+            "new-value",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Secret {
+            command:
+                SecretCommands::Rotate {
+                    name,
+                    new_value,
+                    scope,
+                    workspace_name,
+                    expires_at,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(name, "API_KEY");
+            assert_eq!(new_value, "new-value");
+            assert_eq!(scope.as_deref(), Some("workspace"));
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+            assert_eq!(expires_at, None);
+        } else {
+            panic!("Expected Secret Rotate");
+        }
+
+        let args =
+            Cli::try_parse_from(["gyre", "secret", "delete", "--scope", "tenant", "API_KEY"]);
+        assert!(args.is_ok());
+        if let Commands::Secret {
+            command: SecretCommands::Delete { name, scope, .. },
+        } = args.unwrap().command
+        {
+            assert_eq!(name, "API_KEY");
+            assert_eq!(scope.as_deref(), Some("tenant"));
+        } else {
+            panic!("Expected Secret Delete");
+        }
+    }
+
+    #[test]
+    fn cli_secret_set_rejects_unknown_scope() {
+        let args =
+            Cli::try_parse_from(["gyre", "secret", "set", "--scope", "galaxy", "API_KEY", "v"]);
+        // Parsing succeeds (the value is a free-form string); the scope is
+        // validated at resolution time. This pins that behavior so the error
+        // message stays a runtime diagnostic, not a clap panic.
+        assert!(args.is_ok());
     }
 
     #[test]

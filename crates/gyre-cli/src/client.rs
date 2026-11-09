@@ -216,6 +216,38 @@ pub struct SpawnOrchestratorAgent {
     pub restart_on_failure: Option<bool>,
 }
 
+// ── Secret admin types (mirrors /api/v1/secrets, platform-model.md §7) ───────
+
+/// Secret metadata as returned by the Admin API. The server never includes
+/// the plaintext value in any response, so neither does this type.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SecretResponse {
+    pub id: String,
+    pub name: String,
+    pub scope: String,
+    pub scope_id: String,
+    pub secret_type: String,
+    #[allow(dead_code)]
+    pub created_by: String,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+    pub last_rotated_at: Option<u64>,
+    #[allow(dead_code)]
+    pub tenant_id: String,
+}
+
+/// POST /api/v1/secrets request body (value included here — it is write-only
+/// and never appears in a response).
+#[derive(Serialize, Debug, Clone)]
+pub struct CreateSecretRequest {
+    pub name: String,
+    pub scope: String,
+    pub scope_id: Option<String>,
+    pub secret_type: String,
+    pub value: String,
+    pub expires_at: Option<u64>,
+}
+
 // ── Search response types (mirrors GET /api/v1/search) ───────────────────────
 
 /// One search result row. `facets` mirrors the server's result facets
@@ -636,6 +668,92 @@ impl GyreClient {
             anyhow::bail!("resolve notification failed (HTTP {status}): {text}");
         }
         Ok(())
+    }
+
+    /// POST /api/v1/secrets — create or update a secret (Admin role
+    /// required server-side). The plaintext `value` is sent in the request
+    /// and never appears in the response.
+    pub async fn create_secret(&self, req: &CreateSecretRequest) -> Result<SecretResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/secrets", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create secret failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing create secret response")
+    }
+
+    /// GET /api/v1/secrets?scope=...&scope_id=... — list secret metadata
+    /// for a scope. The server never returns values.
+    pub async fn list_secrets(
+        &self,
+        scope: &str,
+        scope_id: Option<&str>,
+    ) -> Result<Vec<SecretResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/secrets", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("scope", scope)]);
+        if let Some(sid) = scope_id {
+            req = req.query(&[("scope_id", sid)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list secrets failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing secrets list response")
+    }
+
+    /// DELETE /api/v1/secrets/:id — delete a secret (204 on success).
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/v1/secrets/{id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("delete secret failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// POST /api/v1/secrets/:id/rotate — replace a secret's value and
+    /// update `last_rotated_at`.
+    pub async fn rotate_secret(
+        &self,
+        id: &str,
+        new_value: &str,
+        expires_at: Option<u64>,
+    ) -> Result<SecretResponse> {
+        let body = serde_json::json!({ "new_value": new_value, "expires_at": expires_at });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/secrets/{id}/rotate", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("rotate secret failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing rotate secret response")
     }
 
     /// GET /api/v1/repos/:id/graph/concept/:name or
@@ -1705,7 +1823,6 @@ mod tests {
         assert_eq!(c.base_url, "http://localhost:3333");
     }
 
-
     #[test]
     fn spawn_orchestrator_response_parses() {
         // Exact shape from POST /api/v1/repos/:id/orchestrator/spawn after
@@ -1729,7 +1846,10 @@ mod tests {
         }"#;
         let parsed: SpawnOrchestratorResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.agent.id, "0eea0f49-8faa-4b16-a020-6ec24913c197");
-        assert_eq!(parsed.agent.orchestrator_type.as_deref(), Some("repo_orchestrator"));
+        assert_eq!(
+            parsed.agent.orchestrator_type.as_deref(),
+            Some("repo_orchestrator")
+        );
         assert_eq!(parsed.agent.repo_id.as_deref(), Some("repo"));
         assert_eq!(parsed.agent.restart_on_failure, Some(true));
     }
