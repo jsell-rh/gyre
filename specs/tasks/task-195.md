@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §16"
-commits: ["a65ae04d808bdfb43bfc726a7e591fa7fad93589", "35b4dc9914d8ec050e2e8d6ede0e03e86206d6f9", "bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d", "4494a058f44b4c14f26ce39839ff0b952d3939d6"]
+commits: ["4494a058f44b4c14f26ce39839ff0b952d3939d6", "a65ae04d808bdfb43bfc726a7e591fa7fad93589", "35b4dc9914d8ec050e2e8d6ede0e03e86206d6f9", "bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d"]
 ---
 
 ## Spec Excerpt
