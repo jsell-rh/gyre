@@ -146,6 +146,61 @@ describe('TimelineScrubber', () => {
     expect(markers.length).toBeGreaterThan(0);
   });
 
+  it('renders d3-scale time axis ticks when active (ui-layout.md §10 timeline)', () => {
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: TIMELINE, active: true, scrubIndex: 4, nodes: [] }
+    });
+    const axis = container.querySelector('.tl-time-axis');
+    expect(axis).toBeTruthy();
+    const ticks = axis.querySelectorAll('.tl-time-axis-tick');
+    expect(ticks.length).toBeGreaterThanOrEqual(2);
+    // Tick positions are strictly ordered left → right along the axis
+    const lefts = Array.from(ticks).map((el) => parseFloat(el.style.left));
+    for (let i = 1; i < lefts.length; i++) {
+      expect(lefts[i]).toBeGreaterThan(lefts[i - 1]);
+    }
+    // Tick labels render formatted dates
+    const labels = axis.querySelectorAll('.tl-time-axis-label');
+    expect(labels.length).toBe(ticks.length);
+    for (const label of labels) {
+      expect(label.textContent.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('positions key moment markers by timestamp (d3-scale), not array index', () => {
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: TIMELINE, active: true, scrubIndex: 4, nodes: [] }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    // Key moments: d2 (spec_approval, -20d) and d4 (structural_change, -5d)
+    expect(markers.length).toBe(2);
+    // The span is 30 days (d1 at -30d … d5 at now). d2 sits at -20d, i.e.
+    // 10/30 ≈ 33.3% along a *time*-proportional axis. Index-based spacing
+    // (1/4 = 25%) would place it elsewhere — this pins the d3-scale mapping.
+    const left = parseFloat(markers[0].style.left);
+    expect(left).toBeGreaterThan(30);
+    expect(left).toBeLessThan(37);
+    // d4 at -5d → 25/30 ≈ 83.3%
+    const leftD4 = parseFloat(markers[1].style.left);
+    expect(leftD4).toBeGreaterThan(80);
+    expect(leftD4).toBeLessThan(87);
+  });
+
+  it('falls back to index spacing when all deltas share one timestamp', () => {
+    const flat = [
+      { id: 'f1', timestamp: NOW_TS, spec_ref: 'specs/system/a.md', delta_json: null },
+      { id: 'f2', timestamp: NOW_TS, spec_ref: 'specs/system/b.md', delta_json: null },
+      { id: 'f3', timestamp: NOW_TS, spec_ref: null, delta_json: '{"nodes_added":[1,2,3,4,5,6]}' },
+    ];
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: flat, active: true, scrubIndex: 2, nodes: [] }
+    });
+    // Degenerate time domain → no d3-scale axis, but markers still render
+    expect(container.querySelector('.tl-time-axis')).toBeNull();
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBeGreaterThan(0);
+  });
+
   it('renders key moment markers from node spec_approved_at', () => {
     const { container } = render(TimelineScrubber, {
       props: { timeline: TIMELINE, active: true, scrubIndex: 4, nodes: NODES_WITH_MOMENTS }

@@ -40,6 +40,52 @@ class GitHubChecksTest(unittest.TestCase):
         return {'status': status, 'conclusion': conclusion, 'name': 'e2e', 'workflowName': 'E2E Tests',
                 'detailsUrl': 'https://github.com/example/repo/actions/runs/10/job/100'}
 
+    def setup_observation(self, *, changed=None, fixed_main=False, failed_step='Install Playwright browsers', stale=False, mixed=False):
+        self.pr['statusCheckRollup']=[self.check('FAILURE')]
+        self.logs={'10':'e2e\tInstall Playwright browsers\t2026-11-09T13:25:06Z Error: ERROR: Playwright does not support chromium on ubuntu26.04-x64\n'}
+        if mixed:
+            self.pr['statusCheckRollup'].append(self.check('FAILURE')|{'name':'Test','detailsUrl':'https://github.com/example/repo/actions/runs/20/job/200'})
+            self.logs['20']='test result: FAILED. product assertion failed\n'
+        self.baseline=[{'head_sha':self.base,'workflow_id':5,'status':'completed','conclusion':'success','id':9,'run_number':1}]
+        main='f'*40
+        def run(*args,**kwargs):
+            if args[:2]!=('gh','api') or 'actions/runs?' in args[2]:return self.run_cli(*args,**kwargs)
+            url=args[2]
+            if url.endswith('/actions/runs/10'):
+                value={'id':10,'head_sha':self.head,'status':'completed','conclusion':'failure','run_attempt':1,'path':'.github/workflows/e2e.yml'}
+            elif url.endswith('/actions/jobs/100'):
+                value={'id':100,'name':'e2e','head_sha':self.base if stale else self.head,'run_id':10,'status':'completed','conclusion':'failure','run_attempt':1,'steps':[{'name':failed_step,'conclusion':'failure'}]}
+            elif '/git/ref/' in url:value={'object':{'sha':main}}
+            else:
+                path,ref=url.split('/contents/')[1].split('?ref=')
+                if path.endswith('.npmrc'):return subprocess.CompletedProcess(args,1,json.dumps({'status':'404'}),'')
+                different=(changed==path and ref==self.head) or (fixed_main and ref==main and path=='.github/workflows/e2e.yml')
+                value={'type':'file','sha':('2' if different else '1')*40}
+            return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+        return ci.observe(run,'https://github.com/example/repo/pull/1',self.head,self.base,self.temp.name)
+
+    def test_setup_failure_ignores_historical_green_runner_and_has_stable_identity(self):
+        first=self.setup_observation()
+        self.assertEqual(first['status'],'environment_failed')
+        self.head='c'*40;self.base='d'*40;self.pr['headRefOid']=self.head
+        second=self.setup_observation()
+        self.assertEqual(second['failure_signature'],first['failure_signature'])
+        self.assertIn('ubuntu26.04-x64',second['environment_failure']['platforms'])
+
+    def test_setup_failure_refreshes_against_changed_main_without_a_model_repair(self):
+        result=self.setup_observation(fixed_main=True)
+        self.assertEqual(result['status'],'environment_refresh')
+        self.assertEqual(result['target_base'],'f'*40)
+
+    def test_candidate_ci_changes_and_product_test_failures_are_not_shared(self):
+        for path in ('.github/workflows/e2e.yml','web/package.json','web/package-lock.json'):
+            with self.subTest(path=path):self.assertEqual(self.setup_observation(changed=path)['status'],'candidate_failed')
+        self.assertEqual(self.setup_observation(failed_step='Run E2E tests')['status'],'candidate_failed')
+        self.assertEqual(self.setup_observation(mixed=True)['status'],'candidate_failed')
+
+    def test_stale_setup_job_cannot_create_a_shared_repair(self):
+        with self.assertRaisesRegex(RuntimeError,'evidence changed'):self.setup_observation(stale=True)
+
     def test_no_checks_yet_or_pending_or_policy_blocks_publication(self):
         self.assertEqual(self.observe()['status'], 'pending')
         self.pr['statusCheckRollup'] = [self.check(None, 'IN_PROGRESS')]

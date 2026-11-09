@@ -351,16 +351,18 @@ mod tests {
         // (000056 here is task-180's spec_assertion_results and 000057 is
         // task-193's spec_approval_attestation — different migrations that
         // legitimately own those versions on main.)
-        // 2026-10-09-000057_user_tenant_scope (task-110) is excluded too:
+        // 2026-11-08-000060_user_tenant_scope (task-110) is excluded too:
         // after the rebase onto c5deca801 it only creates the tenant-scope
         // index and depends on 000058's tenant_id column, so it cannot run
         // in the pre-000058 set. It rides along with the target batch (in
         // version order, after 000058) — index creation only, so the
-        // backfill assertions below are unaffected.
+        // backfill assertions below are unaffected. (Renumbered from
+        // 20261009000057 to 20261108000060 when upstream landed
+        // agent_persona_id under the same version; see its up.sql.)
         let all = MIGRATIONS.migrations().unwrap();
         let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
             let v = m.name().version().to_string();
-            v != "20261008000058" && v != "20261009000057"
+            v != "20261008000058" && v != "20261108000060"
         });
         assert_eq!(
             target.len(),
