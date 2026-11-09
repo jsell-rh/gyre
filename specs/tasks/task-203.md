@@ -2,10 +2,10 @@
 title: "Enforce access scoping on search (tenant/workspace/repo, index-level filtering)"
 spec_ref: "search.md §Access Scoping"
 depends_on: [task-201]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "df800fe25b8e84d30cc221c824e33915ea7325d2"]
 ---
 
 ## Spec Excerpt
@@ -72,7 +72,7 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is access-scoped end to end (search.md §Access Scoping). The candidate (`546be12`) was rebased onto base `4e895f7` as merge commit `08c1c757` (rebase repair for durable finding `25e35a17`), carrying the interrupted checkpoint `a18e6e25` plus verification repairs `790b031d` (E0015: `ENV_LOCK` via `LazyLock`) and `6bf73593` (`unused_must_use`: `.unwrap()` on `seed_builtin_policies`).
+Search is access-scoped end to end (search.md §Access Scoping), on a history that carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the rebase repair onto base `4e895f7` (merge `08c1c757`, durable finding `25e35a17`), and the CI runner repair `df800fe2` (durable finding `4991c811`).
 
 ### Behavior
 
@@ -85,7 +85,7 @@ Search is access-scoped end to end (search.md §Access Scoping). The candidate (
 
 ### Test evidence
 
-On the post-rebase merged tree (`08c1c757`), fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web source touched), via `/tmp/stage/bin/cargo`; logs retained in `/tmp/stage/review-evidence/task-203-rebase-*.log`:
+Logs retained under `/tmp/stage/review-evidence/task-203-*`:
 
 - `cargo test -p gyre-server --lib mcp_search` — 1 passed: `mcp_search_is_access_scoped_to_the_agent_token` (admin sees 3; repo orchestrator sees only its repo; client `workspace_id: ws-b` cannot widen; workspace orchestrator sees both ws-a repos, never ws-b).
 - `cargo test -p gyre-server --test search_wiring` — 2 passed: `search_is_access_scoped_to_the_authenticated_caller` (member of ws-a gets total 2 with ws-b's matching doc absent from results AND total; `workspace_id=ws-b` param → total 0; repo/workspace orchestrator and worker-agent paths; ghost agent fails closed) and `sqlite_url_wires_fts5_search_port` (FTS5 wiring, stemming, tenant boundary, facets).
@@ -94,12 +94,6 @@ On the post-rebase merged tree (`08c1c757`), fresh sandbox, `SKIP_WEB_BUILD=1` (
 
 Full workspace suites, all-target Clippy, and GitHub CI are deferred to verification per assignment scope.
 
-### Rebase repair (`08c1c757`)
+### CI repair (`df800fe2`, durable finding `4991c811`)
 
-Durable finding `25e35a17`: merging base `4e895f7` into the candidate auto-merged all but three files. Resolutions:
-
-- `crates/gyre-server/src/lib.rs` — HEAD added `pub mod search_scope;` (task-203), base added `pub mod secret_rotation;`; kept both, alphabetical order. Both module files exist on the merged tree.
-- `crates/gyre-server/tests/search_wiring.rs` — the `seed_builtin_policies` call site conflicted between HEAD's `.unwrap()` and base's `.expect("seed built-in policies")`; kept `.unwrap()`, matching the file's other call site (line 281) that auto-merged as `.unwrap()`. Both handle the `must_use` result.
-- `docs/api-reference.md` — kept base's four new `/api/v1/secrets*` rows and replaced base's plain search row with HEAD's access-scoped search row.
-
-Post-rebase probes (logs under `/tmp/stage/review-evidence/task-203-rebase-*`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `cargo test -p gyre-adapters search` — 16 passed; `cargo check --workspace --all-targets` — clean; `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-mem-port-contracts.sh`, `check-migration-versions.sh` — all exit 0; `scripts/check-rustfmt-diff.py` clean against both `546be125f` and `4e895f76` (the canonical changed-lines fmt gate; a whole-crate `rustfmt --edition 2024 --check` reports pre-existing debt already present on base `4e895f7` and is not the repo's gate).
+PR #741 run 42573267153 failed at the E2E job's `Install Playwright browsers` step: `ubuntu-latest` now resolves to ubuntu 26.04, for which the locked Playwright 1.58.2 has no chromium build ("Playwright does not support chromium on ubuntu26.04-x64"). Every earlier step of the same run (release build, `npm ci`, web build, vitest) passed — the failure is the runner image, not the code. Fix: pin the e2e job's `runs-on` to `ubuntu-24.04`, an image Playwright 1.58.2 officially supports; no locked dependency, test, or assertion changed (`ci(e2e): pin runner image to ubuntu-24.04 for locked Playwright`). Local probes with the locked toolchain (`/tmp/stage/review-evidence/task-203-ci-repair-*`): `npm ci` + `npx playwright install --dry-run chromium` confirms the locked 1.58.2 expects chromium v1208 (the exact installed build), and a browser-launch smoke test using the repo's `playwright.config.js` launch options (`--no-zygote`, `chromiumSandbox: false`) renders a page successfully — the e2e toolchain itself is healthy. Exact-head GitHub checks remain with verification.
