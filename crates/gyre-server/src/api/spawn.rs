@@ -395,7 +395,7 @@ pub(crate) async fn spawn_agent_core(
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
 
     // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
-    if let Err(reason) = crate::abac::check_repo_abac(&state, &req.repo_id, &auth).await {
+    if let Err(reason) = crate::abac::check_repo_abac(state, &req.repo_id, auth).await {
         // task-104: AbacDenied audit event — per-handler repo-level ABAC
         // denial outside the ABAC middleware. `endpoint` names the calling
         // surface (REST route or MCP tool) since this core is shared.
@@ -2482,7 +2482,7 @@ mod tests {
             agent_type: None,
             conversation_sha: None,
         };
-        let _resp = spawn_agent_core(&state, req, &auth)
+        let _resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
             .expect("spawn must succeed");
 
@@ -2574,7 +2574,7 @@ mod tests {
             agent_type: None,
             conversation_sha: None,
         };
-        let resp = spawn_agent_core(&state, req, &auth)
+        let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
             .expect("spawn must succeed");
 
@@ -2693,7 +2693,7 @@ mod tests {
                 agent_type: None,
                 conversation_sha: None,
             };
-            let resp = spawn_agent_core(&state, req, &auth)
+            let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
                 .expect("spawn must succeed");
 
@@ -2758,7 +2758,7 @@ mod tests {
                 agent_type: None,
                 conversation_sha: None,
             };
-            let resp = spawn_agent_core(&state, req, &auth)
+            let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
                 .expect("spawn must succeed");
 
@@ -2848,7 +2848,7 @@ mod tests {
             agent_type: None,
             conversation_sha: None,
         };
-        let resp = spawn_agent_core(&state, req, &auth)
+        let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
             .expect("spawn must succeed");
         let agent_id = resp.agent.id.to_string();
