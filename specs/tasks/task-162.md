@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a"]
 ---
 
 ## Spec Excerpt
@@ -107,19 +107,24 @@ adapter.
 Full workspace suite and exact-head GitHub CI remain owned by verification
 and publication, per assignment constraints.
 
-### Merge repair (rebase finding d208c79f)
+### Merge repair (rebase finding 9c0ccfee)
 
-Resolved the rebase conflict against main tip ed57c723 (merge commit
-e19285cc). Only `specs/coverage/system/message-bus.md` conflicted: the
-header audit note/count. Resolution combines both sides — main's row 7
-(Payload Schemas, task-200) stays `verified`, task-162's rows 12/15 stay
-`implemented`; header now reads 14/14 (3 n/a), and `specs/coverage/SUMMARY.md`'s
-message-bus row was updated from main's stale 85% to 100% to match. All
-focused suites re-run green post-merge (evidence above, recorded under
-/tmp/stage/review-evidence), and `check-task-commit-attribution.sh` now
-passes (main fixed the task-210 attribution gap noted earlier).
+Resolved the rebase conflict against main tip fefde294 (merge commit
+9e5a0171d, recorded in `commits:` above). Only
+`crates/gyre-server/src/main.rs` conflicted: the import list -- this
+branch's `message_dispatcher` import vs. main's new
+`bootstrap_default_tenant`. Resolution is the union of both; the file body
+had already auto-merged cleanly with both sides' startup wiring intact
+(`bootstrap_default_tenant(&state)` plus
+`message_dispatcher::spawn_message_consumer`/`spawn_message_expiry`).
+No task-owned file needed semantic repair. All focused suites re-run green
+post-merge (see Test evidence above); `cargo check -p gyre-server --bins`
+clean; arch, dead-message-kinds, fabricated-scope-defaults, and
+task-commit-attribution checks all pass.
+`specs/coverage/system/message-bus.md` (14/14, 3 n/a) and
+`specs/coverage/SUMMARY.md` (message-bus 100%) merged consistently.
 
 Note for reviewers: `check-notification-test-coverage.sh` still exits 2 on
-this host before scanning any file — its awk uses gawk-only 3-arg `match()`
-and this host has mawk 1.3.4. Identical failure at pristine base 8c2d1775;
+this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
+and this host has mawk 1.3.4. Identical failure at pristine base;
 host-tooling issue, unrelated to this task.
