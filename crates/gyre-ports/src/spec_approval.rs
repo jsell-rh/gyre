@@ -5,6 +5,10 @@ use gyre_domain::spec_approval::ApprovalTransitionError;
 use gyre_domain::SpecApproval;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async-trait 0.1.89 injects #[must_use] into every
+                                  // expanded method while the boxed-future return type is
+                                  // already #[must_use] (Future); upstream-suppressed set
+                                  // (lint_suppress_without_body) does not cover this lint.
 pub trait SpecApprovalRepository: Send + Sync {
     /// Insert a new ledger entry. Fails if an entry with the same id already
     /// exists (ids are freshly generated; a duplicate indicates a bug).

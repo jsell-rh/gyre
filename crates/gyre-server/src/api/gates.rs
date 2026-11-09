@@ -715,9 +715,7 @@ mod tests {
             "2".repeat(40),
             "user:bob",
         );
-        rejected
-            .reject("user:carol", "out of scope", 120)
-            .unwrap();
+        rejected.reject("user:carol", "out of scope", 120).unwrap();
         state.spec_approvals.create(&rejected).await.unwrap();
 
         let app = crate::api::api_router().with_state(state);

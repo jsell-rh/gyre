@@ -323,7 +323,7 @@ mod tests {
     }
 
     fn sha(seed: char) -> String {
-        std::iter::repeat(seed).take(40).collect()
+        std::iter::repeat_n(seed, 40).collect()
     }
 
     #[tokio::test]
