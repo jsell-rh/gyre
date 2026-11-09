@@ -326,6 +326,23 @@ pub async fn revoke_task_secrets(
     }
 }
 
+/// Revoke the task-scoped ephemeral secrets of `agent`'s current task, if
+/// any — the shared teardown step for every path that ends an agent run
+/// (REST and MCP completion, admin kill, heartbeat abort, compose teardown,
+/// repo-archive stop, process/container/SSH exit monitors). Agents without a
+/// current task (e.g. orchestrators) have nothing to revoke.
+pub async fn revoke_agent_task_secrets(state: &AppState, agent: &gyre_domain::Agent) {
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        revoke_task_secrets(
+            state,
+            &agent.workspace_id,
+            &task_id.to_string(),
+            &agent.id.to_string(),
+        )
+        .await;
+    }
+}
+
 /// Run one pass of the secret expiry check across all tenants.
 pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     let now = now_secs();

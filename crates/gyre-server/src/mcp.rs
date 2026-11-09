@@ -1448,15 +1448,11 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     // on agent completion ("Secrets access revoked" at
                     // teardown) — deletes Task-scoped secrets for the
                     // agent's task and logs `secret.revoked` per secret.
-                    if let Some(task_id) = agent.current_task_id.as_ref() {
-                        crate::secret_rotation::revoke_task_secrets(
-                            state,
-                            &agent.workspace_id,
-                            &task_id.to_string(),
-                            &agent_id,
-                        )
-                        .await;
-                    }
+                    crate::secret_rotation::revoke_agent_task_secrets(
+                        state,
+                        &agent,
+                    )
+                    .await;
                     tool_result(format!("Agent {agent_id} marked complete"))
                 }
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),

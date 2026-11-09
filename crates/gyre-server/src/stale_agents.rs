@@ -78,6 +78,11 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     .kv_remove("interrogation_context", &agent_id_str)
                     .await;
 
+                // Platform Model §7: heartbeat abort is a kill — revoke the
+                // agent's task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
                     ws_id.clone(),

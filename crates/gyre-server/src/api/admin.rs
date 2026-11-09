@@ -357,15 +357,7 @@ pub async fn admin_kill_agent(
     // Platform Model §7: revoke task-scoped ephemeral secrets on kill
     // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
     // for the agent's task and logs `secret.revoked` per secret.
-    if let Some(task_id) = agent.current_task_id.as_ref() {
-        crate::secret_rotation::revoke_task_secrets(
-            &state,
-            &agent.workspace_id,
-            &task_id.to_string(),
-            &id,
-        )
-        .await;
-    }
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     let killed_by = auth

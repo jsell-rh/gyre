@@ -963,6 +963,13 @@ pub(crate) async fn spawn_agent_core(
                                         if a.status == AgentStatus::Active {
                                             let _ = a.transition_status(AgentStatus::Idle);
                                             let _ = state_mon.agents.update(&a).await;
+                                            // Platform Model §7: the run's process is gone — revoke its
+                                            // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
+                                            crate::secret_rotation::revoke_agent_task_secrets(
+                                                &state_mon,
+                                                &a,
+                                            )
+                                            .await;
                                         }
                                     }
                                     break;
@@ -1073,6 +1080,13 @@ pub(crate) async fn spawn_agent_core(
                                         if a.status == AgentStatus::Active {
                                             let _ = a.transition_status(AgentStatus::Idle);
                                             let _ = state_mon.agents.update(&a).await;
+                                            // Platform Model §7: the run's process is gone — revoke its
+                                            // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
+                                            crate::secret_rotation::revoke_agent_task_secrets(
+                                                &state_mon,
+                                                &a,
+                                            )
+                                            .await;
                                         }
                                     }
                                     break;
@@ -1126,6 +1140,13 @@ pub(crate) async fn spawn_agent_core(
                                         if a.status == AgentStatus::Active {
                                             let _ = a.transition_status(AgentStatus::Idle);
                                             let _ = state_mon.agents.update(&a).await;
+                                            // Platform Model §7: the run's process is gone — revoke its
+                                            // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
+                                            crate::secret_rotation::revoke_agent_task_secrets(
+                                                &state_mon,
+                                                &a,
+                                            )
+                                            .await;
                                         }
                                     }
                                     break;
@@ -1403,6 +1424,13 @@ pub async fn complete_agent(
     cleanup_interrogation_policies(&state, &id).await;
     // Also remove any stored conversation context for this agent.
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
+
+    // Platform Model §7: revoke task-scoped ephemeral secrets on completion
+    // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
+    // for the agent's task and logs `secret.revoked` per secret. Mirrors the
+    // MCP gyre_agent_complete teardown.
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
 
     // Create a jj bookmark for the agent's branch in their worktree (best-effort).
     // This persists the branch tip in jj's bookmark namespace for traceability.
@@ -2654,6 +2682,116 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "agent token must be invalid after complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_agent_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review F1): the REST completion path
+        // POST /api/v1/agents/{id}/complete must revoke the completing
+        // agent's task-scoped ephemeral secrets, mirroring the MCP
+        // gyre_agent_complete teardown. Workspace-scoped secrets and secrets
+        // of unrelated tasks must survive.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "ws-rest-teardown").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "rest teardown task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/rest-teardown").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // The workspace is created via the API, so it is owned by the
+        // caller's tenant ("default" for the global test token).
+        let tenant = "default".to_string();
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.clone(),
+        };
+        // Task-scoped ephemeral secret for the completing agent's task (must
+        // be revoked); workspace-scoped and other-task secrets must survive.
+        state
+            .secrets
+            .create(
+                &mk("sec-rest-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-rest-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-rest-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "branch": "feat/rest-teardown",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-rest-task"), &tenant)
+                .await
+                .unwrap()
+                .is_none(),
+            "REST agent completion must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-rest-ws"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent completion"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-rest-other"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive agent completion"
         );
     }
 
