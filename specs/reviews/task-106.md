@@ -47,3 +47,73 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 25 (pipeline independent review — candidate `1dcaaa7f`, base `774737638`)
+
+Independent re-verification of the full candidate diff (not a re-read of prior
+rounds' conclusions). Evidence: `/tmp/stage/review-evidence/task-106-r25/`.
+
+Verified working:
+
+- **Adapter/port**: `JjOpsPort::jj_rebase` (`gyre-ports`) + real subprocess
+  implementation in `gyre-adapters/jj_ops.rs`: `jj git import` →
+  `jj rebase -b @ -d <moved branch>` (whole in-flight stack) → conflict
+  detection via the `jj resolve --list -r @` exit-code contract (0 = conflicted
+  with files, 2 = clean). Hexagonal boundary respected (`check-arch.sh` EXIT 0).
+- **Trigger**: `rebase_inflight_agents` runs as the LAST step after post-merge
+  gates pass, in both the single-entry and atomic-group paths; merged authors
+  excluded; targets = same target branch, MR Open/Approved, agent Active,
+  worktree present and repo-scoped (`find_rebase_targets`).
+- **Safeguards (plan item 5)**: Active-status filter, worktree-existence
+  check, 60s backoff window with pending-marker batching (newest base wins),
+  `replay_pending_rebases` on every processor cycle, marker kept on infra Err
+  (F4/F8 guarantees hold on both paths), audit events on all three outcomes
+  (success/conflict/error via `record_rebase_audit`/`record_rebase_failure`).
+- **Conflict-as-state + notifications**: MR `has_conflicts` set on conflict,
+  cleared on later clean rebase; `SpeculativeConflict` (workspace) +
+  `Escalation` (agent) with file lists; `baseline_moved` (agent) with
+  `new_base_sha`. `emit_event` signs, persists, and WS-broadcasts (verified in
+  `lib.rs`).
+- **Tests are real**: server `--lib` → **1547 passed / 0 failed** (94s);
+  adapters `--lib` → **408 passed / 0 failed**; `merge_processor` filter → 82
+  passed. Mutation-verified three ways — (1) trigger disabled →
+  `merge_triggers_rebase_of_inflight_agents`, `rebase_conflict_surfaces_as_state`,
+  `rebase_destination_is_moved_target_branch_not_default` all FAIL; (2)
+  dead-agent safeguard disabled → `rebase_skips_dead_agents` FAILS; (3) conflict
+  arm neutered (flag false, no events) → `rebase_conflict_surfaces_as_state`
+  FAILS. Transcripts in the evidence dir; tree restored clean after each.
+- **CI enforcement is real**: ci.yml installs pinned jj 0.39.0 and sets
+  `GYRE_JJ_TESTS_MUST_RUN=1`; verified locally that with the env var set and jj
+  absent, the three `jj_rebase` fixture tests FAIL loudly (exit 101) rather
+  than silently skipping. jj could not be installed in this sandbox (GitHub
+  release download blocked — transport restriction, recorded for remote
+  verification; not a code defect); fixture tests guard-skip locally by design.
+- **Exemption files**: entries REMOVED (jj smoke tests converted to real
+  recorded-fixture tests with assertions — spot-checked), not added. Compliant
+  with the AGENTS.md freeze direction.
+- **Mechanical checks**: `check-arch`, `check-mem-port-contracts`,
+  `check-ignored-tool-tests`, `check-relative-path-defaults`,
+  `check-inert-enforcement`, `check-dead-message-kinds`,
+  `check-task-commit-attribution` → all EXIT 0. (Note:
+  `check-assertionless-tests.sh` exits 2 in THIS sandbox because its awk uses
+  the gawk-only 3-arg `match()` and the sandbox awk is mawk 1.3.4 —
+  environmental, pre-existing, no `.sh` touched by the candidate.)
+- **Base merge**: the R24 merge preserved both sides' test suites
+  (spec-approval-ledger, persona-seed, task-106 rebase/completion-path tests
+  all present and passing in the 1547).
+
+Considered, not findings:
+
+- Plan item 3 says "set the conflict state on the agent's MergeQueueEntry";
+  the implementation flags the author's MR (`has_conflicts`) instead.
+  `MergeQueueEntry` has no conflict field (only `error_message`), in-flight
+  agents are frequently not in the queue at all, and the MR flag is the surface
+  the API layer consumes. The intent — conflicts surfaced as state, not
+  errors — is satisfied; accepted unchanged across all prior rounds.
+- Coverage row for source-control.md §4 remains `task-assigned` with pre-task
+  notes — promotion to `verified` is the completion/auditor stage's action,
+  not the review's.
+
+Verdict: **approve** — no findings. Independent evidence (mutation-verified
+tests, full-suite runs, mechanical invariants, loud CI guard) supports the
+task contract.
