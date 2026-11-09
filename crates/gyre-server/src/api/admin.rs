@@ -553,6 +553,13 @@ pub async fn admin_seed(
         );
         state.workspaces.create(&workspace).await?;
     }
+    // Platform-model.md §2: the demo tenant also gets the four built-in
+    // personas (idempotent — skipped if already present). Startup seeding
+    // only covers tenants that existed at boot, so a tenant created here
+    // (or created before the persona seeding existed) is seeded now.
+    let seed_tenant_id = Id::new(&tenant_id);
+    crate::seed_builtin_personas_for_tenant(&state, &seed_tenant_id).await;
+
     // Repo paths are derived from the configured repos root (same source as
     // repos.rs create handlers) — never relative "./..." literals, which a
     // child process resolves against its own cwd (task-106 R2-F6 class).
