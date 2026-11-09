@@ -11,11 +11,13 @@
 #   skipped + logged when unresolvable). Entry removed, count lowered 5→4.
 #   git_http.rs push-event ws_id fallback — FIXED in task-168's repair
 #   round (upstream of the 72ad2a128 merge). Entry removed, count lowered 4→3.
-#   auth.rs JWT claims.tenant_id fallback (line re-pointed 773→1041 by the
-#   72ad2a128 merge) — FIXED in task-104's verification repair round (same
-#   fix as task-103's cead5a881 on its own branch: the "absent claim =
-#   default tenant" single-tenant IdP contract is now the claim's serde
-#   schema default applied at deserialization, not a use-site unwrap_or
-#   fallback). Entry removed, count lowered 3→2.
+#   auth.rs JWT claims.tenant_id fallback — FIXED independently by task-103
+#   (cead5a881 on its own branch) and task-104's verification repair round:
+#   the documented "absent claim = default tenant" single-tenant IdP
+#   contract is now the claim's serde schema default (default_tenant_claim
+#   on JwtClaims) applied at deserialization, not a use-site unwrap_or
+#   fallback; the value is a deterministic function of the verified token,
+#   and "default" is the real bootstrapped Tenant row. Entry removed,
+#   count lowered 3→2.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
 crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission
