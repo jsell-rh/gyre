@@ -43,6 +43,7 @@ pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_policy;
+pub mod stack;
 pub mod task;
 pub mod team;
 pub mod tenant;
@@ -53,7 +54,6 @@ pub mod user_profile;
 pub mod view_query_resolver;
 pub mod workspace;
 pub mod workspace_membership;
-pub mod stack;
 
 pub use activity::ActivityEvent;
 pub use agent::{

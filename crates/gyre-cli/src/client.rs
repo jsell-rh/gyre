@@ -44,7 +44,6 @@ pub struct AgentStackResponse {
     pub fingerprint: String,
 }
 
-
 #[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct TaskResponse {

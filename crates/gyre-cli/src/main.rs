@@ -1943,7 +1943,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-
 // ── Stack lockfile (supply-chain.md §gyre-stack.lock) ─────────────────────────
 
 /// `gyre stack lock`: fetch the agent's registered stack from the server,
