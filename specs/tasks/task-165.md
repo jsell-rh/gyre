@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c", "c1ad62f946ea7d2004c043908e83d52c967a22e5"]
 ---
 
 ## Spec Excerpt
@@ -61,30 +61,35 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Rebase-resolution round (merge of assigned base `fefde294` into the
-task-165 branch, resolved in merge commit `bdc156e00` — no task-165
-production behavior changed; all conflicts were source-level):
+Repair round (commit `c1ad62f94`, responding to review
+`7de814ab95e745639162e0bbb564e4ad` on candidate `66677b96`):
 
-- **`crates/gyre-server/src/git_http.rs`** (test module): both sides
-  appended tests at the end of the same module. Resolution keeps both
-  sets — task-165's seven stack-attestation/lockfile push tests and
-  the base's task-167 `push_rebases_parent_branch_drops_child_lineage_dep`
-  end-to-end lineage test. All 45 `git_http::` tests pass at the merged
-  HEAD, including both sets.
-- **`scripts/check-fabricated-scope-defaults.sh` +
-  `fabricated-scope-defaults-exemptions.txt`**: adopted the base's state
-  (FROZEN_EXEMPTION_COUNT=3; specs.rs/auth.rs entries removed) because
-  the base's code fixes for those two sites (task-193 workspace-record
-  tenant resolution, task-103 `default_tenant_claim` serde default)
-  auto-merged into this tree — keeping the HEAD-side entries would
-  anchor dead exemption lines, the exact flaw class prior repair
-  rounds removed. Gate passes at merged HEAD (exit 0).
-- **`specs/coverage/SUMMARY.md`**: regenerated mechanically via
-  `scripts/update-coverage-summary.sh` against the merged coverage
-  files (no hand-merged numbers).
-- Earlier repair rounds (12a0d0e9 relative-path dead entry; 4492822e
-  fabricated-scope dead-entry cleanup + L3 record accuracy) remain
-  resolved in history and are not re-ledgered here.
+- **Migration collision fixed (blocking finding)**: the task's
+  `2026-10-10-000056_agent_attestation_level` collided with the base's
+  `2026-10-10-000056_meta_spec_approved_content_hash` (both map to diesel
+  version `20261010000056`; diesel runs only one per version, silently
+  dropping the other on fresh databases). Renumbered to
+  `2026-10-10-000059_agent_attestation_level`. Verified empirically:
+  `scripts/check-migration-versions.sh` exit 0; fresh-DB replay of all 63
+  migrations in version order applies BOTH 20261010 versions and the
+  agents table gains `attestation_level`;
+  `cargo test -p gyre-adapters sqlite::agent` → 17 passed (was 9 FAILED
+  with 'no such column: attestation_level'); full `sqlite::` adapter
+  suite → 284 passed, 0 failed.
+- **Lockfile drift ungated from repo policy (spec-fidelity note)**:
+  `enforce_stack_policy` previously short-circuited the gyre-stack.lock
+  drift check inside `if let Some(policy)` — a repo committing a lockfile
+  without a stack policy got zero drift verification. The drift check now
+  runs whenever the pushed tree carries a gyre-stack.lock and the pushing
+  agent has an attested stack: with a policy it follows the policy's
+  enforcement mode (block/warn); without a policy there is no mode to
+  escalate to, so findings default to warn (ConstraintViolation event +
+  accept). New test `lockfile_drift_without_policy_warned_and_accepted`
+  proves the flag fires with no policy entry; kill-checked by temporarily
+  restoring the policy gate (test fails 'got 0 messages' at the old
+  behavior, passes at the fix).
+- Coverage rows 7/8 updated: row 7 records the no-policy default-warn
+  drift behavior; row 8's migration reference corrected to 000059.
 
 ### Actual behavior
 
@@ -102,9 +107,9 @@ production behavior changed; all conflicts were source-level):
    (`git_http.rs`): L3 = server-recorded workload attestation with
    container identity (written by spawn.rs for M19.4 container targets;
    the JWT `wl_container_id`+`wl_image_hash` branch exists but has no
-   production minting site — see above); L2 = registered stack in KV
-   `agent_stacks`; L1 = no attestation. Stored on the agent record
-   (migration `2026-10-10-000056_agent_attestation_level`,
+   production minting site — see Known partials); L2 = registered stack in
+   KV `agent_stacks`; L1 = no attestation. Stored on the agent record
+   (migration `2026-10-10-000059_agent_attestation_level`,
    sqlite/postgres round-trip, mem via whole-struct clone), exposed on
    `GET /api/v1/agents/:id` as `attestation_level`, and mapped to commit
    provenance labels (server-verified / self-reported / unattested).
@@ -112,44 +117,48 @@ production behavior changed; all conflicts were source-level):
    with `min_attestation_level: u8` (1..=3, validated) and `enforcement:
    block|warn`; Admin-only PUT/GET `/repos/:id/stack-policy`; legacy KV
    entries derive `min_attestation_level` from `required_level`.
-5. **Push enforcement** — `enforce_stack_policy` (`git_http.rs`)
-   runs synchronously on every push to a policy-bearing repo: below-minimum
-   level → Block: 403 + `undo_ref_updates` + PushRejected event; Warn:
-   accept + ConstraintViolation event. `gyre-stack.lock` in the pushed tree
-   is read via `read_git_file` at the new SHA, integrity-checked, and
-   drift-checked against the pushing agent's attested stack under the same
-   enforcement modes.
+5. **Push enforcement** — `enforce_stack_policy` (`git_http.rs`):
+   min-attestation-level check runs on every push to a policy-bearing
+   repo — below-minimum level → Block: 403 + `undo_ref_updates` +
+   PushRejected event; Warn: accept + ConstraintViolation event.
+   gyre-stack.lock in the pushed tree is read via `read_git_file` at the
+   new SHA, integrity-checked, and drift-checked against the pushing
+   agent's attested stack — not gated on a policy (defaults to warn-mode
+   flagging when no policy is set).
 
 ### Test evidence
 
-This round resolved the rebase onto base `fefde294` (merge commit
-`bdc156e00`); task-165 production code is unchanged, but the merged
-tree recombined test modules and exemption files, so the focused probe
-set is the affected suites and gates (logs under
-`/tmp/stage/review-evidence/`):
+Focused probes at HEAD `c1ad62f94` (logs under `/tmp/stage/review-evidence/`):
 
-- `cargo test -p gyre-server git_http::` → 45 passed, 0 failed
-  (log: `task165-repair3-githttp-tests.log`), including all seven
-task-165 push tests
-  (push_below_min_attestation_level_blocked,
+- `bash scripts/check-migration-versions.sh` → OK, exit 0 (log:
+  `task165-repair4-migration-gate.log`); `no_duplicate_migration_version_prefixes`
+  guard test → ok.
+- Fresh-DB migration replay (all 63 up.sql in diesel version order):
+  both `20261010000056` and `20261010000059` apply; `attestation_level`
+  present in `pragma table_info('agents')` (log:
+  `task165-repair4-fresh-db-pragma.log`).
+- `cargo test -p gyre-adapters sqlite::agent` → 17 passed, 0 failed
+  (log: `task165-repair4-sqlite-agent.log`); full `sqlite::` suite →
+  284 passed, 0 failed.
+- `cargo test -p gyre-server git_http::` → 46 passed, 0 failed (log:
+  `task165-repair4-githttp-tests.log`), including all eight task-165
+  push tests (push_below_min_attestation_level_blocked,
   push_below_min_level_warn_mode_flagged_and_accepted,
   push_meeting_min_level_accepted_and_level_stored,
   level3_detected_from_workload_attestation,
   lockfile_drift_blocked_in_block_mode, lockfile_match_accepted,
-  tampered_lockfile_rejected_by_integrity_check) and the base's task-167
-  push_rebases_parent_branch_drops_child_lineage_dep — both merged test
-  sets green together.
+  tampered_lockfile_rejected_by_integrity_check,
+  lockfile_drift_without_policy_warned_and_accepted) and the base's
+  task-167 push_rebases_parent_branch_drops_child_lineage_dep.
+- Kill-check for the new no-policy drift test: with the old policy gate
+  temporarily restored the test fails ('expected a stack-drift
+  constraint_violation event without a repo policy, got 0 messages');
+  green again at the fix (log: `task165-repair4-killcheck.log`).
 - `cargo test -p gyre-server api::stack_attest` → 14 passed, 0 failed
-  (log: `task165-repair3-stackattest-tests.log`).
-- `cargo test -p gyre-domain stack` → 9 passed, 0 failed
-  (log: `task165-repair3-domain-stack-tests.log`).
-- `cargo test -p gyre-cli` → 136 passed, 0 failed (main.rs/client.rs
-  auto-merged from the base; log: `task165-repair3-cli-tests.log`).
-- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at
-  merged HEAD with the base's count-3 state (log:
-  `task165-repair3-fabscope.log`).
-- `bash scripts/check-relative-path-defaults.sh` → OK, exit 0, at the
-  same HEAD (log: `task165-repair3-relpath.log`).
+  (log: `task165-repair4-stackattest-tests.log`);
+  `cargo test -p gyre-domain stack` → 9 passed, 0 failed (log:
+  `task165-repair4-domain-stack-tests.log`).
+- `bash scripts/check-arch.sh` → exit 0 (log: `task165-repair4-arch.log`).
 - `cargo test --all` is owned by the verification/publication stage and
   not repeated here. `ws_integration::test_auth_and_ping_roundtrip`
   fails in this sandbox on `TcpListener::bind` errno 95
