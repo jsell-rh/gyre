@@ -25,6 +25,7 @@ pub struct ProcessHandle {
 ///
 /// Implementations: LocalTarget (tokio::process), ContainerTarget
 /// (docker/podman CLI), SshTarget (ssh CLI), KubernetesTarget (kubectl CLI).
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait ComputeTarget: Send + Sync {
     /// Human-readable backend name (used in logs and error messages).

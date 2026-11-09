@@ -3615,6 +3615,17 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
     )
 }
 
+/// The paired workspace + policy repositories (and the shared workspace
+/// store behind them) returned by `shared_workspace_policy_pair`. A named
+/// alias keeps the tuple's use sites readable and under clippy's
+/// `type_complexity` threshold.
+#[cfg(test)]
+type SharedWorkspacePolicyPair = (
+    Arc<dyn WorkspaceRepository>,
+    Arc<dyn gyre_ports::PolicyRepository>,
+    Arc<Mutex<HashMap<String, Workspace>>>,
+);
+
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
@@ -3622,13 +3633,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
 /// workspace store so the compute-target repo can pair with it (real
 /// `has_workspace_references` in tests).
 #[cfg(test)]
-fn shared_workspace_policy_pair(
-    fail_trust: bool,
-) -> (
-    Arc<dyn WorkspaceRepository>,
-    Arc<dyn gyre_ports::PolicyRepository>,
-    Arc<Mutex<HashMap<String, Workspace>>>,
-) {
+fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
     let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
