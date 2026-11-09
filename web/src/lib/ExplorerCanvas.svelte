@@ -35,7 +35,6 @@
     governingSpecFor,
     buildTraceSteps,
   } from './causal-trace.js';
->>>>>>> fefde2946f3a0af1f212588f54591516fee0f7b2
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
