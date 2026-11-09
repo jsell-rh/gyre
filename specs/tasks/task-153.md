@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
-commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52"]
+commits: ["fe3035959c9d4690a122719a6220b6bd835f0b52", "813cbea12a304a01d68eee59c7ce1a0467ded24a"]
 ---
 
 ## Spec Excerpt
@@ -134,30 +134,33 @@ Tests are written at two levels:
   filtered aggregation, limit-ignored aggregation, entity_type/workspace
   filter restriction, non-matching query aggregates nothing.
 
-### Execution status (round 11 — rebase repair onto c5deca80)
+### Execution status (round 12 — rebase repair onto fefde294)
 
-The assigned repair was a merge of the round-10 head 3b4da7bd with the
-current base c5deca80 that conflicted in `docs/api-reference.md` only.
+The assigned repair was a merge of the round-11 head 12a36efd with the
+current base fefde294 that conflicted in `docs/api-reference.md` only.
 Resolved semantically: kept this task's four search-endpoint rows
-(including `suggest`, `facets`, and the `facet_counts` response shape)
-and took the base's TASK-077 policy-row additions, which the candidate
-side had not carried. No other conflicts.
+(`suggest`, `facets`, the `facet_counts` response shape, and the
+admin-reindex note) and took the base's task-098 secrets-endpoint rows,
+which the candidate side did not carry; the base's stale pre-task-153
+search rows were dropped in favor of the candidate's. No other
+conflicts.
 
 Integrity verified by diffing every task-153 product file between
-3b4da7bd and the merge head 46fac1eb0: `gyre-ports/src/search.rs`,
-`gyre-server/src/api/search.rs`, `api/mod.rs`, and all three adapter
-search files (`sqlite/search.rs`, `postgres/search.rs`, `mem_search.rs`)
-are byte-identical — the implementation described above is intact. The
-base's own upstream changes to shared files (e.g.
-`seed_builtin_policies` now returning `Result`) auto-merged cleanly and
-the upstream side had already adapted `search_wiring.rs` to them; the
-ABAC resolver entries for both new routes remain (abac_middleware.rs
-lines 373-374).
+12a36efd and the merge head 813cbea12: `gyre-ports/src/search.rs`,
+`gyre-server/src/api/search.rs`, and all three adapter search files
+(`sqlite/search.rs`, `postgres/search.rs`, `mem_search.rs`) are
+byte-identical — the implementation described above is intact. The
+routes remain registered (api/mod.rs lines 617-618) with their ABAC
+resolver entries (abac_middleware.rs lines 379-381), and no
+search-related lines changed in `api/mod.rs` or `abac_middleware.rs`
+relative to the candidate. The base's upstream changes (task-089
+Explorer Generated Views, task-105 log compression, secrets rotation,
+etc.) auto-merged cleanly.
 
 History note: earlier frontmatter SHAs became unreachable after the
 round-9 lease expiry; the list was refreshed then to the recovered
-scoped commit fe303595 (via commit 586a322b), and now also records the
-round-11 merge commit 46fac1eb0 that carries the conflict resolution.
+scoped commit fe303595, and now also records the round-12 merge commit
+813cbea12 that carries the conflict resolution.
 
 This sandbox still cannot reach crates.io (no registry cache, no vendored
 deps, no prebuilt target/ — HTTP 000 to static.crates.io), so the
@@ -168,9 +171,9 @@ not a code defect. Remote verification must run:
     cargo test -p gyre-adapters search
 
 Offline checks that ran this round against the merge head and pass
-(raw logs in /tmp/stage/review-evidence/*-round11.*):
+(raw logs in /tmp/stage/review-evidence/*-round12.*):
 
-- `python3 scripts/check-rustfmt-diff.py c5deca80` — exit 0, changed
+- `python3 scripts/check-rustfmt-diff.py fefde294` — exit 0, changed
   Rust lines clean (9 files).
 - `scripts/check-task-commit-attribution.sh` — OK.
 - `scripts/check-abac-route-registry.sh` — OK; both new routes resolve
