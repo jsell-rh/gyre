@@ -82,6 +82,13 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Secret expiry check every 5 minutes (platform-model.md §7, task-098).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "secret_rotation_check".to_string(),
+        Arc::clone(&state),
+    );
+
     // Meta-spec conformance sweep (meta-spec-reconciliation.md §10) — daily by
     // default, configurable via GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
     jobs::spawn_job(

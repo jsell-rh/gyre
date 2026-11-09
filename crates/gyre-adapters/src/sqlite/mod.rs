@@ -36,6 +36,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
 pub mod secret;
@@ -240,6 +241,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "rollout_policies",
             "gate_traces",
             "trace_spans",
             "conversations",

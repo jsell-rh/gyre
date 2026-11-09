@@ -164,6 +164,16 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::ContainerCrashed => 7,
         gyre_domain::AuditEventType::ContainerOom => 8,
         gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
+        // Agent lifecycle events (observability.md §Audit Event Types):
+        // admin interventions rank highest, detector-marked deaths next,
+        // routine lifecycle signals stay informational.
+        gyre_domain::AuditEventType::AgentKilled => 7,
+        gyre_domain::AuditEventType::AgentDead => 6,
+        gyre_domain::AuditEventType::AgentTokenRevoked => 5,
+        gyre_domain::AuditEventType::AgentReassigned => 4,
+        gyre_domain::AuditEventType::AgentSpawned => 3,
+        gyre_domain::AuditEventType::AgentCompleted => 3,
+        gyre_domain::AuditEventType::AgentHeartbeat => 3,
         gyre_domain::AuditEventType::Custom(_) => 3,
     };
     let event_type = event.event_type.as_str();
@@ -418,6 +428,34 @@ mod tests {
     fn cef_escape_pipes() {
         assert_eq!(cef_escape("foo|bar"), "foo\\|bar");
         assert_eq!(cef_escape("a=b"), "a\\=b");
+    }
+
+    #[test]
+    fn cef_agent_lifecycle_severities() {
+        // observability.md §Audit Event Types severity mapping: admin kill 7,
+        // detector-marked death 6, token revocation 5, reassignment 4,
+        // routine lifecycle signals 3.
+        let cases = [
+            (AuditEventType::AgentKilled, 7),
+            (AuditEventType::AgentDead, 6),
+            (AuditEventType::AgentTokenRevoked, 5),
+            (AuditEventType::AgentReassigned, 4),
+            (AuditEventType::AgentSpawned, 3),
+            (AuditEventType::AgentCompleted, 3),
+            (AuditEventType::AgentHeartbeat, 3),
+        ];
+        for (et, want) in cases {
+            let ev = make_event("e1", et.clone());
+            let cef = format_cef(&ev);
+            let severity: u8 = cef
+                .trim_end()
+                .split('|')
+                .nth(6)
+                .unwrap_or_else(|| panic!("malformed CEF: {cef}"))
+                .parse()
+                .unwrap_or_else(|_| panic!("non-numeric severity in CEF: {cef}"));
+            assert_eq!(severity, want, "wrong CEF severity for {et:?}: {cef}");
+        }
     }
 
     #[tokio::test]
