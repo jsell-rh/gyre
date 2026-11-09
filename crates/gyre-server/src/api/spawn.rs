@@ -40,6 +40,12 @@ pub struct SpawnAgentRequest {
     pub agent_type: Option<String>,
     /// For interrogation agents: SHA-256 of the original agent's conversation to load as context.
     pub conversation_sha: Option<String>,
+    /// Persona slug to bind to this agent (platform-model.md §4.3): resolved
+    /// nearest-scope-wins (repo → workspace → tenant), must be Approved, and
+    /// its system prompt is injected as `GYRE_PROMPT_PERSONA`. Fail-closed: a
+    /// slug that does not resolve to an Approved persona rejects the spawn.
+    #[serde(default)]
+    pub persona_slug: Option<String>,
 }
 
 /// JWT TTL for interrogation agents: 30 minutes (HSI §4).
@@ -450,10 +456,44 @@ pub(crate) async fn spawn_agent_core(
         )));
     }
 
+    // platform-model.md §4.3: resolve the spawn's requested persona through
+    // the repo → workspace → tenant chain and bind it to the agent row.
+    // Fail-closed on a slug that does not resolve to an Approved persona
+    // (same posture as orchestrator spawns): an agent styled by a missing or
+    // unapproved persona is exactly what the spec forbids.
+    let persona: Option<gyre_domain::Persona> = match &req.persona_slug {
+        Some(slug) if !slug.is_empty() => {
+            let ws = workspace.as_ref().ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "cannot resolve persona '{slug}': workspace {} unresolvable",
+                    repo.workspace_id
+                ))
+            })?;
+            let prompt_scope = crate::api::prompts::PromptScope {
+                tenant_id: Some(ws.tenant_id.clone()),
+                workspace_id: repo.workspace_id.clone(),
+                repo_id: Some(repo.id.clone()),
+                task_id: Some(Id::new(&req.task_id)),
+                agent_id: None,
+            };
+            Some(
+                crate::api::prompts::resolve_persona_in_chain(state, slug, &prompt_scope)
+                    .await
+                    .map_err(ApiError::InvalidInput)?,
+            )
+        }
+        _ => None,
+    };
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     agent.spawned_by = Some(auth.agent_id.clone());
+    // §4.3 persona binding: persisted on the agent row so system://persona
+    // can resolve it without a slug argument later.
+    if let Some(p) = &persona {
+        agent.persona_id = Some(p.id.clone());
+    }
     if let Some(behavior) = req.disconnected_behavior {
         agent.disconnected_behavior = behavior;
     }
@@ -671,6 +711,32 @@ pub(crate) async fn spawn_agent_core(
     let spawned_container_id: Option<String>; // M19.1/M19.3/M19.4
     let spawned_container_image: Option<String>; // M19.3/M19.4
 
+    // platform-model.md §4.3 MCP Prompts: build the four system prompts for
+    // this agent. They are injected into the container environment below —
+    // part of the agent's initial context, not fetched. The persona prompt is
+    // only present when a persona is bound (an unbound worker has none);
+    // protocol/context/constraints always are. Interrogation agents have no
+    // worktree, so their context prompt records that honestly.
+    let prompt_scope = crate::api::prompts::PromptScope {
+        tenant_id: workspace.as_ref().map(|ws| ws.tenant_id.clone()),
+        workspace_id: repo.workspace_id.clone(),
+        repo_id: Some(repo.id.clone()),
+        task_id: Some(Id::new(&req.task_id)),
+        agent_id: Some(agent.id.clone()),
+    };
+    let prompt_protocol = crate::api::prompts::protocol_prompt().to_string();
+    let prompt_context = crate::api::prompts::context_prompt_for_spawn(
+        &task,
+        &repo,
+        if is_interrogation {
+            None
+        } else {
+            Some((&req.branch, &worktree_path))
+        },
+    );
+    let prompt_constraints = crate::api::prompts::constraints_prompt(state, &prompt_scope).await;
+    let prompt_persona = persona.as_ref().map(|p| p.system_prompt.clone());
+
     {
         // Docker requires an absolute working directory path. Canonicalize the
         // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
@@ -712,6 +778,19 @@ pub(crate) async fn spawn_agent_core(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
         container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
+
+        // platform-model.md §4.3: the system prompts are injected at spawn
+        // time — the agent does not need to fetch them. Content is identical
+        // to what the MCP `prompts/get` handlers serve.
+        if let Some(persona_prompt) = &prompt_persona {
+            container_env.insert("GYRE_PROMPT_PERSONA".to_string(), persona_prompt.clone());
+        }
+        container_env.insert("GYRE_PROMPT_PROTOCOL".to_string(), prompt_protocol.clone());
+        container_env.insert("GYRE_PROMPT_CONTEXT".to_string(), prompt_context.clone());
+        container_env.insert(
+            "GYRE_PROMPT_CONSTRAINTS".to_string(),
+            prompt_constraints.clone(),
+        );
 
         // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
         // repository (tenant → workspace → repo → task, nearest scope wins)
@@ -1228,10 +1307,22 @@ pub(crate) async fn spawn_agent_core(
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
 
-    // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
-    // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
-    // Best-effort: omit when workspace cannot be efficiently determined.
-    let meta_spec_set_sha: Option<String> = None;
+    // M32: meta-spec set SHA for provenance — the workspace's active
+    // meta-spec set at spawn time (the judgment set the resolved persona
+    // draws from), hashed exactly as spec approval and constraint
+    // evaluation hash it. `None` when the workspace has no meta-spec set
+    // configured (compute_meta_spec_set_sha returns "" there).
+    let meta_spec_set_sha = match workspace.as_ref() {
+        Some(ws) => {
+            let sha = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+            if sha.is_empty() {
+                None
+            } else {
+                Some(sha)
+            }
+        }
+        None => None,
+    };
 
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     crate::agent_audit::emit_spawned(
@@ -2040,6 +2131,7 @@ mod tests {
     use super::create_interrogation_policies_in;
     use crate::mem::{test_state, test_state_with_secrets};
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -4193,6 +4285,393 @@ mod tests {
             ),
             "no secret-sourced GYRE_CRED_* may be delivered when resolution fails:\n{dump}"
         );
+    }
+
+    // ── MCP Prompts injection at spawn (platform-model.md §4.3) ───────────────
+
+    /// Env-dump compute-target variant capturing the GYRE_PROMPT_* vars the
+    /// spawn handler injects (§4.3 system prompts).
+    async fn create_prompt_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let script_path = format!("{dump_path}.sh");
+        let script = format!("#!/bin/sh\nenv | sort > {dump_path}\nexit 0\n");
+        std::fs::write(&script_path, script).expect("writing prompt-dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod prompt-dump script");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "prompt-dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Seed an approved persona at tenant scope (the test caller's tenant).
+    async fn seed_spawn_persona(state: &Arc<AppState>, slug: &str, system_prompt: &str) -> String {
+        let mut persona = gyre_domain::Persona::new(
+            Id::new(format!("persona-{slug}")),
+            format!("Persona {slug}"),
+            slug.to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            system_prompt.to_string(),
+            1_700_000_000,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("human-admin".to_string());
+        persona.approved_at = Some(1_700_000_000);
+        state.personas.create(&persona).await.unwrap();
+        persona.id.to_string()
+    }
+
+    /// Spawn with a persona_slug, asserting CREATED.
+    async fn do_spawn_with_persona(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+        compute_target_id: Option<&str>,
+        persona_slug: &str,
+    ) -> (Router, serde_json::Value) {
+        let mut body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+            "persona_slug": persona_slug,
+        });
+        if let Some(ct) = compute_target_id {
+            body["compute_target_id"] = serde_json::Value::String(ct.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    #[tokio::test]
+    async fn spawn_injects_all_four_system_prompts_with_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Implement prompt injection").await;
+        // Give the task a spec ref + description so the context prompt has
+        // real content to render.
+        {
+            let mut task = state
+                .tasks
+                .find_by_id(&Id::new(&task_id))
+                .await
+                .unwrap()
+                .expect("task must exist");
+            task.spec_path = Some("specs/system/platform-model.md".to_string());
+            task.description = Some("Acceptance: all four prompts injected.".to_string());
+            state.tasks.update(&task).await.unwrap();
+        }
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-all", &dump_path).await;
+
+        let persona_id = seed_spawn_persona(
+            &state,
+            "prompt-worker",
+            "You are the prompt-worker persona.",
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/prompts");
+        let (_, json) = do_spawn_with_persona(
+            app,
+            "worker-prompts",
+            &repo_id,
+            &task_id,
+            "feat/prompts",
+            Some(&ct_id),
+            "prompt-worker",
+        )
+        .await;
+
+        // The resolved persona is bound to the agent row (§4.3 persona binding).
+        assert_eq!(json["agent"]["persona_id"], persona_id);
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("prompt-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_PROMPT_PERSONA=You are the prompt-worker persona.\n"),
+            "persona prompt must be injected verbatim:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_PROTOCOL=# Gyre Agent Protocol"),
+            "protocol prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains("Ralph loop"),
+            "protocol prompt must carry the Ralph loop definition:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_CONTEXT=# Agent Context"),
+            "context prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains("Title: Implement prompt injection"),
+            "context prompt must carry the task title:\n{dump}"
+        );
+        assert!(
+            dump.contains("Spec ref: specs/system/platform-model.md"),
+            "context prompt must carry the task's spec ref:\n{dump}"
+        );
+        assert!(
+            dump.contains("Branch: feat/prompts"),
+            "context prompt must carry the worktree branch:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_CONSTRAINTS=# Agent Constraints"),
+            "constraints prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains(&format!("Workspace: {ws_id}")),
+            "constraints prompt must carry the workspace scope boundary:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_without_persona_injects_prompts_but_no_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-nopersona").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Prompts without persona").await;
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-nopersona", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/nopersona");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/nopersona", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+        assert!(
+            json["agent"]
+                .get("persona_id")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            "no persona may be fabricated when none was requested: {}",
+            json["agent"]
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("prompt-dump script should have written its output");
+        for var in [
+            "GYRE_PROMPT_PROTOCOL=",
+            "GYRE_PROMPT_CONTEXT=",
+            "GYRE_PROMPT_CONSTRAINTS=",
+        ] {
+            assert!(dump.contains(var), "{var} must be injected:\n{dump}");
+        }
+        assert!(
+            !dump.contains("GYRE_PROMPT_PERSONA="),
+            "no persona prompt may be injected when no persona is bound:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_persona_slug_fails_closed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-failclosed").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Fail-closed persona").await;
+
+        // Unknown slug: rejected.
+        let body = serde_json::json!({
+            "name": "worker-missing-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/missing-persona",
+            "persona_slug": "no-such-persona",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown persona slug must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("not found in scope chain"),
+            "error should name the unresolvable persona: {}",
+            json["error"]
+        );
+
+        // Unapproved (Pending) slug: rejected — never inject unapproved behavior.
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-pending-spawn"),
+            "Persona pending-spawn",
+            "pending-spawn".to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "pending persona prompt".to_string(),
+            1_700_000_000,
+        );
+        // approval_status stays Pending (Persona::new default)
+        state.personas.create(&persona).await.unwrap();
+        let body = serde_json::json!({
+            "name": "worker-pending-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/pending-persona",
+            "persona_slug": "pending-spawn",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a Pending persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"].as_str().unwrap().contains("approve"),
+            "error should demand approval: {}",
+            json["error"]
+        );
+
+        // No orphaned agent rows from the rejected spawns.
+        let agents = state.agents.list().await.unwrap();
+        let rejected: Vec<&gyre_domain::Agent> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("worker-"))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "rejected spawns must not leave agent rows behind: {:?}",
+            rejected.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_records_workspace_meta_spec_set_sha() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace WITHOUT a meta-spec set: the field is omitted (null).
+        let (app, ws_id) = create_workspace(app, "prompts-ws-metasha").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Meta-spec sha").await;
+        let (app, resp) =
+            try_spawn(app, "worker-metasha-1", &repo_id, &task_id, "feat/metasha").await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        assert!(
+            json.get("meta_spec_set_sha")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            "no meta_spec_set_sha may be fabricated without a configured set: {json}"
+        );
+
+        // Workspace WITH a meta-spec set: the field is the SHA-256 of the
+        // stored set JSON — the same hash spec approval computes.
+        let set_json = r#"{"principles":["judgment over generation"]}"#;
+        state
+            .meta_spec_sets
+            .upsert(&Id::new(&ws_id), set_json)
+            .await
+            .unwrap();
+        let (app, task_id2) = create_task(app, "Meta-spec sha 2").await;
+        let (_, resp) = try_spawn(
+            app,
+            "worker-metasha-2",
+            &repo_id,
+            &task_id2,
+            "feat/metasha-2",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        let sha = json["meta_spec_set_sha"].as_str().unwrap_or("");
+        assert_eq!(sha.len(), 64, "SHA-256 hex expected, got: {sha}");
+        use sha2::{Digest, Sha256};
+        let expected = hex::encode(Sha256::digest(set_json.as_bytes()));
+        assert_eq!(sha, expected, "must hash the stored set JSON bytes");
     }
 
     /// Like `do_spawn`, but with an explicit compute_target_id in the request
