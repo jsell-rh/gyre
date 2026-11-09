@@ -3,10 +3,10 @@ title: "Implement repo-defined persona push detection and approval reset"
 spec_ref: "platform-model.md §2 Repo-Defined Personas"
 depends_on:
   - task-140
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Repo-Defined Personas"
-commits: []
+commits: ["7ffe72535"]
 ---
 
 ## Spec Excerpt
@@ -55,14 +55,35 @@ On push, if a persona file changes, the forge:
 
 ## Acceptance Criteria
 
-- [ ] Pushing a change to `specs/personas/*.md` updates the corresponding persona entity
-- [ ] Persona `approval_status` resets to `Pending` on content change
-- [ ] `content_hash` and `version` are updated
-- [ ] A task is auto-created for human approval
-- [ ] The persona owner is notified
-- [ ] New persona files create new repo-scoped persona entities
-- [ ] Non-persona file pushes are unaffected
-- [ ] Tests pass
+- [x] Pushing a change to `specs/personas/*.md` updates the corresponding persona entity
+- [x] Persona `approval_status` resets to `Pending` on content change
+- [x] `content_hash` and `version` are updated
+- [x] A task is auto-created for human approval
+- [x] The persona owner is notified
+- [x] New persona files create new repo-scoped persona entities
+- [x] Non-persona file pushes are unaffected
+- [x] Tests pass
+
+## Shipped
+
+Implemented in `7ffe72535` (single commit: `crates/gyre-server/src/git_http.rs`, `crates/gyre-common/src/notification.rs`).
+
+### What ships
+
+- `process_persona_changes` runs in the post-receive spawn immediately after `process_spec_lifecycle` — the same push-processing pipeline, not a separate hook. On default-branch pushes it scans `git diff --name-status --diff-filter=AMDR` (empty-tree base for initial pushes) for `specs/personas/<slug>.md` files via a new `parse_persona_changes` filter on a shared `parse_name_status` parser (`parse_spec_changes` behavior unchanged; the spec-lifecycle watched-path ignore is untouched).
+- Per changed persona path: the entity is looked up by slug + `PersonaScope::Repo(repo_id)`. On hit, `system_prompt` is replaced with the file content at the pushed SHA (`git show`, invalid UTF-8 skipped rather than mangled), `content_hash` recomputed, `version` incremented, `approval_status` reset to `Pending`, `approved_by`/`approved_at` cleared, `updated_at` refreshed. On miss, a new repo-scoped persona is registered as `Pending` (version 1). Deleted files (and rename old-paths) reset approval with no content change — there is no new content, but a removed persona file must not keep running on a stale approval; a delete with no registered entity is a logged no-op.
+- The approval task is auto-created with the exact contract title `Persona change requires human approval: {slug}`, priority High, labels `["persona-change", "auto-created"]`, scoped to the repo's real workspace (resolved before create), `spec_path` set to the persona file, `task_type: None` (push-hook tasks never trigger agent spawning), deduplicated against open tasks with the same title, and announced via a `TaskCreated` bus event.
+- The owner is notified through the existing inbox system with a new `NotificationType::PersonaChangePendingApproval` (priority 2). The owner must resolve to a known user and the workspace tenant must resolve; otherwise the notification is skipped and logged — no fabricated scope identity, no undeliverable rows. A newly discovered persona has no owner yet, so no notification is sent for it.
+
+### Test evidence
+
+- End-to-end (real git commits authored with plumbing and pushed through the real `git_receive_pack` HTTP handler, refs verified to move):
+  - `push_persona_change_updates_entity_resets_approval_and_notifies_owner` — seeded approved persona + owner user; push modifies `specs/personas/security.md` → entity updated (content, independently recomputed SHA-256 hash, version 1→2), approval reset (Pending, approved_by/at cleared), exactly one approval task with contract title/labels/priority/scoping, owner notified (`PersonaChangePendingApproval`, entity_ref `persona:security`, correct workspace/repo).
+  - `push_new_persona_file_registers_pending_repo_scoped_entity` — push adds `specs/personas/domain-reviewer.md` → new `PersonaScope::Repo` entity, Pending, version 1, correct hash, approval task created, no notification (no owner).
+  - `push_without_persona_changes_leaves_personas_untouched` — push touches only `Cargo.toml`/`src/main.rs`/`specs/system/other.md`; verified after two positive controls (spec-lifecycle task for the specs/system file, and the knowledge-graph delta for the pushed commit — the pipeline's last write) that the persona entity is byte-identical (still Approved) and no persona task/notification exists.
+- Unit: `parse_persona_changes` (add/modify/delete/rename, non-persona and nested paths ignored, rename-away still detected), `persona_slug_from_path`, `persona_approval_task` shape.
+- Mutation check: with the `process_persona_changes` call removed, both positive end-to-end tests fail (persona never updated / never registered); restored and re-verified green — the tests discriminate real behavior.
+- Suites: `cargo test -p gyre-server --lib` **1498 passed, 0 failed**; `cargo test -p gyre-common --all-targets` **116 passed, 0 failed**; the 3 integration tests re-run 3× stable. Clippy/fmt clean on task-changed lines; `check-arch.sh` and the byte-slice/relative-path/fail-open-ref/lossy-secret/fabricated-scope/scope-literal/inert-enforcement/forwarded-header/unbounded-http mechanical checks all pass. Full evidence: `/tmp/stage/review-evidence/task-141.md`.
 
 ## Agent Instructions
 
