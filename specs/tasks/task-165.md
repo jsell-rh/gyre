@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c", "57bc4ea7e76bb4e95eb76cbd372df54bea510846"]
 ---
 
 ## Spec Excerpt
@@ -60,6 +60,34 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 
 ## Shipped
+
+Repair round 4 (commit `57bc4ea7e`, responding to review `cfaa0223`
+on candidate `b00336daf`) — **rustfmt violations on task-changed lines
+fixed** (all three blocking findings, same class):
+
+- `crates/gyre-cli/src/client.rs`: stray blank line after the new
+  `AgentStackResponse` struct — removed.
+- `crates/gyre-domain/src/lib.rs`: `pub mod stack;` was declared after
+  `workspace_membership` instead of its alphabetical position between
+  `spec_policy` and `task` — moved (rustfmt reorder_modules).
+- `crates/gyre-cli/src/main.rs`: stray blank line before the new
+  `// ── Stack lockfile` section introduced by `run_stack_lock` —
+  removed.
+
+Fix is `cargo fmt -p gyre-cli -p gyre-domain`; the fmt diff contained
+exactly these three findings and nothing else. Verified at `57bc4ea7e`
+(log `task165-r4-fmt-fixed.log`):
+
+- `cargo fmt -p gyre-cli -p gyre-domain -- --check` → clean (exit 0) —
+  the pre-commit `cargo fmt --all --check` gate's affected crates.
+- `python3 scripts/check-rustfmt-diff.py fefde2946f3a0af1f212588f54591516fee0f7b2`
+  → exit 0, "changed lines clean (11 Rust files checked)" — the CI
+  `fmt` job's exact check (.github/workflows/ci.yml).
+- `cargo check -p gyre-cli` → exit 0 (covers gyre-domain via the dep
+  edge; formatting-only + module-declaration move, no semantic change).
+- Round-3 functional evidence unchanged and still valid: round 4
+  touched only whitespace and one module-declaration position; no
+  functional code changed.
 
 Repair round 3 (commit `27227f6b6`, responding to review
 `01b41fe107be40a3b0435327a4668f4e` on candidate `26cc85e5`):
@@ -140,7 +168,14 @@ default warn-mode flagging).
 
 ### Test evidence
 
-Focused probes at HEAD `27227f6b6` (logs under `/tmp/stage/review-evidence/`):
+Focused probes at HEAD `57bc4ea7e` (logs under `/tmp/stage/review-evidence/`):
+
+- Round 4 (this head): `cargo fmt -p gyre-cli -p gyre-domain
+  -- --check` → exit 0; `check-rustfmt-diff.py` vs base → exit 0
+  ("changed lines clean, 11 Rust files checked"); `cargo check
+  -p gyre-cli` → exit 0 (log: `task165-r4-fmt-fixed.log`).
+- Round-3 probes at `27227f6b6` remain valid — round 4 changed only
+  whitespace and one module-declaration position, no functional code:
 
 - `bash scripts/check-event-payload.sh` → exit 0, 1 event kind checked
   (was exit 1 with 6 violations at candidate `26cc85e5`; log:
