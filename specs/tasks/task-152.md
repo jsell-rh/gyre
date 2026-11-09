@@ -2,10 +2,10 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["173fa028a84c9637d4101f916f9fa20f5fb483a0", "595c39034a3f2a675218e88d60b5861572378477"]
+commits: ["173fa028a84c9637d4101f916f9fa20f5fb483a0", "595c39034a3f2a675218e88d60b5861572378477", "75fc67f23"]
 ---
 
 ## Spec Excerpt
@@ -148,9 +148,24 @@ narrative_without_llm`, `briefing_summary_uses_llm_narrative_when_configured`.
   this file (`specs/tasks/task-152.md:209`); the Shipped notes were rewritten concisely with a
   single trailing newline, and `git diff --check fefde294 HEAD` is now clean.
 
+### CI repair (e2e workflow)
+
+- GitHub E2E run 42623773713 on head `47e58b11` failed at "Install Playwright browsers"
+  before any test ran: `ubuntu-latest` now resolves to ubuntu 26.04 and the locked
+  Playwright 1.58.2 refuses to install browsers there ("Playwright does not support
+  chromium on ubuntu26.04-x64"). Fixed by pinning the e2e job to `ubuntu-24.04`
+  (`.github/workflows/e2e.yml`, commit `75fc67f23`), the image the locked Playwright
+  supports. A Playwright version bump was rejected: it changes the chromium revision
+  and would invalidate the committed visual baselines.
+- The suite the failed run never reached was validated locally at head `47e58b11`:
+  server built with `SKIP_WEB_BUILD=1` (serves the assignment base's committed
+  `web/dist`), run against the staged chromium-1208 that Playwright 1.58.2 expects:
+  `npx playwright test` → **65 passed, 0 failed** (1.9m, `r9-e2e-full.log`), including
+  `briefing_section_renders` (exercises the narrative-bearing briefing against the
+  real server) and every explorer visual regression baseline.
+
 ### Verification scope
 
-This sandbox cannot `accept()` TCP listeners (errno 95, `/tmp/stage/capabilities.json`), so
-`cargo test -p gyre-server --test explorer_ws_integration` and exact-head GitHub CI checks
-remain mandatory on the host. Committed `web/dist` is the assignment base's staged state;
-local builds ran with `SKIP_WEB_BUILD=1` so it is untouched by this round.
+Exact-head GitHub CI — now the E2E Tests job on the pinned ubuntu-24.04 image — remains
+mandatory on the host. Committed `web/dist` is the assignment base's staged state; local
+builds ran with `SKIP_WEB_BUILD=1` so it is untouched by this round.
