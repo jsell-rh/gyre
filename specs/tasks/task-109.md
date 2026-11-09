@@ -140,20 +140,39 @@ assigned requirements. That round restored the assigned contract — the
 task file keeps its original `[ ]` checkboxes and carries status via
 `progress:` plus this section, matching completed tasks on main.
 
-**Rebase repair round:** merged the assignment base `ed57c723`
-(task-201 persistent search backend) into the branch as `2bb4d127`;
-conflicts were only `web/dist` build artifacts. Correction (review
-finding d2598c14 F1): the merge resolved those conflicts by taking
-the base's dist bundle wholesale — the committed `web/dist` on this
-branch is byte-identical to the base's and does NOT contain the
-spec-lifecycle UI. An earlier revision of these notes claimed the
-conflict was "resolved by rebuilding web/dist from the merged
-source"; that claim was false and is retracted. The merge touched no
-task-109 source surface (diff over spec_lifecycle files,
-`git_http.rs`, `RepoSettings.svelte` is empty), so the UI source is
-intact; per the current assignment instructions, `web/dist`
-regeneration and committing is owned by the executor /
-final-integration stage, not this branch's assignment.
+**Rebase repair rounds:** two assignment bases have been merged into
+this branch. First, base `ed57c723` (task-201 persistent search
+backend) as `2bb4d127`; conflicts were only `web/dist` build artifacts,
+resolved by taking the base's dist bundle wholesale — the committed
+`web/dist` on this branch does NOT contain the spec-lifecycle UI, which
+is expected: `web/dist` regeneration and committing is owned by the
+executor / final-integration stage (review finding d2598c14 F1; an
+earlier claim that dist was rebuilt from merged source was false and
+is retracted). That merge touched no task-109 source surface.
+
+Second (current round, merge commit `8e37d4561`): merged assignment
+base `fefde2946` (task-089 HSI Explorer Generated Views + secrets
+panels + rollout policies). Two source conflicts, both additive and
+both resolved by keeping both sides:
+- `crates/gyre-server/src/lib.rs` — port-import list and `AppState`
+  wiring now carry BOTH `SpecLifecycleRepository` (task-109,
+  `spec_lifecycle_configs` store) and the base's `RolloutPolicyRepository`
+  (`rollout_policies` store).
+- `web/src/components/RepoSettings.svelte` — `TAB_IDS` now carries
+  BOTH the task-109 `spec-lifecycle` tab and the base's `secrets` tab
+  (merged tab bar: 10 tabs; both tab bodies, `TAB_KEYS` entries, and
+  the `SecretsPanel` import verified present).
+One merge-consequence test repair: `RepoSettings.test.js`
+"renders all N inner tabs" expected the pre-merge count (9) but the
+merged component legitimately renders 10; the count was updated to 10
+and the test still asserts every tab label including both
+`Spec Lifecycle` and `Secrets` — assertion strength preserved, not
+weakened. The base's new migrations
+(`2026-11-06-000057_rollout_policies`,
+`2026-11-07-000057_audit_detail_compression`) do not collide with this
+task's `2026-10-08-000059_spec_lifecycle_configs` (Diesel versions are
+date+sequence); `check-migration-versions.sh` passes. Evidence:
+`/tmp/stage/review-evidence/task-109/rebase-repair-fefde294.md`.
 
 **Migration numbering repair rounds:** the migration has been renumbered
 twice, both times because the assigned base added a colliding migration
@@ -220,51 +239,36 @@ Current-round probes: `SKIP_WEB_BUILD=1 cargo test -p gyre-server
 2 hook tests, re-run at this repair head); `cargo fmt --all --check`
 — clean.
 
-**Test evidence** (focused probes re-run at the latest repair commit
-`5b2b0684e` on this branch; earlier rounds recorded under
+**Test evidence** (focused probes re-run at the current head, merge
+commit `8e37d4561`; earlier rounds recorded under
 `/tmp/stage/review-evidence/task-109/`):
-- `bash scripts/check-migration-versions.sh` — exit 0 (was the failing
-  check, verification finding 7a1761da: duplicate version 20261008000058)
-- `bash scripts/check-migration-sql-portability.sh` — exit 0
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
-  (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation —
-  against a real fresh SQLite DB, proving the renamed 000059 migration
-  still creates the table)
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
-  no_duplicate_migration_version_prefixes` — 1/1
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
-  migration_000058_backfills_unique_url_safe_usernames` — 1/1 (task-120's
-  regression test that keys on version 20261008000058, re-run to confirm
-  the renumber leaves the neighboring migration untouched)
-
-Earlier-round probes (unchanged source, still standing at `696c03f2`):
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server -p gyre-adapters
+  -p gyre-domain` — clean (both merged feature sets compile together)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` —
-  originally 7/7 (API 5 incl. Agent-role 403 with a real JWT on the
-  assigned `/settings/spec-lifecycle` path; hook 2: `enabled=false`
-  creates no tasks and custom `watched_paths` fully replace defaults
-  with `default_priority_new: Critical` landing on the created task —
-  end-to-end against a real bare git repo with real pushed commits).
-  Correction (finding d2598c14 F2): these API tests run against the
-  in-memory store via `mem::test_state()`, NOT a fresh SQLite-backed
-  server as an earlier revision of these notes claimed; the
-  API-over-SQLite path is now covered by
-  `get_put_traverse_sqlite_migration_end_to_end` (see the
-  review-repair round above), and the migration itself by the
-  gyre-adapters tests above.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
-  'git_http::tests::parse_spec_changes'` — 9/9 and
-  `'git_http::tests::classify_spec_change'` — 6/6 (config-driven filtering,
-  custom paths, ignored-override, configured priorities)
-- `python3 scripts/check-clippy-diff.py 72ad2a128` — exit 0 (changed
-  lines clean); `cargo fmt --all --check` — clean; `bash scripts/check-arch.sh`
-  and the remaining `scripts/check-*.sh` static gates — all exit 0
-  (incl. `check-task-commit-attribution.sh`, which passes once `5b2b0684e`
-  is recorded in this file's `commits:` frontmatter as done in this
-  commit)
-- Web UI tests are unchanged by this repair (the fix touches no
-  `web/` source); the prior round's `npx vitest run
-  src/__tests__/RepoSettings.test.js` — 56/56 stands.
+  8/8 (6 API incl. `get_put_traverse_sqlite_migration_end_to_end`, a
+  real SQLite-backed GET/PUT traverse of the migration-created table,
+  plus the Agent-role 403 with a real JWT; 2 hook tests:
+  `enabled=false` creates no tasks and custom `watched_paths` fully
+  replace defaults with `default_priority_new: Critical` landing on the
+  created task — end-to-end against a real bare git repo with real
+  pushed commits)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle`
+  — 4/4 (unconfigured defaults, round-trip, upsert overwrite, per-repo
+  isolation, against a real fresh SQLite DB)
+- `npx vitest run src/__tests__/RepoSettings.test.js` — 57/57
+  (includes the 10-tab merged bar with both `Spec Lifecycle` and
+  `Secrets` labels, and the spec-lifecycle form tests)
+- `npx vitest run src/__tests__/SecretsPanel.test.js` — 9/9 (base's
+  new component wired into the merged RepoSettings)
+- `bash scripts/check-migration-versions.sh`,
+  `check-migration-sql-portability.sh`, `check-abac-route-registry.sh`,
+  `check-arch.sh`, `check-task-commit-attribution.sh` — all exit 0
+- `python3 scripts/check-clippy-diff.py fefde2946` — exit 0 (16
+  changed Rust files, changed lines clean); `cargo fmt --all --check`
+  — clean
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle`
+  — 5/5 and `gyre-server` `git_http::tests::parse_spec_changes` — 9/9,
+  `classify_spec_change` — 6/6, re-run at this head
 
 `cargo test --all`, the full web suite, and exact-head GitHub checks are
 owned by the verification stage per assignment instructions; this repair
