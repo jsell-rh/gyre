@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "5626a68fcb94469acc6f6c2504dcd2dbcd204e7c"]
 ---
 
 ## Spec Excerpt
@@ -107,18 +107,24 @@ adapter.
 Full workspace suite and exact-head GitHub CI remain owned by verification
 and publication, per assignment constraints.
 
-### Merge repair (rebase finding 9c0ccfee)
+### Merge repairs (findings 9c0ccfee, e7aa777ea context)
 
-Resolved the rebase conflict against main tip fefde294 (merge commit
-9e5a0171d, recorded in `commits:` above). Only
-`crates/gyre-server/src/main.rs` conflicted: the import list -- this
-branch's `message_dispatcher` import vs. main's new
-`bootstrap_default_tenant`. Resolution is the union of both; the file body
-had already auto-merged cleanly with both sides' startup wiring intact
-(`bootstrap_default_tenant(&state)` plus
-`message_dispatcher::spawn_message_consumer`/`spawn_message_expiry`).
-No task-owned file needed semantic repair. All focused suites re-run green
-post-merge (see Test evidence above); `cargo check -p gyre-server --bins`
+Two merges against main, both touching only the
+`crates/gyre-server/src/main.rs` import list (the same conflict class:
+this branch's `message_dispatcher` import vs. main's new imports):
+
+- **9e5a0171d** against main tip fefde294 (`bootstrap_default_tenant`):
+  resolved as the union; file body auto-merged cleanly with both sides'
+  startup wiring intact.
+- **5626a68fc** against main tip 3ced150b (task-140's
+  `seed_builtin_personas`): same union resolution; body auto-merged with
+  both `seed_builtin_personas(&state)` and
+  `message_dispatcher::spawn_message_consumer`/`spawn_message_expiry`
+  wiring present.
+
+Both merge commits are recorded in `commits:` above. No task-owned file
+needed semantic repair in either merge. Focused suites re-run green
+post-merge (see Test evidence); `cargo check -p gyre-server --bins`
 clean; arch, dead-message-kinds, fabricated-scope-defaults, and
 task-commit-attribution checks all pass.
 `specs/coverage/system/message-bus.md` (14/14, 3 n/a) and
@@ -129,11 +135,9 @@ this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
 and this host has mawk 1.3.4. Identical failure at pristine base;
 host-tooling issue, unrelated to this task.
 
-### Review repair (finding 73a69995)
+### Review repairs (findings 73a69995, e7aa777ea)
 
-Both findings from the review round at 152e67033 are fixed:
-
-- **Failing test (code):**
+- **Failing test (73a69995, code):**
   `reconciliation::tests::reconciliation_completed_fires_when_all_tasks_terminal`
   failed at 152e67033 because the p6 MetaSpecDrift notification moved into
   the async NotificationBridge while the test asserted it synchronously
@@ -142,10 +146,14 @@ Both findings from the review round at 152e67033 are fixed:
   bridge test) and polling for the bridge-created notification. The test
   kills a real regression: removing the bridge's ReconciliationCompleted
   arm or the dispatcher wiring makes it fail again.
-- **Stale frontmatter (process):** merge commit 9e5a0171d is re-listed in
-  `commits:` above, so the main.rs startup-wiring conflict resolution is
-  inside review scoping; the Shipped merge-repair note is now accurate at
-  head.
+- **Stale frontmatter (73a69995, process):** merge commit 9e5a0171d is
+  listed in `commits:` above, so the main.rs startup-wiring conflict
+  resolution is inside review scoping.
+- **Frontmatter regression (e7aa777ea, process):** head cea3f23b4 had
+  again dropped 9e5a0171d from `commits:`, making the 73a69995 repair
+  note false at head. Fixed at the current head: `commits:` now lists
+  51221dc02, 9e5a0171d, 5192ff750, and the new merge 5626a68fc, and this
+  note is accurate at head.
 
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
