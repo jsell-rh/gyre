@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §16"
-commits: ["bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d"]
+commits: ["bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d", "35b4dc991"]
 ---
 
 ## Spec Excerpt
@@ -77,3 +77,8 @@ All behavior lives in `crates/gyre-server/src/gate_executor.rs` (commit `bb9dfd8
 - Pure-helper tests: `manifest_gates_resolved_from_spec_ref` (both personas + defaults + carried constraints — fails if manifest sourcing is removed), `manifest_gates_match_bare_path_spec_ref_without_sha`, `manifest_gates_empty_for_missing_inputs`, `manifest_gates_dedupe_repeated_persona`.
 - Persona-path tests: passes with a qualifying persona review (level-3 workload, pinned stack hash); **fails with no review** (kills regression to the auto-pass stub); fails on attestation below minimum; fails on stack-hash mismatch; ignores reviews from other personas; fails fast on ChangesRequested.
 - Trigger tests (real temp git repos with a manifest at HEAD): spec_ref MR gets GateResult rows for both manifest personas and `check_gates_for_mr` holds the MR (`Ok(false)`) while they run; a failed manifest-gate result blocks the merge (`Err` naming the manifest gate); repo-level gate + manifest gate on the same persona run exactly once (repo gate wins); MR without spec_ref and repo without manifest run exactly the repo-level gates.
+
+### Repair round (verification findings, commit `35b4dc991`)
+
+- **rustfmt:** applied rustfmt to the task-195 additions in `gate_executor.rs` (assert! wraps, `kv_set`/`fs::write` argument lists, `trigger_gates_for_mr` test call sites); every violation was inside this task's own hunks — no pre-existing lines reformatted. `check-rustfmt-diff.py` against the assignment base is clean.
+- **Fabricated ws scope:** the GateFailure event emission in `run_gate` fell back to `Id::new("default")` when the MR lookup failed — a legacy site whose exemption was pinned to `gate_executor.rs:111` and got unmasked when this task's code shifted it to line 313. Fixed the site instead of re-pinning the exemption: the workspace-scoped event is now skipped and logged when the workspace cannot be resolved (the `emit_reconciliation_completed` pattern, task-097 F3). Exemption entry removed, `FROZEN_EXEMPTION_COUNT` lowered 3→2. No test depended on the fabricated-identity path; all 39 gate_executor tests still pass (1499 lib tests total, 0 failed).
