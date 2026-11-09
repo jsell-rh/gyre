@@ -465,8 +465,25 @@ impl ResourceResolver {
                     None,
                 ),
                 // ── Meta-specs ─────────────────────────────────────────────
+                RouteResourceMapping::api("/api/v1/meta-specs-registry", "meta_spec", None),
+                RouteResourceMapping::api("/api/v1/meta-specs-registry/:id", "meta_spec", None),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs-registry/:id/versions",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs-registry/:id/versions/:version",
+                    "meta_spec",
+                    None,
+                ),
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/specs/:path/meta-spec-bindings",
                     "meta_spec",
                     None,
                 ),

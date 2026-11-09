@@ -793,6 +793,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs-registry/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
+        // Spec-level meta-spec bindings (agent-runtime spec §2)
+        .route(
+            "/api/v1/specs/:path/meta-spec-bindings",
+            get(meta_specs::get_spec_meta_spec_bindings)
+                .put(meta_specs::put_spec_meta_spec_bindings),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
