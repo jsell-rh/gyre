@@ -10,6 +10,10 @@
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
+  // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
+  // workspace generate endpoint (read-only query translator).
+  import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
+  import { viewSpecToViewQuery } from '../lib/generated-view.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -103,6 +107,54 @@
   // repeated clicks on the same step re-trigger the camera move.
   let traceFocusRequest = $state(null);
   let traceFocusNonce = 0;
+
+  // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
+  // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
+  // 'generate' is the LLM view generator (workspace generate endpoint) that
+  // translates natural-language questions into ViewSpec documents.
+  let chatMode = $state('ask');
+  // Trace playback request for generated "flow" views: the nonce lets a new
+  // flow view re-trigger the canvas particle animation.
+  let tracePlaybackRequest = $state(null);
+  let tracePlaybackNonce = 0;
+
+  /**
+   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   *
+   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
+   * node-type filters, callouts, and the LLM's explanation as the query
+   * annotation — the sidebar annotation alongside the graph). A "flow"
+   * layout additionally fetches the trace_source MR's captured trace and
+   * starts particle playback on the evaluative lens; the server already
+   * guarantees flow views are trace-backed, so a fetch failure here falls
+   * back to the structural lens (client mirror of the server fallback).
+   */
+  function applyGeneratedViewSpec(spec) {
+    if (!spec || typeof spec !== 'object') return;
+    const query = viewSpecToViewQuery(spec);
+    if (query) {
+      activeViewQuery = query;
+      pushInteraction({ action: 'query', detail: `generated:${spec.layout ?? 'view'}` });
+    }
+    if (spec.layout === 'flow' && spec.data?.trace_source?.mr_id) {
+      const mrId = spec.data.trace_source.mr_id;
+      api.mrTrace(mrId)
+        .then((trace) => {
+          if (trace?.spans?.length > 0) {
+            traceData = trace;
+            tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+          } else {
+            explorerLens = 'structural';
+          }
+        })
+        .catch((err) => {
+          console.warn('[ExplorerView] flow view trace fetch failed:', err);
+          explorerLens = 'structural';
+        });
+    } else {
+      explorerLens = 'structural';
+    }
+  }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -1820,6 +1872,7 @@
                 onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
+                playbackRequest={tracePlaybackRequest}
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
@@ -2367,6 +2420,26 @@
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
+                  <!-- HSI §3: chat column mode — Explorer agent (ask) vs LLM view
+                       generator (generate). -->
+                  <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'ask'}
+                      role="tab"
+                      aria-selected={chatMode === 'ask'}
+                      onclick={() => { chatMode = 'ask'; }}
+                      type="button"
+                    >{$t('explorer_chat.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'generate'}
+                      role="tab"
+                      aria-selected={chatMode === 'generate'}
+                      onclick={() => { chatMode = 'generate'; }}
+                      type="button"
+                    >{$t('generated_view.title')}</button>
+                  </div>
                   <button
                     class="chat-collapse-btn"
                     onclick={() => { chatCollapsed = true; }}
@@ -2377,6 +2450,7 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
                   </button>
                 </div>
+                {#if chatMode === 'ask'}
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
@@ -2389,6 +2463,13 @@
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
                 />
+                {:else}
+                <GeneratedViewChat
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                />
+                {/if}
               </div>
             {/if}
             {#if chatCollapsed}
@@ -4195,13 +4276,46 @@
 
   /* ── Chat panel collapse/expand controls ─────────────────────────── */
   .chat-collapse-bar {
-    display: none;
+    display: flex;
     flex-shrink: 0;
     align-items: center;
-    justify-content: center;
-    padding: var(--space-1) 0;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface);
+  }
+
+  /* HSI §3: chat mode tabs (Explorer agent | Generated Views) */
+  .chat-mode-tabs {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .chat-mode-tab {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .chat-mode-tab:hover { color: var(--color-text); }
+
+  .chat-mode-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+    font-weight: 600;
+  }
+
+  .chat-mode-tab:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .chat-collapse-btn {
