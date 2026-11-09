@@ -524,6 +524,23 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register meta_spec_stale_pin_check job (agent-runtime.md §2 Stale Pin
+    // Detection): compares spec-level binding pins against current versions.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_stale_pin_check".to_string(),
+                description: "Detects specs pinning old meta-spec versions and creates priority-6 \
+                     MetaSpecDrift notifications (agent-runtime §2)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+        )
+        .await;
+
     // Register secret expiry check job (every 5 minutes, platform-model.md §7)
     registry
         .register(
