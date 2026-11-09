@@ -85,15 +85,44 @@ impl SearchPort for MemSearchAdapter {
         let mut results: Vec<(f64, SearchResult)> = docs
             .iter()
             .filter(|doc| {
+                // §Access Scoping: tenant + accessible workspace/repo sets are
+                // enforced inside the query filter, before scoring — the
+                // result set (and any count derived from it) can never
+                // include documents the caller cannot access.
+                if doc.tenant_id.as_deref() != Some(query.tenant_id.as_str()) {
+                    return false;
+                }
                 // Entity type filter.
                 if let Some(ref et) = query.entity_type {
                     if doc.entity_type != *et {
                         return false;
                     }
                 }
-                // Workspace filter.
+                // Workspace filter (user-supplied narrowing — intersects with
+                // the accessible set, so it can only narrow, never widen).
                 if let Some(ref ws) = query.workspace_id {
                     if doc.workspace_id.as_deref() != Some(ws.as_str()) {
+                        return false;
+                    }
+                }
+                // Accessible-workspace set: None = unscoped (Admin), an empty
+                // set excludes everything.
+                if let Some(ref ids) = query.accessible_workspace_ids {
+                    if !ids
+                        .iter()
+                        .any(|w| doc.workspace_id.as_deref() == Some(w.as_str()))
+                    {
+                        return false;
+                    }
+                }
+                // Accessible-repo set: repo-less (workspace-level) documents
+                // stay visible — repo scope restricts repos, not the workspace.
+                if let Some(ref ids) = query.accessible_repo_ids {
+                    let repo_ok = match doc.repo_id.as_deref() {
+                        None | Some("") => true,
+                        Some(r) => ids.iter().any(|i| i == r),
+                    };
+                    if !repo_ok {
                         return false;
                     }
                 }
@@ -141,6 +170,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    const TEST_TENANT: &str = "t-test";
+
     fn make_doc(entity_type: &str, id: &str, title: &str, body: &str) -> SearchDocument {
         SearchDocument {
             entity_type: entity_type.to_string(),
@@ -149,7 +180,21 @@ mod tests {
             body: body.to_string(),
             workspace_id: None,
             repo_id: None,
+            tenant_id: Some(TEST_TENANT.to_string()),
             facets: HashMap::new(),
+        }
+    }
+
+    /// Tenant-bound query with no workspace/repo restriction.
+    fn tenant_query(query: &str) -> SearchQuery {
+        SearchQuery {
+            query: query.to_string(),
+            entity_type: None,
+            workspace_id: None,
+            limit: 10,
+            tenant_id: TEST_TENANT.to_string(),
+            accessible_workspace_ids: None,
+            accessible_repo_ids: None,
         }
     }
 
@@ -178,9 +223,7 @@ mod tests {
         let results = adapter
             .search(SearchQuery {
                 query: "ABAC".to_string(),
-                entity_type: None,
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("ABAC")
             })
             .await
             .unwrap();
@@ -215,8 +258,7 @@ mod tests {
             .search(SearchQuery {
                 query: "authentication".to_string(),
                 entity_type: Some("task".to_string()),
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("authentication")
             })
             .await
             .unwrap();
@@ -236,9 +278,7 @@ mod tests {
         let results = adapter
             .search(SearchQuery {
                 query: "JWT".to_string(),
-                entity_type: None,
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("JWT")
             })
             .await
             .unwrap();
@@ -262,9 +302,7 @@ mod tests {
         let results = adapter
             .search(SearchQuery {
                 query: "QUEUE".to_string(),
-                entity_type: None,
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("QUEUE")
             })
             .await
             .unwrap();
@@ -292,9 +330,7 @@ mod tests {
         let results = adapter
             .search(SearchQuery {
                 query: "new".to_string(),
-                entity_type: None,
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("new")
             })
             .await
             .unwrap();
@@ -305,12 +341,101 @@ mod tests {
         let old_results = adapter
             .search(SearchQuery {
                 query: "old".to_string(),
-                entity_type: None,
-                workspace_id: None,
-                limit: 10,
+                ..tenant_query("old")
             })
             .await
             .unwrap();
         assert!(old_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn access_scoping_filters_inside_the_query_filter() {
+        // §Access Scoping parity with the storage-backed adapters: tenant,
+        // accessible-workspace and accessible-repo sets restrict the result
+        // set before counts are derived; a user-supplied workspace_id cannot
+        // widen access; a document with no resolvable tenant is visible to no
+        // tenant-scoped query.
+        let adapter = MemSearchAdapter::new();
+
+        let mut in_a = make_doc("task", "in-a", "needle", "needle in workspace a");
+        in_a.workspace_id = Some("ws-a".to_string());
+        let mut in_b = make_doc("task", "in-b", "needle", "needle in workspace b");
+        in_b.workspace_id = Some("ws-b".to_string());
+        adapter.index(in_a).await.unwrap();
+        adapter.index(in_b).await.unwrap();
+        // No tenant -> invisible to every tenant-scoped query.
+        adapter
+            .index(SearchDocument {
+                tenant_id: None,
+                ..make_doc("task", "no-tenant", "needle", "needle with no tenant")
+            })
+            .await
+            .unwrap();
+
+        // Scoped to ws-a: only ws-a's doc.
+        let scoped = adapter
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..tenant_query("needle")
+            })
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].entity_id, "in-a");
+
+        // Unscoped within tenant: both tenanted docs, never the tenantless one.
+        let admin = adapter.search(tenant_query("needle")).await.unwrap();
+        assert_eq!(admin.len(), 2);
+
+        // Empty accessible set: zero results.
+        let none = adapter
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec![]),
+                ..tenant_query("needle")
+            })
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        // Wrong tenant: zero results.
+        let other = adapter
+            .search(SearchQuery {
+                tenant_id: "other-tenant".to_string(),
+                ..tenant_query("needle")
+            })
+            .await
+            .unwrap();
+        assert!(other.is_empty());
+
+        // User-supplied workspace_id cannot widen the accessible set.
+        let widened = adapter
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                workspace_id: Some("ws-b".to_string()),
+                ..tenant_query("needle")
+            })
+            .await
+            .unwrap();
+        assert!(widened.is_empty());
+
+        // Repo scope: repo docs restricted, workspace-level docs kept.
+        let mut r1 = make_doc("task", "r1-doc", "widget", "widget in repo one");
+        r1.workspace_id = Some("ws-a".to_string());
+        r1.repo_id = Some("repo-1".to_string());
+        let mut r2 = make_doc("task", "r2-doc", "widget", "widget in repo two");
+        r2.workspace_id = Some("ws-a".to_string());
+        r2.repo_id = Some("repo-2".to_string());
+        adapter.index(r1).await.unwrap();
+        adapter.index(r2).await.unwrap();
+        let repo_scoped = adapter
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                accessible_repo_ids: Some(vec!["repo-1".to_string()]),
+                ..tenant_query("widget")
+            })
+            .await
+            .unwrap();
+        assert_eq!(repo_scoped.len(), 1);
+        assert_eq!(repo_scoped[0].entity_id, "r1-doc");
     }
 }

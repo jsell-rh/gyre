@@ -9,6 +9,7 @@ use gyre_ports::search::SearchQuery;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -44,6 +45,7 @@ pub struct SearchResponse {
 }
 
 pub async fn search_handler(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, ApiError> {
@@ -56,6 +58,12 @@ pub async fn search_handler(
         }));
     }
     let limit = params.limit.min(100);
+    // §Access Scoping: tenant/workspace/repo scope is derived from the
+    // authenticated caller — never from client-supplied params. The
+    // client's `workspace_id` stays a narrowing filter that the adapter
+    // intersects with the accessible set: requesting an inaccessible
+    // workspace yields zero results, not an error that leaks its existence.
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let results = state
         .search
         .search(SearchQuery {
@@ -63,6 +71,9 @@ pub async fn search_handler(
             entity_type: params.entity_type,
             workspace_id: params.workspace_id,
             limit,
+            tenant_id: scope.tenant_id,
+            accessible_workspace_ids: scope.accessible_workspace_ids,
+            accessible_repo_ids: scope.accessible_repo_ids,
         })
         .await
         .map_err(ApiError::Internal)?;

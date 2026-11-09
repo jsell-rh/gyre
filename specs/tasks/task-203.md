@@ -2,10 +2,10 @@
 title: "Enforce access scoping on search (tenant/workspace/repo, index-level filtering)"
 spec_ref: "search.md §Access Scoping"
 depends_on: [task-201]
-progress: not-started
+progress: complete
 coverage_sections:
   - "search.md §Access Scoping"
-commits: []
+commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
 ---
 
 ## Spec Excerpt
@@ -69,3 +69,37 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 - Do NOT weaken any existing auth; add scoping without breaking Admin/global-token paths.
 - Preserve hexagonal boundaries — scope derivation is server-side; the port just receives the resolved id lists.
 - Run validation once at the end. On completion set `progress: ready-for-review` and record commit SHAs.
+
+## Shipped
+
+Search is access-scoped end to end (search.md §Access Scoping). The candidate (`546be12`) was rebased onto base `4e895f7` as merge commit `08c1c757` (rebase repair for durable finding `25e35a17`), carrying the interrupted checkpoint `a18e6e25` plus verification repairs `790b031d` (E0015: `ENV_LOCK` via `LazyLock`) and `6bf73593` (`unused_must_use`: `.unwrap()` on `seed_builtin_policies`).
+
+### Behavior
+
+- **Scope derivation (server-side, `crates/gyre-server/src/search_scope.rs`)**: `derive_search_scope` resolves the caller's `tenant_id` from auth, then — Admin (incl. global dev token) → unscoped within the tenant; agent JWTs with `orchestrator_type` claims → workspace orchestrator sees its whole workspace, repo orchestrator its single repo; worker agents → their agent record's workspace/repo; human users → accepted workspace memberships; unknown callers → fail closed (empty accessible set, zero results, never unscoped).
+- **Port (`gyre-ports/src/search.rs`)**: `SearchQuery` carries `tenant_id`, `accessible_workspace_ids: Option<Vec<String>>` (`None` = Admin/unscoped, empty = zero rows), `accessible_repo_ids: Option<Vec<String>>` (repo-less workspace docs stay visible). The user-supplied `workspace_id`/`entity_type` remain narrowing filters intersected with the accessible set — they can only narrow, never widen.
+- **Adapter enforcement, inside the index query**: SQLite FTS5 and Postgres tsvector adapters bind `tenant_id = ?`, `workspace_id IN (...)`, `(repo_id = '' OR repo_id IN (...))` as SQL WHERE clauses on the FTS/tsquery itself (empty accessible set → `AND 0`); the mem adapter applies the same constraints in its query filter before scoring. No post-filtering anywhere, so totals/facet counts cannot leak inaccessible documents.
+- **Handlers**: REST `search_handler` and MCP `gyre_search` take `AuthenticatedAgent` first and derive scope from the token context, never from client args.
+- **Indexing**: task/agent/MR creation routes documents through `search_scope::index_doc`, which stamps `workspace_id`/`repo_id` from the entity and resolves `tenant_id` from the workspace's scope row (unresolvable → doc visible to no tenant-scoped query, never mis-attributed).
+- **Docs**: `docs/api-reference.md` search rows now state the access scoping and that `workspace_id` only narrows.
+
+### Test evidence
+
+On the post-rebase merged tree (`08c1c757`), fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web source touched), via `/tmp/stage/bin/cargo`; logs retained in `/tmp/stage/review-evidence/task-203-rebase-*.log`:
+
+- `cargo test -p gyre-server --lib mcp_search` — 1 passed: `mcp_search_is_access_scoped_to_the_agent_token` (admin sees 3; repo orchestrator sees only its repo; client `workspace_id: ws-b` cannot widen; workspace orchestrator sees both ws-a repos, never ws-b).
+- `cargo test -p gyre-server --test search_wiring` — 2 passed: `search_is_access_scoped_to_the_authenticated_caller` (member of ws-a gets total 2 with ws-b's matching doc absent from results AND total; `workspace_id=ws-b` param → total 0; repo/workspace orchestrator and worker-agent paths; ghost agent fails closed) and `sqlite_url_wires_fts5_search_port` (FTS5 wiring, stemming, tenant boundary, facets).
+- `cargo test -p gyre-adapters search` — 16 passed, incl. `access_scoping_filters_inside_the_index_query` (asserts the SQL text carries the WHERE clauses), `access_scoping_filters_inside_the_query_filter` (mem), `repo_scope_restricts_repos_but_keeps_workspace_level_docs`.
+- `bash scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-abac-route-registry.sh` — all exit 0.
+
+Full workspace suites, all-target Clippy, and GitHub CI are deferred to verification per assignment scope.
+
+### Rebase repair (`08c1c757`)
+
+Durable finding `25e35a17`: merging base `4e895f7` into the candidate auto-merged all but three files. Resolutions:
+
+- `crates/gyre-server/src/lib.rs` — HEAD added `pub mod search_scope;` (task-203), base added `pub mod secret_rotation;`; kept both, alphabetical order. Both module files exist on the merged tree.
+- `crates/gyre-server/tests/search_wiring.rs` — the `seed_builtin_policies` call site conflicted between HEAD's `.unwrap()` and base's `.expect("seed built-in policies")`; kept `.unwrap()`, matching the file's other call site (line 281) that auto-merged as `.unwrap()`. Both handle the `must_use` result.
+- `docs/api-reference.md` — kept base's four new `/api/v1/secrets*` rows and replaced base's plain search row with HEAD's access-scoped search row.
+
+Post-rebase probes (logs under `/tmp/stage/review-evidence/task-203-rebase-*`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `cargo test -p gyre-adapters search` — 16 passed; `cargo check --workspace --all-targets` — clean; `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-mem-port-contracts.sh`, `check-migration-versions.sh` — all exit 0; `scripts/check-rustfmt-diff.py` clean against both `546be125f` and `4e895f76` (the canonical changed-lines fmt gate; a whole-crate `rustfmt --edition 2024 --check` reports pre-existing debt already present on base `4e895f7` and is not the repo's gate).
