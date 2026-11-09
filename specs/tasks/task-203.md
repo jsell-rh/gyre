@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "08c1c757b5a5e26a69e574f97a5ea80a29b52c11"]
 ---
 
 ## Spec Excerpt
@@ -72,7 +72,7 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is access-scoped end to end (search.md §Access Scoping), continuing the interrupted checkpoint `a18e6e25` on the merged tree, plus the verification repair `790b031d`.
+Search is access-scoped end to end (search.md §Access Scoping). The candidate (`546be12`) was rebased onto base `4e895f7` as merge commit `08c1c757` (rebase repair for durable finding `25e35a17`), carrying the interrupted checkpoint `a18e6e25` plus verification repairs `790b031d` (E0015: `ENV_LOCK` via `LazyLock`) and `6bf73593` (`unused_must_use`: `.unwrap()` on `seed_builtin_policies`).
 
 ### Behavior
 
@@ -85,7 +85,7 @@ Search is access-scoped end to end (search.md §Access Scoping), continuing the 
 
 ### Test evidence
 
-Fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web code touched), via `/tmp/stage/bin/cargo`; logs retained in `/tmp/stage/review-evidence/`:
+On the post-rebase merged tree (`08c1c757`), fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web source touched), via `/tmp/stage/bin/cargo`; logs retained in `/tmp/stage/review-evidence/task-203-rebase-*.log`:
 
 - `cargo test -p gyre-server --lib mcp_search` — 1 passed: `mcp_search_is_access_scoped_to_the_agent_token` (admin sees 3; repo orchestrator sees only its repo; client `workspace_id: ws-b` cannot widen; workspace orchestrator sees both ws-a repos, never ws-b).
 - `cargo test -p gyre-server --test search_wiring` — 2 passed: `search_is_access_scoped_to_the_authenticated_caller` (member of ws-a gets total 2 with ws-b's matching doc absent from results AND total; `workspace_id=ws-b` param → total 0; repo/workspace orchestrator and worker-agent paths; ghost agent fails closed) and `sqlite_url_wires_fts5_search_port` (FTS5 wiring, stemming, tenant boundary, facets).
@@ -94,10 +94,12 @@ Fresh sandbox, `SKIP_WEB_BUILD=1` (committed `web/dist`; no web code touched), v
 
 Full workspace suites, all-target Clippy, and GitHub CI are deferred to verification per assignment scope.
 
-### Verification repair (`790b031d`)
+### Rebase repair (`08c1c757`)
 
-Durable finding `3f2e4f62`: the verification sandbox failed to compile the `search_wiring` test binary — `E0015: cannot call non-const associated function tokio::sync::Mutex::<()>::new in statics` — because `static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(())` depends on `Mutex::new` being `const fn`, which does not hold on the verification toolchain's tokio build. Fixed by initializing the env-var lock through `std::sync::LazyLock` (the pattern already used by `crates/gyre-adapters/src/call_graph.rs`), so no const call sits in the static initializer; test logic unchanged. Everything else in that verification run passed (arch lints, ABAC registry, mem port contracts, web build); the svelte a11y/unused-CSS output in the log tail is warnings-only. Post-fix probes in this sandbox, `SKIP_WEB_BUILD=1` via `/tmp/stage/bin/cargo` (notes in `/tmp/stage/review-evidence/task-203-e0015-repair.md`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `rustfmt --check` on the changed file — clean.
+Durable finding `25e35a17`: merging base `4e895f7` into the candidate auto-merged all but three files. Resolutions:
 
-### Verification repair (`6bf73593`)
+- `crates/gyre-server/src/lib.rs` — HEAD added `pub mod search_scope;` (task-203), base added `pub mod secret_rotation;`; kept both, alphabetical order. Both module files exist on the merged tree.
+- `crates/gyre-server/tests/search_wiring.rs` — the `seed_builtin_policies` call site conflicted between HEAD's `.unwrap()` and base's `.expect("seed built-in policies")`; kept `.unwrap()`, matching the file's other call site (line 281) that auto-merged as `.unwrap()`. Both handle the `must_use` result.
+- `docs/api-reference.md` — kept base's four new `/api/v1/secrets*` rows and replaced base's plain search row with HEAD's access-scoped search row.
 
-Durable finding `82706acf`: the verification checks run (`bash /tmp/stage/checks.sh`, candidate `4c1f2f62`) exited 1 with a single actionable code diagnostic — `crates/gyre-server/tests/search_wiring.rs:275: unused_must_use: unused std::result::Result that must be used`. Root cause: `abac_middleware::seed_builtin_policies(&state).await;` drops its `anyhow::Result<()>` at both call sites in the test (lines 200 and 275 of the candidate); rustc's `unused_must_use` fires on the dropped `#[must_use]` result. Everything else in that run passed (rustfmt clean, build OK, web build succeeded; the svelte a11y/unused-CSS output is warnings-only and pre-existing). Fix: both call sites now `.unwrap()`, matching every other fallible call in the file — no production code, test logic, or assertions changed. Post-fix probes in this sandbox, `SKIP_WEB_BUILD=1` via `/tmp/stage/bin/cargo` (notes and logs in `/tmp/stage/review-evidence/task-203-unused-must-use-repair.md`): `unused_must_use` reproduced pre-fix at :200 and :275, post-fix `cargo clippy -p gyre-server --all-targets` reports zero `unused_must_use`; `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `rustfmt --edition 2024 --check` — clean.
+Post-rebase probes (logs under `/tmp/stage/review-evidence/task-203-rebase-*`): `cargo test -p gyre-server --test search_wiring` — 2 passed; `cargo test -p gyre-server --lib mcp_search` — 1 passed; `cargo test -p gyre-adapters search` — 16 passed; `cargo check --workspace --all-targets` — clean; `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-mem-port-contracts.sh`, `check-migration-versions.sh` — all exit 0; `scripts/check-rustfmt-diff.py` clean against both `546be125f` and `4e895f76` (the canonical changed-lines fmt gate; a whole-crate `rustfmt --edition 2024 --check` reports pre-existing debt already present on base `4e895f7` and is not the repo's gate).
