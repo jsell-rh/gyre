@@ -7,6 +7,14 @@
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
+  import { onViewEvent, dispatchViewEvent, viewEventFromDom } from '../lib/viewEvents.js';
+  import { applyDensityPolicy } from '../lib/canvas-density.js';
+  // ui-layout.md §10 Layout Engines: the layout registry (task-170) maps
+  // ViewSpec layout names to renderer components; the generated view's
+  // `layout` field selects the renderer (see applyGeneratedViewSpec).
+  import { getLayout } from '../lib/layoutRegistry.js';
+  import { resolveScopeNodes, edgeSrc, edgeTgt } from '../lib/view-query-scope.js';
+  import VirtualNodeList from '../lib/VirtualNodeList.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
@@ -119,18 +127,28 @@
   let tracePlaybackNonce = 0;
 
   /**
-   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   * Apply a generated ViewSpec (HSI §3) to the Explorer.
    *
-   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
-   * node-type filters, callouts, and the LLM's explanation as the query
-   * annotation — the sidebar annotation alongside the graph). A "flow"
-   * layout additionally fetches the trace_source MR's captured trace and
-   * starts particle playback on the evaluative lens; the server already
-   * guarantees flow views are trace-backed, so a fetch failure here falls
-   * back to the structural lens (client mirror of the server fallback).
+   * The ViewSpec's `layout` field selects the renderer through the layout
+   * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
+   * render on the SVG canvas positioned by ELK, 'side-by-side' on the
+   * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
+   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
+   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   *
+   * For the canvas-rendered layouts the ViewSpec is translated to a
+   * ViewQuery the canvas renders (concept / node-type filters, callouts,
+   * and the LLM's explanation as the query annotation — the sidebar
+   * annotation alongside the graph). A "flow" layout additionally fetches
+   * the trace_source MR's captured trace and starts particle playback on
+   * the evaluative lens; the server already guarantees flow views are
+   * trace-backed, so a fetch failure here falls back to the structural
+   * lens (client mirror of the server fallback).
    */
   function applyGeneratedViewSpec(spec) {
     if (!spec || typeof spec !== 'object') return;
+    const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
+    activeLayout = getLayout(layoutName) ? layoutName : 'graph';
     const query = viewSpecToViewQuery(spec);
     if (query) {
       activeViewQuery = query;
@@ -156,6 +174,22 @@
     }
   }
 
+  // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
+  // The generated ViewSpec's `layout` field (set in applyGeneratedViewSpec)
+  // selects the renderer through the layout registry. Layouts rendered by
+  // the unified canvas (graph/flow/timeline) and the shell-owned list
+  // layout have no dedicated registry component — the boundary branch
+  // below renders them; the rest dispatch to their registered renderer.
+  const CANVAS_LAYOUTS = new Set(['graph', 'flow', 'timeline']);
+  let activeLayout = $state('graph');
+
+  /** Dismiss the generated layout — return to the default graph canvas.
+   *  The active view query is kept (it stays visible via the canvas's own
+   *  annotation UI and can be cleared from the manual query editor). */
+  function clearGeneratedLayout() {
+    activeLayout = 'graph';
+  }
+
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
   // canvasState.recent_interactions.  ExplorerView adds higher-level
@@ -166,6 +200,123 @@
     explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
   }
 
+  // ── Uniform ViewEvent handling (ui-layout.md §10 Interaction Events) ──────────
+  // The Explorer shell handles all ViewEvents uniformly:
+  //   click        → open the detail panel
+  //   dblclick     → drill down (scope into the entity's repo)
+  //   hover        → show a tooltip
+  //   context-menu → open an actions menu
+  // Events marked `handled` were already serviced by an integrated emitter
+  // (ExplorerCanvas routes its own click/drill/tooltip/menu interactions
+  // through its direct callbacks) — they are observed here for interaction
+  // tracking only, never re-performed.
+  let viewTooltip = $state(null); // { x, y, name, type }
+  let viewMenu = $state(null);    // { x, y, entity, data }
+
+  /** Open the node detail panel (shared by canvas callback + ViewEvents). */
+  function openNodeDetail(n) {
+    detailNode = n;
+    highlightedSpanId = null;
+    if (n?._action === 'view_spec' && n.spec_path) {
+      openSpecEditor(n.spec_path);
+    } else if (n?._action === 'create_spec') {
+      // Open spec editor with a template for the uncovered node
+      const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+      specEditorOpen = true;
+      specEditorPath = suggestedPath;
+      const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
+      specEditorContent = template;
+      specEditorOriginal = '';
+      specEditorError = '';
+    }
+    // 'view_code' and plain nodes render in the detail panel (location shown
+    // by NodeDetailPanel) — setting detailNode above covers them.
+  }
+
+  function handleViewEvent(ev) {
+    if (!ev) return;
+    pushInteraction(`viewevent:${ev.type}:${ev.entity_type}:${ev.entity_id}`);
+    if (ev.handled) return;
+    const data = ev.data;
+    switch (ev.type) {
+      case 'click':
+        viewMenu = null;
+        if (data) openNodeDetail(data);
+        break;
+      case 'dblclick':
+        // Drill-down: scope the Explorer into the entity's repo when it
+        // lives elsewhere; otherwise open its detail panel.
+        if (data?.repo_id && data.repo_id !== selectedRepoId) {
+          selectRepo({ id: data.repo_id });
+        } else if (data) {
+          openNodeDetail(data);
+        }
+        break;
+      case 'hover':
+        viewTooltip = data
+          ? {
+              x: ev.position?.x ?? 0,
+              y: ev.position?.y ?? 0,
+              name: data.name ?? data.qualified_name ?? data.id,
+              type: data.node_type ?? ev.entity_type,
+            }
+          : null;
+        break;
+      case 'context-menu':
+        viewTooltip = null;
+        viewMenu = {
+          x: ev.position?.x ?? 0,
+          y: ev.position?.y ?? 0,
+          entity: ev.entity_type,
+          data,
+        };
+        break;
+    }
+  }
+
+  $effect(() => onViewEvent(handleViewEvent));
+
+  function onWindowClick(e) {
+    // Clicking anywhere dismisses the hover tooltip; clicking outside the
+    // ViewEvent actions menu dismisses it.
+    if (viewTooltip) viewTooltip = null;
+    if (viewMenu && !e.target.closest?.('.viewevent-menu')) viewMenu = null;
+  }
+
+  function viewMenuAction(action) {
+    const data = viewMenu?.data;
+    viewMenu = null;
+    if (!data) return;
+    if (action === 'details') {
+      openNodeDetail(data);
+    } else if (action === 'code' && data.file_path) {
+      openNodeDetail({ ...data, _action: 'view_code' });
+    } else if (action === 'spec' && data.spec_path) {
+      openNodeDetail({ ...data, _action: 'view_spec' });
+    } else if (action === 'copy_id') {
+      navigator.clipboard?.writeText?.(String(data.id ?? ''));
+    }
+  }
+
+  /** Cards (Architecture Insights entries) emit ViewEvents too — they are
+   *  interactive elements under ui-layout.md §10 ("nodes, edges, rows, cards"). */
+  function emitCardViewEvent(domEvent, node) {
+    dispatchViewEvent(
+      domEvent.currentTarget,
+      viewEventFromDom(domEvent, 'node', node?.id ?? node?.qualified_name ?? node?.name ?? 'unknown', node)
+    );
+  }
+
+  function cardClick(domEvent, node) {
+    emitCardViewEvent(domEvent, node);
+  }
+
+  function cardKeydown(e, node) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      emitCardViewEvent(e, node);
+    }
+  }
   // §10 Interaction Context: the active view query is part of the canvas
   // state sent with each message, so the LLM knows what view is currently
   // applied ("what about this one?" can build on the active query).
@@ -1336,6 +1487,8 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
+      if (viewMenu) { viewMenu = null; return; }
+      if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
       if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
@@ -1443,6 +1596,38 @@
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
+  // Rendering density policy for the canvas area (ui-layout.md §10):
+  // the shell owns the >1000-node list fallback; the public-only filter
+  // (>500) is applied inside ExplorerCanvas with its own banner.
+  let graphDensity = $derived(applyDensityPolicy(effectiveGraph?.nodes ?? []));
+
+  // ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ──
+  /** Renderer component for the active layout (capitalized for Svelte's
+   *  dynamic component syntax; null → unified canvas / shell list). */
+  let LayoutRenderer = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout) || activeLayout === 'list') return null;
+    return getLayout(activeLayout)?.component ?? null;
+  });
+
+  /** The active layout's registry entry (label key, engine selector). */
+  let activeLayoutReg = $derived(getLayout(activeLayout));
+
+  /** Nodes/edges the generated layout renderer receives: the active view
+   *  query's scope applied to the effective graph, so a generated
+   *  hierarchical/layered/side-by-side/diff/list view shows the same node
+   *  set the unified canvas would show for the same spec (null scope or an
+   *  unmatched scope → full graph, mirroring the canvas). */
+  let generatedLayoutGraph = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout)) return null;
+    const allNodes = effectiveGraph?.nodes ?? [];
+    const allEdges = effectiveGraph?.edges ?? [];
+    const scoped = resolveScopeNodes(activeViewQuery?.scope, allNodes, allEdges);
+    const nodes = scoped ?? allNodes;
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = allEdges.filter((e) => ids.has(edgeSrc(e)) && ids.has(edgeTgt(e)));
+    return { nodes, edges };
+  });
+
   // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
   // Uses imported functions from timeline-utils.js for testability.
   let timelineDeltaStats = $derived.by(() => {
@@ -1514,7 +1699,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} />
+<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} onclick={onWindowClick} />
 
 {#if scopeType === 'tenant'}
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
@@ -1832,6 +2017,71 @@
                 </div>
               {/if}
               {#if explorerViewMode === 'boundary'}
+              {#if LayoutRenderer}
+                <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
+                     Engines): the ViewSpec `layout` field selects the renderer
+                     through the layout registry — hierarchical/layered render on
+                     the SVG canvas positioned by ELK, side-by-side on the CSS
+                     Grid composite, diff on the structural-diff component. The
+                     scope of the spec's ViewQuery filters the node set. -->
+                <div class="gen-layout-wrap" data-layout={activeLayout} data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t(activeLayoutReg?.labelKey ?? 'explorer_view.layout_graph')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <LayoutRenderer
+                      nodes={generatedLayoutGraph.nodes}
+                      edges={generatedLayoutGraph.edges}
+                      repoId={selectedRepoId}
+                      engine={activeLayoutReg?.engine ?? 'graph'}
+                      onSelectNode={openNodeDetail}
+                    />
+                  </div>
+                </div>
+              {:else if activeLayout === 'list'}
+                <!-- ui-layout.md §10 `list` engine: native Svelte {#each} rows
+                     with virtual scrolling (registry component is null — the
+                     shell owns the list renderer). -->
+                <div class="gen-layout-wrap" data-layout="list" data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t('explorer_view.layout_list')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <VirtualNodeList
+                      nodes={generatedLayoutGraph.nodes}
+                      viewportHeight={520}
+                    />
+                  </div>
+                </div>
+              {:else if graphDensity.mode === 'list'}
+                <!-- ui-layout.md §10 Canvas Rendering: >1000 nodes even after
+                     the public filter → list layout with virtual scrolling +
+                     a warning (the shell owns the fallback swap). -->
+                <div class="density-list-fallback" role="region" aria-label="Graph as virtualized list">
+                  <div class="density-list-banner" role="status">
+                    Graph too large for canvas rendering ({graphDensity.total} nodes) —
+                    switched to list layout with virtual scrolling.
+                  </div>
+                  <VirtualNodeList
+                    nodes={effectiveGraph.nodes ?? []}
+                    viewportHeight={520}
+                  />
+                </div>
+              {:else}
               <!-- windowEscape={false}: ExplorerView owns the window-level Escape
                    cascade (onWindowKeydown: spec editor → query editor → detail panel →
                    active view query) and already exits trace mode through it; a second
@@ -1848,27 +2098,7 @@
                 gateStatusBySpec={gateStatusBySpec}
                 specApprovals={specApprovals}
                 bind:canvasState={explorerCanvasState}
-                onNodeDetail={(n) => {
-                  detailNode = n;
-                  highlightedSpanId = null;
-                  if (n?._action === 'view_spec' && n.spec_path) {
-                    openSpecEditor(n.spec_path);
-                  } else if (n?._action === 'create_spec') {
-                    // Open spec editor with a template for the uncovered node
-                    const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
-                    specEditorOpen = true;
-                    specEditorPath = suggestedPath;
-                    const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
-                    specEditorContent = template;
-                    specEditorOriginal = '';
-                    specEditorError = '';
-                  } else if (n?._action === 'view_code' && n.file_path) {
-                    // Open in code: show file in detail panel.
-                    // The NodeDetailPanel displays Location (file_path:line).
-                    // This preserves canvas state unlike opening a new browser tab.
-                    detailNode = n;
-                  }
-                }}
+                onNodeDetail={openNodeDetail}
                 onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
@@ -1892,6 +2122,7 @@
                 onTimelineMarkerClick={(_delta) => {}}
                 {timelineDeltaStats}
               />
+              {/if}
               {:else if explorerViewMode === 'spec-realization'}
                 <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
                 <SpecRealizationView
@@ -1933,7 +2164,17 @@
                         <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
                         <div class="arch-type-grid">
                           {#each graphTypes.slice(0, 20) as node}
-                            <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                            <div
+                              class="arch-type-card"
+                              title={node.qualified_name ?? node.name}
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.name ?? node.qualified_name} ({node.node_type ?? 'type'})"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
                               <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
                               {#if node.doc_comment}
@@ -2012,7 +2253,16 @@
                         <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
                         <ul class="arch-risk-list">
                           {#each repoRisks.slice(0, 10) as node}
-                            <li class="arch-risk-item">
+                            <li
+                              class="arch-risk-item"
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.qualified_name ?? node.name} risk hotspot"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
                               <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '\u2014'}</span>
                               {#if node.risk_reason ?? node.reason}
@@ -2489,6 +2739,42 @@
       </div>
         <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
     </div>
+  </div>
+{/if}
+
+<!-- ── Uniform ViewEvent surfaces (ui-layout.md §10 Interaction Events) ────── -->
+<!-- Hover tooltip fed by ViewEvents from non-integrated emitters (SVG canvas,
+     list rows, cards). ExplorerCanvas renders its own tooltip internally. -->
+{#if viewTooltip}
+  <div
+    class="viewevent-tooltip"
+    style="left: {viewTooltip.x + 14}px; top: {viewTooltip.y + 14}px;"
+    role="tooltip"
+    aria-hidden="true"
+  >
+    <span class="viewevent-tooltip-type">{viewTooltip.type}</span>
+    <span class="viewevent-tooltip-name">{viewTooltip.name}</span>
+  </div>
+{/if}
+
+<!-- Context-menu actions fed by ViewEvents -->
+{#if viewMenu}
+  <div class="viewevent-menu-backdrop" onclick={() => (viewMenu = null)} oncontextmenu={(e) => { e.preventDefault(); viewMenu = null; }} role="presentation"></div>
+  <div
+    class="viewevent-menu"
+    style="left: {viewMenu.x}px; top: {viewMenu.y}px;"
+    role="menu"
+    aria-label="Entity actions"
+  >
+    <div class="viewevent-menu-title">{viewMenu.data?.name ?? viewMenu.data?.id ?? viewMenu.entity}</div>
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('details')}>View details</button>
+    {#if viewMenu.data?.file_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('code')}>Open in code</button>
+    {/if}
+    {#if viewMenu.data?.spec_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('spec')}>View governing spec</button>
+    {/if}
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('copy_id')}>Copy ID</button>
   </div>
 {/if}
 
@@ -4459,5 +4745,146 @@
     .chat-expand-btn {
       display: none !important;
     }
+  }
+  .arch-risk-item {
+    cursor: pointer;
+  }
+
+  .arch-type-card {
+    cursor: pointer;
+  }
+  .arch-type-card:focus-visible,
+  .arch-risk-item:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  /* ── Density list fallback (ui-layout.md §10: >1000 nodes → list) ───── */
+  .density-list-fallback {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+    padding: var(--space-3, 12px);
+    box-sizing: border-box;
+  }
+  .density-list-banner {
+    padding: 8px 12px;
+    border: 1px solid #f87171;
+    border-radius: 8px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #f87171;
+    font-size: 13px;
+  }
+
+  /* ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ── */
+  .gen-layout-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+  }
+  .gen-layout-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 3px 6px 3px 10px;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #cbd5e1;
+    font-size: 12px;
+  }
+  .gen-layout-chip-clear {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .gen-layout-chip-clear:hover {
+    color: #e2e8f0;
+    background: #1e293b;
+  }
+  .gen-layout-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── ViewEvent surfaces (ui-layout.md §10 Interaction Events) ───────── */
+  .viewevent-tooltip {
+    position: fixed;
+    z-index: 300;
+    background: rgba(15, 15, 26, 0.95);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    pointer-events: none;
+    max-width: 320px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  }
+  .viewevent-tooltip-type {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+  }
+  .viewevent-tooltip-name {
+    font-size: 13px;
+    color: #e2e8f0;
+    word-break: break-all;
+  }
+
+  .viewevent-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 290;
+  }
+  .viewevent-menu {
+    position: fixed;
+    z-index: 300;
+    min-width: 200px;
+    background: var(--color-surface, #111827);
+    border: 1px solid var(--color-border, #334155);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewevent-menu-title {
+    font-size: 12px;
+    color: #94a3b8;
+    padding: 6px 10px 8px;
+    border-bottom: 1px solid #1e293b;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+  }
+  .viewevent-menu-item {
+    background: transparent;
+    border: none;
+    color: #e2e8f0;
+    text-align: left;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .viewevent-menu-item:hover {
+    background: #1e293b;
   }
 </style>
