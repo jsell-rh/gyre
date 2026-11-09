@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "9e91c2c86c0ddb68f4cc1e1813ce8fc0fad4fafe"]
 ---
 
 ## Spec Excerpt
@@ -94,23 +94,26 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 ## Shipped
 
 The forge-maintained spec-link graph (spec-links.md §Forge-Maintained Spec
-Graph) is now a persistent SQL table with the in-memory `SpecLinksStore`
+Graph) is a persistent SQL table with the in-memory `SpecLinksStore`
 retained as a write-through hot cache, so the graph survives restarts instead
 of silently degrading to empty for staleness checks, approval/merge gates,
 graph queries, and the accountability patrol.
 
-**Production behavior:**
+### Production behavior
 
-- Migration `2026-10-08-000056_spec_links` creates the `spec_links` table with
+- Migration `2026-10-08-000059_spec_links` creates the `spec_links` table with
   the spec's 13-column schema (`source_sha TEXT NOT NULL`, `target_sha`
   NOT NULL storing `''` for the `Option::None` unresolved-link case, mapped
   and documented in both SQL adapters), plus indexes on `source_repo_id`,
   `source_path`, and `target_path`; registered in `schema.rs`. Portability
   checked (`check-migration-sql-portability.sh` PASS — runs on both SQLite
-  and PostgreSQL).
+  and PostgreSQL). (Originally `2026-10-08-000056_spec_links`; renumbered
+  to `000059` during the rebase onto fefde294 because the base added its own
+  `2026-10-08-000056_spec_assertion_results` — duplicate Diesel versions
+  silently never run.)
 - `SpecLinkEntry` gained `source_sha: String`, populated in `sync_spec_ledger`
   from the source spec's real blob SHA computed at HEAD (reused from
-  `manifest_sha_by_path`, never a placeholder). The type moved to
+  `manifest_sha_by_path`, never a placeholder). The type lives in
   `gyre-domain::spec_links` alongside `SpecLedgerEntry` so the port and
   adapters can persist it; `gyre-server::spec_registry` re-exports it.
 - New port `gyre_ports::SpecLinkRepository` (`list_all`,
@@ -131,7 +134,7 @@ graph queries, and the accountability patrol.
   thread with its own runtime; read failure is logged at error level rather
   than silently masquerading as an empty graph.
 
-**Test evidence:**
+### Test evidence
 
 - Restart-durability (the bug this task kills):
   `restart_rebuilds_spec_link_graph_from_persisted_table` and
@@ -151,82 +154,76 @@ graph queries, and the accountability patrol.
   `mem::spec_link_contract_tests` mirror the round-trip and scoping contract
   for the Mem adapter. The Postgres adapter follows the identical row-mapping
   and query structure as the SQLite adapter; the repo has no PG test
-  infrastructure (zero test modules under `postgres/`, no PG service in CI),
-  so PG is compile-verified — same convention as every other PG adapter.
+  infrastructure, so PG is compile-verified — same convention as every other
+  PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-**Verification evidence (verification-repair round, HEAD 053d36d8, base 110180fb):**
+### Rebase repair onto fefde294 (commit 9e91c2c8, this round)
 
-The verification gate (`checks.sh` at source b78aec96) failed with exit 1 on
-four findings; all are repaired at the root (commit 053d36d8, evidence under
+Resolved the merge of the new assignment base fefde294 into the task branch
+(finding 92d928e9):
+
+- `api/repos.rs`, `mem.rs`, `middleware.rs`, `lib.rs`: kept both sides — the
+  task-198 spec-link persistence and the base's new spec-assertion-results
+  feature (separate repositories, separate migrations, both wired into
+  `AppState`; repo deletion cleans up both tables).
+- `git_http.rs`: base independently fixed the same fabricated `"default"`
+  workspace fallback in `process_spec_lifecycle` that this branch fixed in
+  its verification-repair round; kept this branch's Option-based
+  skip-and-log form, consistent with the auto-merged `if let Some(ws_id)`
+  emission wrapper.
+- Fabricated-scope exemptions: combined state is the base's 3-entry file
+  (base fixed specs.rs + auth.rs, lowering the frozen count 5→3; this
+  branch's git_http fix is preserved in the merged code).
+- Renamed this branch's migration to `2026-10-08-000059_spec_links` — the
+  base added `2026-10-08-000056_spec_assertion_results`, colliding on Diesel
+  version 20261008000056. `check-migration-versions.sh` now passes.
+- `api/graph.rs` (base's new briefing filter test): added the `source_sha`
+  field the base-side `SpecLinkEntry` literals predate.
+- Renumbered the drifted line-keyed `unnamed-tuple-carrier` exemption entries
+  to post-merge lines (same frozen sites, count unchanged, no additions).
+
+Focused probes at HEAD 9e91c2c8, all PASS (records under
 `/tmp/stage/review-evidence`):
 
-- **Fabricated-scope exemption flagged as new:** the gate forbids any
-  exemption entry not present at base, and the task's line-drift renumber
-  (`git_http.rs:1495` -> `1496`) read as a new exemption. Fixed for real
-  instead: `process_spec_lifecycle` no longer fabricates a `"default"`
-  workspace on repo-lookup failure — the workspace-scoped SpecChanged /
-  TaskCreated emissions are skipped with a `warn!` log (the
-  `emit_reconciliation_completed` pattern), the exemption entry is deleted,
-  and `FROZEN_EXEMPTION_COUNT` is lowered 5 -> 4. The normal path (repo
-  exists — it was just pushed to) is unchanged.
-- **rustfmt / clippy changed-line failures:** rustfmt applied to the eight
-  task-touched files with flagged lines; `#[allow(clippy::double_must_use)]`
-  added to `SpecLinkRepository` (established `storage.rs` convention for
-  async_trait ports). `check-rustfmt-diff.py` and `check-clippy-diff.py`
-  against base 110180fb: both clean.
-- **otlp tuple-carrier marker could not survive rustfmt:** rustfmt always
-  moves a comment after `Result<(` off the declaration line, so the frozen
-  inline `tuple-carrier:ok` marker broke under rustfmt compliance. Replaced
-  the positional 3-field tuple with a named `ReceiverHandle` struct
-  (addr / shutdown_tx / server) — the check's own recommended remediation;
-  both callers updated, `grpc_receiver_accepts_export` and the
-  `run_trace_capture` lifecycle tests pass.
-- Line-keyed exemption entries in `in-memory-state-stores` and
-  `unnamed-tuple-carriers` renumbered to the drifted lines (same frozen
-  entries, count unchanged, no additions).
+- `cargo build --all` — clean.
+- `cargo test -p gyre-server --lib` filtered to `spec_registry::`,
+  `spec_link_staleness`, `spec_patrol`, `mem::spec_link`, `git_http::`,
+  `api::graph`, `api::specs` — ok, 232 passed / 0 failed (includes all four
+  section-closing tests, each individually confirmed passing).
+- `cargo test -p gyre-server --lib` filtered to `api::repos`, `mem::tests`,
+  `middleware`, `merge_processor`, `otlp`, `reconciliation`,
+  `explorer_views` — ok, 177 passed / 0 failed.
+- `cargo test -p gyre-adapters --lib` — ok, 387 passed / 0 failed (includes
+  the renamed migration's `migrations_create_tables` and the
+  `sqlite::spec_links` round-trip suite).
+- Full `scripts/check-*.sh` battery compared against a fefde294 worktree:
+  every script either passes in the merged tree or fails with the identical
+  exit code at base (pre-existing upstream debt, verified by running each
+  script with script + code from the same tree). `check-unnamed-tuple-carriers`
+  now passes in the merged tree while it still fails at base (this branch's
+  otlp `ReceiverHandle` fix plus the renumbered entries).
 
-Focused probes at HEAD 053d36d8, all PASS (records under
-`/tmp/stage/review-evidence`):
+### Prior repair history (condensed)
 
-- `cargo test -p gyre-server --lib` filtered to `git_http::`, `mem::`,
-  `spec_registry::tests`, `spec_link_staleness`, `spec_patrol`,
-  `api::specs`, `api::graph`, `merge_processor`, `otlp`, `api::repos::tests`
-  — ok. 290 passed; 0 failed (includes all four section-closing tests:
-  graph rebuild, staleness parity, cross-repo scoping, manifest-removal
-  cleanup — each individually confirmed passing).
-- `cargo test -p gyre-adapters --lib sqlite::spec_links` — ok. 4 passed;
-  0 failed (round-trip, replace scoping, reopened-database durability,
-  repo-scoped delete).
-- Full `scripts/check-*.sh` battery: every gate that the verification run
-  executes (arch, hierarchy, ABAC registry + exempt handlers, MCP write
-  tools, migration versions + SQL portability, dead message kinds, byte-slice
-  truncation, relative path defaults, fail-open ref resolution, task commit
-  attribution, mem port contracts, fabricated scope defaults, lossy secret
-  conversion, scope literal defaults, inert enforcement, forged scope
-  fields, forwarded header trust, in-memory state stores, unbounded external
-  HTTP, unnamed tuple carriers) PASSES. The remaining failing scripts fail
-  identically at base 110180fb (verified by output diff in a base worktree —
-  differences are line drift only, no new findings).
-
-**Prior repair history (condensed):**
-
-- 2736e818 (base 5196f444): restored the missing `#[tokio::test]` on
-  `staleness_query_parity_after_restart` — the section-closing
-  restart-durability test was dead code, never registered in the test
-  binary.
-- 733ba170 (base 18c44f1a): renumbered frozen line-keyed exemptions after
-  line drift and removed an accidental `web/dist` rebuild captured by a
-  pipeline checkpoint.
+- 053d36d8 (verification-repair round, base 110180fb): fixed the verification
+  gate's four findings for real — removed the git_http fabricated-scope
+  exemption by fixing the code (skip + warn), rustfmt/clippy changed-line
+  compliance, replaced the otlp positional tuple with a named
+  `ReceiverHandle` struct, renumbered drifted line-keyed exemptions.
+- 2736e818: restored the missing `#[tokio::test]` on
+  `staleness_query_parity_after_restart` — the section-closing test had been
+  dead code.
+- 733ba170: renumbered frozen line-keyed exemptions after line drift and
+  removed an accidental `web/dist` rebuild captured by a pipeline checkpoint.
 - `cargo test --all` (full workspace suite) remains owned by verification
-  and publication per the assignment. The Postgres adapter is
-  compile-verified (no feature gate; no PG test infrastructure exists in the
-  repo) — same convention as every other PG adapter.
+  and publication per the assignment.
 
-**Sandbox/gate notes:**
+### Sandbox/gate notes
 
 - The gyre-server build script re-runs `npm ci && npm run build` whenever
   `web/node_modules` is absent (fresh sandbox), so any full-build gate will
   re-dirty `web/dist`; that rebuild is environmental, not a source change.
-  At HEAD 053d36d8 the tree's `web/dist` is byte-identical to base
-  (`git diff 110180fb..HEAD -- web/dist` is empty).
+  This round used `SKIP_WEB_BUILD=1` throughout; `web/dist` in the merge
+  commit is exactly the base's committed content plus the task branch's
+  previously committed state, with no rebuild performed.
