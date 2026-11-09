@@ -1638,6 +1638,19 @@
       "empty": "No compute targets configured. Contact your tenant administrator.",
       "default_badge": "Default for this workspace"
     },
+    "audit": {
+      "title": "Audit Log",
+      "filter_label": "Filter by event type",
+      "all_event_types": "All event types",
+      "loading_btn": "Loading…",
+      "refresh": "Refresh",
+      "loading": "Loading audit events…",
+      "empty": "No audit events found for this workspace.",
+      "col_type": "Type",
+      "col_actor": "Actor",
+      "col_detail": "Detail",
+      "col_time": "Time"
+    },
     "save_failed_settings": "Failed to save settings",
     "save_failed_trust": "Failed to save trust level",
     "save_failed_drift": "Failed to save drift policy",
