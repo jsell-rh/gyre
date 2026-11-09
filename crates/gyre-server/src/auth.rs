@@ -450,6 +450,23 @@ pub struct ImpersonationContext {
     pub session_id: String,
 }
 
+/// Tenant scope for server-originated principals: the global token, spawned
+/// agent tokens, and federated agents.
+///
+/// This is the DOCUMENTED contract, not a fabricated fallback:
+/// - hierarchy-enforcement.md §1 "Bootstrap Behavior": on first startup the
+///   server provisions a default tenant, and legacy `tenant_id DEFAULT
+///   'default'` columns reference it.
+/// - message-bus.md "Origin and tenant resolution from auth context": the
+///   global `GYRE_AUTH_TOKEN` resolves as the default (bootstrap) tenant.
+///
+/// Callers that can resolve a real scope from stored state (e.g. API-key
+/// users via `user.tenant_id`, workspaces via `ws.tenant_id`) MUST do so
+/// and must fail closed when it is absent.
+pub(crate) fn system_principal_tenant() -> String {
+    "default".to_string()
+}
+
 /// Resolved principal injected by the auth extractor.
 #[derive(Clone)]
 pub struct AuthenticatedAgent {
@@ -458,12 +475,15 @@ pub struct AuthenticatedAgent {
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
-    /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
-    /// - All other auth methods: always "default".
+    /// - JWT auth: extracted from the validated `tenant_id` claim.
+    /// - API-key auth: the user's stored tenant binding (fail-closed when
+    ///   the user has none — task-099 F1).
+    /// - Global token, agent tokens, federated JWTs: the server-originated
+    ///   default tenant (`system_principal_tenant`).
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
-    /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
@@ -473,6 +493,20 @@ pub struct AuthenticatedAgent {
     /// Identity-security.md §Impersonation requires every action taken with
     /// this token to be attributed to the impersonator in the audit trail.
     pub impersonation: Option<ImpersonationContext>,
+}
+
+impl AuthenticatedAgent {
+    /// True only for the genuine system principal: the global dev/system
+    /// token. NOT a plain `agent_id == "system"` string match — API-key and
+    /// Keycloak-JWT paths set `agent_id` from `user.display_name` /
+    /// `preferred_username`, so a user *named* "system" would spoof every
+    /// call site that gates on that string (abac_middleware's ABAC bypass,
+    /// the task-099 tenant-containment gates). The system principal has no
+    /// backing user row: `user_id.is_none()` is the discriminator an
+    /// attacker cannot forge (their key/JWT resolves to their own user id).
+    pub fn is_system_principal(&self) -> bool {
+        self.agent_id == "system" && self.user_id.is_none()
+    }
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -718,7 +752,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
-                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+                tenant_id: system_principal_tenant(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
                 impersonation: None,
@@ -783,7 +817,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
-                    tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+                    tenant_id: system_principal_tenant(),
                     jwt_claims,
                     deprecated_token_auth,
                     impersonation: None,
@@ -813,11 +847,30 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+                // F1: the tenant scope comes from the user's stored binding.
+                // Fail closed when it is absent: fabricating a tenant here
+                // made API-key admins global superusers across tenants.
+                let tenant_id = match user.tenant_id.clone() {
+                    Some(t) => t.to_string(),
+                    None => {
+                        tracing::warn!(
+                            user_id = %user.id,
+                            username = %user.username,
+                            "API-key auth for user without tenant binding; rejecting. \
+                             Re-provision the user via POST /api/v1/users with tenant_id."
+                        );
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            "user has no tenant binding; re-provision via POST /api/v1/users",
+                        )
+                            .into_response());
+                    }
+                };
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
-                    tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+                    tenant_id,
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
                     impersonation: None,
@@ -859,7 +912,7 @@ pub async fn authenticate_token(
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
-            tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+            tenant_id: system_principal_tenant(),
             jwt_claims: None,
             deprecated_token_auth: false,
             impersonation: None,
@@ -903,7 +956,7 @@ pub async fn authenticate_token(
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
-                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+                tenant_id: system_principal_tenant(),
                 jwt_claims,
                 deprecated_token_auth: false,
                 impersonation: None,
@@ -924,11 +977,24 @@ pub async fn authenticate_token(
     // 3. API keys.
     if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
         if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+            // F1: fail closed when the user has no tenant binding (see the
+            // extractor's API-key path for the rationale).
+            let tenant_id = match user.tenant_id.clone() {
+                Some(t) => t.to_string(),
+                None => {
+                    tracing::warn!(
+                        user_id = %user.id,
+                        username = %user.username,
+                        "API-key auth for user without tenant binding; rejecting"
+                    );
+                    return Err("user has no tenant binding; re-provision via POST /api/v1/users");
+                }
+            };
             return Ok(AuthenticatedAgent {
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
-                tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+                tenant_id,
                 jwt_claims: None,
                 deprecated_token_auth: false,
                 impersonation: None,
@@ -1024,19 +1090,22 @@ async fn validate_jwt(
         .unwrap_or_else(|| claims.sub.clone());
 
     // Extract and validate tenant_id from JWT claim. The claim's schema
-    // default ("default" — the bootstrapped single-tenant scope) was already
-    // applied at deserialization, so the value here is fully determined by
-    // the verified token.
+    // default ("default" — the bootstrapped single-tenant scope, the same
+    // tenant system_principal_tenant resolves server-originated principals
+    // to) was already applied at deserialization, so the value here is fully
+    // determined by the verified token.
     let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
-    // Find or auto-create user.
+    // Find or auto-create user. The validated tenant claim binds the user
+    // at creation (F1): an OIDC user must not exist as tenant-less.
     let user = find_or_create_user(
         state,
         &claims.sub,
         &preferred_username,
         claims.email.as_deref(),
         &roles,
+        &tenant_id,
     )
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
@@ -1067,6 +1136,7 @@ async fn find_or_create_user(
     preferred_username: &str,
     email: Option<&str>,
     roles: &[UserRole],
+    tenant_id: &str,
 ) -> anyhow::Result<User> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1132,6 +1202,9 @@ async fn find_or_create_user(
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
+    // F1: bind the user to the validated tenant claim so later API-key or
+    // JWT auth for this user resolves a real scope.
+    user.tenant_id = Some(Id::new(tenant_id));
     user.last_login_at = Some(now);
 
     // create() can still fail on the unique index if another user was
@@ -1374,7 +1447,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
-        tenant_id: "default".to_string(), // scope-literal:ok — task-099 F1 legacy debt
+        tenant_id: system_principal_tenant(),
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
         impersonation: None,
@@ -1573,7 +1646,7 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use super::{system_principal_tenant, test_helpers::*, AuthenticatedAgent, WsTicketStore};
     use gyre_domain::UserRole;
 
     #[test]
@@ -2286,7 +2359,11 @@ mod tests {
 
         let state = test_state();
         let now = 1000u64;
-        let user = User::new(Id::new("u1"), "ext-1", "frank", now);
+        // The user must carry a tenant binding (task-099 F1): API-key auth
+        // resolves the tenant scope from user.tenant_id and fail-closes
+        // when it is absent, so an unbound user would 403 here.
+        let mut user = User::new(Id::new("u1"), "ext-1", "frank", now);
+        user.tenant_id = Some(Id::new("t1"));
         state.users.create(&user).await.unwrap();
         // Store the SHA-256 hash of the API key (matching auth extractor behaviour).
         let raw_key = "gyre_test_api_key";
@@ -2315,6 +2392,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"frank");
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_rejects_user_without_tenant_binding() {
+        // task-099 F1: an API-key user with no tenant binding must fail
+        // closed (403), never authenticate as a fabricated tenant scope.
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        let state = test_state();
+        let user = User::new(Id::new("u2"), "ext-2", "orphan", 1000);
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_orphan_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(raw_key), &user.id, "orphan-key")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", "Bearer gyre_orphan_key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -2989,5 +3100,47 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    #[test]
+    fn is_system_principal_discriminates_spoof_shapes() {
+        // Task-099 revision: API-key and Keycloak-JWT paths set agent_id
+        // from user.display_name / preferred_username, so a user NAMED
+        // "system" would spoof every `agent_id == "system"` gate (ABAC
+        // bypass, tenant-containment bypasses) if the check were a plain
+        // string match. `user_id.is_none()` is the discriminator a
+        // spoofing user cannot forge: their key/JWT resolves to their own
+        // user id.
+        let global_token = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: system_principal_tenant(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(global_token.is_system_principal());
+
+        // API-key user named "system": agent_id matches, user_id doesn't.
+        let spoofed = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: Some(gyre_common::Id::new("u-sys")),
+            roles: vec![UserRole::Admin],
+            tenant_id: "t-2".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(!spoofed.is_system_principal());
+
+        // Ordinary user: neither field matches.
+        let ordinary = AuthenticatedAgent {
+            agent_id: "jsell".to_string(),
+            user_id: Some(gyre_common::Id::new("u-1")),
+            roles: vec![UserRole::Admin],
+            tenant_id: "t-1".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(!ordinary.is_system_principal());
     }
 }
