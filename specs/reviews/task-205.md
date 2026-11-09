@@ -150,3 +150,59 @@ exemptions. Coverage row realized-model.md §4 re-audited to `implemented`.
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests that a mutation probe confirms fail under substring
   revert.
+
+---
+
+## Independent Review (R2)
+
+**Reviewer:** Review agent (pipeline stage)
+**Candidate:** aa6650a296748833265004c9136f4b3123db5f8f
+**Base:** fefde2946f3a0af1f212588f54591516fee0f7b2
+**Status:** approved
+
+### What was verified (independently, at the candidate tree)
+
+- **Manifest parsing is real.** `SpecManifest.concepts` (`#[serde(default)]`,
+  `ConceptDef`/`ConceptInclude` modeling the sequence-of-single-key-maps
+  shape, repeated-key aggregation) with unit tests covering both spec-example
+  concepts exactly and the no-`concepts:`-key case. `From<&ConceptDef>`
+  produces the domain `ConceptView`, and `resolve_concept_view`
+  (api/graph.rs) instantiates it from the repo's real
+  `specs/manifest.yaml` at its default branch via
+  `spec_registry::read_git_file` — which has no fallback (plain
+  `git show <branch>:<file>`); the "repo without manifest → 404" test is a
+  working negative control.
+- **Endpoints are projections, not substring.** Repo + workspace REST
+  handlers and both MCP `graph_concept` scopes flow through
+  `assemble_concept_projection` / `assemble_workspace_concept_projection`;
+  undefined concept names 404 (REST) / error (MCP) with no substring
+  fallback; the `?concept=` substring param on `GET /graph` is preserved as
+  the distinct §7 surface.
+- **Glob matcher is anchored and case-sensitive** (`MergeRequest` ≠
+  `MergeRequestDependency`, `Gate*` ≠ `LateGate`, both directions tested);
+  no new crate dependencies (Cargo.lock/tomls unchanged vs base).
+- **Mutation probe (reviewer-executed).** Replacing
+  `concept.project(...)` in `assemble_concept_projection` with the pre-task
+  substring behavior makes the three discriminating tests fail
+  (`graph_concept_returns_manifest_projection_not_substring`,
+  `workspace_graph_concept_unions_manifest_projections`,
+  `mcp_graph_concept_manifest_projection_not_substring`). Source restored;
+  tree clean at candidate.
+- **Test runs.** `cargo test -p gyre-common --lib` → 120 passed;
+  `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 176 passed; `cargo test -p gyre-server --test
+  graph_integration` → 38 passed, 0 failed on a real TCP listener
+  (accept(2) supported in this sandbox — the earlier EOPNOTSUPP restriction
+  did not apply this run). `cargo build -p gyre-cli` → OK.
+- **Mechanical gates.** check-arch.sh, check-abac-route-registry.sh,
+  check-abac-exempt-handlers.sh, check-mcp-write-tools.sh,
+  check-dead-message-kinds.sh, check-task-commit-attribution.sh — all pass.
+  Both concept routes remain in the ABAC resolver registry
+  (abac_middleware.rs:158/:420).
+
+### Findings
+
+None material. Evidence: /tmp/stage/review-evidence/task205-review-summary.md
+(and sibling probe logs). Deferred to verification: `cargo build --all`
+(workspace-wide invocations are rejected for the review stage; every touched
+crate compiles individually).
