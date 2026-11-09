@@ -731,17 +731,18 @@ async fn merge_atomic_group(
                 &mr.id,
             )
             .await?;
-            state
-                .merge_queue
-                .update_status(
-                    &ge.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(format!(
-                        "merge request status {:?} cannot be merged",
-                        mr.status
-                    )),
-                )
-                .await?;
+            // fail_queue_entry keeps the status change and the spec-required
+            // merge_queue.processed event from diverging (same invariant as
+            // every other Failed transition); it runs AFTER the rollback
+            // because the rollback requeues every entry.
+            fail_queue_entry(
+                state,
+                ge,
+                Some(&mr),
+                "mr_not_mergeable",
+                &format!("merge request status {:?} cannot be merged", mr.status),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -1212,17 +1213,17 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     status = ?candidate_mr.status,
                     "queue entry references non-mergeable MR, failing entry"
                 );
-                state
-                    .merge_queue
-                    .update_status(
-                        &candidate.id,
-                        MergeQueueEntryStatus::Failed,
-                        Some(format!(
-                            "merge request status {:?} cannot be merged",
-                            candidate_mr.status
-                        )),
-                    )
-                    .await?;
+                fail_queue_entry(
+                    state,
+                    candidate,
+                    Some(&candidate_mr),
+                    "mr_not_mergeable",
+                    &format!(
+                        "merge request status {:?} cannot be merged",
+                        candidate_mr.status
+                    ),
+                )
+                .await?;
                 continue;
             }
 
@@ -2075,7 +2076,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
 /// otherwise the MR is resolved from the entry so scope filters still work,
 /// and the event records unscoped when the MR no longer resolves (e.g. the
 /// MR was deleted before the entry was processed).
-async fn emit_queue_processed_terminal(
+pub(crate) async fn emit_queue_processed_terminal(
     state: &AppState,
     entry: &MergeQueueEntry,
     mr: Option<&MergeRequest>,
@@ -4751,6 +4752,137 @@ mod tests {
         assert!(
             ev.workspace_id.is_none(),
             "event records unscoped when the MR no longer resolves"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an entry is failed because its MR became non-mergeable
+    /// after enqueue (4b'' — e.g. reverted by the recovery protocol while
+    /// the entry sat queued). Regression: this path previously failed the
+    /// entry with no analytics event while the adjacent MR-not-found site
+    /// in the same loop was wired.
+    #[tokio::test]
+    async fn non_mergeable_mr_during_selection_records_queue_processed_failed() {
+        let state = test_state();
+        let (_repo, mut mr) = setup_recovery_mr(&state).await;
+
+        // The MR was reverted after enqueueing (Open→…→Reverted persisted).
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.transition_status(MrStatus::Reverted).unwrap();
+        state.merge_requests.update(&mr).await.unwrap();
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Failed,
+            "stale entry for a Reverted MR must be failed, not merged"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "non-mergeable-MR failure during selection must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-recov");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_mergeable");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an atomic-group member is failed at fetch time (R4)
+    /// because its MR became non-mergeable after enqueue — the selection
+    /// loop's 4b'' check only validates the first candidate, so this member
+    /// reaches the group path. Regression: this path previously failed the
+    /// member's entry with no analytics event.
+    #[tokio::test]
+    async fn atomic_group_non_mergeable_member_records_queue_processed_failed() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("agent-1"),
+        )
+        .await;
+        let mut mr_second = create_mr_in_group(
+            &state,
+            "mr-second",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/second",
+            Some("agent-2"),
+        )
+        .await;
+
+        enqueue_mr(&state, "mr-first", 50, 1000).await;
+        enqueue_mr(&state, "mr-second", 50, 1001).await;
+
+        // The second member was reverted after enqueueing; only the first
+        // member is validated during selection, so the stale member is
+        // caught by the group path's R4 re-validation.
+        mr_second.transition_status(MrStatus::Approved).unwrap();
+        mr_second.transition_status(MrStatus::Merged).unwrap();
+        mr_second.transition_status(MrStatus::Reverted).unwrap();
+        state.merge_requests.update(&mr_second).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let entry_second = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-second"))
+            .await
+            .unwrap()
+            .expect("mr-second entry should exist");
+        assert_eq!(
+            entry_second.status,
+            MergeQueueEntryStatus::Failed,
+            "the stale member's entry must be failed terminally"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "R4 non-mergeable-member failure must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-second");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_mergeable");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
         );
     }
 
