@@ -57,3 +57,71 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 3 — independent review (controller stage, candidate `ae99db0d`)
+
+Reviewed the exact candidate `ae99db0de1eaca9075b54637c003981804b31e0d` against base
+`fefde2946f3a0af1f212588f54591516fee0f7b2` (rebase merge `8f1095ca9` + EOF fix `ae99db0de`).
+Independent probes only; no reliance on the implementer's own round-1/2 record.
+
+**Diff scope** (12 files): `gyre-domain/src/narrative.rs` (new, 1062 lines), `gyre-server`
+api/graph.rs + graph_extraction.rs + explorer_ws.rs + llm_defaults.rs, `gyre-common`
+DeltaEdgeEntry, gate script repair, docs/coverage. `web/`, `gyre-adapters/`, `gyre-ports/`
+untouched.
+
+**Acceptance criteria verified against code and live probes:**
+
+- Template generator is real and grounded: `NarrativeGrounding::from_graph` indexes live
+  graph (Contains/Implements/FieldOf/GovernedBy edge directions cross-checked against the
+  extractors; soft-deleted excluded); renderer covers addition/removal/modification/edges,
+  grouping >3, count-only legacy format, char-safe truncation; `""` for empty/malformed.
+- Timeline AND diff `DeltaResponse.narrative` populated from real `graph_store` queries
+  (grounding once per request) with real `agents.find_by_id` + `agent_personas` kv
+  attribution — the same key production `constraint_check.rs:964` reads; no fabricated
+  identity. "stubbed for now" comment gone (grep: no matches).
+- LLM synthesis (`llm_architecture_narrative`): real `LlmPort::complete` call,
+  `{{facts}}`-injected grounded prompt via prompt-template infra, 10s `tokio::time::timeout`;
+  falls back to concatenated template narratives on unconfigured/error/timeout/empty.
+- Briefing: `assemble_briefing` appends "Architecture: {narrative}", honors main's
+  `repo_filter` uniformly; REST and MCP both delegate. Empty narrative leaves the summary
+  unchanged (no "Architecture: ." garbage).
+- Hexagonal split correct: facts/prompt constants in `gyre-domain`, LLM call in
+  `gyre-server` (check-arch passes).
+
+**Probe evidence** (logs under `/tmp/stage/review-evidence/`, `CARGO_HOME=/tmp/cargo-home`,
+`SKIP_WEB_BUILD=1`):
+
+- `cargo test -p gyre-domain --lib narrative` → 18 passed.
+- `cargo test -p gyre-server --lib -- narrative briefing` → 27 passed.
+- `cargo test -p gyre-server --lib api::graph` → 31 passed.
+- `cargo test -p gyre-server --lib session_registry` → 4 passed;
+  `compact_delta_records_true_removed_edge_count` → 1 passed (real end-to-end git-repo
+  extraction pipeline, asserts true removed-edge count through the port).
+- Mechanical gates exit 0: arch, abac-route-registry, task-commit-attribution,
+  byte-slice-truncation, unbounded-external-http, template-substitution,
+  migration-versions, inert-enforcement.
+- **Mutation probe 1**: `llm_architecture_narrative` forced to always return fallback →
+  `briefing_summary_uses_llm_narrative_when_configured` FAILS (echo-mock discrimination is
+  real; file restored, tree clean).
+- **Mutation probe 2**: `generate_template_narrative` stubbed to `""` →
+  `timeline_endpoint_returns_grounded_narrative` FAILS (file restored, tree clean).
+- **Gate-weakening probe**: `{{rogue_var}}` planted in `PROMPT_GRAPH_NARRATIVE` value →
+  check-template-substitution exit 1, correctly attributed to `llm_architecture_narrative`
+  (the round-2 script repair does not blind the gate; file restored).
+- `git diff --check fefde294 HEAD` → clean; the prior verification failure
+  (`specs/tasks/task-152.md:209` blank line at EOF, see /tmp/stage/findings.log) is fixed
+  by `ae99db0de`.
+
+**Non-blocking notes:**
+
+- `explorer_ws.rs` session-registry hardening (`max.max(1)` against a `remove(0)`-on-empty
+  panic under `GYRE_EXPLORER_MAX_SESSIONS=0`, plus registry tests) is outside strict §6
+  scope — interrupted-pipeline recovery; production default (3) unchanged, tests pass.
+- `load_narrative_grounding` loads all nodes+edges per timeline request and once per repo
+  per briefing — O(graph) per call; correct, a performance follow-up if large repos matter.
+- Coverage row 9 anchor cites the round-1 commit `f88e55b7` and "edge relationship counts";
+  the final tree additionally renders per-edge detail templates — understates, never
+  overstates. 7/8 coverage is accurate (§4 concept views remain task-assigned, task-205).
+
+Round-3 verdict: **approved** — every §6 acceptance criterion is backed by production code,
+and every proof test is demonstrably capable of failing (mutation-verified).
