@@ -197,3 +197,33 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+## Review round 8 (candidate 1aaae3116, base fefde2946)
+
+Independent review of the round-7 repair commit `7d5702c72` plus two doc-only
+process commits. Approved; no findings.
+
+- Round-7 findings (d34a2353) closed by mutation-verified regression tests:
+  reverting `MergeAttestation.meta_specs_used` population to `vec![]` fails
+  `merge_attestation_records_author_prompt_set_meta_specs`; removing the
+  `GYRE_META_SPEC_PROMPT`/`GYRE_META_SPEC_SET_SHA` env injection fails
+  `spawn_delivers_meta_spec_prompt_to_agent_env`. Both mutations reproduced
+  and both tests pass at HEAD. Files restored after each mutation.
+- Focused suites at HEAD: meta_spec/meta_specs/prompt_assembly/stale_pin
+  (46 pass), spawn/mem/merge_processor::tests (117 pass), adapters meta_spec
+  (10 pass), docker/gyre-agent npm test (12 pass) — includes all round-6
+  regression tests and the mem binding-contract test.
+- Mechanical: check-arch, check-abac-route-registry, check-mem-port-contracts,
+  check-migration-versions, check-task-commit-attribution, rustfmt-diff — all
+  clean. check-clippy-diff blocked by the executor's workspace-wide cargo
+  wrapper (infrastructure restriction, not a defect): focused clippy shows
+  zero warnings in the new files and all touched-file warnings on unchanged
+  pre-existing lines; deferred to verification.
+- Production wiring verified present at HEAD: attestation population, spawn
+  env delivery + response field, prompt assembly with approval gating, 9
+  bootstrap seeds, stale-pin job, ABAC resolver entries with exemption-file
+  shrink, mem shared binding-store wiring, CI agent-tests job.
+- Scope: diff touches only task-116 surface; the two commits above the repair
+  commit are `specs/tasks/task-116.md` records only.
+
+Evidence: `/tmp/stage/review-evidence/task116-review-round8-1aaae3116.md`.
