@@ -12,21 +12,32 @@ pub struct RateLimiter {
     rate: u64,
     tokens: AtomicU64,
     last_refill_sec: AtomicU64,
+    /// Wall-clock source (seconds since epoch). Injectable so tests can
+    /// freeze time; the per-second refill otherwise makes exhaustion
+    /// assertions depend on where requests land relative to a second
+    /// boundary.
+    clock: fn() -> u64,
 }
 
 impl RateLimiter {
     pub fn new(rate_per_sec: u64) -> Arc<Self> {
-        let now = now_secs();
+        Self::with_clock(rate_per_sec, now_secs)
+    }
+
+    /// Like [`new`], but with an injected clock. A constant clock freezes
+    /// the bucket (no refill), making exhaustion deterministic in tests.
+    pub fn with_clock(rate_per_sec: u64, clock: fn() -> u64) -> Arc<Self> {
         Arc::new(Self {
             rate: rate_per_sec,
             tokens: AtomicU64::new(rate_per_sec),
-            last_refill_sec: AtomicU64::new(now),
+            last_refill_sec: AtomicU64::new(clock()),
+            clock,
         })
     }
 
     /// Try to consume one token. Returns true if allowed, false if rate exceeded.
     pub fn try_acquire(&self) -> bool {
-        let now = now_secs();
+        let now = (self.clock)();
         let last = self.last_refill_sec.load(Ordering::Relaxed);
         if now > last {
             // New second — refill to full rate.
@@ -88,5 +99,34 @@ mod tests {
     fn zero_rate_always_rejects() {
         let rl = RateLimiter::new(0);
         assert!(!rl.try_acquire());
+    }
+
+    #[test]
+    fn refills_to_full_rate_each_second() {
+        // Injectable clock: deterministic refill coverage without sleeping
+        // across a real second boundary.
+        static CLOCK: AtomicU64 = AtomicU64::new(1_700_000_000);
+        let clock = || CLOCK.load(Ordering::Relaxed);
+        let rl = RateLimiter::with_clock(2, clock);
+        assert!(rl.try_acquire());
+        assert!(rl.try_acquire());
+        assert!(!rl.try_acquire(), "exhausted within the current second");
+        CLOCK.store(1_700_000_001, Ordering::Relaxed);
+        assert!(rl.try_acquire(), "bucket refills to full rate next second");
+        assert!(rl.try_acquire());
+        assert!(
+            !rl.try_acquire(),
+            "refill is to the full rate, not one token per second"
+        );
+    }
+
+    #[test]
+    fn frozen_clock_keeps_bucket_exhausted() {
+        let rl = RateLimiter::with_clock(1, || 1_700_000_000);
+        assert!(rl.try_acquire());
+        assert!(
+            !rl.try_acquire(),
+            "with a frozen clock the bucket never refills"
+        );
     }
 }

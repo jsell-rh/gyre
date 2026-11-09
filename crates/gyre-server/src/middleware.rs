@@ -202,10 +202,19 @@ mod tests {
 
     /// Build router with a very low rate limit for testing.
     fn rate_limited_app(rate: u64) -> Router {
+        rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::new(rate))
+    }
+
+    /// Build router with an injected rate limiter. Lets exhaustion tests
+    /// freeze the limiter clock: with the real clock, the per-second refill
+    /// makes the second request's outcome depend on whether it lands in a
+    /// later wall-clock second than the first (observed as intermittent
+    /// 200-vs-429 failures under parallel test load).
+    fn rate_limited_app_with_limiter(limiter: Arc<crate::rate_limit::RateLimiter>) -> Router {
         use crate::AppState;
         let base = test_state();
         let state = Arc::new(AppState {
-            rate_limiter: crate::rate_limit::RateLimiter::new(rate),
+            rate_limiter: limiter,
             auth_token: base.auth_token.clone(),
             base_url: base.base_url.clone(),
             repos: base.repos.clone(),
@@ -452,8 +461,14 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_exhaustion_returns_429() {
-        // Rate of 1: first succeeds, second gets 429.
-        let app = rate_limited_app(1);
+        // Rate of 1 with a frozen clock: first succeeds, second gets 429.
+        // The clock is frozen so the bucket cannot refill between the two
+        // requests — with the real clock this test was racy on second
+        // boundaries (second request occasionally got a refilled token).
+        let app =
+            rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::with_clock(1, || {
+                1_700_000_000
+            }));
         let resp1 = app
             .clone()
             .oneshot(
