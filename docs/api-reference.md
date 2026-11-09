@@ -218,7 +218,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
 | `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
-| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
+| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task, revoke agent token (Admin only) (M11.1, task-103) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
@@ -397,6 +397,13 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 | `container_crashed` | Container exited with non-zero code or was force-killed (M23) |
 | `container_oom` | Container OOM-killed by the kernel (M23) |
 | `container_network_blocked` | Outbound network attempt blocked by `--network=none` (G8, M23) |
+| `agent_spawned` | Agent spawned via `POST /api/v1/agents/spawn` (task-103) |
+| `agent_completed` | Agent completed via `POST /api/v1/agents/{id}/complete` (task-103) |
+| `agent_killed` | Admin force-killed an agent (task-103) |
+| `agent_dead` | Stale agent detector marked an agent Dead (task-103) |
+| `agent_heartbeat` | Agent heartbeat received (task-103) |
+| `agent_token_revoked` | Agent auth token revoked — completion, stop, or admin kill (task-103) |
+| `agent_reassigned` | Admin reassigned an agent's task to another agent (task-103) |
 
 `outcome` is `success` | `failure` | `blocked` (default `success`). Unrecognized
 `event_type` strings are preserved as custom events.
