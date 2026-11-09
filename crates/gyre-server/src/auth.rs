@@ -3118,6 +3118,7 @@ mod tests {
             tenant_id: system_principal_tenant(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(global_token.is_system_principal());
 
@@ -3129,6 +3130,7 @@ mod tests {
             tenant_id: "t-2".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!spoofed.is_system_principal());
 
@@ -3140,6 +3142,7 @@ mod tests {
             tenant_id: "t-1".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!ordinary.is_system_principal());
     }

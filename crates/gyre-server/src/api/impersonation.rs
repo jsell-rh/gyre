@@ -285,13 +285,18 @@ mod tests {
             Id::new(format!("ws-imp-{user_id}")),
             Id::new("tenant-imp"),
             "imp-test",
-            "imp-test",
+            // Slug unique per seeded user: the workspace port contract
+            // (enforced by the mem adapter) makes (tenant_id, slug) unique.
+            format!("imp-{user_id}"),
             now,
         );
         state.workspaces.create(&ws).await.unwrap();
 
         let mut user = User::new(Id::new(user_id), format!("ext-{user_id}"), name, now);
         user.roles = roles;
+        // The base's task-099 F1 API-key auth fails closed without a tenant
+        // binding; seed one so API-key requests resolve the real scope.
+        user.tenant_id = Some(Id::new("tenant-imp"));
         state.users.create(&user).await.unwrap();
 
         if with_membership {
