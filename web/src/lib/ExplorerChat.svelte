@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n';
   import { renderMarkdown } from './markdown.js';
   import { validateViewQuery } from './view-query-validator.js';
+  import { toWireCanvasState } from './canvas-state.js';
 
   let {
     repoId = '',
@@ -14,6 +15,7 @@
     graphHints = [],
     graphNodes = [],
     graphEdges = [],
+    onLoadView = () => {},
   } = $props();
 
   // ── Spec path detection ─────────────────────────────────────────────────
@@ -297,6 +299,15 @@
     const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectCount);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      // If the debounce window from the last connect() attempt is still
+      // active (socket dropped < CONNECT_DEBOUNCE_MS after connecting),
+      // connect() would return early and the reconnect would be silently
+      // swallowed — killing auto-reconnect entirely. Reschedule for after
+      // the window lapses instead.
+      if (Date.now() - lastConnectAttempt < CONNECT_DEBOUNCE_MS) {
+        scheduleReconnect();
+        return;
+      }
       reconnectCount++;
       connect();
     }, delay);
@@ -488,10 +499,15 @@
     scrollToBottom();
 
     try {
+      // §10 Interaction Context: send the normalized snake_case canvas state
+      // (selected_node, zoom_level, visible_tree_groups, active_filter,
+      // active_lens, active_query, recent_interactions) - the internal
+      // camelCase fields (selectedNode, zoom, breadcrumb) are not part of
+      // the wire format and would be dropped server-side.
       ws.send(JSON.stringify({
         type: 'message',
         text: text,
-        canvas_state: canvasState,
+        canvas_state: toWireCanvasState(canvasState),
       }));
       // Increment AFTER successful send so failed sends don't count toward
       // the session limit (which would eventually block the client).
@@ -508,6 +524,8 @@
     savedViewsDropdownOpen = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     activeViewId = view.id;
+    // §10: query actions are tracked in recent_interactions with the preset name
+    onLoadView(view);
     ws.send(JSON.stringify({ type: 'load_view', view_id: view.id }));
   }
 
@@ -773,6 +791,9 @@
                     type="button"
                   >
                     <span class="saved-view-name">{view.name}</span>
+                    {#if view.is_system}
+                      <span class="saved-view-system-badge" title="System default view — cannot be deleted">System</span>
+                    {/if}
                     {#if view.created_at}
                       <span class="saved-view-date">{formatTime(view.created_at)}</span>
                     {/if}
@@ -1196,6 +1217,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .saved-view-system-badge {
+    flex-shrink: 0;
+    margin-left: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-text-muted);
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    border-radius: var(--radius-sm, 4px);
+    padding: 1px 5px;
   }
 
   .saved-view-date {

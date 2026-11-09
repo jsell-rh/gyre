@@ -135,7 +135,7 @@
       id: n.repo_id,
       node_type: 'repo',
       width: NODE_W,
-      height: NODE_H,
+      height: n.types != null ? 68 : NODE_H,
     }));
     const elkEdges = edges.map((e, i) => ({
       id: e.id ?? `e${i}`,
@@ -366,15 +366,20 @@
         {@const colors = nodeColors(health)}
         {@const highlighted = isHighlighted(node.repo_id)}
         {@const dimmed = hoveredNodeId && !highlighted}
+        <!-- HSI §3 Level 1 node boxes carry type/endpoint counts: nodes with
+             counts get a taller box so the counts render as a sub-label
+             between the repo name and the health indicator. -->
+        {@const hasStats = node.types != null}
+        {@const nh = hasStats ? 68 : NODE_H}
         {#if pos}
           <g
             class="dep-node"
             data-testid="dep-node-{node.repo_id}"
             data-health={health}
-            transform="translate({pos.x - NODE_W / 2}, {pos.y - NODE_H / 2})"
+            transform="translate({pos.x - NODE_W / 2}, {pos.y - nh / 2})"
             tabindex="0"
             role="button"
-            aria-label="{node.name} — {health}"
+            aria-label="{node.name} — {health}{hasStats ? `, ${node.types} types, ${node.endpoints} endpoints` : ''}"
             opacity={dimmed ? 0.25 : 1}
             onclick={() => onNodeClick(node)}
             ondblclick={onNodeDblClick ? () => onNodeDblClick(node) : undefined}
@@ -384,7 +389,7 @@
           >
             <rect
               width={NODE_W}
-              height={NODE_H}
+              height={nh}
               rx={NODE_RX}
               fill={colors.fill}
               stroke={highlighted ? '#f8fafc' : colors.stroke}
@@ -394,7 +399,7 @@
             <text
               class="dep-node-label"
               x={NODE_W / 2}
-              y={NODE_H / 2 - 6}
+              y={hasStats ? 16 : NODE_H / 2 - 6}
               text-anchor="middle"
               dominant-baseline="central"
               fill={colors.text}
@@ -403,11 +408,27 @@
             >
               {node.name}
             </text>
+            <!-- HSI §3 Level 1: type/endpoint counts sub-label -->
+            {#if hasStats}
+              <text
+                class="dep-node-counts"
+                data-testid="dep-node-counts-{node.repo_id}"
+                x={NODE_W / 2}
+                y={31}
+                text-anchor="middle"
+                dominant-baseline="central"
+                fill={colors.text}
+                font-size="9"
+                opacity="0.75"
+              >
+                {node.types} types · {node.endpoints} endpoints
+              </text>
+            {/if}
             <!-- Health indicator -->
             <text
               class="dep-node-health"
               x={NODE_W / 2}
-              y={NODE_H / 2 + 12}
+              y={hasStats ? 52 : NODE_H / 2 + 12}
               text-anchor="middle"
               dominant-baseline="central"
               fill={colors.badge}
