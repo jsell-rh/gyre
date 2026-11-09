@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab"]
+commits: ["531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab", "a3b639877ae7ba27267a39fb7c7b9fbb55284efc"]
 ---
 
 ## Spec Excerpt
@@ -90,7 +90,8 @@ Both `agent-gates.md` coverage sections are implemented with real, production
 behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
 runs and completed across assignments, including the review-F1/F2/F3 repairs,
 the review-round TTL repair `72c5bb03`, the review-repair round `31c35ddb`,
-and the rebase onto `fefde294`, all described below).
+the rebase onto `fefde294`, and the rebase onto task-177's `7747376`, all
+described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
@@ -136,7 +137,7 @@ and the rebase onto `fefde294`, all described below).
   `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
   the exit code; no-command fails closed.
 
-### Repair rounds (`31c35ddb`, rebase onto `fefde294`)
+### Repair rounds (`31c35ddb`, rebases onto `fefde294` and `7747376`)
 
 **Review findings `31c35ddb`** (findings b916825b; no product behavior
 changed):
@@ -172,11 +173,31 @@ changed):
   carries a unique JWT ID, so teardown-time `kv_remove` revocation is
   attributable per token, matching the sibling mint functions.
 
+**Rebase onto `7747376`** (merge `a3b639877`, task-177 base):
+
+- Four conflicts resolved by combining both sides' fixes. In
+  `abac_middleware.rs`, the branch's early action resolution (required by
+  the task-134 scoped-token allow-list) is kept and the base's hardened
+  `is_system_principal()` system bypass adopted (task-099 F1: an
+  `agent_id == "system"` string match would let a user *named* "system"
+  spoof the ABAC bypass). In `git_http.rs`, the branch's scoped-token
+  read-only push rejection is kept and the `resolve_repo_by_slug` call
+  adapted to the base's new `&auth` signature. The fabricated-scope freeze
+  files resolve to the branch's tightest form: 1 entry,
+  `FROZEN_EXEMPTION_COUNT=1` — the merged tree keeps the branch's
+  `gate_executor.rs` rewrite (no ws_id fallback), so the base's
+  `gate_executor.rs:111` entry is dead. Verified on the merged tree:
+  baseline passes and a growth probe (an extra entry appended temporarily)
+  FAILS; probe output retained in review evidence
+  (`rebase-resolution-7747376.txt`).
+
 ### Test evidence
 
-On the rebased tree at `531434a68` (merge `05c99b4e2` of `31c35ddb` onto
-`fefde294` + the `jti` fix): `task134_review_probe` 7/7, `gate_executor`
-37/37 (including both TTL regression tests and both e2e review tests), and
-`auth` 44/44 pass; `check-fabricated-scope-defaults.sh` passes with the
-count enforced at 1. `cargo test --all` and the full mechanical-check suite
-are owned by verification and publication.
+On the tree rebased onto task-177's `7747376` (merge `a3b639877`):
+`task134_review_probe` 7/7, `gate_executor` 37/37 (including both TTL
+regression tests and both e2e review tests), `abac_middleware` 12/12
+(including `system_token_bypasses_abac` against the hardened
+`is_system_principal()` bypass), `git_http` 40/40, and `auth` 46/46 pass;
+`check-fabricated-scope-defaults.sh` passes with the count enforced at 1.
+`cargo test --all` and the full mechanical-check suite are owned by
+verification and publication.
