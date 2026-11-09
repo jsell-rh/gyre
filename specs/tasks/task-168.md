@@ -62,10 +62,11 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 All three coverage sections are implemented in production code (earlier
 checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
-`5e617c7`/`4443b66`/`219780c`/`40b0f8e` repair rounds — see Repair rounds).
-Current tree: merge of assignment base `124a852` at `25fe58fa` plus the
-process commit recording this round (all evidence re-run on that tree, logs
-under `/tmp/stage/review-evidence/`, suffix `base124a852`).
+`5e617c7`/`4443b66`/`219780c`/`40b0f8e`/`25fe58fa` repair rounds — see
+Repair rounds). Current tree: merge of assignment base `fefde294` at
+`c0b6a74e` plus the process commit recording this round (all evidence re-run
+on that tree, logs under `/tmp/stage/review-evidence/`, suffix
+`basefefde294`).
 
 ### Git push rejection for archived repos (§API Summary)
 
@@ -77,22 +78,25 @@ under `/tmp/stage/review-evidence/`, suffix `base124a852`).
   packfile is processed; clone/fetch (`git-upload-pack`) still works on
   archived repos — read-only, not invisible.
 - Evidence on the current tree: git_http unit tests 41/41 passed
-  (`cargo-git-http-base124a852.log`, includes the three archived-repo
+  (`cargo-git-http-basefefde294.log`, includes the three archived-repo
   pkt-line/403/clone-still-works tests), and integration test
   `push_to_archived_repo_rejected` in `crates/gyre-server/tests/git_integration.rs`
   which runs a **real `git push`** against a live server and asserts the push
   fails with an "archived" reason (1/1 passed,
-  `cargo-integration-archived-push-base124a852.log`).
+  `cargo-integration-archived-push-basefefde294.log`).
 
 ### Admin workspace-scope Repos tab (§Admin → Workspace Scope → Repos Tab)
 
 - `WorkspaceSettings.svelte` has a `repos` tab: table of all workspace repos
-  with name, Active/Archived status badge, active agent count, and last-activity
-  timestamp; "+ New Repo" and "Import Repo" buttons with creation/mirror forms;
-  clicking a repo navigates to repo scope via the `goToRepo` context.
-- Evidence: `web/src/__tests__/WorkspaceSettings.test.js` +
-  `web/src/__tests__/RepoSettings.test.js` — 132/132 vitest tests pass on the
-  current tree (`vitest-task168-repair-base124a852.log`).
+  with name, Active/Archived status badge, active agent count, last-activity
+  timestamp, default branch, and mirror URL; "+ New Repo" and "Import Repo"
+  buttons with creation/mirror forms; clicking a repo navigates to repo scope
+  via the `goToRepo` context.
+- Evidence: full frontend suite on the current tree — 1948 passed / 41
+  skipped across 89 files (`vitest-task168-repair-basefefde294.log`, exit 0),
+  including both repos-tab test suites in
+  `web/src/__tests__/WorkspaceSettings.test.js` + `RepoSettings.test.js`
+  (137/137 in those two files).
 
 ### Repo-scope Gates panel (§Gates — Admin → Repo Scope → Gates)
 
@@ -106,7 +110,8 @@ under `/tmp/stage/review-evidence/`, suffix `base124a852`).
   (migration `2026-10-08-000059_gate_position`, SQLite + PostgreSQL portable)
   enforced in both adapters and the mem store.
 - Evidence: gates API unit tests (position ordering, update validation) —
-  11/11 passed on the current tree (`cargo-gates-base124a852.log`).
+  26 gates-filtered tests + 7 recovery tests passed on the current tree
+  (`cargo-gates-recovery-basefefde294.log`).
 
 ### Repair rounds
 
@@ -119,17 +124,40 @@ under `/tmp/stage/review-evidence/`, suffix `base124a852`).
   (the base fixed the site itself; frozen count 5 → 4).
 - `40b0f8e`: resolved base `66a5fc67` — additive main-side work only; all
   task-168 source survived byte-for-byte.
-- **This round (merge `25fe58fa`)**: resolved assignment base `124a852`
-  (task-193 spec approval attestation). Conflicts resolved:
-  `mr_timeline.rs`/`merge_processor.rs` test literals keep our
-  `QualityGate.position` field on the base's reindentation; the exemptions
-  file keeps our deletion of the `git_http.rs` ws_id entry (site fixed in
-  `219780c`); `WorkspaceSettings.svelte` `TAB_IDS` is the **union** — base's
-  `policies` tab (task-084) plus our `repos` tab — with the tab-count test
-  updated 8 → 9 (it already asserted both `Policies` and `Repos` labels).
-  Renumbered `2026-10-08-000057_gate_position` → `000058` after base landed
-  `000057_spec_approval_attestation` (duplicate Diesel versions silently
-  never run). rustfmt clean on both resolved Rust files.
+- **Round `25fe58fa`**: resolved assignment base `124a852` (task-193 spec
+  approval attestation). Union `TAB_IDS` (base's `policies` tab plus our
+  `repos`); renumbered `2026-10-08-000057_gate_position` → `000058` after
+  base landed `000057_spec_approval_attestation`.
+- **This round (merge `c0b6a74e`)**: resolved assignment base `fefde294`
+  (task-089 HSI Explorer Generated Views). Conflicts and resolutions:
+  - `fabricated-scope-defaults-exemptions.txt`: base fixed the `auth.rs`
+    JWT claims fallback (task-103) and lowered the frozen count 4 → 3 — took
+    base's side, entry removed.
+  - `WorkspaceSettings.svelte`: base independently shipped a simpler repos
+    tab (HSI §1.5), so the auto-merge produced TWO repos script/markup
+    sections (duplicate `let` declarations — uncompilable) plus a `TAB_IDS`
+    collision. Resolution: **one** repos implementation — ours (agent counts,
+    last activity, status badge, repo navigation) extended with base's
+    default-branch and mirror-URL columns; base's duplicate script block,
+    effect branch, and markup deleted; `TAB_IDS` is the union (10 tabs:
+    base's `secrets` tab added, `repos` after `budget`); the two `repos`
+    locale objects in `en.json` merged into one union object (duplicate JSON
+    keys are last-wins, so base's were dead).
+  - `WorkspaceSettings.test.js`: the merged file carries both repos-tab
+    suites; base's suite retargeted to the surviving implementation's
+    testids (`ws-`-prefixed) with identical behavioral assertions (create →
+    `api.createRepo`, import → `api.createMirrorRepo` with derived name,
+    row content includes mirror URL — now a real column). Two keyboard-nav
+    tests asserted `repos` as the *last* tab; with the union tab order the
+    last tab is `audit`, so they now assert `#ws-tab-audit` (same
+    wrap-to-last / End-key behavior). Tab-count test 9 → 10.
+  - `RepoSettings.test.js`: mock union (our gate/MR mocks + base's secrets
+    mocks).
+  - `recovery.rs`: base's new test `QualityGate` literals gained our
+    `position: 0` field (E0063 fix, matches the production default).
+  - Renumbered `2026-10-08-000058_gate_position` → `000059` after base
+    landed `000058_user_entity_profile_fields` (duplicate Diesel versions
+    silently never run). rustfmt clean.
 - **Review finding `fddd589d` (stale committed `web/dist`)**: acknowledged and
   verified at the source level. `web/dist` is a generated artifact — in this
   runtime the executor restores it from the assignment base and final
@@ -144,14 +172,15 @@ under `/tmp/stage/review-evidence/`, suffix `base124a852`).
 
 ### Invariants
 
-All 17 mechanical invariant checks pass at merge head `25fe58fa` on the merged
-tree (`invariants-base124a852.log` + per-check logs under
+All 17 mechanical invariant checks pass at merge head `c0b6a74e` on the merged
+tree (`invariants-basefefde294.log` + per-check logs under
 `/tmp/stage/review-evidence/`) — `check-arch`,
 `check-abac-route-registry`, `check-migration-versions` (no duplicates
-after the `000058` renumber), `check-migration-sql-portability`,
+after the `000059` renumber), `check-migration-sql-portability`,
 `check-mem-port-contracts`, `check-inert-enforcement`,
 `check-dead-message-kinds`, `check-fabricated-scope-defaults`
-(3 entries, frozen count 4), `check-byte-slice-truncation`,
+(3 entries, frozen count 3 — base fixed the auth.rs site),
+`check-byte-slice-truncation`,
 `check-relative-path-defaults`, `check-fail-open-ref-resolution`,
 `check-lossy-secret-conversion`, `check-scope-literal-defaults`,
 `check-forwarded-header-trust`, `check-in-memory-state-stores`,
