@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820"]
 ---
 
 ## Spec Excerpt
@@ -99,33 +99,50 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round 8 — rebase onto upstream `774737638` (finding
-`12a2256d8d53414c82451831daebeaeb`), merge commit `b53fa1484`.**
+**Repair round 9 — review findings `d559534738b54ad398ee79fd95770725`
+(checkpoint `b95b56ea`), commit `797cf52f`.** All six findings
+re-verified against the current tree and repaired:
 
-- **`auth.rs` conflict:** kept `find_or_create_user_tenant` (the
-task-110 invitation email-link path) at the call site — the merged
-body already carries upstream's F1 tenant binding and username
-escape hatch. Repaired the auto-merge graft that had duplicated the
-`tenant_id` parameter (8-arg call against the 7-param signature,
-double tenant binding): restored the reviewed 7-parameter signature;
-the sole caller always passes `Some(&validated_tenant)` (the
-schema-defaulted JWT claim), so upstream's F1 invariant — an OIDC
-user is never created tenant-less — holds identically.
-- **`fabricated-scope-defaults-exemptions.txt` conflict:** both sides
-carried the same 2 entries; adopted the upstream prose ("count
-lowered to 2"), matching the merged `FROZEN_EXEMPTION_COUNT=2`.
-- **Migration version collision (beyond the flagged conflicts):**
-upstream landed `2026-10-09-000057_agent_persona_id` under Diesel
-version `20261009000057`, which the candidate's
-`2026-10-09-000057_user_tenant_scope` also held — Diesel would have
-silently dropped the tenant-scope index on fresh databases.
-Renumbered the task-110 migration to
-`2026-11-08-000060_user_tenant_scope` (next unused sequence; the
-upstream version string stays immutable), and updated the
-`migration_000058_backfills_unique_url_safe_usernames` test
-exclusion accordingly. `check-migration-versions` went FAIL → OK.
+- **F1 (SSO link):** tenant-invitation accept now LINKS an existing
+  SSO-provisioned account instead of creating a parallel local-mode
+  account that shadows it. New port method
+  `UserRepository::find_by_email` (SQLite/Postgres via portable
+  `lower(users.email) = ?`, mem; case-insensitive because invitation
+  emails are lowercased while SSO accounts store the IdP's raw
+  casing); the accept path resolves the tenant-scoped email match,
+  attaches the pre-assigned memberships and the invited GlobalRole
+  via `update()` (username/external_id untouched), and reports
+  `mode: "linked"` with the real account's id/username. Adjacent
+  defect fixed while testing: pre-assigned memberships were created
+  but never *activated* — acceptance now activates them (same
+  semantics as the workspace-invitation accept path).
+- **F2 (username collision):** derived handles go through
+  `User::sanitize_username` + `resolve_unique_username` (the auth.rs
+  deterministic suffix scheme: bob, bob-2, ...; `u-<id>` escape
+  hatch), so a colliding local-part across domains or tenants
+  resolves instead of 500 + rollback to a permanently un-acceptable
+  Pending invitation.
+- **F3 (username contract):** an explicit `username` is validated
+  with `User::validate_username` BEFORE the single-use claim (invalid
+  input must not consume/roll back the invitation) → 400; a taken
+  handle → 409; both retryable. `docs/api-reference.md` updated.
+- **F4 (low):** `GYRE_INVITE_EXPIRY_INTERVAL_SECS=0` now falls back
+  to the default instead of panicking `tokio::time::interval` at
+  startup.
+- **F5 (low):** `load_policy` fails CLOSED on a corrupt stored policy
+  row (error naming the tenant) instead of silently applying the
+  permissive defaults; enforcement callers and GET propagate it, PUT
+  policy is the documented remediation path (persists a fresh valid
+  row).
+- **F6 (test gaps):** new HTTP-layer tests with a two-tenant fixture
+  — cross-tenant 403 guards on workspace invite/list/revoke/accept
+  and tenant invitation revoke (invitation stays Pending);
+  `max_pending_invitations` cap enforced (429, capacity freed by
+  revoke); expired workspace invitation rejected (409 → Expired, no
+  membership); plus regressions for F1/F2/F3 and a SQLite adapter
+  test for `find_by_email`.
 
-Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-8.md`.
+Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-9.md`.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -171,6 +188,24 @@ Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-8.md`.
 - **Docs:** `docs/api-reference.md` covers all invitation routes,
   selectors and the policy endpoints; `docs/server-config.md`
   documents `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
+
+### Test evidence (round 9, commit `797cf52f`)
+
+- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports`
+  (SKIP_WEB_BUILD=1) — clean.
+- `cargo test -p gyre-server --lib api::invitations` — 26 passed /
+  0 failed (was 20; +6 new tests).
+- `cargo test -p gyre-server --lib auth` — 69 passed / 0 failed.
+- `cargo test -p gyre-server --lib` (full) — 1564 passed / 0 failed.
+- `cargo test -p gyre-adapters` (full) — 400 passed / 0 failed /
+  12 ignored (was 399; +1 `find_by_email` adapter test).
+- Mechanical guards: every guard OK at the assignment-start head
+  `39bef9d66` is still OK with this diff; the 33 guards that FAIL at
+  that head fail byte-identically with and without this diff
+  (verified by stashing), all in task-089/157/upstream code —
+  e.g. `check-non-atomic-creation` → `git_http.rs:1555`,
+  `check-dependent-scope-resolution` → `reconciliation.rs:925` —
+  left for upstream-side fixes per the round-8 note.
 
 ### Test evidence (round 8, at merge commit `b53fa1484`)
 
