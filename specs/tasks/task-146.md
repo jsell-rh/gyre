@@ -94,6 +94,8 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
 
+## Shipped
+
 ### Analytics event schema and auto-emitted events (commit 38c2c5e)
 
 - `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec fields
@@ -189,3 +191,44 @@ Each fix has a regression test that fails on the old code:
   pre-existing exit-1 violation sets) are documented in
   /tmp/stage/review-evidence/test-evidence.md — not introduced by this
   branch.
+
+### Contract-repair round: Shipped-heading restore and base fefde2946 merge (this round)
+
+The controller's checkpoint comparison flagged a protected-text change:
+the previous checkpoint's task document had lost the `## Shipped`
+heading — its round subheadings followed `## Agent Instructions`
+directly, leaving every progress note outside the required section. The
+executor restored the assigned task document; this round rebuilt it with
+the heading intact and every note under `###` subheadings, and re-added
+`8f0ee1903` to the `commits:` frontmatter (the task-labeled
+product-surface fix commit) so `check-task-commit-attribution.sh` passes
+with no exemption.
+
+The branch was also merged with base fefde2946 (the task-089 lineage:
+HSI Explorer Generated Views). The merge is additive for this task's
+surface: `merge_requests.rs` gained only the `has_trace`/`limit`
+workspace-MR-list filter and its tests; the `mr.closed` analytics
+emission and every other task-146 trigger point are byte-identical.
+No migration collision this round (base added none; the analytics
+migration stays `2026-10-08-000059_analytics_scope_columns`).
+
+Verified on the merged HEAD: every task-146 regression test passes —
+`cancel_records_queue_processed_skipped`,
+`non_mergeable_mr_during_selection_records_queue_processed_failed`,
+`atomic_group_non_mergeable_member_records_queue_processed_failed`,
+`gate_failure_during_selection_records_queue_processed_failed`,
+`mr_not_found_during_selection_records_queue_processed_failed`,
+`spec_policy_block_records_queue_processed_failed`,
+`circuit_breaker_cancel_records_queue_processed_skipped`,
+`spawn_auto_advance_records_task_status_changed`,
+`complete_auto_advance_records_task_status_changed`,
+`abort_records_agent_failed_analytics_event`, and
+`compose_teardown_stops_all_agents` — plus the full
+`merge_processor::tests`, `api::analytics`, `api::merge_queue`,
+`api::compose::tests`, and `api::merge_requests::tests` suites
+(178 tests, 0 failed). `check-task-commit-attribution.sh`,
+`check-migration-versions.sh`, `check-arch.sh`,
+`check-fabricated-scope-defaults.sh`, and
+`check-relative-path-defaults.sh` all exit 0. web/dist is byte-identical
+to base (this branch never modified it). Evidence retained under
+/tmp/stage/review-evidence.
