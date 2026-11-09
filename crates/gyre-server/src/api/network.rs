@@ -224,6 +224,8 @@ pub async fn update_peer_endpoint(
             "JWT callers may only update their own peer record".to_string(),
         ));
     } else if auth.jwt_claims.is_none() && !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "PUT /api/v1/network/peers/:id")
+            .await;
         return Err(ApiError::Forbidden(
             "Admin role required to update another agent's peer record".to_string(),
         ));
@@ -256,6 +258,8 @@ pub async fn delete_peer(
             "JWT callers may only delete their own peer record".to_string(),
         ));
     } else if auth.jwt_claims.is_none() && !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "DELETE /api/v1/network/peers/:id")
+            .await;
         return Err(ApiError::Forbidden(
             "Admin role required to delete another agent's peer record".to_string(),
         ));

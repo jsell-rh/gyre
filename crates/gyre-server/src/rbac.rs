@@ -492,4 +492,232 @@ mod tests {
                 .await;
         }
     }
+
+    #[tokio::test]
+    async fn round9_uninstrumented_role_guards_record_rbac_denied_audit_event() {
+        // Review repair (task-104 round 9): live pure role guards that
+        // rejected with 403 while recording no rbac_denied event —
+        // update_peer / delete_peer (network.rs), put_rollout_policy
+        // (meta_specs.rs, arrived via the task-157 base merge), the secrets
+        // require_admin helper covering four endpoints (secrets.rs, arrived
+        // via the task-098 base merge), and the broadcast-destination guard
+        // (messages.rs). Same class as the round-8 finding. Each sub-case
+        // gets a fresh state so the recorded event count is exactly one.
+        // A valid 44-char base64 Curve25519 pubkey (32 bytes).
+        const VALID_PUBKEY: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+
+        // Register a peer for `agent_id` using the global Admin token.
+        async fn register_peer(app: &Router, agent_id: &str) -> String {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/network/peers")
+                        .header("Authorization", "Bearer test-token")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "agent_id": agent_id,
+                                "wireguard_pubkey": VALID_PUBKEY,
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        // 1. Per-agent uuid token updating another agent's peer record
+        //    (reviewer's probe: non-JWT, non-Admin caller -> the Admin role
+        //    guard is the operative enforcement).
+        {
+            let state = make_test_state_with_jwt();
+            state
+                .kv_store
+                .kv_set(
+                    "agent_tokens",
+                    "other-agent",
+                    "other-agent-secret".to_string(),
+                )
+                .await
+                .unwrap();
+            let app = crate::api::api_router().with_state(state.clone());
+            let peer_id = register_peer(&app, "peer-owner").await;
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/network/peers/{peer_id}"))
+                        .header("Authorization", "Bearer other-agent-secret")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "endpoint": "10.0.0.9:51820"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "Admin", "PUT /api/v1/network/peers/:id").await;
+        }
+
+        // 2. Per-agent uuid token deleting another agent's peer record.
+        {
+            let state = make_test_state_with_jwt();
+            state
+                .kv_store
+                .kv_set(
+                    "agent_tokens",
+                    "other-agent",
+                    "other-agent-secret".to_string(),
+                )
+                .await
+                .unwrap();
+            let app = crate::api::api_router().with_state(state.clone());
+            let peer_id = register_peer(&app, "peer-owner").await;
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/network/peers/{peer_id}"))
+                        .header("Authorization", "Bearer other-agent-secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "Admin", "DELETE /api/v1/network/peers/:id").await;
+        }
+
+        // 3. Developer JWT updating a workspace rollout policy (the guard
+        //    arrived via the task-157 base merge).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/workspaces/ws-1/meta-specs/rollout-policy")
+                        .header(
+                            "Authorization",
+                            format!(
+                                "Bearer {}",
+                                sign_test_jwt(
+                                    &serde_json::json!({
+                                        "sub": "dev-sub",
+                                        "preferred_username": "dev-user",
+                                        "realm_access": { "roles": ["developer"] }
+                                    }),
+                                    3600,
+                                )
+                            ),
+                        )
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "strategy": "manual"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(
+                &state,
+                "Admin",
+                "PUT /api/v1/workspaces/:id/meta-specs/rollout-policy",
+            )
+            .await;
+        }
+
+        // 4. Developer JWT listing secrets (Admin-only via the shared
+        //    require_admin helper — one guard, four endpoints).
+        {
+            let state = make_test_state_with_jwt();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/secrets?scope=tenant")
+                        .header(
+                            "Authorization",
+                            format!(
+                                "Bearer {}",
+                                sign_test_jwt(
+                                    &serde_json::json!({
+                                        "sub": "dev-sub",
+                                        "preferred_username": "dev-user",
+                                        "realm_access": { "roles": ["developer"] }
+                                    }),
+                                    3600,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/secrets").await;
+        }
+
+        // 5. Per-agent uuid token sending a broadcast message (only Server
+        //    origin or Admin may broadcast).
+        {
+            let state = make_test_state_with_jwt();
+            state
+                .kv_store
+                .kv_set(
+                    "agent_tokens",
+                    "other-agent",
+                    "other-agent-secret".to_string(),
+                )
+                .await
+                .unwrap();
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-1/messages")
+                        .header("Authorization", "Bearer other-agent-secret")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "to": "broadcast",
+                                "kind": "task104_round9_probe"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_rbac_denied(
+                &state,
+                "Server or Admin",
+                "POST /api/v1/workspaces/:workspace_id/messages",
+            )
+            .await;
+        }
+    }
 }

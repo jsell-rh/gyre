@@ -355,6 +355,13 @@ pub async fn put_rollout_policy(
     // (NEW-26: non-Admin callers, including agents, must not be able to
     // rewrite the rules that govern their own rollout).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-specs/rollout-policy",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace rollout policy".to_string(),
         ));
