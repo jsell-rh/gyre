@@ -150,8 +150,14 @@ pub struct SpecApprovalResponse {
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
     pub revocation_reason: Option<String>,
+    /// When a human reviewer rejected this approval (None = not rejected).
+    /// Distinguishes rejection from revocation for ledger consumers
+    /// (e.g. the Explorer evaluative lens approval icons).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_by: Option<String>,
     /// Derived from which timestamp column is non-null (never stored).
     pub status: String,
@@ -386,7 +392,7 @@ mod tests {
     use super::verify_spec_ref;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
-    use gyre_domain::Repository;
+    use gyre_domain::{Repository, SpecApproval};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -685,6 +691,67 @@ mod tests {
         assert_eq!(pending["status"], "pending");
         assert_eq!(pending["approved_at"], serde_json::Value::Null);
         assert!(!pending["active"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_spec_approvals_includes_rejection_fields() {
+        // HSI §3 Evaluative lens: the approval ledger response must let the
+        // Explorer distinguish a REJECTED approval (✗) from a revoked one —
+        // both are inactive, but rejection is a reviewer decision while
+        // revocation returns the spec to pending.
+        let state = test_state();
+        let mut approved = SpecApproval::new(
+            gyre_common::Id::new("ap-1"),
+            "specs/system/auth.md",
+            "1".repeat(40),
+            "user:alice",
+        );
+        approved.approve(100).unwrap();
+        state.spec_approvals.create(&approved).await.unwrap();
+
+        let mut rejected = SpecApproval::new(
+            gyre_common::Id::new("ap-2"),
+            "specs/system/billing.md",
+            "2".repeat(40),
+            "user:bob",
+        );
+        rejected
+            .reject("user:carol", "out of scope", 120)
+            .unwrap();
+        state.spec_approvals.create(&rejected).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/approvals")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        let by_path: std::collections::HashMap<&str, &serde_json::Value> = arr
+            .iter()
+            .map(|a| (a["spec_path"].as_str().unwrap(), a))
+            .collect();
+
+        let active = by_path.get("specs/system/auth.md").unwrap();
+        assert_eq!(active["active"], serde_json::json!(true));
+        // Rejected fields are omitted for active approvals (skip_serializing_if)
+        assert!(active.get("rejected_at").is_none());
+
+        let rejected = by_path.get("specs/system/billing.md").unwrap();
+        assert_eq!(rejected["active"], serde_json::json!(false));
+        assert_eq!(rejected["rejected_at"], serde_json::json!(120));
+        assert_eq!(
+            rejected["rejected_reason"],
+            serde_json::json!("out of scope")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

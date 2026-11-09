@@ -6,7 +6,7 @@
  *   - Has data-testid="tenant-settings"
  *   - Page title shows "Tenant Administration"
  *   - Back button calls onBack callback
- *   - All 6 tabs render: Users, Compute Targets, Budget, Audit, Health, Jobs
+ *   - All 8 tabs render: Users, Compute Targets, Budget, Secrets, Workspaces, Audit, Health, Jobs
  *   - Tab keyboard navigation (ArrowRight/ArrowLeft/Home/End)
  *   - Users tab: loads api.me(), shows user info
  *   - Compute Targets tab: loads api.computeList(), shows table
@@ -40,6 +40,10 @@ vi.mock('../lib/api.js', () => ({
     adminListSnapshots: vi.fn().mockResolvedValue([]),
     adminDeleteSnapshot: vi.fn().mockResolvedValue({}),
     adminRetention: vi.fn().mockResolvedValue(null),
+    secretsList: vi.fn().mockResolvedValue([]),
+    secretCreate: vi.fn().mockResolvedValue({}),
+    secretDelete: vi.fn().mockResolvedValue(null),
+    secretRotate: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -115,9 +119,25 @@ describe('TenantSettings', () => {
       expect(text).toContain('Users');
       expect(text).toContain('Compute Targets');
       expect(text).toContain('Budget');
+      expect(text).toContain('Secrets');
       expect(text).toContain('Audit');
       expect(text).toContain('Health');
       expect(text).toContain('Jobs');
+    }, { timeout: 3000 });
+  });
+
+  it('Secrets tab loads the tenant-scoped secrets panel', async () => {
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      const secretsTab = container.querySelector('[data-testid="tenant-settings-tab-secrets"]');
+      expect(secretsTab).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="tenant-settings-tab-secrets"]'));
+    await waitFor(() => {
+      const panel = container.querySelector('[data-testid="secrets-panel"]');
+      expect(panel).toBeTruthy();
+      expect(panel.getAttribute('data-scope')).toBe('tenant');
+      expect(api.secretsList).toHaveBeenCalledWith('tenant', null);
     }, { timeout: 3000 });
   });
 

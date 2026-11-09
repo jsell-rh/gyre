@@ -3843,6 +3843,16 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
             .map(|(_, _, v)| v.clone()))
     }
 
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<gyre_common::Secret>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, s, _)| tid == tenant_id && s.id == *id)
+            .map(|(_, s, _)| s.clone()))
+    }
+
     async fn list_by_scope(
         &self,
         scope: gyre_common::SecretScope,
