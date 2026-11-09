@@ -2,7 +2,7 @@
 title: "Seed built-in personas at tenant bootstrap"
 spec_ref: "platform-model.md §2 Built-In Personas"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §Built-In Personas"
 commits: ["b0f24a748880ec65b275b6f7eb2905bfb44d9695"]
