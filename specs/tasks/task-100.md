@@ -6,7 +6,7 @@ depends_on:
   - task-098
 progress: ready-for-review
 coverage_sections: []
-commits: ["afd5ab18bb1b17954e04de5aafdcb6a6f4f690fe", "c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347"]
+commits: ["afd5ab18bb1b17954e04de5aafdcb6a6f4f690fe", "c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347", "abd7dab3bb75b4f0a04d1b1e71e3449ad23ed6d0"]
 ---
 
 ## Spec Excerpt
@@ -63,7 +63,9 @@ All five acceptance criteria are implemented in production code on top of the ta
   - REST `POST /api/v1/agents/{id}/stop` (`stop_agent`, alongside token revocation — review round-2 F1) and `POST /api/v1/agents/{id}/fail` (`fail_agent`, after the terminal Failed transition — review round-2 F2);
   - `POST /api/v1/admin/agents/{id}/kill` (alongside policy cleanup);
   - the spec-reject cascaded shutdown (`reject_spec` in `api/specs.rs`, which cancels the spec's in-flight tasks and stops their Active agents — review round-2 F3, mirroring the repo-archive stop);
-  - stale-agent heartbeat abort (`stale_agents.rs`, the kill that marks the agent Dead), compose teardown (`POST /api/v1/compose/teardown`), repo-archive agent stop (the agents' tasks are cancelled, so their one-time secrets must not outlive the task), and the process/container/SSH exit monitors in `spawn.rs` (the run's process is gone).
+  - the stale-agent detector's **both** arms — heartbeat abort (the kill that marks the agent Dead) and the `DisconnectedBehavior::Pause` stop (review round-3 F1; Pause is the default behavior and Stopped is terminal, so the run ends there exactly as it does under Abort);
+  - `PUT /api/v1/agents/{id}/status` when the parsed new status is terminal (Dead/Failed/Stopped — review round-3 F2; the generic status endpoint ends the run just like the dedicated stop/fail/kill endpoints);
+  - compose teardown (`POST /api/v1/compose/teardown`), repo-archive agent stop (the agents' tasks are cancelled, so their one-time secrets must not outlive the task), and the process/container/SSH exit monitors in `spawn.rs` (the run's process is gone).
 
   The tenant is resolved from the agent's workspace record; an unresolvable workspace skips revocation with a warn — no fabricated scope.
 - **Audit events** (tracing macros with `event` field, the `constraint_check.rs` pattern; secret name, never value):
@@ -73,16 +75,18 @@ All five acceptance criteria are implemented in production code on top of the ta
 
 ### Test evidence
 
-- `cargo test -p gyre-server --lib` — **1495 passed, 0 failed** (after the round-2 repair, on the branch with the task-103 base merged in), including:
+- `cargo test -p gyre-server --lib` — **1497 passed, 0 failed** (after the round-3 repair), including:
   - `secret_rotation::tests::rotation_handler_refreshes_expiring_oauth_secret` — real refresh grant against a local token endpoint; asserts the grant posted the stored refresh token/client_id, the stored value is the rotated document, expiry extended past the window, `last_rotated_at` set, and no admin notification.
   - `secret_rotation::tests::rotation_handler_failure_falls_back_to_admin_notification` — 500 from the endpoint leaves the value untouched and notifies the admin.
   - `secret_rotation::tests::malformed_handler_value_falls_back_to_admin_notification`.
   - `secret_rotation::tests::revoke_task_secrets_deletes_only_that_task_scope` / `..._skips_unresolvable_workspace`.
   - `mcp::tests::agent_complete_revokes_task_scoped_secrets`, `api::admin::tests::admin_kill_revokes_task_scoped_secrets`, and (round-1) `api::spawn::tests::complete_agent_revokes_task_scoped_secrets` — the REST completion path.
   - (round-2) `api::spawn::tests::stop_agent_revokes_task_scoped_secrets` and `api::spawn::tests::fail_agent_revokes_task_scoped_secrets` — REST stop/fail; `api::specs::tests::reject_spec_revokes_task_scoped_secrets` — the spec-reject cascaded shutdown. Each asserts the task-scoped secret is deleted while workspace-scoped and other-task secrets survive. All three were verified to FAIL when the fix call sites are removed (negative control run during the round-2 repair; evidence: `/tmp/stage/review-evidence/task-100-round2-repair.md`) — bug-killing, not self-confirming.
+  - (round-3) `stale_agents::tests::stale_detector_pause_revokes_task_scoped_secrets` — Pause-behavior stale stop revokes the task-scoped secret while workspace and other-task secrets survive; `api::agents::tests::update_agent_status_terminal_revokes_task_scoped_secrets` — PUT status `dead` revokes the task-scoped secret while a non-terminal `idle` transition (control agent, own task) and workspace/other-task secrets survive. Both were verified to FAIL when the new call sites are removed (negative control run during this round-3 repair, alongside the six sibling revocation tests which stayed green; evidence: `/tmp/stage/review-evidence/task-100-round3-repair.md`).
   - Existing task-098 tests (expiring/expired notify, dedup, healthy never notify) still pass unchanged.
 - `cargo test -p gyre-adapters secret` — 17 passed (adapter contract untouched).
-- `cargo clippy -p gyre-server --all-targets` — no warnings in any region touched by this task (the repo-wide pre-existing warning set is unchanged by the round-2 repair).
+- `cargo clippy -p gyre-server --all-targets` — no warnings in any region touched by this task (the repo-wide pre-existing warning set is unchanged by the round-3 repair).
+- `cargo fmt -p gyre-server -- --check` — clean (the round-3 repair also normalized rustfmt drift the round-2 repair had left in `spawn.rs`/`mcp.rs`).
 - All mechanical check scripts pass (`check-arch`, `check-unbounded-external-http`, `check-fabricated-scope-defaults`, `check-lossy-secret-conversion`, `check-scope-literal-defaults`, `check-inert-enforcement`, `check-task-commit-attribution`, and the rest).
 
 ### Notes
