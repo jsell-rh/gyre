@@ -7544,6 +7544,16 @@ mod tests {
     #[tokio::test]
     async fn meta_spec_drift_records_warn_gate_result_and_merge_proceeds() {
         let state = test_state();
+        // Production policy set (same as
+        // `guided_workspace_merge_proceeds_with_startup_seeded_builtins`):
+        // a deployed server seeds the builtin ABAC policies at startup, and
+        // the merge-time attestation-ABAC gate default-denies without them.
+        // The drift MR carries a chain attestation, so
+        // `builtin:attested-authorization` allows the merge — the §9 drift
+        // behavior is under test, not the empty policy store.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let ws_id = "ws-drift-warn";
         let repo = create_repo_in_workspace(&state, "repo-drift-warn", ws_id).await;
         let current = bind_drift_set(&state, ws_id).await;
@@ -7597,6 +7607,13 @@ mod tests {
     #[tokio::test]
     async fn meta_spec_drift_hard_blocks_under_strict_workspace_policy() {
         let state = test_state();
+        // Production policy set — see the warn-only test above: the relaxed
+        // phase of this test must merge the attested drifted MR, which the
+        // builtin `attested-authorization` Allow covers exactly as in a
+        // deployed server.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let ws_id = "ws-drift-block";
         let repo = create_repo_in_workspace(&state, "repo-drift-block", ws_id).await;
         bind_drift_set(&state, ws_id).await;
@@ -7695,6 +7712,10 @@ mod tests {
     #[tokio::test]
     async fn meta_spec_drift_matching_set_sha_merges_without_warning() {
         let state = test_state();
+        // Production policy set — see the warn-only drift test above.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let ws_id = "ws-drift-match";
         let repo = create_repo_in_workspace(&state, "repo-drift-match", ws_id).await;
         let current = bind_drift_set(&state, ws_id).await;
