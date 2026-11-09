@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["f8be8730c81540598867316d46588b6e78cd265d", "6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["f8be8730c81540598867316d46588b6e78cd265d", "6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688", "80772a600e6254bf923829e1fc891794aa33c1b3"]
 ---
 
 ## Spec Excerpt
@@ -75,6 +75,39 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 Automatic jj rebase on target branch movement (source-control.md §4).
 Core behavior shipped in rounds 1–5; later rounds were review, CI,
 verification-gate, base-merge, and completion-path repairs.
+
+### Base-merge round (R24, commit `80772a600`)
+
+Merged assignment base `774737638` (task-177 candidate). The auto-merge
+left four content conflicts; resolution preserves BOTH sides' work:
+
+- `merge_processor.rs`: the task-106 rebase test block was kept verbatim
+  (byte-identical to pre-merge HEAD) and the base's new
+  `require_current_spec_blocks_stale_spec_ref` test (spec-approval-ledger
+  regression) was inserted after it, before the task-077 section. The
+  criss-cross conflict split both tests around shared `.await.unwrap()`
+  lines, so both were reconstructed whole rather than interleaved.
+- `api/spawn.rs`: kept the base's new
+  `secret_rotation::revoke_agent_task_secrets` teardown call (Platform
+  Model §7); dropped the base's `jj_bookmark_create` block at the complete
+  path because it is superseded by R20's F1 fix (`jj_bookmark_set` +
+  `jj git export` BEFORE MR stats — reintroducing create would regress
+  "Bookmark already exists" and export a stale spawn-time bookmark).
+- `lib.rs`: kept both sides' tests — task-106's `configured_repos_path`
+  F6 pins and the base's `seed_builtin_personas` suite (both were
+  independent additions at the same spot).
+- `.github/workflows/e2e.yml`: both sides pinned `runs-on: ubuntu-24.04`
+  with equivalent rationale comments; kept one merged comment.
+
+Evidence (logs in `/tmp/stage/review-evidence/task-106-r24/`):
+`cargo test -p gyre-server --lib` → **1547 passed, 0 failed** (R22's 1505
+plus the base's new suites; task-106 rebase tests, the base's
+spec-approval-ledger and persona-seed tests, and the spawn/completion-path
+tests all verified present and passing). `cargo test -p gyre-adapters
+--lib` → 408 passed, 0 failed. `cargo check -p gyre-server --all-targets`
+→ EXIT 0; `cargo fmt --check -p gyre-server` → EXIT 0;
+`check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`
+→ all EXIT 0.
 
 ### CI repair round (R23, commit `27b946cbc`)
 
