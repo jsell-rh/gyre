@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["2d4faab3a1d1038a4a6354a50823645c25e01257", "07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
+commits: ["f32cd89d76dd19fb1711fbd53c82ca3c06c431ad", "2d4faab3a1d1038a4a6354a50823645c25e01257", "07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
 ---
 
 ## Spec Excerpt
@@ -81,7 +81,18 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 ## Shipped
 
-All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–12; current head `2d4faab3a`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–13; current head `f32cd89d7`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+
+### Rebase repair (round 13, merge `f32cd89d7`): task-138 base merge, union resolution in the spec-lifecycle hook
+
+Rebase finding `0b70463af` on candidate `e633c9a16`: merging base `22f275e26a` (task-138 spec approval ledger) conflicted in `git_http.rs` `process_spec_lifecycle`. The two sides had restructured the same region differently: task-104 resolves the repo's workspace scope per spec change (`ws_id_opt`) and `continue`s past the workspace events when the repo row is unresolvable; task-138 resolves `ws_id` once per push above the change loop and emits the workspace message events conditionally (`if let Some`), so cross-workspace notification still runs when the repo row is unresolvable. Resolved as a union of both semantics:
+
+- The base's once-per-push `ws_id` resolution is kept (warn + `None` on lookup failure); task-104's redundant per-change `ws_id_opt` block — the same lookup resolved later and with worse logging — is removed.
+- All three task-104 `SpecChanged` audit emissions (dedup-skip, create-Err, create-Ok) are scoped via `ws_id.as_ref()`: a real scope when the repo resolves, no event scoping when it does not, never a fabricated identity (task-097 F3 class). The dedup-skip emission, previously unscoped only because the old lookup sat after the dedup check, is now scoped like the others.
+- The create-Ok arm keeps the audit emission with the auto-created `task_id` and adopts the base's conditional workspace-event emission (no `continue`); the base's duplicate inner `change_kind` re-computation is dropped in favor of the outer per-change binding that already feeds the audit events.
+- The base's approval-invalidation block (auto-merged) and its auto-merged `api/specs.rs` / `mem.rs` / `git_refs.rs` / `merge_processor.rs` changes are taken as-is. The base's new revoke-approval deny path is an Owner-or-Admin ownership guard — the denial class explicitly excluded from RbacDenied emissions — and task-138 was independently reviewed, so no new emission repair was required.
+
+Regression coverage is the existing pair of tests over the resolved region: `push_spec_change_records_spec_changed_audit_event` (task-104: exactly one `spec_changed` event with repo_id/spec_path/change_kind/task_id) and `push_modifying_spec_revokes_ledger_approvals` (task-138: push invalidates stale approvals) both pass at the merge head.
 
 ### Rebase repair (round 12, merge `451407535` + commit `2d4faab3a`): task-100 base merge, union resolutions, and AuthFailure on the new fail-closed API-key rejection
 
@@ -123,17 +134,19 @@ Regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` driv
 
 Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the round-12 API-key tenant-binding rejection (AuthFailure with reason), the per-request AuthSuccess dedupe, the ABAC policy denial paths (middleware, git push, and the nine round-11 per-handler guards), and the RbacDenied paths (extractor, handler guards, the round-8/9 guards, and the round-10 MCP tools/call gate).
 
-At the round-12 head `2d4faab3a` (merge `451407535` of base `7373979e8` task-100, on top of the round-11 head `07794b483` and its earlier base merges):
+At the round-13 head `f32cd89d7` (merge of base `22f275e26a` task-138, on top of the round-12 head `2d4faab3a` and its earlier base merges):
 
-- `cargo test -p gyre-server --lib`: **1537 passed, 0 failed** (the round-8/9/10/11/12 regression tests plus the task-100, task-103, and task-089 tests that arrived with the base merges; 1501 before the task-100 base merge).
+- `cargo test -p gyre-server --lib`: **1544 passed, 0 failed** (the round-8/9/10/11/12 regression tests plus the task-100, task-103, task-089, and task-138 tests that arrived with the base merges; 1537 before the task-138 base merge).
+- `cargo test -p gyre-server --test git_integration`: 17 passed, 0 failed (includes the base's `push_modifying_spec_revokes_ledger_approvals`).
 - Mutation checks: removing the round-12 extractor-path AuthFailure emission fails `auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding`; the round-11 worktrees/conversations checks and earlier rounds' checks (rollout-policy, secrets, MCP-gate RbacDenied) still hold.
-- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has no findings in code touched by the round-12 resolution (remaining warnings pre-existing at the candidate and in the merged base).
-- `bash scripts/check-fabricated-scope-defaults.sh` and `bash scripts/check-arch.sh` pass.
-- Round-12 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-*.log`.
+- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has no findings in code touched by the round-13 resolution (remaining warnings pre-existing at the candidate and in the merged base).
+- `bash scripts/check-fabricated-scope-defaults.sh`, `bash scripts/check-inert-enforcement.sh`, and `bash scripts/check-arch.sh` pass.
+- Round-13 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-round13*.log`.
 - Full workspace suites, arch checks, and GitHub CI are owned by verification.
 
-### Repair and merge history (rounds 1–11, summarized)
+### Repair and merge history (rounds 1–12, summarized)
 
+- Round 13 (rebase finding `0b70463af`, merge `f32cd89d7` of base `22f275e26a` task-138): spec-lifecycle hook conflict resolved as a union — base's once-per-push `ws_id` resolution kept, task-104's redundant per-change lookup removed, all SpecChanged audit emissions scoped from the per-push resolution, base's conditional workspace-event emission adopted (details in the section above).
 - Round 11 (commit `07794b483`, finding on candidate `1345a7cac`): nine uninstrumented per-handler repo/workspace ABAC guards now record AbacDenied via the shared `record_abac_denied` helper; regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` (details in the section above). Round 12 (rebase finding `c112f2c10`) is described in its own section above.
 - Rounds 1–2: implementation `ac5f88365` preserved through merges of bases `233664cf8` (task-087) and `72ad2a128` (task-096).
 - Round 5 (base `414fe9aa1b`, task-120): git-declined ref updates no longer record GitPushAccepted (`ca905fe43`, `verify_applied_ref_updates`).
