@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5192ff750f58b79d2553a317e9d9b802292ad3e1"]
 ---
 
 ## Spec Excerpt
@@ -128,3 +128,25 @@ Note for reviewers: `check-notification-test-coverage.sh` still exits 2 on
 this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
 and this host has mawk 1.3.4. Identical failure at pristine base;
 host-tooling issue, unrelated to this task.
+
+### Review repair (finding 73a69995)
+
+Both findings from the review round at 152e67033 are fixed:
+
+- **Failing test (code):**
+  `reconciliation::tests::reconciliation_completed_fires_when_all_tasks_terminal`
+  failed at 152e67033 because the p6 MetaSpecDrift notification moved into
+  the async NotificationBridge while the test asserted it synchronously
+  without ever draining the bus. Fixed in 5192ff750 by spawning the real
+  dispatcher (`spawn_message_consumer`, same pattern as the gate_executor
+  bridge test) and polling for the bridge-created notification. The test
+  kills a real regression: removing the bridge's ReconciliationCompleted
+  arm or the dispatcher wiring makes it fail again.
+- **Stale frontmatter (process):** merge commit 9e5a0171d is re-listed in
+  `commits:` above, so the main.rs startup-wiring conflict resolution is
+  inside review scoping; the Shipped merge-repair note is now accurate at
+  head.
+
+Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
+0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
+clean. Evidence recorded under /tmp/stage/review-evidence.
