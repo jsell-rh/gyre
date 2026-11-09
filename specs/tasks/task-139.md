@@ -3,11 +3,11 @@ title: "Implement forge enforcement policies for spec-to-code binding at merge"
 spec_ref: "agent-gates.md §Forge Enforcement Policies"
 depends_on:
   - task-138
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: []
+commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb"]
 ---
 
 ## Spec Excerpt
@@ -83,3 +83,97 @@ The `spec-alignment-review` gate type (using Accountability agent persona) is de
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Forge Enforcement Policies and §Integration with Agent Gates. Existing spec policy: check `gyre-server/src/api/spec_policy.rs` and routes at `GET/PUT /api/v1/repos/:id/spec-policy` (registered in `gyre-server/src/api/mod.rs` at line ~171). MR model: `gyre-domain/src/merge_request.rs` or equivalent. Merge processor: grep for `merge_processor\|process_merge` in `gyre-server/src/`. Spec approvals: depends on task-138's ledger. Git SHA comparison: need to resolve current HEAD SHA for a spec file path in the repo. Check migration numbering: currently at 000049.
+
+## Shipped
+
+All five forge enforcement policies now run at merge time with real ledger
+and git lookups, violations reach the MR author directly, and the
+spec-alignment gate receives the spec at the pinned SHA. Four of the five
+policies (`require_spec_ref`, `require_approved_spec`, `warn_stale_spec`,
+`require_current_spec`) and the `spec_ref` MR field already shipped with the
+task-138 lineage; this assignment adds the missing pieces with production
+code, not bookkeeping.
+
+### require_signed_approval (the missing 5th policy)
+
+- `SpecPolicy.require_signed_approval` (`gyre-domain/src/spec_policy.rs`),
+  persisted via migration `2026-11-09-000059_require_signed_approval`
+  (portable `ALTER TABLE ... ADD COLUMN ... INTEGER NOT NULL DEFAULT 0`) and
+  implemented in the SQLite and Postgres adapters + mem store.
+- `verify_signed_spec_ref` (`api/gates.rs`): same exact-(path, sha) ledger
+  query as `verify_spec_ref`, but the active approval must additionally
+  carry a non-empty signature; one signed active approval among several
+  rows for the version satisfies the policy, whitespace-only signatures do
+  not.
+- Merge processor enforces it before executing the merge; an MR with no
+  spec_ref is also rejected under this policy (no spec_ref → no referenced
+  approval, signed or otherwise).
+- `GET/PUT /api/v1/repos/:id/spec-policy` round-trips the field (Admin-only
+  PUT, defaults false — opt-in per repo).
+
+### Enforcement errors reported to the author
+
+- Every blocking spec-policy rejection now fails the queue entry with the
+  specific reason AND emits a `GateFailure` workspace event AND delivers an
+  inbox notification to the author's spawning user
+  (`notifications::notify_spec_policy_violation`, same delivery rule as
+  `notify_gate_failure`).
+- `warn_stale_spec` keeps the existing `StaleSpecWarning` event and now also
+  records a deduplicated advisory MR comment (`forge:spec-policy` author)
+  visible via `GET /api/v1/merge-requests/:id/comments`, without blocking.
+
+### Spec-alignment gate receives spec at pinned SHA
+
+- New `GET /api/v1/merge-requests/:id/spec` serves the spec content at the
+  MR's pinned `spec_ref` SHA via `git cat-file blob` (SHA validated 40-hex
+  before reaching the command line). 404 when the MR has no spec_ref or the
+  pinned blob is unreachable. Route registered in `api/mod.rs` with an ABAC
+  `RouteResourceMapping` (resource `merge_request`).
+- `gate_executor` passes `GYRE_SPEC_URL` to AgentReview and AgentValidation
+  gate agent processes (documented in `docs/agent-protocol.md`), so review
+  runs against the version the code was written for — not HEAD.
+- Web: RepoSettings policy form now binds the real API field names
+  (`require_approved_spec`, `warn_stale_spec` — the previous
+  `require_approval`/`stale_spec_warning` bindings were dead) and adds
+  `require_current_spec` + `require_signed_approval` toggles, so all five
+  policies are configurable from the UI as well as the API.
+
+### Test evidence
+
+Focused suites distinguishing real behavior (this sandbox, base
+22f275e26a320cc8ab0f27f016688a138e62be8f, commit
+99edd0bcaddd740a5b560e61ef2937b156d780fb):
+
+- `signed_spec_ref_requires_signature_on_active_approval` (api::gates):
+  approved+signed verifies; approved-unsigned and blank-signature fail
+  naming the missing signature; no-approval fails; one signed row among
+  several satisfies.
+- `require_signed_approval_blocks_unsigned_spec_approval`
+  (merge_processor): unsigned approval → entry Failed with reason naming the
+  signature, author notification delivered (asserted via
+  `NotificationRepository::list_for_user`); control MR with a signed
+  approval merges (Merged).
+- `warn_stale_spec_adds_advisory_comment_without_blocking`
+  (merge_processor, real git repo with HEAD moved past the referenced
+  blob): merge proceeds (Merged) and the advisory comment lands on the MR.
+- `get_mr_spec_serves_pinned_sha_not_head` (api::merge_requests, real git
+  repo with spec v1 committed then v2 at HEAD): endpoint returns v1 content
+  and the pinned SHA; no-spec_ref and unreachable-SHA MRs 404.
+- `set_require_signed_approval_round_trips` (api::spec_policy) and
+  `set_and_get_round_trips_all_five_policies` (sqlite adapter, fresh DB →
+  proves migration 000059 runs).
+- Regression control: `require_current_spec_blocks_stale_spec_ref`,
+  `revoked_approval_no_longer_verifies_spec_ref`,
+  `find_by_spec_sha_scopes_to_exact_version` still pass.
+
+Suite results: `cargo test -p gyre-server --lib` 1531/1531; `-p gyre-domain`
+442/442; `-p gyre-adapters --lib` 405/405 (incl. all migrations on fresh
+SQLite DBs); integration `git_integration` 17/17, `api_integration` 66/66,
+`graph_integration` 38/38; frontend `vitest run
+src/__tests__/RepoSettings.test.js` 54/54. Mechanical invariants pass:
+arch, migration-versions, migration-SQL-portability, ABAC route registry
+(+ new route registered), ABAC exempt handlers, mem-port-contracts,
+inert-enforcement, dead-message-kinds, api-auth, and the other check-*
+scripts with output identical to the pristine baseline. Full workspace
+`cargo test --all`, all-target Clippy, and GitHub CI on the exact head
+remain with verification/publication.
