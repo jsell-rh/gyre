@@ -97,10 +97,12 @@ repo-B/workspace-B.
   `attestation.context_binding_mismatch` without blocking (Phase 2).
 - **Real generation counter**: `Task.generation` (default 1) persisted in
   domain, SQLite + Postgres adapters (migration
-  `2026-10-08-000057_task_generation`, portable SQL, next unused sequence
-  number — renumbered from 000056 after the main merge introduced a
-  main-side migration at the same version; duplicate versions are
-  silently dropped by Diesel) and exposed in `TaskResponse`. Bumped on
+  `2026-10-08-000059_task_generation`, portable SQL, next unused sequence
+  number — renumbered twice: from 000056 after a main-side migration at the
+  same version, then from 000057 after base `fefde294` shipped
+  `2026-10-08-000057_spec_approval_attestation`; duplicate versions are
+  silently dropped by Diesel, alphabetically-first wins) and exposed in
+  `TaskResponse`. Bumped on
   every reassignment to a different agent in all four mutation paths:
   `update_task` (PUT /api/v1/tasks/:id), spawn reassignment, admin
   reassign, MCP reassign.

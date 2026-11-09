@@ -3130,6 +3130,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -3317,6 +3318,8 @@ mod tests {
             revoked_at: None,
             revoked_by: None,
             revocation_reason: None,
+            attestation_level: None,
+            stack_hash: None,
         };
         state.spec_approval_history.record(&event).await.unwrap();
 
