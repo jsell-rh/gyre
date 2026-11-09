@@ -43,3 +43,86 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 13 — rebase review (candidate `2d985c338`, base `fefde2946`)
+
+Scope: the round-12 rebase merge `6e679bc8b` (branch tip `7435129e0` onto base
+`fefde2946`, task-089 head) plus the two process commits recording it. The
+merge reported three content conflicts (auth.rs, check-fabricated-scope-defaults.sh,
+fabricated-scope-defaults-exemptions.txt); this review independently verified
+each resolution and re-ran the task's load-bearing probes on the merged head.
+
+Conflict resolutions (all verified sound):
+
+- **auth.rs JWT `tenant_id` claim**: the branch's `Option<String>` +
+  use-site `unwrap_or_else(system_principal_tenant)` was replaced by upstream
+  task-103's serde schema default (`default_tenant_claim` on `JwtClaims`).
+  Behaviorally identical: absent claim → "default" (the bootstrapped Tenant
+  row, materialized by `bootstrap_default_tenant` in lib.rs), applied at
+  deserialization, then passed through `validate_tenant_id` (length, charset,
+  "system" reserved for Admins). No use-site fallback remains, so the
+  fabricated-scope-defaults exemption stays eliminated. The branch's own
+  security work survived the merge intact: fail-closed API-key tenant binding
+  (user without `tenant_id` → 403 with re-provision hint, auth.rs:659-679) and
+  the `is_system_principal()` discriminator (`agent_id == "system" &&
+  user_id.is_none()` — cannot be spoofed by a user *named* "system") gating
+  create_user tenant containment (users.rs:812).
+- **check-fabricated-scope-defaults.sh / exemptions**: kept the branch's
+  stricter FROZEN_EXEMPTION_COUNT=2 (base had 3). The deleted third entry was
+  the auth.rs JWT fallback, which the merged code genuinely fixes via the
+  serde schema default — a fix, not a grandfather. Count decrease is the
+  allowed direction.
+- **check-scope-literal-defaults.sh / exemptions**: 24 → 12. The 12 deleted
+  entries were the task-099-owned sites (auth.rs ×7, lib.rs ×2, domain
+  agent.rs) fixed in the F1 revision rounds; the fixes are present in the
+  merged tree (the check passing at 12 proves it — a missing fix would be an
+  unlisted violation and fail the check).
+
+Fresh evidence on `2d985c338` (logs in `/tmp/stage/review-evidence/`):
+
+- 18 mechanical check scripts all exit 0: arch, abac-route-registry,
+  abac-exempt-handlers, fabricated-scope-defaults, scope-literal-defaults,
+  byte-slice-truncation, relative-path-defaults, lossy-secret-conversion,
+  inert-enforcement, mem-port-contracts, migration-sql-portability,
+  migration-versions, dead-message-kinds, mcp-write-tools,
+  fail-open-ref-resolution, forged-scope-fields, in-memory-state-stores,
+  unbounded-external-http.
+- `cargo test -p gyre-cli`: **148 + 1 passed, 0 failed** — includes all
+  bootstrap tests (parse/flags, slug, gates, starter kit ×2, manifest shape,
+  summary ×4, persona coverage ×2), the four scripted full-flow resume tests
+  against a mock HTTP server, and the round-11 push-safety tests running real
+  git against a real bare "server" repo.
+- `cargo test -p gyre-server --lib`: **1501 passed, 0 failed** — includes the
+  46 auth tests (JWT claim extraction, fail-closed API-key binding,
+  minted-jti uniqueness from upstream task-103), the create_user handler
+  tests (duplicate external_id/username, unknown role/tenant, cross-tenant
+  admin 403, non-URL-safe username), persona resolution, and the
+  spec_registry round-trip test that consumes the exact shipped
+  starter-manifest bytes through the real `parse_manifest` (the round-1 F5
+  defect's regression test — verified fixed on this head:
+  `approval: {mode: human_only}` in starter-manifest.yaml).
+- **Mutation probe (independent)**: replacing the push-refusal `bail!` with a
+  force-with-lease makes
+  `push_sync_first_run_replaces_seed_and_resume_refuses_to_rewind_merged_main`
+  FAIL (exit 101) — the refusal behavior is load-bearing and the test bites.
+  Source restored byte-identical (`git status` clean), both push-safety tests
+  re-pass.
+- **Rebase touch analysis**: `bootstrap.rs` and `bootstrap/` are byte-identical
+  to the pre-merge branch tip; `run_bootstrap`/`StepTracker` untouched by the
+  merge (the main.rs/client.rs additions are upstream secrets/budget work in
+  unrelated regions). The rebase therefore only re-based conflict sites and
+  absorbed upstream work; no task-099 behavior drifted.
+
+Pre-existing, unchanged from the base (not introduced by this candidate, per
+the shipped notes and confirmed byte-identical on both heads): clippy errors
+in gyre-domain rust_extractor.rs, check-assertionless-tests exit 2,
+check-cli-spec-parity exit 1 on the spec_assist SSE display path.
+
+Verdict: **approved**. The rebase resolutions are semantically correct and
+strictly non-permissive, all prior-round repairs are present and re-verified
+on the merged head, and the task's acceptance criteria are backed by green
+focused suites plus an independent mutation probe. Full workspace suites,
+all-target Clippy, GitHub CI, and a fresh live e2e remain with verification
+and publication as previously scoped.
+
+— Reviewer, 2026-11-09 (round 13)
