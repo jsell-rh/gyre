@@ -20,6 +20,7 @@ vi.mock('../lib/api.js', () => ({
     mergeRequests: vi.fn().mockResolvedValue([]),
     mrGates: vi.fn().mockResolvedValue([]),
     mrTrace: vi.fn().mockResolvedValue({ spans: [] }),
+    repoGraphRisks: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -105,9 +106,11 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const structural = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true); // always-on base layer
+    expect(structural?.disabled).toBe(true); // Structural cannot be toggled off
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluative?.checked).toBe(false);
     expect(new URL(window.location.href).searchParams.get('lens')).toBeNull();
   });
 
@@ -120,13 +123,12 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     await drillIntoRepo(container);
 
     replaceStateSpy.mockClear();
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
     expect(evaluative).toBeTruthy();
     await fireEvent.click(evaluative);
 
     // Evaluative is now active and the URL carries the param
-    expect(evaluative.classList.contains('active')).toBe(true);
+    expect(evaluative.checked).toBe(true);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
   });
 
@@ -138,14 +140,14 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
     await fireEvent.click(evaluative);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
 
-    const structural = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Structural');
-    await fireEvent.click(structural);
+    // Unchecking the Evaluative overlay returns to structural (the base
+    // layer's own checkbox is locked on — there is nothing to click back to).
+    await fireEvent.click(evaluative);
+    expect(evaluative.checked).toBe(false);
     expect(new URL(window.location.href).searchParams.get('lens')).toBeNull();
   });
 
@@ -157,9 +159,8 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
-    expect(evaluative?.classList.contains('active')).toBe(true);
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluative?.checked).toBe(true);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
   });
 
@@ -198,10 +199,11 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const observable = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim().startsWith('Observable'));
+    const observable = container.querySelector('[data-testid="lens-checkbox-observable"]');
     expect(observable).toBeTruthy();
-    expect(observable.getAttribute('aria-disabled')).toBe('true');
+    const observableInput = observable.querySelector('input');
+    expect(observableInput?.checked).toBe(false);
+    expect(observableInput?.disabled).toBe(true);
     expect(observable.getAttribute('title')).toContain('requires production telemetry integration');
     expect(observable.textContent).toContain('requires production telemetry integration');
   });

@@ -77,6 +77,13 @@
     // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
     // parent (ExplorerView); only rendered in the Evaluative lens.
     gateRecords = [],
+    // Risk metrics per node id from GET /repos/:id/graph/risks (task-178:
+    // Evaluative lens overlays risk data — churn × complexity heat).
+    riskByNode = {},
+    // Node ids hidden by the in-view filter panel (filter-categories.js
+    // hiddenNodeIds) — category checkboxes and concept selection toggle
+    // node visibility on the canvas.
+    hiddenNodeIds = null,
   } = $props();
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
@@ -417,8 +424,15 @@
       if (hasTraces && !TRACE_METRICS.has(evaluativeMetric)) {
         evaluativeMetric = 'span_duration';
       }
+      // No trace data but risk metrics are available (GET /repos/:id/graph/risks,
+      // task-178): default the heat to the risk overlay instead of a dead metric.
+      if (!hasTraces && riskEntryCount > 0 && evaluativeMetric !== 'risk') {
+        evaluativeMetric = 'risk';
+      }
     }
   });
+  // Risk entries present in the riskByNode prop (task-178 Evaluative lens).
+  let riskEntryCount = $derived(Object.keys(riskByNode ?? {}).length);
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
@@ -459,6 +473,11 @@
     void activeAgentNodeIds.size;
     void recentChanges.size;
     void nodeGateStatus.size;
+    // In-view filter panel (task-178): category/concept visibility changes
+    // and Evaluative-lens risk data arrival must redraw without waiting for
+    // the next user interaction.
+    void hiddenNodeIds?.size;
+    void Object.keys(riskByNode ?? {}).length;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
   });
@@ -908,12 +927,16 @@
     return m;
   });
 
-  // Centralized metric value accessor for evaluative lens (trace-based metrics only)
+  // Centralized metric value accessor for evaluative lens (trace metrics +
+  // the risk overlay from GET /repos/:id/graph/risks).
   function getNodeMetricValue(metric, node) {
     if (!node) return 0;
-    // Evaluative lens only supports behavioral/trace metrics per spec.
-    // Structural metrics (complexity, churn, incoming_calls, test_coverage)
-    // belong in the structural lens heat map.
+    // Risk overlay (task-178): risk score per node from the server's
+    // /graph/risks endpoint — churn × complexity. Structural metrics
+    // (complexity, churn alone) belong in the structural lens heat map.
+    if (metric === 'risk') {
+      return riskByNode?.[node.id] ?? 0;
+    }
     if (metric === 'span_duration') {
       const stats = nodeSpanStats.get(node.id);
       return stats ? stats.meanDuration : 0;
@@ -2696,6 +2719,14 @@
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
 
+      // In-view filter panel (ui-navigation.md §3): category checkboxes and
+      // concept selection toggle node visibility — hidden nodes are skipped
+      // entirely (tree-group containers stay: they hold the visible children).
+      if (!isTreeGroup && hiddenNodeIds?.size > 0) {
+        const filterNid = ln.node?.id ?? ln.id;
+        if (hiddenNodeIds.has(filterNid)) return;
+      }
+
       // Semantic zoom: deliberate information hierarchy per zoom level
       // The spec's core abstraction: "default zoom shows boundaries and interfaces"
       // with "types, functions visible on drill-down."
@@ -3899,6 +3930,8 @@
 
       const srcId = edgeSrc(e);
       const tgtId = edgeTgt(e);
+      // In-view filter panel: edges touching a hidden node are hidden too.
+      if (hiddenNodeIds?.size > 0 && (hiddenNodeIds.has(srcId) || hiddenNodeIds.has(tgtId))) continue;
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -5783,12 +5816,41 @@
     </div>
   {/if}
 
-  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
+  <!-- Toolbar — lens checkbox group + filter presets (explorer-implementation.md §25 Phase 1;
+       ui-navigation.md §3: "Checkbox group (not a dropdown — checkboxes allow multi-select
+       for composition). Structural (always on) + Evaluative (toggle) + Observable (toggle, future).") -->
   <div class="treemap-toolbar">
-    <div class="lens-group" role="group" aria-label="Lens toggle">
-      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
-      <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
+    <div class="lens-group" role="group" aria-label="Lens selector" data-testid="lens-checkbox-group">
+      <!-- Structural is always the base layer — checked and locked. -->
+      <label class="lens-check" data-testid="lens-checkbox-structural" title="Structural lens — boundaries and dependencies (always on)">
+        <input type="checkbox" checked disabled aria-disabled="true" />
+        <span>Structural</span>
+      </label>
+      <!-- Evaluative is an additive overlay on the structural base. -->
+      <label class="lens-check" data-testid="lens-checkbox-evaluative" title="Overlay test results, gate outcomes, spec coverage, and risk metrics on the structural topology">
+        <input
+          type="checkbox"
+          checked={lens === 'evaluative'}
+          onchange={(e) => {
+            const next = e.currentTarget.checked ? 'evaluative' : 'structural';
+            lens = next;
+            onLensChange(next);
+          }}
+        />
+        <span>Evaluative</span>
+      </label>
+      <!-- Observable is a future toggle — grayed out until production telemetry
+           integration exists (system-explorer.md §1 "Observable (future)"). Clicking
+           it surfaces the notice banner instead of activating. -->
+      <label
+        class="lens-check lens-check-observable"
+        data-testid="lens-checkbox-observable"
+        title="Observable lens is disabled — requires production telemetry integration"
+        onclick={() => { observableBannerVisible = true; }}
+      >
+        <input type="checkbox" disabled aria-disabled="true" />
+        <span>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></span>
+      </label>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
@@ -5808,6 +5870,7 @@
       <EvaluativeOverlay
         {evaluativeMetric}
         {traceData}
+        hasRiskData={riskEntryCount > 0}
         onMetricChange={(key) => { evaluativeMetric = key; userExplicitlySelectedMetric = true; onLensChange('evaluative'); }}
       />
       <div class="tb-sep"></div>
@@ -6363,6 +6426,25 @@
   }
 
   .filter-group, .lens-group { display: flex; gap: 2px; }
+  /* Lens checkbox group (ui-navigation.md §3: checkbox group, not a dropdown) */
+  .lens-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }
+  .lens-check:hover { background: rgba(51, 65, 85, 0.5); color: #e2e8f0; }
+  .lens-check input { accent-color: #3b82f6; margin: 0; cursor: pointer; }
+  .lens-check input:disabled { cursor: not-allowed; }
+  .lens-check:has(input:checked) { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
+  .lens-check-observable { opacity: 0.45; font-style: italic; cursor: not-allowed; }
+  .lens-check-observable:hover { background: transparent; color: #94a3b8; opacity: 0.6; }
 
   .tb-btn {
     padding: 5px 14px; border: none; border-radius: 7px; font-size: 13px; font-weight: 500;
@@ -6374,9 +6456,6 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; }
-  .tb-btn-observable:hover { opacity: 0.5; }
-  .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
   .observable-coming-soon { font-size: 9px; opacity: 0.7; font-style: italic; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 
