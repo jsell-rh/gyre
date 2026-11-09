@@ -17,9 +17,9 @@ use gyre_ports::{
     AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1234,49 +1234,78 @@ impl CostRepository for MemCostRepository {
     }
 }
 
+/// One stored audit event. Once the log-compression job compresses an
+/// event's detail (observability.md §Log Retention & Compression), the
+/// raw JSON lives only in `detail_zstd` and `event.detail` is `Null` —
+/// mirroring the SQLite/Postgres adapters, where compression blanks the
+/// `detail` column and stores the zstd payload in `detail_zstd`.
+struct MemAuditEntry {
+    event: AuditEvent,
+    detail_zstd: Option<Vec<u8>>,
+}
+
+impl MemAuditEntry {
+    /// Materialize the domain event, decompressing the detail payload
+    /// when compressed. A corrupt compressed payload is a hard error —
+    /// same contract as the DB adapters.
+    fn materialize(&self) -> Result<AuditEvent> {
+        let mut event = self.event.clone();
+        if let Some(z) = &self.detail_zstd {
+            let raw = zstd::decode_all(z.as_slice())
+                .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
+            event.detail = serde_json::from_slice(&raw)
+                .map_err(|e| anyhow::anyhow!("parse compressed audit detail: {e}"))?;
+        }
+        Ok(event)
+    }
+}
+
 #[derive(Default)]
 pub struct MemAuditRepository {
-    store: Arc<Mutex<Vec<AuditEvent>>>,
+    store: Arc<Mutex<Vec<MemAuditEntry>>>,
 }
 
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
-        self.store.lock().await.push(event.clone());
+        self.store.lock().await.push(MemAuditEntry {
+            event: event.clone(),
+            detail_zstd: None,
+        });
         Ok(())
     }
 
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
-        let mut events: Vec<AuditEvent> = store
-            .iter()
-            .filter(|e| {
-                filter
-                    .agent_id
-                    .as_ref()
-                    .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
-                    && filter
+        let mut events: Vec<AuditEvent> =
+            store
+                .iter()
+                .filter(|e| {
+                    filter.agent_id.as_ref().is_none_or(|a| {
+                        e.event.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
+                    }) && filter
                         .event_type
                         .as_ref()
-                        .is_none_or(|t| e.event_type.as_str() == *t)
-                    && filter
-                        .workspace_id
-                        .as_ref()
-                        .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
-                    && filter
-                        .user_id
-                        .as_ref()
-                        .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
-                    && filter
-                        .resource_type
-                        .as_ref()
-                        .is_none_or(|rt| e.resource_type == *rt)
-                    && filter.outcome.is_none_or(|o| e.outcome == o)
-                    && filter.since.is_none_or(|s| e.timestamp >= s)
-                    && filter.until.is_none_or(|u| e.timestamp <= u)
-            })
-            .cloned()
-            .collect();
+                        .is_none_or(|t| e.event.event_type.as_str() == *t)
+                        && filter.workspace_id.as_ref().is_none_or(|w| {
+                            e.event
+                                .workspace_id
+                                .as_ref()
+                                .is_some_and(|id| id.as_str() == w)
+                        })
+                        && filter.user_id.as_ref().is_none_or(|u| {
+                            e.event.user_id.as_ref().is_some_and(|id| id.as_str() == u)
+                        })
+                        && filter
+                            .resource_type
+                            .as_ref()
+                            .is_none_or(|rt| e.event.resource_type == *rt)
+                        && filter.outcome.is_none_or(|o| e.event.outcome == o)
+                        && filter.since.is_none_or(|s| e.event.timestamp >= s)
+                        && filter.until.is_none_or(|u| e.event.timestamp <= u)
+                })
+                .map(MemAuditEntry::materialize)
+                .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(filter.limit);
         Ok(events)
@@ -1291,7 +1320,7 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut counts: HashMap<String, u64> = HashMap::new();
         for e in store.iter() {
-            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+            *counts.entry(e.event.event_type.as_str()).or_insert(0) += 1;
         }
         let mut result: Vec<(String, u64)> = counts.into_iter().collect();
         result.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1302,9 +1331,9 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut events: Vec<AuditEvent> = store
             .iter()
-            .filter(|e| e.timestamp > since)
-            .cloned()
-            .collect();
+            .filter(|e| e.event.timestamp > since)
+            .map(MemAuditEntry::materialize)
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         events.truncate(limit);
         Ok(events)
@@ -1313,8 +1342,33 @@ impl AuditRepository for MemAuditRepository {
     async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        store.retain(|e| e.timestamp >= cutoff_secs);
+        store.retain(|e| e.event.timestamp >= cutoff_secs);
         Ok((before - store.len()) as u64)
+    }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<gyre_ports::audit::CompressionStats> {
+        let mut store = self.store.lock().await;
+        let mut stats = gyre_ports::audit::CompressionStats::default();
+        for e in store.iter_mut() {
+            if (stats.compressed as usize) >= limit {
+                break;
+            }
+            if e.detail_zstd.is_some() || e.event.timestamp >= cutoff_secs {
+                continue;
+            }
+            let raw = serde_json::to_vec(&e.event.detail)?;
+            let compressed = zstd::encode_all(raw.as_slice(), 3)?;
+            stats.compressed += 1;
+            stats.bytes_before += raw.len() as u64;
+            stats.bytes_after += compressed.len() as u64;
+            e.detail_zstd = Some(compressed);
+            e.event.detail = serde_json::Value::Null;
+        }
+        Ok(stats)
     }
 }
 
@@ -2979,6 +3033,33 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+// ── MemRolloutPolicyRepository ──────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemRolloutPolicyRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl RolloutPolicyRepository for MemRolloutPolicyRepository {
+    async fn get(&self, workspace_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(workspace_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, workspace_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, workspace_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemLlmConfigRepository ────────────────────────────────────────────────────
 
 type LlmConfigKey = (Option<String>, String); // (workspace_id, function_key)
@@ -3400,7 +3481,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3415,6 +3496,7 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         Some(storage),
+        None,
         None,
     )
 }
@@ -3433,6 +3515,23 @@ pub fn test_state_with_secrets(
         policies,
         None,
         Some(secrets),
+        None,
+    )
+}
+
+/// Build a test AppState with a custom KvJsonStore — used to exercise
+/// kv read-failure paths (e.g. the rolling-rollout pending-state merge
+/// must abort, not overwrite, when the stored state cannot be read).
+#[cfg(test)]
+pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+        Some(kv),
     )
 }
 
@@ -3441,7 +3540,7 @@ pub fn test_state_with_secrets(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Build a test AppState whose policy repo fails every `create`, used to
@@ -3456,6 +3555,7 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        None,
         None,
         None,
     )
@@ -3474,6 +3574,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        None,
         None,
         None,
     )
@@ -3504,7 +3605,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None)
+    test_state_inner(git_ops, workspaces, policies, None, None, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3517,6 +3618,7 @@ fn test_state_inner(
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
+    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3535,7 +3637,7 @@ fn test_state_inner(
         worktrees: Arc::new(MemWorktreeRepository::default()),
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
-        kv_store: Arc::new(MemKvStore::default()),
+        kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
@@ -3562,7 +3664,7 @@ fn test_state_inner(
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(crate::log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
@@ -3606,6 +3708,7 @@ fn test_state_inner(
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
@@ -3695,6 +3798,16 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
             .iter()
             .find(|(tid, s, _)| tid == tenant_id && s.id == *id)
             .map(|(_, _, v)| v.clone()))
+    }
+
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<gyre_common::Secret>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, s, _)| tid == tenant_id && s.id == *id)
+            .map(|(_, s, _)| s.clone()))
     }
 
     async fn list_by_scope(
