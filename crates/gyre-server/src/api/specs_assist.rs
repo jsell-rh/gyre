@@ -726,11 +726,29 @@ pub async fn save_spec(
     //               (the version the human is approving; matches the ledger's
     //               current_sha semantics from sync_spec_ledger)
     //   mr_id / branch / repo_id — for the MR quick links
+    //
+    // Primary path: `git rev-parse <branch>:<path>` (handles any object
+    // format). Fallback when git is unavailable: derive the SHA-1 git blob id
+    // directly from the content just written to the branch — a blob id is
+    // sha1("blob <len>\0<content>") over the exact bytes `write_file` stored,
+    // so it matches what rev-parse returns for the same content. Never fall
+    // back to "": an empty spec_sha is a fail-open that pushes the Inbox
+    // approve action onto a legacy fallback which approves the pre-edit
+    // ledger version — a no-op masked by an "Approved" success message.
     let blob_sha = {
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-        crate::spec_registry::get_blob_sha(&git_bin, &repo.path, &branch_name, &req.spec_path)
+        match crate::spec_registry::get_blob_sha(&git_bin, &repo.path, &branch_name, &req.spec_path)
             .await
-            .unwrap_or_default()
+        {
+            Some(sha) => sha,
+            None => {
+                use sha1::{Digest, Sha1};
+                let mut hasher = Sha1::new();
+                hasher.update(format!("blob {}\0", req.content.len()).as_bytes());
+                hasher.update(req.content.as_bytes());
+                hex::encode(hasher.finalize())
+            }
+        }
     };
     let notif_body = serde_json::json!({
         "spec_path": req.spec_path,
@@ -1042,10 +1060,14 @@ mod tests {
         assert_eq!(body["spec_path"], "specs/system/vision.md");
         assert_eq!(body["mr_id"], mr_id);
         assert_eq!(body["repo_id"], repo_id);
-        assert!(
-            body["spec_sha"].is_string(),
-            "spec_sha must be present (possibly empty when git is unavailable in tests)"
-        );
+        // HSI §8 P2 / task-175 F3: spec_sha must be the blob SHA of the exact
+        // content the human is approving — never "" (the old fail-open wrote
+        // an empty SHA when git was unavailable, pushing the Inbox approve
+        // action onto a legacy fallback that approves the pre-edit version).
+        // The expected value was produced by `git hash-object` over the exact
+        // saved content — an external anchor, not mirrored logic: a blob id
+        // is sha1("blob <len>\0<content>").
+        assert_eq!(body["spec_sha"], "8035a51635f85a1fa9452e01964fbbd9f01179d4");
         // No workspace members in the test state — the system fallback
         // recipient keeps the approval visible in the global-admin Inbox.
         assert_eq!(spec_notif.user_id, Id::new("system"));

@@ -101,6 +101,7 @@ vi.mock('../lib/api.js', () => ({
     agents: vi.fn().mockResolvedValue([]),
     sendAgentMessage: vi.fn().mockResolvedValue({}),
     mergeRequests: vi.fn().mockResolvedValue([]),
+    mergeRequest: vi.fn().mockResolvedValue(null),
     revertMr: vi.fn().mockResolvedValue({ repo_id: 'repo-1', mr_id: 'mr-lose', revert_commit_sha: 'rev123' }),
     createTask: vi.fn().mockResolvedValue({ id: 'task-42', title: 'Reconcile' }),
   },
@@ -368,6 +369,63 @@ describe('Inbox', () => {
     });
   });
 
+  // task-175 F3: a structured body with an empty spec_sha (server wrote ""
+  // when git was unavailable) must NOT fall back to the ledger SHA while the
+  // spec-edit MR is still open — that is the PRE-edit content, and approving
+  // it records an approval for a version that is invalidated when the MR
+  // lands. The approve action must fail with missing_spec_sha instead.
+  const openMrNoShaNotif = makeNotification({
+    id: 'notif-open-mr-no-sha',
+    notification_type: 'spec_approval',
+    priority: 2,
+    title: 'Spec pending approval',
+    body: JSON.stringify({
+      spec_path: 'specs/system/api-conventions.md',
+      spec_sha: '',
+      mr_id: 'mr-open-1',
+      mr_title: 'Spec edit: specs/system/api-conventions.md',
+      repo_id: 'repo-1',
+    }),
+    entity_ref: 'mr-open-1',
+  });
+
+  it('approve fails with missing_spec_sha when the body SHA is empty and the spec-edit MR is still open (F3)', async () => {
+    api.mergeRequest.mockResolvedValue({ id: 'mr-open-1', status: 'open' });
+    api.myNotifications.mockResolvedValue([openMrNoShaNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    const approveBtn = await findByText('Approve');
+    await fireEvent.click(approveBtn);
+    // MR state is checked before any approval is recorded.
+    expect(api.mergeRequest).toHaveBeenCalledWith('mr-open-1');
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Cannot approve: no SHA found for this spec version');
+    });
+    expect(api.approveSpec).not.toHaveBeenCalled();
+    expect(api.resolveNotification).not.toHaveBeenCalledWith('notif-open-mr-no-sha');
+  });
+
+  it('approve uses the ledger SHA once the spec-edit MR has merged (ledger then holds the approved content)', async () => {
+    api.mergeRequest.mockResolvedValue({ id: 'mr-open-1', status: 'merged' });
+    api.myNotifications.mockResolvedValue([openMrNoShaNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    const approveBtn = await findByText('Approve');
+    await fireEvent.click(approveBtn);
+    expect(api.getSpec).toHaveBeenCalledWith('system/api-conventions.md');
+    await waitFor(() => {
+      expect(api.approveSpec).toHaveBeenCalledWith(
+        'system/api-conventions.md',
+        'fetchedsha000000000000000000000000000000',
+      );
+    });
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Approved');
+    });
+  });
+
   it('rejects a legacy body-less spec_approval notification by parsing the title', async () => {
     api.myNotifications.mockResolvedValue([legacySpecApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -402,6 +460,12 @@ describe('Inbox', () => {
       'mr-uuid-42',
       expect.objectContaining({ decision: 'approved' }),
     );
+    // The override must also set mr.status=approved — the human-approval
+    // escape the merge processor honors. Recording only the review gates
+    // nothing for a failed process gate: retry re-runs and re-fails.
+    await waitFor(() => {
+      expect(api.mrStatus).toHaveBeenCalledWith('mr-uuid-42', 'approved');
+    });
     await waitFor(() => {
       expect(document.body.textContent).toContain('Override submitted');
     });
@@ -814,37 +878,86 @@ describe('Inbox', () => {
     expect(nodes.length).toBe(2);
   });
 
-  it('Pick B reverts agent A\'s merged MR via the recovery endpoint', async () => {
-    api.mergeRequests.mockResolvedValue([
-      { id: 'mr-a', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
-      { id: 'mr-b', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
-    ]);
+  // HSI §8 P5: Pick A / Pick B create a spec-implementation task to revert
+  // the non-selected side's changes (all three options create a task via the
+  // existing task domain model — no direct revert). The merged-MR list rows
+  // carry merge_commit_sha because the server list endpoint enriches merged
+  // rows from the attestation store (anchored by the Rust test
+  // `list_mrs_enriches_merged_rows_with_merge_commit_sha` in
+  // crates/gyre-server/src/api/merge_requests.rs) — this mock mirrors that
+  // real wire format.
+  const mergedMrsForConflict = [
+    { id: 'mr-a', repository_id: 'repo-1', status: 'merged', title: 'agent-1 payments', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
+    { id: 'mr-b', repository_id: 'repo-1', status: 'merged', title: 'agent-2 payments', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
+  ];
+
+  it('Pick B creates a revert task for agent A\'s conflicting implementation (HSI §8 P5)', async () => {
+    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
     await fireEvent.click(header);
     await fireEvent.click(await findByText('Pick B'));
     await waitFor(() => {
-      expect(api.revertMr).toHaveBeenCalledWith('repo-1', 'mr-a');
+      expect(api.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task_type: 'implementation',
+          spec_path: 'system/payments.md',
+          workspace_id: 'ws-1',
+          repo_id: 'repo-1',
+          labels: ['spec-implementation', 'revert'],
+        })
+      );
     });
+    // The task description must reference the losing side (agent-1, its
+    // commit SHA, and its MR resolved via merge_commit_sha) and keep the
+    // winning side as the reference implementation.
+    const call = api.createTask.mock.calls[0][0];
+    expect(call.description).toContain('agent-1');
+    expect(call.description).toContain('aaaa000000000000000000000000000000000000');
+    expect(call.description).toContain('mr-a');
+    expect(call.description).toContain('agent-2');
+    expect(call.description).toContain('bbbb000000000000000000000000000000000000');
+    // Spec mechanism: a task is created — no direct revert from the Inbox.
+    expect(api.revertMr).not.toHaveBeenCalled();
     await waitFor(() => {
-      expect(document.body.textContent).toContain("Picked — reverted agent-1's conflicting MR");
+      expect(document.body.textContent).toContain('Picked — revert task created');
     });
   });
 
-  it('Pick A reverts agent B\'s merged MR via the recovery endpoint', async () => {
-    api.mergeRequests.mockResolvedValue([
-      { id: 'mr-a', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
-      { id: 'mr-b', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
-    ]);
+  it('Pick A creates a revert task for agent B\'s conflicting implementation (HSI §8 P5)', async () => {
+    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
     await fireEvent.click(header);
     await fireEvent.click(await findByText('Pick A'));
     await waitFor(() => {
-      expect(api.revertMr).toHaveBeenCalledWith('repo-1', 'mr-b');
+      expect(api.createTask).toHaveBeenCalled();
     });
+    const call = api.createTask.mock.calls[0][0];
+    expect(call.description).toContain('agent-2');
+    expect(call.description).toContain('bbbb000000000000000000000000000000000000');
+    expect(call.description).toContain('mr-b');
+    expect(api.revertMr).not.toHaveBeenCalled();
+  });
+
+  it('Pick still creates the revert task when the losing MR cannot be resolved — the description carries the commit SHA', async () => {
+    // Real deployments can hold divergence notifications whose losing MR
+    // predates attestation retention; the commit SHA is still actionable.
+    api.mergeRequests.mockResolvedValue([]);
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Pick A'));
+    await waitFor(() => {
+      expect(api.createTask).toHaveBeenCalled();
+    });
+    const call = api.createTask.mock.calls[0][0];
+    expect(call.description).toContain('bbbb000000000000000000000000000000000000');
+    expect(call.description).toContain('unresolved');
+    expect(api.revertMr).not.toHaveBeenCalled();
   });
 
   // HSI §8 P2: the expanded spec_approval accordion shows the spec-edit/*
@@ -880,15 +993,16 @@ describe('Inbox', () => {
     );
   });
 
-  it('Pick shows a targeted error when the losing commit has no merged MR', async () => {
-    api.mergeRequests.mockResolvedValue([]);
+  it('Pick surfaces the failure when the revert task cannot be created', async () => {
+    api.mergeRequests.mockResolvedValue(mergedMrsForConflict);
+    api.createTask.mockRejectedValueOnce(new Error('workspace offline'));
     api.myNotifications.mockResolvedValue([conflictNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
     await fireEvent.click(header);
     await fireEvent.click(await findByText('Pick A'));
     await waitFor(() => {
-      expect(document.body.textContent).toContain('Could not find the merged MR for commit');
+      expect(document.body.textContent).toContain('workspace offline');
     });
     expect(api.revertMr).not.toHaveBeenCalled();
   });

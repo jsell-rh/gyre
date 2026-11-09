@@ -289,13 +289,25 @@
     return body.spec_path ?? (n.title?.match(/:\s*(.+\.md)\s*$/)?.[1] ?? null);
   }
 
-  // Resolve the spec SHA to approve: from the body, else from the spec ledger
-  // (GET /specs/:path returns current_sha). The SHA is the blob SHA of the
-  // spec content the human is approving.
+  // Resolve the spec SHA to approve: from the body first, else from the spec
+  // ledger (GET /specs/:path returns current_sha). The SHA is the blob SHA of
+  // the spec content the human is approving.
+  //
+  // The ledger fallback is only safe once the spec-edit MR has MERGED — for
+  // a still-open MR the ledger's current_sha is the PRE-edit content, and
+  // approving that records an approval event for a version that is
+  // invalidated when the MR lands (auto_invalidate_on_change -> Pending), a
+  // no-op masked by the "Approved" success message. When the body lacks the
+  // branch blob SHA and the MR is still open, fail with missing_spec_sha
+  // instead of silently approving the wrong version.
   async function resolveSpecSha(n, specPath) {
     const body = getBody(n);
     if (body.spec_sha) return body.spec_sha;
     try {
+      if (body.mr_id) {
+        const mr = await api.mergeRequest(body.mr_id);
+        if (!mr || mr.status !== 'merged') return null;
+      }
       const spec = await api.getSpec(normalizeSpecPath(specPath));
       return spec?.current_sha ?? spec?.sha ?? null;
     } catch {
@@ -424,8 +436,15 @@
     }
   }
 
-  // HSI §8 P3 "Override": record a human approval review on the failed-gate MR —
-  // the persisted judgment that the failure is acceptable. POST /merge-requests/:id/reviews
+  // HSI §8 P3 "Override": the human judgment that a failed gate's failure is
+  // acceptable. Two effects, both required for the override to actually gate:
+  // 1. POST /merge-requests/:id/reviews — records the persisted approval
+  //    review (audit trail; consumed by the agent_review gate).
+  // 2. PUT /merge-requests/:id/status {approved} — the human-approval escape
+  //    the merge processor honors (it holds a merge on gate failure unless
+  //    mr.status == Approved). Recording only the review gates nothing for a
+  //    failed process gate: retry re-runs and re-fails, so the MR could never
+  //    merge despite the override.
   async function handleOverrideGate(n) {
     const body = getBody(n);
     if (!body.mr_id) return;
@@ -436,6 +455,7 @@
         reviewer_agent_id: 'human',
         body: `Gate override from Inbox: ${body.gate_name ?? 'gate'} failure accepted by human`,
       });
+      await api.mrStatus(body.mr_id, 'approved');
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
@@ -552,21 +572,20 @@
 
   // HSI §8 P5 "Pick A / Pick B / Reconcile": conflicting-interpretation
   // arbitration. The divergence body carries both agents' commit SHAs and
-  // the repo; each side's MR is resolved from the repo's merged MR list by
-  // merge-commit SHA (the divergence is post-merge). Picking a side reverts
-  // the other side's MR via the recovery protocol; Reconcile creates a
-  // reconciliation task scoped to the contested spec.
-  async function resolveConflictMrId(n, commitSha) {
+  // the repo; the divergence is post-merge. Per the spec, all three options
+  // create a task via the existing task domain model: picking a side creates
+  // a spec-implementation task to REVERT the non-selected side's changes
+  // (with the selected implementation as reference); Reconcile creates a
+  // reconciliation task. The losing side's MR is resolved best-effort from
+  // the repo's merged MR list by merge-commit SHA (the list endpoint
+  // enriches merged rows from the attestation store) so the task description
+  // can reference it — the commit SHA alone is enough to act on when the MR
+  // cannot be resolved.
+  async function resolveConflictMr(n, commitSha) {
     if (!commitSha || !n.repo_id) return null;
     const mrs = (await api.mergeRequests({ repository_id: n.repo_id })) ?? [];
     const merged = mrs.filter(m => m.status === 'merged');
-    const bySha = merged.find(m => m.merge_commit_sha === commitSha);
-    if (bySha) return bySha.id;
-    // Fallback: SHA may be the branch head commit rather than the merge commit;
-    // match MRs whose title/branch references the authoring agent is not
-    // reliable, so return null and surface a targeted error instead of
-    // reverting the wrong MR.
-    return null;
+    return merged.find(m => m.merge_commit_sha === commitSha) ?? null;
   }
 
   async function handlePickSide(n, keepSide) {
@@ -574,22 +593,41 @@
     const repoId = n.repo_id ?? body.repo_id;
     const keepSha = keepSide === 'a' ? body.commit_sha_a : body.commit_sha_b;
     const loseSha = keepSide === 'a' ? body.commit_sha_b : body.commit_sha_a;
+    const keepAgent = keepSide === 'a' ? body.agent_a : body.agent_b;
     const loseAgent = keepSide === 'a' ? body.agent_b : body.agent_a;
     if (!repoId || !loseSha) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: `pick_${keepSide}` } };
     try {
-      const mrId = await resolveConflictMrId(n, loseSha);
-      if (!mrId) {
-        throw new Error($t('decisions.no_conflict_mr', { values: { sha: loseSha.slice(0, 12) } }));
-      }
-      await api.revertMr(repoId, mrId);
+      const specRef = body.spec_ref || n.entity_ref;
+      const loseMr = await resolveConflictMr(n, loseSha);
+      const task = await api.createTask({
+        title: $t('decisions.revert_task_title', {
+          values: { spec: specRef?.split('/').pop() ?? specRef ?? '' },
+        }),
+        description: $t('decisions.revert_task_desc', {
+          values: {
+            spec: specRef ?? '',
+            keep_agent: keepAgent ?? '',
+            keep_sha: keepSha ?? '',
+            lose_agent: loseAgent ?? '',
+            lose_sha: loseSha,
+            lose_mr: loseMr ? `${loseMr.id} (${loseMr.title})` : $t('decisions.revert_task_no_mr'),
+            count: body.conflict_count ?? (Array.isArray(body.conflicting_nodes) ? body.conflicting_nodes.length : 0),
+          },
+        }),
+        task_type: 'implementation',
+        spec_path: specRef,
+        workspace_id: n.workspace_id,
+        repo_id: repoId,
+        labels: ['spec-implementation', 'revert'],
+      });
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
       );
       actionStates = {
         ...actionStates,
-        [n.id]: { loading: false, success: true, message: $t('decisions.side_picked', { values: { agent: loseAgent ?? '' } }) },
+        [n.id]: { loading: false, success: true, message: $t('decisions.revert_task_created', { values: { id: task?.id ?? '' } }) },
       };
     } catch (e) {
       actionStates = {
