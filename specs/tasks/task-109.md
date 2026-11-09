@@ -90,217 +90,142 @@ Per-repo spec lifecycle configuration (spec-lifecycle.md §Configuration)
 replaces the previously hardcoded watched/ignored path prefixes and task
 priorities in the post-receive hook.
 
-**Domain** (`gyre-domain/src/spec_lifecycle_config.rs`): `SpecLifecycleConfig`
-with all eight spec fields — `enabled`, `watched_paths`, `ignored_paths`,
-`auto_invalidate_approvals`, `dedup_open_tasks`, and
-`default_priority_new/modified/deleted` as typed `TaskPriority` (invalid
-values rejected at deserialization). Defaults match the prior hardcoded
-behavior exactly: watched `["specs/system/", "specs/development/"]`, ignored
-`["specs/milestones/", "specs/prior-art/", "specs/personas/",
-"specs/prompts/"]`, priorities Medium/High/High, all flags true. Serde
-field-level defaults keep a partial JSON payload from zeroing unspecified
-fields; `is_watched()` applies ignored-over-watched precedence.
+### Behavior
 
-**Persistence** (migration `2026-10-08-000059_spec_lifecycle_configs`,
-see the migration-numbering repair rounds below):
-separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
-portable SQL for both SQLite and PostgreSQL through the shared embedded
-migrations dir. Diesel adapters (SQLite + Postgres) implement the
-`SpecLifecycleRepository` port with upsert-on-conflict; absent rows mean
-defaults. Wired through the `store!` macro in `AppState`; in-memory mode uses
-`MemSpecLifecycleRepository` (port-backed per the durable-state invariant).
+- **Domain** (`gyre-domain/src/spec_lifecycle_config.rs`):
+  `SpecLifecycleConfig` with all eight spec fields — `enabled`,
+  `watched_paths`, `ignored_paths`, `auto_invalidate_approvals`,
+  `dedup_open_tasks`, and `default_priority_new/modified/deleted` as typed
+  `TaskPriority` (invalid values rejected at deserialization). Defaults match
+  the prior hardcoded behavior exactly: watched
+  `["specs/system/", "specs/development/"]`, ignored
+  `["specs/milestones/", "specs/prior-art/", "specs/personas/",
+  "specs/prompts/"]`, priorities Medium/High/High, all flags true. Serde
+  field-level defaults keep a partial JSON payload from zeroing unspecified
+  fields; `is_watched()` applies ignored-over-watched precedence.
+- **Persistence** (migration `2026-10-08-000059_spec_lifecycle_configs`):
+  separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
+  portable SQL for both SQLite and PostgreSQL through the shared embedded
+  migrations dir. Diesel adapters (SQLite + Postgres) implement the
+  `SpecLifecycleRepository` port with upsert-on-conflict; absent rows mean
+  defaults. Wired through the `store!` macro in `AppState`; in-memory mode
+  uses `MemSpecLifecycleRepository` (port-backed per the durable-state
+  invariant).
+- **API** (`GET/PUT /api/v1/repos/:id/settings/spec-lifecycle`): PUT is
+  Admin/Developer-only — the Agent role gets 403 (an agent must not be able
+  to disable the drift detector it is subject to); GET returns defaults for
+  unconfigured repos; unknown repo → 404. Route registered in `api/mod.rs`
+  with an ABAC `RouteResourceMapping` entry; documented in
+  `docs/api-reference.md`.
+- **Hook wiring** (`git_http.rs process_spec_lifecycle`): loads per-repo
+  config through the same port the API writes; `enabled=false` returns
+  before any diff/task/approval work; filtering via `config.is_watched`
+  (ignored wins); `classify_spec_change` takes priorities from config
+  (A/R→new, M→modified, D→deleted); `auto_invalidate_approvals=false` skips
+  approval revocation; `dedup_open_tasks=false` skips the open-task dedup
+  gate. No hardcoded path literals remain in production code. Workspace
+  scoping for emitted events: the repo is re-resolved once per push and,
+  when the row is unresolvable, workspace-scoped events are skipped rather
+  than emitted under a fabricated scope (task-097 F3 class); approval
+  invalidation is independent of the repo row and still runs (see the
+  current rebase round below).
+- **UI** (`RepoSettings.svelte`): "Spec Lifecycle" tab with enabled toggle,
+  tag-style add/remove lists for watched/ignored paths, both flag toggles,
+  and three priority selects; loads via `api.repoSpecLifecycle`, saves via
+  `api.setRepoSpecLifecycle`; locale strings in `en.json`.
 
-**API** (`GET/PUT /api/v1/repos/:id/settings/spec-lifecycle`, the assigned
-route contract restored by 483559c0 after the first review round): PUT is
-Admin/Developer-only — the Agent role gets 403 (an agent must not be able to
-disable the drift detector it is subject to); GET returns defaults for
-unconfigured repos; unknown repo → 404. Route registered in `api/mod.rs`
-with an ABAC `RouteResourceMapping` entry; documented in
-`docs/api-reference.md`.
+### Repair history (condensed; full detail in earlier review rounds)
 
-**Hook wiring** (`git_http.rs process_spec_lifecycle`): loads per-repo
-config through the same port the API writes; `enabled=false` returns before
-any diff/task/approval work; filtering via `config.is_watched` (ignored
-wins); `classify_spec_change` takes priorities from config (A/R→new,
-M→modified, D→deleted); `auto_invalidate_approvals=false` skips approval
-revocation; `dedup_open_tasks=false` skips the open-task dedup gate. The
-workspace scope for created tasks comes from the repo resolved at push
-time — no "default" workspace fabrication on re-lookup failure. No
-hardcoded path literals remain in production code.
+- **Contract (569e4bd2):** an earlier candidate marked the
+  acceptance-criteria checkboxes as checked, which the verifier counts as a
+  change to the assigned requirements; the contract was restored — the task
+  file keeps its original open checkboxes and carries status via
+  `progress:` plus this section.
+- **Migration numbering:** renumbered three times (`000056`→`000057`→
+  `000058`→`000059`, findings 7ac79a6a, d9ebdcd9, 7a1761da) because
+  successive assignment bases added colliding migrations on the same
+  date-sequence; Diesel runs only one migration per version, so a collision
+  silently drops the `spec_lifecycle_configs` table on fresh databases.
+  Current version `2026-10-08-000059` does not collide with any merged-base
+  migration; `check-migration-versions.sh` passes at the current head.
+- **Verification repair (d9ebdcd9, commit 696c03f2):** rustfmt drift,
+  a missing `#[allow(clippy::double_must_use)]` on the port trait, and a
+  discarded must-use `Result` in a test — all fixed; clippy-diff clean.
+- **Review repair (d2598c14, commit 2fb3ca466):** added
+  `get_put_traverse_sqlite_migration_end_to_end` (real SQLite-backed
+  GET/PUT traverse of the migration-created table — the exact failure mode
+  behind the renumber rounds); coverage row updated to `implemented`.
+  `web/dist` is NOT rebuilt or committed on this branch — the executor
+  restores dist from the assignment base and final integration rebuilds and
+  publishes it remotely; the task-109 UI source in `web/src` is intact.
+- **CI repair (bc54e343):** the `E2E Tests` job failed in
+  "Install Playwright browsers" — `ubuntu-latest` now resolves to ubuntu
+  26.04 and the locked `playwright-core@1.58.2` has no chromium registry
+  entries for ubuntu ≥ 25. Fixed by pinning the `e2e` job to
+  `runs-on: ubuntu-24.04` in `.github/workflows/e2e.yml`. Not a candidate
+  defect; the identical pin is now also on main (present in the current
+  assignment base), so the merged workflow carries it on both sides.
 
-**UI** (`RepoSettings.svelte`): "Spec Lifecycle" tab with enabled toggle,
-tag-style add/remove lists for watched/ignored paths, both flag toggles, and
-three priority selects; loads via `api.repoSpecLifecycle`, saves via
-`api.setRepoSpecLifecycle`; locale strings in `en.json`.
+### Rebase repair rounds
 
-**Contract-repair round (finding 569e4bd2):** the prior candidate
-`b1526c71` closed the acceptance-criteria checkboxes as `[x]`, which
-`scripts/dev-contract.py:requirement_parts` counts as a change to the
-assigned requirements. That round restored the assigned contract — the
-task file keeps its original `[ ]` checkboxes and carries status via
-`progress:` plus this section, matching completed tasks on main.
+Three assignment bases have been merged into this branch. The first two
+(`ed57c723` task-201 persistent search, as `2bb4d127`; `fefde2946` task-089
+HSI Explorer, as `8e37d4561`) touched no task-109 source semantics — the
+former conflicted only in `web/dist` artifacts (taken from the base
+wholesale), the latter additively in `AppState` wiring and the
+`RepoSettings.svelte` tab bar (both sides kept; the merged bar renders 10
+tabs and the tab-count test was updated accordingly with all labels still
+asserted).
 
-**Rebase repair rounds:** two assignment bases have been merged into
-this branch. First, base `ed57c723` (task-201 persistent search
-backend) as `2bb4d127`; conflicts were only `web/dist` build artifacts,
-resolved by taking the base's dist bundle wholesale — the committed
-`web/dist` on this branch does NOT contain the spec-lifecycle UI, which
-is expected: `web/dist` regeneration and committing is owned by the
-executor / final-integration stage (review finding d2598c14 F1; an
-earlier claim that dist was rebuilt from merged source was false and
-is retracted). That merge touched no task-109 source surface.
+**Current round (finding 28f33736, merge commit `e135f37de`):** merged
+assignment base `774737638` (task-177 rendering technology, plus task-099
+bootstrap fallback and spec-approval ledger path normalization). One source
+conflict, in `process_spec_lifecycle`: the candidate had added a
+`workspace_id: &Id` parameter and emitted events unconditionally under the
+push-time resolved workspace; the base hoisted the workspace resolution to
+once-per-push returning `Option<Id>`, skips only the workspace-scoped
+events when the repo row is unresolvable, and keeps approval invalidation
+and cross-workspace notification running (its test
+`push_modifying_spec_revokes_ledger_approvals` relies on that decoupling —
+it drives the hook with a repo id that has no repo row). Resolved by
+adopting the base's shape: the conflict hunk takes the base side, the
+candidate's now-redundant `workspace_id` parameter is removed, and the
+production call site plus the two task-109 hook tests drop the argument
+(their fixture registers the real repo row, so the per-push re-lookup
+resolves the same workspace the tests previously passed explicitly). Both
+sides' invariants hold: no fabricated scope on lookup failure (events are
+skipped), and the task-097 F3 class rule is satisfied. The diff vs the base
+parent now shows only the task-109 config machinery. All auto-merged
+overlap files (`schema.rs`, `lib.rs`s, `abac_middleware.rs`, `api/mod.rs`,
+`mem.rs`, `middleware.rs`, `docs/api-reference.md`, `en.json`, `e2e.yml`)
+verified to carry both sides' symbols. Evidence:
+`/tmp/stage/review-evidence/task-109/rebase-repair-7747376.md`.
 
-Second (current round, merge commit `8e37d4561`): merged assignment
-base `fefde2946` (task-089 HSI Explorer Generated Views + secrets
-panels + rollout policies). Two source conflicts, both additive and
-both resolved by keeping both sides:
-- `crates/gyre-server/src/lib.rs` — port-import list and `AppState`
-  wiring now carry BOTH `SpecLifecycleRepository` (task-109,
-  `spec_lifecycle_configs` store) and the base's `RolloutPolicyRepository`
-  (`rollout_policies` store).
-- `web/src/components/RepoSettings.svelte` — `TAB_IDS` now carries
-  BOTH the task-109 `spec-lifecycle` tab and the base's `secrets` tab
-  (merged tab bar: 10 tabs; both tab bodies, `TAB_KEYS` entries, and
-  the `SecretsPanel` import verified present).
-One merge-consequence test repair: `RepoSettings.test.js`
-"renders all N inner tabs" expected the pre-merge count (9) but the
-merged component legitimately renders 10; the count was updated to 10
-and the test still asserts every tab label including both
-`Spec Lifecycle` and `Secrets` — assertion strength preserved, not
-weakened. The base's new migrations
-(`2026-11-06-000057_rollout_policies`,
-`2026-11-07-000057_audit_detail_compression`) do not collide with this
-task's `2026-10-08-000059_spec_lifecycle_configs` (Diesel versions are
-date+sequence); `check-migration-versions.sh` passes. Evidence:
-`/tmp/stage/review-evidence/task-109/rebase-repair-fefde294.md`.
+### Test evidence
 
-**Migration numbering repair rounds:** the migration has been renumbered
-twice, both times because the assigned base added a colliding migration
-on the same date-sequence. Diesel runs only one migration per version
-(alphabetically first wins), so a collision silently drops the
-`spec_lifecycle_configs` table on fresh databases and per-repo config
-degrades to defaults. First `000056` → `000057` (finding 7ac79a6a, commit
-`0dbe7863`: collision with `spec_assertion_results`); then the base
-`72ad2a128` itself added `2026-10-08-000057_spec_approval_attestation`,
-re-colliding with `000057` (finding d9ebdcd9, verification exit 1). The
-merge of that base (`6b1e4e789`) renumbered to the next unused sequence
-`000058`; no schema change — the migrations dir is embedded wholesale
-(`embed_migrations!("migrations")`), so only the directory name and its
-header comment changed. A third renumber (`000058` → `000059`, commit
-`5b2b0684e`, finding 7a1761da) followed the same pattern: the merged
-base `c5deca801` carries task-120's
-`2026-10-08-000058_user_entity_profile_fields` on the same date-sequence.
-That migration stays at `000058` — its regression test keys on version
-`20261008000058` — so this task's migration moved to the next unused
-sequence `000059`.
+Earlier rounds (before the current merge) recorded, at their then-heads:
+`cargo test -p gyre-server --lib spec_lifecycle` — 8/8 (6 API incl. the
+SQLite-backed migration traverse, plus 2 end-to-end hook tests against a
+real bare git repo); `cargo test -p gyre-adapters --lib spec_lifecycle` —
+4/4 against a real fresh SQLite DB; `cargo test -p gyre-domain --lib
+spec_lifecycle` — 5/5; `parse_spec_changes` — 9/9 and
+`classify_spec_change` — 6/6; `npx vitest run RepoSettings.test.js` — 57/57
+and `SecretsPanel.test.js` — 9/9; clippy-diff and fmt clean.
 
-**Verification-repair round (finding d9ebdcd9, commit `696c03f2`):**
-besides the migration renumber, the failed verification run flagged three
-non-migration findings on this task's changed lines, all repaired in
-`696c03f2`: rustfmt drift across the task-109 files (whole-tree
-`cargo fmt --all --check` now clean), a missing
-`#[allow(clippy::double_must_use)]` on the `SpecLifecycleRepository`
-trait (async_trait generates a must_use future per method — the
-established `gyre-ports` pattern, e.g. `git_ops.rs`, `storage.rs`), and a
-discarded must-use `Result` from `seed_builtin_policies` in the
-Agent-role 403 test (now `.unwrap()`ed, matching the sibling call sites).
-`python3 scripts/check-clippy-diff.py 72ad2a128` exits 0 at the repair
-commit (16 changed Rust files, changed lines clean).
-
-**Review-repair round (finding d2598c14, commit `2fb3ca466` for the
-code repair):** the review round on
-candidate `b6f97fe0` flagged three findings. F2 (moderate): these
-notes falsely claimed the five API tests "construct a fresh
-SQLite-backed server" — they run against `mem::test_state()`
-(`MemSpecLifecycleRepository`). Repaired with a real test,
-`get_put_traverse_sqlite_migration_end_to_end` in
-`api/spec_lifecycle.rs`: it wires a temp-file `SqliteStorage` (whose
-constructor runs the embedded migrations, including 000059) into
-`spec_lifecycle_configs` — the same wiring production `build_state`
-performs via the `store!` macro in DB-backed mode — so GET/PUT
-genuinely traverse the migration-created table; a missing
-`spec_lifecycle_configs` table (the silent-collision failure mode
-behind the migration renumber rounds) fails the test with a 500.
-F3 (minor): coverage row 11 (`spec-lifecycle.md` §Configuration)
-updated from `task-assigned` to `implemented` with notes, matching
-the ready-for-review convention (task-105/task-120), awaiting
-independent verification. F1 (major): committed `web/dist` is the
-base-side bundle without the spec-lifecycle UI — see the retracted
-rebase-round claim above; per current assignment instructions this
-round does not rebuild or commit dist (the executor restores dist
-from the assignment base and final integration rebuilds and
-publishes it remotely). The task-109 UI source in `web/src` is intact
-(`RepoSettings.svelte` spec-lifecycle tab, `api.js` client methods,
-`en.json` strings), so a dist rebuild from this source emits the
-settings tab; evidence recorded under
-`/tmp/stage/review-evidence/task-109/f1-dist-state.txt`.
-Current-round probes: `SKIP_WEB_BUILD=1 cargo test -p gyre-server
---lib spec_lifecycle` — 8/8 (6 API incl. the new SQLite-backed test +
-2 hook tests, re-run at this repair head); `cargo fmt --all --check`
-— clean.
-
-**CI repair round (finding bc54e343, candidate head `d74e10da0`, e2e
-run 42594335429):** the `E2E Tests` job failed in "Install Playwright
-browsers" — GitHub's `ubuntu-latest` now resolves to ubuntu 26.04, and
-the locked `playwright-core@1.58.2` has zero browser-download registry
-entries for `ubuntu26.*`/`ubuntu25.*`, so `npx playwright install
---with-deps chromium` throws before any test runs. Not a candidate
-defect (the base→candidate diff never touched `.github/` or
-`web/package*.json`); verified against the locked package source in
-this sandbox (`npm ci` installs exactly `playwright-core@1.58.2`; its
-registry has 20 `ubuntu24` entries and the failing throws are
-`registry/index.js:1152` and `registry/dependencies.js:108`). Fixed by
-pinning the `e2e` job to `runs-on: ubuntu-24.04` in
-`.github/workflows/e2e.yml` (with a comment naming the lockfile
-constraint); `ci.yml` jobs stay on `ubuntu-latest` since they passed on
-26.04 in the same run set. Workflow-only change — no Rust or web
-source touched, matching the identical repair on sibling task branches
-(task-140 `2992e44c8`, task-106 `27b946cbc`). Live exact-head re-run
-belongs to remote verification. Evidence:
-`/tmp/stage/review-evidence/task-109/ci-bc54e343.md`.
-
-**Test evidence** (focused probes re-run at the current head, merge
-commit `8e37d4561`; earlier rounds recorded under
-`/tmp/stage/review-evidence/task-109/`):
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server -p gyre-adapters
-  -p gyre-domain` — clean (both merged feature sets compile together)
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` —
-  8/8 (6 API incl. `get_put_traverse_sqlite_migration_end_to_end`, a
-  real SQLite-backed GET/PUT traverse of the migration-created table,
-  plus the Agent-role 403 with a real JWT; 2 hook tests:
-  `enabled=false` creates no tasks and custom `watched_paths` fully
-  replace defaults with `default_priority_new: Critical` landing on the
-  created task — end-to-end against a real bare git repo with real
-  pushed commits)
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle`
-  — 4/4 (unconfigured defaults, round-trip, upsert overwrite, per-repo
-  isolation, against a real fresh SQLite DB)
-- `npx vitest run src/__tests__/RepoSettings.test.js` — 57/57
-  (includes the 10-tab merged bar with both `Spec Lifecycle` and
-  `Secrets` labels, and the spec-lifecycle form tests)
-- `npx vitest run src/__tests__/SecretsPanel.test.js` — 9/9 (base's
-  new component wired into the merged RepoSettings)
-- `bash scripts/check-migration-versions.sh`,
-  `check-migration-sql-portability.sh`, `check-abac-route-registry.sh`,
-  `check-arch.sh`, `check-task-commit-attribution.sh` — all exit 0
-- `python3 scripts/check-clippy-diff.py fefde2946` — exit 0 (16
-  changed Rust files, changed lines clean); `cargo fmt --all --check`
-  — clean
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle`
-  — 5/5 and `gyre-server` `git_http::tests::parse_spec_changes` — 9/9,
-  `classify_spec_change` — 6/6, re-run at this head
-- CI repair round (finding bc54e343, this sandbox): workflow-only
-  change, no Rust/web source touched. Probes: `npm ci` in `web/`
-  installs the locked `playwright-core@1.58.2`; its registry contains 20
-  `ubuntu24` download-URL entries and zero `ubuntu25`/`ubuntu26` entries;
-  both CI error strings match its throw/warn sites verbatim; edited
-  `e2e.yml` parses as valid YAML with `jobs.e2e.runs-on ==
-  ubuntu-24.04` and all 12 steps intact;
-  `check-task-commit-attribution.sh` passes. Full-log evidence:
-  `/tmp/stage/review-evidence/task-109/ci-bc54e343.md`.
-
-`cargo test --all`, the full web suite, and exact-head GitHub checks are
-owned by the verification stage per assignment instructions; this repair
-round needed no TCP-listener probe (all probes above are in-process),
-and the current sandbox capability report marks listener probes
-supported should verification require them.
+At the current merge head (`e135f37de`) this sandbox instance has NO
+outbound network (direct TCP refused) and no prewarmed cargo registry,
+target dir, or `web/node_modules`, so Rust and vitest suites could not be
+executed here — recorded as a transport restriction for remote
+verification, not a code defect. Probes that did run here, all exit 0:
+`cargo fmt --all --check` (rustfmt parses every workspace crate — syntax
+validation of the merged tree), `check-migration-versions.sh`,
+`check-migration-sql-portability.sh`, `check-arch.sh`,
+`check-abac-route-registry.sh`, `check-task-commit-attribution.sh`, and
+the remaining mechanical gates (byte-slice, relative-path defaults,
+fail-open refs, fabricated/lossy/scope-literal defaults, inert
+enforcement, dead message kinds, mem port contracts, forwarded headers,
+in-memory state stores, unbounded HTTP, forged scope fields, MCP write
+tools, ABAC exempt handlers); `e2e.yml` parses as YAML and `en.json` as
+JSON. Full suites at the exact merge head belong to remote verification;
+the merge-conflict resolution itself is a three-way-diff-verified union
+described above.
