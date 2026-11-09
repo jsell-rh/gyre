@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54"]
 ---
 
 ## Spec Excerpt
@@ -232,3 +232,28 @@ Verified on the merged HEAD: every task-146 regression test passes —
 `check-relative-path-defaults.sh` all exit 0. web/dist is byte-identical
 to base (this branch never modified it). Evidence retained under
 /tmp/stage/review-evidence.
+
+### Verification-repair round: deterministic rate-limit exhaustion test (commit d7641dddc)
+
+The verification `cargo test --all` run on candidate 2c8b65581 failed
+in `middleware::tests::rate_limit_exhaustion_returns_429` (assertion
+left: 200, right: 429). Root cause was a wall-clock race in the test,
+not a limiter defect and not a task-146 regression: the test predates
+this branch (03b65d7dc), and `RateLimiter` refills the bucket to the
+full rate whenever the wall clock crosses a second boundary, so when
+the test's two back-to-back requests straddle that boundary — likely
+under full-suite parallel load — the second request draws a refilled
+token and returns 200.
+
+Reproduced on the unmodified candidate binary: 4 failures / 200 runs
+under 4-way CPU load, 0 / 300 unloaded; captured output matches the
+verification failure exactly. The fix injects the clock into
+`RateLimiter` (`with_clock`); the exhaustion test now freezes the clock
+so no refill can occur between its two requests, and the refill branch
+gains its first deterministic unit test
+(`refills_to_full_rate_each_second`) plus a frozen-clock guard test.
+Assertion strength is unchanged (first request 200, second 429). Probe
+evidence under /tmp/stage/review-evidence: 0 failures / 300 runs under
+the same load post-fix; `rate_limit` and `middleware::` suites pass
+(24 + 19 tests), `cargo fmt --check` clean, clippy clean on changed
+lines.
