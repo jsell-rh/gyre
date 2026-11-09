@@ -17,6 +17,10 @@
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
   import {
+    gateStatusDecoration,
+    evaluativeNodeDecorations,
+  } from './lens-rendering.js';
+  import {
     activeAgentNodeIds as computeActiveAgentNodeIds,
     computeRecentChanges,
     recentChangeAlpha,
@@ -38,6 +42,8 @@
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = $bindable('all'),
     lens = $bindable('structural'),
+    gateStatusBySpec = {},   // HSI §3 Evaluative lens: spec path → 'pass' | 'fail' (most recent gate results)
+    specApprovals = [],     // HSI §3 Evaluative lens: spec approval ledger records
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
@@ -49,6 +55,8 @@
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
     focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    playbackRequest = null, // { nonce } — start trace playback (generated "flow" views, HSI §3);
+    //                        // repeated requests re-trigger via a fresh nonce.
     windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
     //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
     //                     closes overlays most-recent-first and clears the trace query itself, so it opts
@@ -131,6 +139,55 @@
       if (edgeType(e) === 'governed_by') idx.add(edgeSrc(e));
     }
     return idx;
+  });
+
+  // ── Evaluative lens decorations (HSI §3 Three Lenses) ─────────────────
+  // Lens decorations compose on the structural base: the same layout and
+  // the same spec-governance coloring are reused; the evaluative lens only
+  // adds visual encodings (coverage badges, gate rings, approval icons,
+  // gate-colored edges) on top.
+  let nodesById = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) m.set(n.id, n);
+    return m;
+  });
+
+  // Spec approval ledger records (GET /api/v1/specs/approvals) by spec path.
+  let approvalRecordsByPath = $derived.by(() => {
+    const m = new Map();
+    for (const rec of specApprovals ?? []) {
+      if (!rec?.spec_path) continue;
+      if (!m.has(rec.spec_path)) m.set(rec.spec_path, []);
+      m.get(rec.spec_path).push(rec);
+    }
+    return m;
+  });
+
+  // Composed evaluative decorations per node: coverage badge (green/yellow/
+  // red from GraphNode.test_coverage), gate status ring (most recent gate
+  // results joined via the node's governing specs), and spec approval icon
+  // (✓ approved / ⏳ pending / ✗ rejected from the approval ledger).
+  let evaluativeDecorationsByNodeId = $derived.by(() => {
+    const m = new Map();
+    if (lens !== 'evaluative') return m;
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = evaluativeNodeDecorations(n, { gateStatusBySpec, approvalRecordsByPath, edges, nodesById });
+      if (d) m.set(n.id, d);
+    }
+    return m;
+  });
+
+  // Gate outcome per node id, precomputed so the per-edge render loop stays
+  // O(1) per edge (edges leaving a governed node get the gate color).
+  let gateStatusByNodeId = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = gateStatusDecoration(n, gateStatusBySpec, edges, nodesById);
+      if (d) m.set(n.id, d.status);
+    }
+    return m;
   });
 
   function specBorderColor(node) {
@@ -1057,6 +1114,19 @@
     evalPlaying = true;
     scheduleRedraw();
   }
+
+  // External playback request (HSI §3 Generated Views: a "flow" layout
+  // view starts the particle animation along the span tree). Nonce-based so
+  // a repeated request for the same view re-triggers.
+  $effect(() => {
+    const req = playbackRequest;
+    if (!req?.nonce) return;
+    // Only meaningful when trace data exists — the parent only fires this
+    // for trace-backed flow views, but guard anyway: without spans there is
+    // nothing to animate.
+    if ((traceData?.spans?.length ?? 0) === 0) return;
+    untrack(() => startTracePlayback());
+  });
 
   // Pan/zoom the camera to a node on external request (detail-panel trace
   // step click — explorer-canvas.md §6 step 6). `nonce` lets repeated clicks
@@ -3441,6 +3511,63 @@
       ctx.restore();
     }
 
+    // ── Evaluative lens decorations (HSI §3 Three Lenses) ──────────────
+    // Composed on top of the structural base: gate status ring, spec
+    // approval icon, and coverage badge. The structural fill, spec border,
+    // and label above remain visible underneath (lenses compose — the
+    // Evaluative overlay never replaces the Structural rendering).
+    const evalDeco = evaluativeDecorationsByNodeId.get(n?.id);
+    if (evalDeco && sw > 25 && sh > 16) {
+      // Gate status ring — green (pass) / red (fail) from the most recent
+      // gate results of the node's governing specs.
+      if (evalDeco.gate && sw > 30) {
+        ctx.save();
+        ctx.strokeStyle = evalDeco.gate.color;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Spec approval icon — ✓ approved / ⏳ pending / ✗ rejected from the
+      // spec approval ledger (bottom-left; TEST/metric badges own the top).
+      if (evalDeco.approval) {
+        const fs = Math.max(9, Math.min(12, sw * 0.12));
+        ctx.save();
+        ctx.font = `700 ${fs}px system-ui`;
+        const pillW = measureText(ctx, evalDeco.approval.icon, ctx.font) + 6;
+        const ax = s.x - sw / 2 + 2;
+        const ay = s.y + sh / 2 - fs - 4;
+        ctx.fillStyle = 'rgba(15,15,26,0.85)';
+        ctx.beginPath();
+        roundRect(ctx, ax, ay, pillW, fs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.approval.color;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.approval.icon, ax + 3, ay + 2);
+        ctx.restore();
+      }
+      // Test coverage badge — green/yellow/red heatmap from
+      // GraphNode.test_coverage (bottom-right).
+      if (evalDeco.coverage && sw > 40 && sh > 22) {
+        const bfs = Math.max(7, Math.min(10, sw * 0.09));
+        ctx.save();
+        ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
+        const bw = measureText(ctx, evalDeco.coverage.label, ctx.font) + 6;
+        const bx = s.x + sw / 2 - 2;
+        const by = s.y + sh / 2 - bfs - 4;
+        ctx.fillStyle = evalDeco.coverage.bg;
+        ctx.beginPath();
+        roundRect(ctx, bx - bw, by, bw, bfs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.coverage.fg;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.coverage.label, bx - 2, by + 2);
+        ctx.restore();
+      }
+    }
+
     // Label — LOD: skip text on leaf nodes at low zoom for performance
     // At zoom < 0.5, leaf labels are too small to read anyway
     if (sw > 30 && sh > 14 && cam.zoom >= 0.5) {
@@ -3808,6 +3935,23 @@
           color = '#ef4444'; // red — at least one gate failed
           edgeAlpha = Math.max(edgeAlpha, 0.75);
           lineWidth = Math.max(lineWidth, 2);
+        }
+      }
+
+      // Evaluative lens: gate status edge coloring (HSI §3) — edges leaving
+      // a node governed by a spec with a concluded gate run are colored
+      // green (pass) / red (fail), with the most recent MR per spec path
+      // deciding the outcome. When both data sources are present this
+      // per-spec recency join overrides the record-aggregate coloring above
+      // (it resolves "most recent gate results" per spec, per HSI §3);
+      // either way the structural layout and topology are unchanged
+      // (lenses compose).
+      if (lens === 'evaluative') {
+        const gateStatus = gateStatusByNodeId.get(srcId);
+        if (gateStatus) {
+          color = gateStatus === 'pass' ? '#22c55e' : '#ef4444';
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 1.8);
         }
       }
 
@@ -5461,7 +5605,20 @@
     ['High flow', 'hsl(0,70%,45%)'],
     ['OK span', '#60a5fa'],
     ['Error span', '#ef4444'],
-    ...(hasGateEdges ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']] : []),
+    ['Coverage ok', '#22c55e'],
+    ['Coverage partial', '#eab308'],
+    ['Coverage low', '#ef4444'],
+    ['Gate pass', '#22c55e'],
+    ['Gate fail', '#ef4444'],
+    ['Approved', '#22c55e'],
+    ['Pending', '#eab308'],
+    ['Rejected', '#ef4444'],
+    // Record-aggregate gate entries only while the per-spec join above has
+    // no data — the two families describe the same gate outcomes, and the
+    // per-spec recency join's entries subsume the aggregate ones.
+    ...(hasGateEdges && gateStatusByNodeId.size === 0
+      ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']]
+      : []),
   ] : [
     ['Has spec', '#22c55e'],
     ['Suggested', '#eab308'],
@@ -5749,6 +5906,19 @@
                   <span class="insight-risk">Risk: complex + undertested</span>
                 {/if}
               </div>
+            {/if}
+            {#if lens === 'evaluative'}
+              {@const evalDeco = evaluativeDecorationsByNodeId.get(tooltipNode.id)}
+              {#if evalDeco?.gate || evalDeco?.approval}
+                <div class="tooltip-insight">
+                  {#if evalDeco?.gate}
+                    <span class={evalDeco.gate.status === 'pass' ? 'insight-ok' : 'insight-warn'}>Gates: {evalDeco.gate.status === 'pass' ? 'passed' : 'failed'} (most recent run)</span>
+                  {/if}
+                  {#if evalDeco?.approval}
+                    <span class={evalDeco.approval.status === 'approved' ? 'insight-ok' : evalDeco.approval.status === 'pending' ? 'insight-note' : 'insight-warn'}>Spec approval: {evalDeco.approval.label}</span>
+                  {/if}
+                </div>
+              {/if}
             {/if}
             {#if nodeSpanStats.get(tooltipNode.id)}
               {@const spanSt = nodeSpanStats.get(tooltipNode.id)}

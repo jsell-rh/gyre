@@ -371,7 +371,7 @@ pub enum NotificationPriority {
 > | Band | Notification types |
 > |---|---|
 > | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted |
-> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹ |
 > | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
 > | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
 >
@@ -383,6 +383,11 @@ pub enum NotificationPriority {
 > filtering and the §Notification Routing for Agent Escalations Urgent check
 > therefore derive the band from the notification type, never from the numeric
 > priority.
+>
+> ¹ SecretExpiring is defined by platform-model.md §7 (secret rotation); it is
+> banded High here (recorded 2026-11, task-112 merge with main) as the same
+> approaching-deadline class as BudgetWarning — the resource still works but
+> will fail at expiry, so it needs attention soon rather than eventually.
 
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"

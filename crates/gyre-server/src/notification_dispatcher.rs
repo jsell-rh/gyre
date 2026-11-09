@@ -633,6 +633,9 @@ mod tests {
         // High: budget warning, gate failure.
         assert_eq!(band(NotificationType::BudgetWarning), NotificationPriority::High);
         assert_eq!(band(NotificationType::GateFailure), NotificationPriority::High);
+        // High: secret approaching expiry (platform-model §7, merged from
+        // main) — same approaching-deadline class as budget warning.
+        assert_eq!(band(NotificationType::SecretExpiring), NotificationPriority::High);
         // Medium: stale dependency, spec drift.
         assert_eq!(band(NotificationType::MetaSpecDrift), NotificationPriority::Medium);
         assert_eq!(band(NotificationType::DependencyChainTooDeep), NotificationPriority::Medium);

@@ -268,7 +268,10 @@ impl NotificationPriority {
             | T::PersonaApprovalRequested
             | T::MergeQueuePaused
             | T::CascadeTestFailed
-            | T::AtomicGroupFailure => Self::High,
+            | T::AtomicGroupFailure
+            // Secret approaching expiry (platform-model.md §7, merged from
+            // main): same approaching-deadline class as BudgetWarning.
+            | T::SecretExpiring => Self::High,
             // Medium - needs attention eventually: spec drift (spec example),
             // stale-dependency-adjacent and review-arbitration items.
             T::MetaSpecDrift

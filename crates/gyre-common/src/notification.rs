@@ -75,6 +75,8 @@ pub enum NotificationType {
     /// workspace Owner and tenant Admin are notified
     /// (user-management.md §Who Gets Notified).
     SecurityFinding,
+    /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
+    SecretExpiring,
 }
 
 impl NotificationType {
@@ -107,6 +109,7 @@ impl NotificationType {
             Self::MergeQueuePaused => "MergeQueuePaused",
             Self::BudgetExhausted => "BudgetExhausted",
             Self::SecurityFinding => "SecurityFinding",
+            Self::SecretExpiring => "SecretExpiring",
         }
     }
 
@@ -139,6 +142,7 @@ impl NotificationType {
             "MergeQueuePaused" => Some(Self::MergeQueuePaused),
             "BudgetExhausted" => Some(Self::BudgetExhausted),
             "SecurityFinding" => Some(Self::SecurityFinding),
+            "SecretExpiring" => Some(Self::SecretExpiring),
             _ => None,
         }
     }
@@ -172,6 +176,7 @@ impl NotificationType {
             Self::MergeQueuePaused => 3,
             Self::BudgetExhausted => 2,
             Self::SecurityFinding => 3,
+            Self::SecretExpiring => 7,
         }
     }
 }
@@ -263,6 +268,7 @@ mod tests {
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
         assert_eq!(NotificationType::MrReverted.default_priority(), 2);
         assert_eq!(NotificationType::MergeQueueEscalation.default_priority(), 1);
+        assert_eq!(NotificationType::SecretExpiring.default_priority(), 7);
     }
 
     #[test]
@@ -294,6 +300,7 @@ mod tests {
             NotificationType::MergeQueuePaused,
             NotificationType::BudgetExhausted,
             NotificationType::SecurityFinding,
+            NotificationType::SecretExpiring,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
