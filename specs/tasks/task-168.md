@@ -103,7 +103,7 @@ under `/tmp/stage/review-evidence/`, suffix `base124a852`).
   saving positions via `PUT /api/v1/repos/:id/gates/:gate_id`.
 - Backend: `PUT /api/v1/repos/:id/gates/:gate_id` (`gates::update_gate`) with
   per-gate-type field validation; gate ordering via the `position` column
-  (migration `2026-10-08-000058_gate_position`, SQLite + PostgreSQL portable)
+  (migration `2026-10-08-000059_gate_position`, SQLite + PostgreSQL portable)
   enforced in both adapters and the mem store.
 - Evidence: gates API unit tests (position ordering, update validation) —
   11/11 passed on the current tree (`cargo-gates-base124a852.log`).

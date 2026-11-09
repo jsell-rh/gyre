@@ -4,7 +4,7 @@
  * Covers:
  *   - Renders without throwing
  *   - Page header shows workspace name + back button
- *   - 8 tabs are rendered with correct labels
+ *   - 10 tabs are rendered with correct labels
  *   - General tab renders name (display-only), compute target selector
  *   - Trust Level tab renders trust level cards (4 levels)
  *   - Trust Level tab renders implied trust: policy summary (HSI §2a, task-084)
@@ -22,8 +22,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/svelte';
-
+import { render, fireEvent, waitFor } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
     computeList: vi.fn().mockResolvedValue([]),
@@ -32,12 +31,16 @@ vi.mock('../lib/api.js', () => ({
     setWorkspaceBudget: vi.fn().mockResolvedValue({ entity_type: 'workspace', entity_id: 'ws-1', config: { max_tokens_per_day: 5000 }, usage: { tokens_used_today: 0, cost_today: 0, active_agents: 0, period_start: 0 } }),
     workspaceAbacPolicies: vi.fn().mockResolvedValue([]),
     auditEvents: vi.fn().mockResolvedValue([]),
-    updateWorkspace: vi.fn().mockResolvedValue({}),
     workspaceRepos: vi.fn().mockResolvedValue([]),
+    createRepo: vi.fn().mockResolvedValue({ id: 'repo-new', name: 'new-repo' }),
+    createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-mirror', name: 'mirrored', is_mirror: true }),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
     agents: vi.fn().mockResolvedValue([]),
     mergeRequests: vi.fn().mockResolvedValue([]),
-    createRepo: vi.fn().mockResolvedValue({ id: 'repo-new' }),
-    createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-mir' }),
+    secretsList: vi.fn().mockResolvedValue([]),
+    secretCreate: vi.fn().mockResolvedValue({}),
+    secretDelete: vi.fn().mockResolvedValue(null),
+    secretRotate: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
 }));
@@ -93,20 +96,31 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 9 tabs', () => {
+  it('renders all 10 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(9);
+    expect(tabs.length).toBe(10);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust Level');
     expect(labels).toContain('Policies');
     expect(labels).toContain('Teams');
     expect(labels).toContain('Budget');
+    // HSI §1.5 Admin workspace-scope row: Policies (Trust & Policies) + Repos tabs
+    expect(labels).toContain('Repos');
     expect(labels).toContain('Compute');
     expect(labels).toContain('LLM Config');
+    expect(labels).toContain('Secrets');
     expect(labels).toContain('Audit');
-    expect(labels).toContain('Repos');
+  });
+
+  it('Secrets tab loads the scoped secrets panel', async () => {
+    const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+    await fireEvent.click(container.querySelector('#ws-tab-secrets'));
+    const panel = container.querySelector('[data-testid="secrets-panel"]');
+    expect(panel).toBeTruthy();
+    expect(panel.getAttribute('data-scope')).toBe('workspace');
+    expect(api.secretsList).toHaveBeenCalledWith('workspace', 'ws-1');
   });
 
   it('General tab is active by default', () => {
@@ -162,6 +176,47 @@ describe('WorkspaceSettings', () => {
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       await fireEvent.click(container.querySelector('[data-testid="save-general-btn"]'));
       expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', expect.any(Object));
+    });
+  });
+
+  // HSI §1.5 Admin workspace-scope row: Repos tab (list, create, import).
+  // Selectors target the task-168 repos implementation (the unified markup
+  // that also carries agent counts / last activity per repo-lifecycle.md §1).
+  describe('Repos tab', () => {
+    it('lists workspace repos with name and mirror URL', async () => {
+      api.workspaceRepos.mockResolvedValueOnce([
+        { id: 'repo-1', name: 'billing-service', status: 'Active', default_branch: 'main', is_mirror: false },
+        { id: 'repo-2', name: 'payments-mirror', status: 'Active', default_branch: 'main', is_mirror: true, mirror_url: 'https://example.com/payments.git' },
+      ]);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await waitFor(() => expect(container.querySelector('[data-testid="ws-repos-table"]')).toBeTruthy());
+      const rows = container.querySelectorAll('[data-testid="ws-repo-row"]');
+      expect(rows.length).toBe(2);
+      expect(rows[0].textContent).toContain('billing-service');
+      expect(rows[1].textContent).toContain('https://example.com/payments.git');
+    });
+
+    it('create form calls api.createRepo with the workspace id', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await fireEvent.click(container.querySelector('[data-testid="ws-repos-new-btn"]'));
+      await fireEvent.input(container.querySelector('[data-testid="ws-new-repo-name-input"]'), { target: { value: 'new-repo' } });
+      await fireEvent.submit(container.querySelector('[data-testid="ws-new-repo-form"]'));
+      await waitFor(() => expect(api.createRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'new-repo', workspace_id: 'ws-1' })
+      ));
+    });
+
+    it('import form calls api.createMirrorRepo with the derived name', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await fireEvent.click(container.querySelector('[data-testid="ws-repos-import-btn"]'));
+      await fireEvent.input(container.querySelector('[data-testid="ws-import-url-input"]'), { target: { value: 'https://example.com/upstream.git' } });
+      await fireEvent.submit(container.querySelector('[data-testid="ws-import-repo-form"]'));
+      await waitFor(() => expect(api.createMirrorRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'https://example.com/upstream.git', workspace_id: 'ws-1', name: 'upstream' })
+      ));
     });
   });
 
@@ -493,10 +548,9 @@ describe('WorkspaceSettings', () => {
       await new Promise(r => setTimeout(r, 0));
       // Table should appear
       const table = container.querySelector('[data-testid="members-table"]');
-      if (table) {
-        const rows = table.querySelectorAll('[data-testid="member-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(table).toBeTruthy();
+      const rows = table.querySelectorAll('[data-testid="member-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
 
     it('shows empty state when no members', async () => {
@@ -668,10 +722,9 @@ describe('WorkspaceSettings', () => {
       await openAuditTab(container);
       await new Promise(r => setTimeout(r, 0));
       const list = container.querySelector('[data-testid="audit-list"]');
-      if (list) {
-        const rows = list.querySelectorAll('[data-testid="audit-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(list).toBeTruthy();
+      const rows = list.querySelectorAll('[data-testid="audit-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
   });
 
@@ -754,16 +807,16 @@ describe('WorkspaceSettings', () => {
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       const tablist = container.querySelector('[data-testid="ws-settings-tabs"]');
       await fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
-      const reposTab = container.querySelector('#ws-tab-repos');
-      expect(reposTab.getAttribute('aria-selected')).toBe('true');
+      const auditTab = container.querySelector('#ws-tab-audit');
+      expect(auditTab.getAttribute('aria-selected')).toBe('true');
     });
 
     it('End key moves to last tab', async () => {
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       const tablist = container.querySelector('[data-testid="ws-settings-tabs"]');
       await fireEvent.keyDown(tablist, { key: 'End' });
-      const reposTab = container.querySelector('#ws-tab-repos');
-      expect(reposTab.getAttribute('aria-selected')).toBe('true');
+      const auditTab = container.querySelector('#ws-tab-audit');
+      expect(auditTab.getAttribute('aria-selected')).toBe('true');
     });
     it('Home key moves to first tab', async () => {
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });

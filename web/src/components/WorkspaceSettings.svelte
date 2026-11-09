@@ -12,13 +12,14 @@
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
+  import SecretsPanel from './SecretsPanel.svelte';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'compute', 'llm', 'audit', 'repos'];
+  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'repos', 'compute', 'llm', 'secrets', 'audit'];
   let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
@@ -490,8 +491,7 @@
     } catch (e) {
       membersError = e.message;
       members = [];
-    }
-    finally { membersLoading = false; }
+    } finally { membersLoading = false; }
   }
 
   async function loadBudget(wsId) {
@@ -1248,6 +1248,17 @@
         {/if}
       </div>
 
+    <!-- Secrets tab (platform-model.md §7 UI) -->
+    {:else if activeTab === 'secrets'}
+      <div class="settings-section" data-testid="secrets-tab">
+        <h2 class="section-title">{$t('workspace_settings.tabs.secrets')}</h2>
+        {#if workspace?.id}
+          <SecretsPanel scope="workspace" scopeId={workspace.id} />
+        {:else}
+          <p class="empty-text">{$t('workspace_settings.secrets_need_entity')}</p>
+        {/if}
+      </div>
+
     <!-- Audit tab -->
     {:else if activeTab === 'audit'}
       <div class="settings-section" data-testid="audit-tab">
@@ -1386,6 +1397,8 @@
                 <th>{$t('workspace_settings.repos.col_status')}</th>
                 <th>{$t('workspace_settings.repos.col_agents')}</th>
                 <th>{$t('workspace_settings.repos.col_last_activity')}</th>
+                <th>{$t('workspace_settings.repos.col_default_branch')}</th>
+                <th>{$t('workspace_settings.repos.col_mirror')}</th>
               </tr>
             </thead>
             <tbody>
@@ -1403,6 +1416,8 @@
                   </td>
                   <td>{repoAgentCounts[repo.id] ?? 0}</td>
                   <td>{repoLastActivity[repo.id] ? fmtDate(repoLastActivity[repo.id]) : '—'}</td>
+                  <td class="cell-mono">{repo.default_branch ?? '—'}</td>
+                  <td class="cell-mono">{repo.is_mirror ? (repo.mirror_url ?? '—') : '—'}</td>
                 </tr>
               {/each}
             </tbody>

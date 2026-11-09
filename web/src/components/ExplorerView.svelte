@@ -4,28 +4,59 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
+  import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
+  // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
+  // workspace generate endpoint (read-only query translator).
+  import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
+  import { viewSpecToViewQuery } from '../lib/generated-view.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import Briefing from './Briefing.svelte';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
+  // HSI §3 Default Views (task-088): Spec Realization, Change, System Trace.
+  // Boundary is the default explorer view (canvas drill-down), so it has no
+  // dedicated component — the ExplorerCanvas IS the Boundary View.
+  import SpecRealizationView from './explorer/SpecRealizationView.svelte';
+  import ChangeView from './explorer/ChangeView.svelte';
+  import SystemTraceView from './explorer/SystemTraceView.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
+  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null, archSubTab = undefined, onArchSubTabChange = undefined } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
+
+  // ── Architecture sub-tabs (ui-navigation.md §2, repo scope) ─────────────
+  // Control-bar sub-tabs at repo scope: Graph (default) | Briefing (the
+  // repo-scoped narrative via ?repo_id= — HSI §1.5 repo-scope Briefing row).
+  // Controlled from App when the `archSubTab` prop is provided (drawer
+  // Briefing clicks must switch the sub-tab even when the Architecture tab
+  // is already active); `localArchSubTab` is the standalone fallback.
+  let localArchSubTab = $state('graph');
+  let activeArchSubTab = $derived(archSubTab !== undefined ? archSubTab : localArchSubTab);
+
+  function setArchSubTab(sub) {
+    localArchSubTab = sub;
+    onArchSubTabChange?.(sub);
+  }
 
   // ── Workspace-scope repo list ──────────────────────────────────────────
   let wsRepos = $state([]);
   let wsReposLoading = $state(true);
   let wsReposError = $state(null);
+  // HSI §3 Boundary View Level 1: per-repo type/endpoint counts from the
+  // workspace knowledge graph + cross-repo dependency chips.
+  let wsRepoStats = $state({});   // repoId → { types, endpoints }
+  let wsRepoDeps = $state({});    // repoId → [{ name, target_repo_id }]
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -39,6 +70,18 @@
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
 
+  // ── HSI §3 Default Views: view selector ───────────────────────────────
+  // Boundary (default) | Spec Realization | Change | System Trace.
+  // Boundary is the ExplorerCanvas C4 drill-down (workspace repo cards →
+  // packages → modules → code items); the other three are dedicated panels.
+  const EXPLORER_VIEWS = [
+    { id: 'boundary', label: 'Boundary' },
+    { id: 'spec-realization', label: 'Spec Realization' },
+    { id: 'change', label: 'Change' },
+    { id: 'system-trace', label: 'System Trace' },
+  ];
+  let explorerViewMode = $state('boundary');
+
   // Graph data quality warnings (e.g., missing LSP toolchains)
   let graphWarnings = $state([]);
   let graphWarningsDismissed = $state(false);
@@ -47,7 +90,15 @@
   let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [], recent_interactions: [] });
   let activeViewQuery = $state(null);
   let explorerFilter = $state('all');
-  let explorerLens = $state('structural');
+  // Lens selection persists in the URL query param (?lens=evaluative) so a
+  // view with an active lens is deep-linkable (HSI §3 Three Lenses).
+  let explorerLens = $state(initialLensFromUrl());
+  // Evaluative lens data (HSI §3): gate outcomes per spec path (from the most
+  // recent gate results of MRs carrying that spec_ref) and the spec approval
+  // ledger. Both are best-effort overlays — the structural base renders fine
+  // without them.
+  let gateStatusBySpec = $state({});
+  let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
@@ -56,6 +107,54 @@
   // repeated clicks on the same step re-trigger the camera move.
   let traceFocusRequest = $state(null);
   let traceFocusNonce = 0;
+
+  // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
+  // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
+  // 'generate' is the LLM view generator (workspace generate endpoint) that
+  // translates natural-language questions into ViewSpec documents.
+  let chatMode = $state('ask');
+  // Trace playback request for generated "flow" views: the nonce lets a new
+  // flow view re-trigger the canvas particle animation.
+  let tracePlaybackRequest = $state(null);
+  let tracePlaybackNonce = 0;
+
+  /**
+   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   *
+   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
+   * node-type filters, callouts, and the LLM's explanation as the query
+   * annotation — the sidebar annotation alongside the graph). A "flow"
+   * layout additionally fetches the trace_source MR's captured trace and
+   * starts particle playback on the evaluative lens; the server already
+   * guarantees flow views are trace-backed, so a fetch failure here falls
+   * back to the structural lens (client mirror of the server fallback).
+   */
+  function applyGeneratedViewSpec(spec) {
+    if (!spec || typeof spec !== 'object') return;
+    const query = viewSpecToViewQuery(spec);
+    if (query) {
+      activeViewQuery = query;
+      pushInteraction({ action: 'query', detail: `generated:${spec.layout ?? 'view'}` });
+    }
+    if (spec.layout === 'flow' && spec.data?.trace_source?.mr_id) {
+      const mrId = spec.data.trace_source.mr_id;
+      api.mrTrace(mrId)
+        .then((trace) => {
+          if (trace?.spans?.length > 0) {
+            traceData = trace;
+            tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+          } else {
+            explorerLens = 'structural';
+          }
+        })
+        .catch((err) => {
+          console.warn('[ExplorerView] flow view trace fetch failed:', err);
+          explorerLens = 'structural';
+        });
+    } else {
+      explorerLens = 'structural';
+    }
+  }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -190,6 +289,14 @@
 
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
+  // HSI §3 Layer 1: MR gate evaluation records for the current repo —
+  // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
+  let gateRecords = $state([]);
+  // HSI §3 Layer 1: recent ArchitecturalDelta records (last hour only) for
+  // the fading highlight rings. Loaded on canvas load so the rings do not
+  // depend on the collapsed-by-default Architecture-Insights panel; the
+  // insights panel's full timeline (a superset) takes precedence once live.
+  let livenessTimeline = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -747,6 +854,21 @@
     }
   });
 
+  // Read initial Architecture sub-tab from URL params (set by goToRepoTab
+  // context — same convention as the Code tab's subTab param).
+  // The param is intentionally NOT deleted after reading: App's
+  // setRepoArchSubTab keeps the ?subTab= URL param mirroring the rendered
+  // sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing"), so
+  // reload/copy of the current URL must keep opening the same sub-tab.
+  $effect(() => {
+    if (scopeType !== 'repo') return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSubTab = params.get('subTab');
+    if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
+      setArchSubTab(initialSubTab);
+    }
+  });
+
   async function loadWsRepos() {
     wsReposLoading = true;
     wsReposError = null;
@@ -760,6 +882,65 @@
     } finally {
       wsReposLoading = false;
     }
+    loadWsBoundaryStats();
+  }
+
+  /** HSI §3 Boundary View Level 1 — enrich the workspace repo cards with
+   *  type/endpoint counts (from the aggregated workspace knowledge graph)
+   *  and cross-repo dependency chips. Best-effort: failures leave the cards
+   *  without counts rather than breaking the repo list. */
+  async function loadWsBoundaryStats() {
+    if (!scope.workspaceId) return;
+    try {
+      const g = await api.workspaceGraph(scope.workspaceId);
+      const stats = {};
+      for (const n of g?.nodes ?? []) {
+        const rid = n.repo_id;
+        if (!rid) continue;
+        if (!stats[rid]) stats[rid] = { types: 0, endpoints: 0 };
+        const t = String(n.node_type ?? '').toLowerCase();
+        if (['type', 'interface', 'trait', 'class', 'enum'].includes(t)) stats[rid].types += 1;
+        if (t === 'endpoint') stats[rid].endpoints += 1;
+      }
+      wsRepoStats = stats;
+    } catch {
+      wsRepoStats = {};
+    }
+    // Cross-repo dependency chips per repo (names resolved against the list).
+    const deps = {};
+    await Promise.all(
+      wsRepos.map(async (repo) => {
+        try {
+          const edges = await api.repoDependencies(repo.id);
+          deps[repo.id] = (Array.isArray(edges) ? edges : []).map((e) => ({
+            target_repo_id: e.target_repo_id,
+            name:
+              wsRepos.find((r) => r.id === e.target_repo_id)?.name ??
+              e.target_artifact ??
+              e.target_repo_id,
+          }));
+        } catch {
+          deps[repo.id] = [];
+        }
+      })
+    );
+    wsRepoDeps = deps;
+  }
+
+  /** Switch the Explorer view (HSI §3 view selector). Resetting to Boundary
+   *  restores the canvas drill-down exactly as it was (canvas state is kept
+   *  in explorerCanvasState, so nothing is lost while other views are shown). */
+  function setExplorerView(mode) {
+    explorerViewMode = mode;
+    pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  /** Navigate from another view (Change / Spec Realization) to a node's
+   *  implementation details in the Boundary View. */
+  function navigateToBoundaryNode(node) {
+    explorerViewMode = 'boundary';
+    explorerCanvasState = { ...explorerCanvasState, selectedNode: node };
+    detailNode = node;
   }
 
   /** Read the drilled repo name from the current URL (?repo=name), or null.
@@ -775,6 +956,34 @@
       return null;
     }
   }
+
+  /** Read the lens from the current URL (?lens=evaluative). Called once at
+   *  component init (from the explorerLens $state initializer) so a lens
+   * deep link restores on reload/refresh. Structural is the default;
+   *  observable is future work and normalizes back to structural. */
+  function initialLensFromUrl() {
+    try {
+      return lensFromUrl(window.location.href);
+    } catch {
+      return 'structural';
+    }
+  }
+
+  // Lens selection persists in the URL query param (?lens=evaluative) so
+  // an overlaid view is deep-linkable. replaceState (no history entry):
+  // switching lenses is a view concern, not a navigation — browser Back must
+  // not step through lens toggles. The structural default drops the param
+  // to keep URLs clean. Other params (e.g. ?repo=) and the #drill= hash are
+  // preserved.
+  $effect(() => {
+    const lensValue = explorerLens;
+    try {
+      const url = lensToUrl(lensValue, window.location.href);
+      if (url !== window.location.href) {
+        history.replaceState(null, '', url);
+      }
+    } catch { /* URL unavailable (SSR) — skip persistence */ }
+  });
 
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view.
@@ -862,12 +1071,16 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; livenessTimeline = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
+    gateStatusBySpec = {};
+    specApprovals = [];
+    gateRecords = [];
+    livenessTimeline = null;
     graphWarnings = [];
     graphWarningsDismissed = false;
     perfWarningDismissed = false;
@@ -881,6 +1094,15 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+      // Load evaluative lens overlays: gate outcomes + spec approvals
+      // (best-effort, non-blocking)
+      loadEvaluativeData(repoId);
+      // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
+      loadGateData(repoId);
+      // Load recent ArchitecturalDelta records for the fading change rings
+      // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
+      // load must not gate.
+      loadLivenessTimeline(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -926,7 +1148,7 @@
   async function loadTraceData(repoId) {
     try {
       // Find the most recent MR for this repo that has trace data
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 5 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       for (const mr of mrList) {
         try {
@@ -938,6 +1160,117 @@
         } catch { /* no trace for this MR, try next */ }
       }
     } catch { /* trace loading is best-effort */ }
+  }
+
+  /** Load Evaluative lens data (HSI §3): gate outcomes and spec approvals.
+   *
+   *  Gate status: gate results are recorded per MR, and each MR carries a
+   *  spec_ref ("path@sha"), so the outcome is joined to graph nodes via the
+   *  node's governing spec paths. For each spec path, the most recent MR
+   *  with concluded gate results decides: pass = every gate passed,
+   *  fail = at least one failed.
+   *
+   *  Spec approvals: the approval ledger (GET /api/v1/specs/approvals)
+   *  provides ✓ approved / ⏳ pending / ✗ rejected status per spec path.
+   *
+   *  Both loads are best-effort and non-blocking — the structural base
+   *  renders fine without them. */
+  async function loadEvaluativeData(repoId) {
+    // Spec approval ledger — one fetch, filtered client-side by the paths
+    // actually present on graph nodes.
+    try {
+      api.specsApprovals()
+        .then((list) => { specApprovals = Array.isArray(list) ? list : []; })
+        .catch(() => { /* ledger unavailable — approval icons omitted */ });
+    } catch { /* ledger endpoint unavailable — approval icons omitted */ }
+
+    // Gate outcomes per spec path from recent MRs.
+    try {
+      // GET /api/v1/merge-requests scopes by `repository_id` and caps via
+      // `per_page` (newest first — ListMrsQuery), so the gate-status window
+      // is requested repo-scoped with a bounded per-MR gate fetch fan-out
+      // (the same ≤10 bound the liveness loaders uphold); a repo_id param
+      // is silently ignored and would attribute other repos' gate outcomes
+      // to this repo's evaluative overlay. A client-side sort keeps the
+      // recency order explicit even if a backend ignores the cap.
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      // Most recent first: the latest MR with concluded gates decides a
+      // spec path's status; older MRs for the same path are ignored.
+      const sorted = [...mrList].sort((a, b) => {
+        const at = Number(a?.created_at ?? 0) || 0;
+        const bt = Number(b?.created_at ?? 0) || 0;
+        return bt - at;
+      }).slice(0, 10);
+      const byPath = {};
+      for (const mr of sorted) {
+        const specRef = mr?.spec_ref;
+        if (!specRef) continue;
+        const path = specRef.split('@')[0];
+        if (!path || byPath[path]) continue;
+        try {
+          const results = await api.mrGates(mr.id);
+          // Keep only the most recent result per gate (re-runs append new
+          // records; the latest run decides the outcome).
+          const latestByGate = new Map();
+          for (const r of results ?? []) {
+            if (r?.status !== 'passed' && r?.status !== 'failed') continue;
+            const gid = r.gate_id ?? r.id;
+            const prev = latestByGate.get(gid);
+            if (!prev || (r.started_at ?? 0) >= (prev.started_at ?? 0)) latestByGate.set(gid, r);
+          }
+          const concluded = [...latestByGate.values()];
+          if (concluded.length === 0) continue;
+          byPath[path] = concluded.some(r => r.status === 'failed') ? 'fail' : 'pass';
+        } catch { /* no gate results for this MR — try older MRs for the path */ }
+      }
+      gateStatusBySpec = byPath;
+    } catch {
+      gateStatusBySpec = {};
+    }
+  }
+
+  /**
+   * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
+   * Each MR's spec_ref links its gate results to the graph nodes the spec
+   * governs; the Evaluative lens colors edges green (all passed) / red (any
+   * failed). Best-effort and non-blocking, like trace loading.
+   */
+  async function loadGateData(repoId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      const records = [];
+      for (const mr of mrList) {
+        if (!mr?.spec_ref) continue;
+        try {
+          const gates = await api.mrGates(mr.id);
+          if (Array.isArray(gates) && gates.length > 0) {
+            records.push({ mrId: mr.id, spec_ref: mr.spec_ref, gates });
+          }
+        } catch { /* no gates for this MR, skip */ }
+      }
+      gateRecords = records;
+    } catch { /* gate loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load the repo's recent ArchitecturalDelta records on
+   * canvas load so the fading highlight rings have a data source in the
+   * default view (the Architecture-Insights panel that owns the full
+   * timeline is collapsed by default). The query is bounded to the recent-
+   * change window (since = now − 1h, no until) so the payload stays small;
+   * computeRecentChanges re-applies the same window, and the insights
+   * panel's full timeline supersedes this slice once loaded. Best-effort
+   * and non-blocking, like trace/gate loading.
+   */
+  async function loadLivenessTimeline(repoId) {
+    try {
+      const since = Math.floor((Date.now() - RECENT_CHANGE_WINDOW_MS) / 1000);
+      const timeline = await api.repoGraphTimeline(repoId, since);
+      if (selectedRepoId !== repoId) return; // stale — user switched repos
+      livenessTimeline = Array.isArray(timeline) ? timeline : [];
+    } catch { /* recent-change rings are best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -1220,6 +1553,23 @@
                 {#if repo.description}
                   <span class="ws-repo-description">{repo.description}</span>
                 {/if}
+                <!-- HSI §3 Boundary View Level 1: type/endpoint counts from the
+                     workspace knowledge graph (C4 container card). -->
+                <span class="ws-repo-counts">
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.types ?? 0} types</span>
+                  <span class="ws-repo-count-sep">·</span>
+                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.endpoints ?? 0} endpoints</span>
+                </span>
+                {#if wsRepoDeps[repo.id]?.length}
+                  <span class="ws-repo-deps" title="Cross-repo dependencies">
+                    {#each wsRepoDeps[repo.id].slice(0, 4) as dep}
+                      <span class="ws-repo-dep-chip">→ {dep.name}</span>
+                    {/each}
+                    {#if wsRepoDeps[repo.id].length > 4}
+                      <span class="ws-repo-dep-more">+{wsRepoDeps[repo.id].length - 4}</span>
+                    {/if}
+                  </span>
+                {/if}
               </div>
             </div>
             <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
@@ -1246,6 +1596,29 @@
         <h1 class="page-title">{scopeType === 'repo' || showingRepoGraph ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
         {#if scopeType !== 'repo' && !showingRepoGraph}
           <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        {/if}
+
+        {#if scopeType === 'repo'}
+          <!-- Control-bar sub-tabs (ui-navigation.md §2): Graph (default) |
+               Briefing (repo-scoped narrative, HSI §1.5). -->
+          <div class="arch-subtabs" role="tablist" aria-label={$t('explorer_view.arch_subtabs_label')}>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'graph'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'graph'}
+              onclick={() => setArchSubTab('graph')}
+              data-testid="arch-subtab-graph"
+            >{$t('explorer_view.sub_tabs.graph')}</button>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'briefing'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'briefing'}
+              onclick={() => setArchSubTab('briefing')}
+              data-testid="arch-subtab-briefing"
+            >{$t('explorer_view.sub_tabs.briefing')}</button>
+          </div>
         {/if}
       </div>
       <div class="header-right">
@@ -1311,9 +1684,24 @@
     </div>
 
 
-    <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
+    <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
+        <!-- HSI §3 view selector: Boundary | Spec Realization | Change | System Trace -->
+        <div class="explorer-view-tabs" role="tablist" aria-label="Explorer view" data-testid="explorer-view-selector">
+          {#each EXPLORER_VIEWS as v (v.id)}
+            <button
+              type="button"
+              role="tab"
+              class="view-tab"
+              class:active={explorerViewMode === v.id}
+              aria-selected={explorerViewMode === v.id}
+              onclick={() => setExplorerView(v.id)}
+            >{v.label}</button>
+          {/each}
+        </div>
+
+        {#if explorerViewMode === 'boundary'}
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -1376,13 +1764,20 @@
             </span>
           {/if}
         {/if}
+        {/if}
       </div>
     {/if}
 
     <!-- Main content -->
     <div class="explorer-body">
       <div class="explorer-body-main">
-        {#if !selectedRepoId}
+        {#if scopeType === 'repo' && activeArchSubTab === 'briefing' && scope.repoId}
+          <!-- Briefing sub-tab (ui-navigation.md §2): repo-scoped narrative —
+               HSI §1.5 repo-scope Briefing row (?repo_id= filter). -->
+          <div class="arch-briefing-wrap" data-testid="arch-briefing">
+            <Briefing workspaceId={scope.workspaceId} repoId={scope.repoId} scope="repo" />
+          </div>
+        {:else if !selectedRepoId}
           <div class="empty-state-wrap">
             {#if scopeType === 'repo'}
               <!-- Repo scope: repo ID will be set by the auto-select effect -->
@@ -1436,6 +1831,7 @@
                   {/if}
                 </div>
               {/if}
+              {#if explorerViewMode === 'boundary'}
               <!-- windowEscape={false}: ExplorerView owns the window-level Escape
                    cascade (onWindowKeydown: spec editor → query editor → detail panel →
                    active view query) and already exits trace mode through it; a second
@@ -1449,6 +1845,8 @@
                 activeQuery={activeViewQuery}
                 bind:filter={explorerFilter}
                 bind:lens={explorerLens}
+                gateStatusBySpec={gateStatusBySpec}
+                specApprovals={specApprovals}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
@@ -1474,15 +1872,17 @@
                 onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
+                playbackRequest={tracePlaybackRequest}
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
                 windowEscape={false}
-                timeline={graphTimeline ?? []}
+                timeline={graphTimeline ?? livenessTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                {gateRecords}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;
@@ -1492,8 +1892,27 @@
                 onTimelineMarkerClick={(_delta) => {}}
                 {timelineDeltaStats}
               />
-              <!-- Architecture Insights — collapsible panel inside canvas area -->
-              {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+              {:else if explorerViewMode === 'spec-realization'}
+                <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
+                <SpecRealizationView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onOpenSpec={(path) => openSpecEditor(path)}
+                  onSelectNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'change'}
+                <!-- HSI §3 Change View: architectural deltas since last visit -->
+                <ChangeView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onNavigateToNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'system-trace'}
+                <!-- HSI §3 System Trace View: SDLC timeline for an MR -->
+                <SystemTraceView repoId={selectedRepoId} />
+              {/if}
+              <!-- Architecture Insights — collapsible panel inside canvas area (Boundary view only) -->
+              {#if explorerViewMode === 'boundary' && selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
                 <div class="arch-insights-overlay">
                   <div class="arch-insights-toggle">
                     <button
@@ -2001,6 +2420,26 @@
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
+                  <!-- HSI §3: chat column mode — Explorer agent (ask) vs LLM view
+                       generator (generate). -->
+                  <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'ask'}
+                      role="tab"
+                      aria-selected={chatMode === 'ask'}
+                      onclick={() => { chatMode = 'ask'; }}
+                      type="button"
+                    >{$t('explorer_chat.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'generate'}
+                      role="tab"
+                      aria-selected={chatMode === 'generate'}
+                      onclick={() => { chatMode = 'generate'; }}
+                      type="button"
+                    >{$t('generated_view.title')}</button>
+                  </div>
                   <button
                     class="chat-collapse-btn"
                     onclick={() => { chatCollapsed = true; }}
@@ -2011,6 +2450,7 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
                   </button>
                 </div>
+                {#if chatMode === 'ask'}
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
@@ -2023,6 +2463,13 @@
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
                 />
+                {:else}
+                <GeneratedViewChat
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                />
+                {/if}
               </div>
             {/if}
             {#if chatCollapsed}
@@ -2039,9 +2486,8 @@
             {/if}
           </div>
         {/if}
-
-        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
       </div>
+        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
     </div>
   </div>
 {/if}
@@ -2135,6 +2581,35 @@
     white-space: nowrap;
   }
 
+  /* HSI §3 Boundary View Level 1: type/endpoint counts + dep chips on cards */
+  .ws-repo-counts {
+    display: inline-flex;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .ws-repo-count-sep { color: var(--color-border); }
+
+  .ws-repo-deps {
+    display: inline-flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .ws-repo-dep-chip {
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    border-radius: var(--radius-full, 999px);
+    padding: 0 var(--space-2);
+  }
+
+  .ws-repo-dep-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
   .ws-repo-explore {
     font-size: var(--text-sm);
     color: var(--color-link);
@@ -2173,6 +2648,46 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
+  }
+
+  /* Control-bar sub-tabs at repo scope (ui-navigation.md §2): Graph | Briefing */
+  .arch-subtabs {
+    display: flex;
+    gap: 0;
+    border-bottom: none;
+    margin-top: var(--space-2);
+  }
+
+  .arch-subtab-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted, var(--color-text));
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .arch-subtab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .arch-subtab-btn:not(.active):hover {
+    color: var(--color-text);
+  }
+
+  .arch-subtab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .arch-briefing-wrap {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
   }
 
   .header-right {
@@ -2355,6 +2870,41 @@
     background: var(--color-surface-elevated);
     flex-shrink: 0;
     flex-wrap: wrap;
+  }
+
+  /* HSI §3 view selector tabs (Boundary | Spec Realization | Change | System Trace) */
+  .explorer-view-tabs {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    padding: 2px;
+    flex-shrink: 0;
+  }
+
+  .view-tab {
+    border: none;
+    background: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .view-tab:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+  }
+
+  .view-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    box-shadow: inset 0 -2px 0 var(--color-focus);
+    font-weight: 600;
   }
 
   .search-input-wrap {
@@ -3726,13 +4276,46 @@
 
   /* ── Chat panel collapse/expand controls ─────────────────────────── */
   .chat-collapse-bar {
-    display: none;
+    display: flex;
     flex-shrink: 0;
     align-items: center;
-    justify-content: center;
-    padding: var(--space-1) 0;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface);
+  }
+
+  /* HSI §3: chat mode tabs (Explorer agent | Generated Views) */
+  .chat-mode-tabs {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .chat-mode-tab {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .chat-mode-tab:hover { color: var(--color-text); }
+
+  .chat-mode-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+    font-weight: 600;
+  }
+
+  .chat-mode-tab:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .chat-collapse-btn {
