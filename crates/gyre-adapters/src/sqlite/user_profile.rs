@@ -392,7 +392,9 @@ impl JudgmentLedgerRepository for SqliteStorage {
                             ),
                         ),
                         JudgmentType::TrustGrant => (
-                            str_field("workspace_id").or(wid.clone()).unwrap_or_default(),
+                            str_field("workspace_id")
+                                .or(wid.clone())
+                                .unwrap_or_default(),
                             format!(
                                 "trust {} -> {}",
                                 str_field("from").unwrap_or_default(),
@@ -694,10 +696,9 @@ mod tests {
     async fn judgment_ledger_merges_sources_reverse_chron() {
         let (_tmp, s) = setup();
         seed_judgments(&s).await;
-        let entries =
-            JudgmentLedgerRepository::list_for_user(&s, "u1", None, None, None, 50, 0)
-                .await
-                .unwrap();
+        let entries = JudgmentLedgerRepository::list_for_user(&s, "u1", None, None, None, 50, 0)
+            .await
+            .unwrap();
         // 3 approvals/rejections (not u9's) + 3 audit events (not u9's).
         assert_eq!(entries.len(), 6, "got {:?}", entries.len());
         let types: Vec<_> = entries.iter().map(|e| e.judgment_type.clone()).collect();
@@ -728,7 +729,9 @@ mod tests {
         assert_eq!(rej.detail.as_deref(), Some("not coherent"));
         assert_eq!(rej.workspace_id, Some(Id::new("ws1")));
         // No foreign-user entries.
-        assert!(!entries.iter().any(|e| e.entity_ref == "specs/a.md" && e.timestamp == 1190));
+        assert!(!entries
+            .iter()
+            .any(|e| e.entity_ref == "specs/a.md" && e.timestamp == 1190));
     }
 
     #[tokio::test]
@@ -749,7 +752,9 @@ mod tests {
         // specs/b.md approval (NULL workspace) and the global meta-spec publish
         // are excluded; approval+rejection+gate+trust remain.
         assert_eq!(entries.len(), 4, "got {:?}", entries.len());
-        assert!(entries.iter().all(|e| e.workspace_id == Some(Id::new("ws1"))));
+        assert!(entries
+            .iter()
+            .all(|e| e.workspace_id == Some(Id::new("ws1"))));
     }
 
     #[tokio::test]
@@ -782,7 +787,9 @@ mod tests {
         .unwrap();
         // Only non-revoked/non-rejected approvals.
         assert_eq!(approvals.len(), 2);
-        assert!(approvals.iter().all(|e| e.judgment_type == JudgmentType::SpecApproval));
+        assert!(approvals
+            .iter()
+            .all(|e| e.judgment_type == JudgmentType::SpecApproval));
     }
 
     #[tokio::test]
@@ -865,7 +872,10 @@ mod tests {
         let (_tmp, s) = setup();
         let u = make_user("u1");
         UserRepository::create(&s, &u).await.unwrap();
-        let got = UserRepository::find_by_id(&s, &u.id).await.unwrap().unwrap();
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.oidc_issuer, None);
         assert_eq!(got.last_login_at, None);
 
@@ -873,7 +883,10 @@ mod tests {
         UserRepository::record_login(&s, &u.id, "https://idp.test", 1000, 60)
             .await
             .unwrap();
-        let got = UserRepository::find_by_id(&s, &u.id).await.unwrap().unwrap();
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.oidc_issuer.as_deref(), Some("https://idp.test"));
         assert_eq!(got.last_login_at, Some(1000));
 
@@ -881,22 +894,54 @@ mod tests {
         UserRepository::record_login(&s, &u.id, "https://idp.test", 1030, 60)
             .await
             .unwrap();
-        let got = UserRepository::find_by_id(&s, &u.id).await.unwrap().unwrap();
-        assert_eq!(got.last_login_at, Some(1000), "in-window write leaked through");
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got.last_login_at,
+            Some(1000),
+            "in-window write leaked through"
+        );
 
-        // Past the window: advances.
-        UserRepository::record_login(&s, &u.id, "https://idp.test", 1061, 60)
+        // Within the debounce window but with a DIFFERENT verified issuer:
+        // the write MUST fire — the provisioning path re-stamps last_login_at
+        // on every auth, so the debounce alone would never record the issuer
+        // of an already-provisioned user (port contract carve-out).
+        UserRepository::record_login(&s, &u.id, "https://idp-two.test", 1035, 60)
             .await
             .unwrap();
-        let got = UserRepository::find_by_id(&s, &u.id).await.unwrap().unwrap();
-        assert_eq!(got.last_login_at, Some(1061));
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got.oidc_issuer.as_deref(),
+            Some("https://idp-two.test"),
+            "issuer change must bypass the debounce"
+        );
+        assert_eq!(got.last_login_at, Some(1035));
+
+        // Past the window (measured from the issuer-change write at 1035):
+        // advances.
+        UserRepository::record_login(&s, &u.id, "https://idp-two.test", 1096, 60)
+            .await
+            .unwrap();
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.last_login_at, Some(1096));
 
         // update() must preserve auth-provider fields.
         let mut edited = got.clone();
         edited.display_name = "renamed".into();
         UserRepository::update(&s, &edited).await.unwrap();
-        let got = UserRepository::find_by_id(&s, &u.id).await.unwrap().unwrap();
-        assert_eq!(got.oidc_issuer.as_deref(), Some("https://idp.test"));
-        assert_eq!(got.last_login_at, Some(1061));
+        let got = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.oidc_issuer.as_deref(), Some("https://idp-two.test"));
+        assert_eq!(got.last_login_at, Some(1096));
     }
 }

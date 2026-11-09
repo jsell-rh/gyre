@@ -22,6 +22,14 @@ pub enum AuditEventType {
     GateOverride,
     /// A meta-spec (persona/principle/standard) version was published.
     MetaSpecPublish,
+    // Agent lifecycle events (observability.md §Audit Event Types)
+    AgentSpawned,
+    AgentCompleted,
+    AgentKilled,
+    AgentDead,
+    AgentHeartbeat,
+    AgentTokenRevoked,
+    AgentReassigned,
     Custom(String),
 }
 
@@ -40,6 +48,13 @@ impl AuditEventType {
             Self::TrustChange => "trust_change".to_string(),
             Self::GateOverride => "gate_override".to_string(),
             Self::MetaSpecPublish => "meta_spec_publish".to_string(),
+            Self::AgentSpawned => "agent_spawned".to_string(),
+            Self::AgentCompleted => "agent_completed".to_string(),
+            Self::AgentKilled => "agent_killed".to_string(),
+            Self::AgentDead => "agent_dead".to_string(),
+            Self::AgentHeartbeat => "agent_heartbeat".to_string(),
+            Self::AgentTokenRevoked => "agent_token_revoked".to_string(),
+            Self::AgentReassigned => "agent_reassigned".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -59,6 +74,13 @@ impl AuditEventType {
             "trust_change" => Self::TrustChange,
             "gate_override" => Self::GateOverride,
             "meta_spec_publish" => Self::MetaSpecPublish,
+            "agent_spawned" => Self::AgentSpawned,
+            "agent_completed" => Self::AgentCompleted,
+            "agent_killed" => Self::AgentKilled,
+            "agent_dead" => Self::AgentDead,
+            "agent_heartbeat" => Self::AgentHeartbeat,
+            "agent_token_revoked" => Self::AgentTokenRevoked,
+            "agent_reassigned" => Self::AgentReassigned,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -175,6 +197,13 @@ mod tests {
             AuditEventType::TrustChange,
             AuditEventType::GateOverride,
             AuditEventType::MetaSpecPublish,
+            AuditEventType::AgentSpawned,
+            AuditEventType::AgentCompleted,
+            AuditEventType::AgentKilled,
+            AuditEventType::AgentDead,
+            AuditEventType::AgentHeartbeat,
+            AuditEventType::AgentTokenRevoked,
+            AuditEventType::AgentReassigned,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {

@@ -1332,8 +1332,14 @@ mod tests {
             .await
             .unwrap()
             .expect("JWT auth must provision the acting user");
-        assert_eq!(ev.user_id.as_ref().map(Id::as_str), Some(acting_user.id.as_str()));
-        assert_eq!(ev.workspace_id.as_ref().map(Id::as_str), Some(ws_id.as_str()));
+        assert_eq!(
+            ev.user_id.as_ref().map(Id::as_str),
+            Some(acting_user.id.as_str())
+        );
+        assert_eq!(
+            ev.workspace_id.as_ref().map(Id::as_str),
+            Some(ws_id.as_str())
+        );
         assert_eq!(ev.detail["from"], "Guided");
         assert_eq!(ev.detail["to"], "Supervised");
 
@@ -1351,7 +1357,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp2.status(), StatusCode::OK, "same-value PUT must succeed");
+        assert_eq!(
+            resp2.status(),
+            StatusCode::OK,
+            "same-value PUT must succeed"
+        );
         let events2 = state
             .audit
             .query(&AuditQueryFilter {
@@ -1361,6 +1371,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(events2.len(), 1, "no-change PUT must not write trust_change: {events2:?}");
+        assert_eq!(
+            events2.len(),
+            1,
+            "no-change PUT must not write trust_change: {events2:?}"
+        );
     }
 }

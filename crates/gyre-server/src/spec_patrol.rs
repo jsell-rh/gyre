@@ -1038,7 +1038,8 @@ mod tests {
                 Some(&Id::new("ws1")),
                 None,
                 None,
-                None, &[],
+                None,
+                &[],
                 10,
                 0,
             )
@@ -1071,7 +1072,8 @@ mod tests {
                 Some(&Id::new("ws1")),
                 None,
                 None,
-                None, &[],
+                None,
+                &[],
                 10,
                 0,
             )
@@ -1088,7 +1090,8 @@ mod tests {
                 Some(&Id::new("ws1")),
                 None,
                 None,
-                None, &[],
+                None,
+                &[],
                 10,
                 0,
             )
@@ -1160,7 +1163,8 @@ mod tests {
                 Some(&Id::new("ws1")),
                 None,
                 None,
-                None, &[],
+                None,
+                &[],
                 10,
                 0,
             )
@@ -1226,7 +1230,8 @@ mod tests {
                 Some(&Id::new("ws1")),
                 None,
                 None,
-                None, &[],
+                None,
+                &[],
                 10,
                 0,
             )

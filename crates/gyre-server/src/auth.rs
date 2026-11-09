@@ -61,6 +61,12 @@ pub struct AgentJwtClaims {
     pub exp: u64,
     /// Always "agent" for agent tokens.
     pub scope: String,
+    /// JWT ID — unique identifier for this token. Recorded in
+    /// `AgentTokenRevoked` audit events when the token is revoked
+    /// (observability.md §Audit Event Types). Empty on tokens minted
+    /// before the claim existed.
+    #[serde(default)]
+    pub jti: String,
     /// Task assigned to this agent at spawn time.
     pub task_id: String,
     /// Identity that called POST /api/v1/agents/spawn.
@@ -215,6 +221,7 @@ impl AgentSigningKey {
             iat: now,
             exp: now + ttl_secs,
             scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
             workspace_id: None,
@@ -241,6 +248,27 @@ impl AgentSigningKey {
         jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
             .map(|td| td.claims)
             .map_err(|e| format!("agent JWT validation: {e}"))
+    }
+
+    /// Extract the `jti` (JWT ID) claim from an agent token without verifying
+    /// the signature or expiry.
+    ///
+    /// crypto-verify:ok — audit-detail extraction only, never an authentication
+    /// decision. Callers pass tokens read from the server's own `agent_tokens`
+    /// KV bucket (minted by this key), never caller-supplied input; the value
+    /// feeds the `jti` field of an `AgentTokenRevoked` audit event. All auth
+    /// paths use `validate()` (full EdDSA signature verification) instead.
+    pub fn extract_jti_unverified(&self, token: &str) -> Option<String> {
+        // JWT format: header.payload.signature (base64url, no padding).
+        let payload_b64 = token.split('.').nth(1)?;
+        let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let jti = claims.get("jti")?.as_str()?;
+        if jti.is_empty() {
+            None
+        } else {
+            Some(jti.to_string())
+        }
     }
 
     /// Mint an orchestrator JWT with scope claims (platform-model.md §3).
@@ -270,6 +298,7 @@ impl AgentSigningKey {
             iat: now,
             exp: now + ttl_secs,
             scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
             task_id: agent_id.to_string(),
             spawned_by: spawned_by.to_string(),
             workspace_id: Some(workspace_id.to_string()),
@@ -334,9 +363,24 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
-    #[serde(default)]
-    tenant_id: Option<String>,
+    /// Tenant scope claim. An IdP that does not issue tenant claims is a
+    /// single-tenant deployment whose callers belong to the bootstrapped
+    /// "default" tenant (hierarchy-enforcement.md §1) — expressed as the
+    /// claim's schema default (applied at deserialization), not as a
+    /// use-site fallback.
+    #[serde(default = "default_tenant_claim")]
+    tenant_id: String,
+}
+
+/// Serde default for [`JwtClaims::tenant_id`]: an absent tenant claim maps
+/// to the bootstrapped "default" tenant — the documented single-tenant IdP
+/// contract ("Absent = \"default\""). This is a deterministic function of
+/// the cryptographically verified token, not a fabricated scope identity on
+/// a lookup failure: there is no fallible lookup between the verified claims
+/// and this value, and "default" is a real Tenant row materialized at
+/// startup (bootstrap_default_tenant in lib.rs).
+fn default_tenant_claim() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -769,20 +813,23 @@ async fn validate_jwt(
 
     let claims = token_data.claims;
     let roles = roles_from_claims(&claims);
-    let username = claims
+    let preferred_username = claims
         .preferred_username
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from JWT claim. The claim's schema
+    // default ("default" — the bootstrapped single-tenant scope) was already
+    // applied at deserialization, so the value here is fully determined by
+    // the verified token.
+    let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user.
     let user = find_or_create_user(
         state,
         &claims.sub,
-        &username,
+        &preferred_username,
         claims.email.as_deref(),
         &roles,
     )
@@ -817,31 +864,149 @@ async fn validate_jwt(
     })
 }
 
+/// Find or auto-provision a user from a verified SSO identity.
+///
+/// - First login: the username is derived from the SSO `preferred_username`
+///   claim (sanitized to the URL-safe handle contract; falls back to the
+///   subject when sanitization yields nothing), display name starts as the
+///   raw preferred_username (user-management.md §Username vs Display Name).
+/// - Every authentication: `last_login_at` is stamped and persisted.
+/// - The username is immutable after creation: later logins never rewrite
+///   it, even if the IdP later changes `preferred_username`.
 async fn find_or_create_user(
     state: &Arc<AppState>,
     external_id: &str,
-    name: &str,
+    preferred_username: &str,
     email: Option<&str>,
     roles: &[UserRole],
 ) -> anyhow::Result<User> {
-    if let Some(existing) = state.users.find_by_external_id(external_id).await? {
-        return Ok(existing);
-    }
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
+    if let Some(mut existing) = state.users.find_by_external_id(external_id).await? {
+        // Spec §User Entity: last_login_at is set on each authentication.
+        // username/external_id stay untouched (immutable after creation).
+        existing.record_login(now);
+        state.users.update(&existing).await?;
+        return Ok(existing);
+    }
+
+    // Derive the URL-safe username from the SSO preferred_username. When
+    // sanitization leaves nothing usable, fall back to the subject — but
+    // sanitized like any other handle: the subject is an opaque IdP
+    // identifier (RFC 7519 StringOrURI; Auth0 subjects contain '|'), not a
+    // URL-safe string, and the handle contract (validate_username) must hold
+    // for every persisted username. When neither sanitizes (e.g. a purely
+    // numeric-keypad subject), use migration 000058's escape hatch for
+    // unsanitizable names: "u-<row id>", URL-safe and unique by the freshly
+    // generated primary key.
+    // sanitize_username is lossy — distinct IdP handles ("Jordan Sell" /
+    // "Jordan_Sell") can derive the same URL-safe username — and usernames
+    // are globally unique (idx_users_username + the create() port
+    // contract), so the first login of a second user whose derived handle
+    // collides resolves it with the migration's deterministic suffix
+    // scheme (base, base-2, base-3, ...) instead of failing the login
+    // (a 401 that would repeat forever: find_by_external_id keeps
+    // missing, and the username is immutable).
     let id = Id::new(uuid::Uuid::new_v4().to_string());
-    let mut user = User::new(id, external_id, name, now);
+    let base_username = User::sanitize_username(preferred_username)
+        .or_else(|| User::sanitize_username(external_id))
+        .unwrap_or_else(|| format!("u-{}", id.as_str()));
+    let username = match resolve_unique_username(state, &base_username).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            // Every Err means the base handle is already taken (the walk
+            // probes the base first), so falling back to the subject
+            // verbatim would fail create() and reproduce the lockout.
+            // Instead mirror migration 000058's escape hatch for
+            // unsanitizable names: "u-<row id>", URL-safe and unique by
+            // the freshly generated primary key.
+            tracing::warn!(
+                external_id,
+                base = %base_username,
+                error = %e,
+                "no unique handle derivable from the SSO username; assigning a generated handle"
+            );
+            format!("u-{}", id.as_str())
+        }
+    };
+
+    let mut user = User::new_sso(
+        id,
+        external_id,
+        username,
+        preferred_username, // display_name: human-readable, editable
+        now,
+    );
     user.email = email.map(|e| e.to_string());
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
+    user.last_login_at = Some(now);
 
+    // create() can still fail on the unique index if another user was
+    // provisioned with the same handle between the uniqueness probe and the
+    // insert (TOCTOU): the next login re-runs this resolution, so the
+    // transient conflict self-heals rather than locking the user out.
     state.users.create(&user).await?;
     Ok(user)
+}
+
+/// Derive a globally-unique handle for a freshly provisioned user.
+///
+/// Mirrors migration 000058's dedup pass 1: the first user keeps the base
+/// handle, later colliding users get deterministic numeric suffixes
+/// (base-2, base-3, ...). An exhausted suffix space bails and the caller
+/// assigns a generated `u-<id>` handle (unique by the fresh primary key).
+async fn resolve_unique_username(state: &Arc<AppState>, base: &str) -> anyhow::Result<String> {
+    let mut candidate = base.to_string();
+    // Bounded at 2..=10_000 so a pathological store cannot pin this loop
+    // open; an exhausted space bails to the generated-handle fallback.
+    for n in 2u32..=10_000 {
+        if state.users.find_by_username(&candidate).await?.is_none() {
+            return Ok(candidate);
+        }
+        candidate = suffixed_username(base, n)?;
+    }
+    anyhow::bail!("username suffix space exhausted for base {base:?}");
+}
+
+/// Build the `n`-th collision candidate for a base handle: the base
+/// truncated so `base-{n}` fits the 64-char cap, with any truncation
+/// artifact repaired so the candidate passes the URL-safe handle contract.
+///
+/// Pure (no storage probe) so it is directly unit-testable. Fails only when
+/// no prefix of `base` can carry a suffix.
+fn suffixed_username(base: &str, n: u32) -> anyhow::Result<String> {
+    let suffix = format!("-{n}");
+    // Handles are ASCII-only (validate_username), so byte length is char
+    // length and byte slicing cannot split a char.
+    let budget = 64usize.saturating_sub(suffix.len());
+    let mut stem = base
+        .as_bytes()
+        .get(..budget)
+        .unwrap_or(base.as_bytes())
+        .to_vec();
+    // Truncation can leave a trailing separator or a dangling "--": pop
+    // until the stem itself passes the handle contract.
+    while !User::validate_username(
+        std::str::from_utf8(&stem)
+            .map_err(|_| anyhow::anyhow!("username base {base:?} is not ASCII"))?,
+    )
+    .is_ok()
+    {
+        if stem.is_empty() {
+            anyhow::bail!("no URL-safe prefix of username {base:?} fits the 64-char cap");
+        }
+        stem.pop();
+    }
+    Ok(format!(
+        "{}{}",
+        std::str::from_utf8(&stem).expect("stem is ASCII (validated above)"),
+        suffix
+    ))
 }
 
 // -- Federation JWT validation (G11) ------------------------------------------
@@ -1437,6 +1602,388 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_login_derives_url_safe_username_from_preferred() {
+        // user-management.md §Username vs Display Name: username is derived
+        // from SSO preferred_username (sanitized to URL-safe), display_name
+        // stays human-readable, last_login_at is stamped on the first auth.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "derive-sub-1",
+            "preferred_username": "Jordan.Sell@example.com",
+            "email": "jordan@example.com"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let user = state
+            .users
+            .find_by_external_id("derive-sub-1")
+            .await
+            .unwrap()
+            .expect("user provisioned on first login");
+        assert_eq!(
+            user.username, "jordan-sell-example-com",
+            "username must be the sanitized handle"
+        );
+        assert_eq!(
+            user.display_name, "Jordan.Sell@example.com",
+            "display name starts as the raw preferred_username"
+        );
+        assert!(
+            user.last_login_at.is_some(),
+            "first login stamps last_login_at"
+        );
+        assert_eq!(user.last_login_at, Some(user.updated_at));
+    }
+
+    #[tokio::test]
+    async fn second_login_stamps_last_login_and_keeps_username() {
+        // Spec: last_login_at is set on EACH authentication, and the
+        // username is immutable after creation even if the IdP later
+        // changes preferred_username.
+        let state = make_test_state_with_jwt();
+        let claims1 = serde_json::json!({
+            "sub": "relogin-sub",
+            "preferred_username": "alice"
+        });
+        let token1 = sign_test_jwt(&claims1, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first = state
+            .users
+            .find_by_external_id("relogin-sub")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.username, "alice");
+        let first_login = first.last_login_at.unwrap();
+
+        // IdP now reports a different preferred_username for the same sub.
+        let claims2 = serde_json::json!({
+            "sub": "relogin-sub",
+            "preferred_username": "alice-renamed"
+        });
+        let token2 = sign_test_jwt(&claims2, 3600);
+        let app2: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let second = state
+            .users
+            .find_by_external_id("relogin-sub")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.username, "alice",
+            "username is immutable after creation"
+        );
+        assert_eq!(
+            second.display_name, "alice",
+            "display name also stable across logins"
+        );
+        let second_login = second.last_login_at.expect("re-login must re-stamp");
+        assert!(
+            second_login >= first_login,
+            "last_login_at must advance (first={first_login}, second={second_login})"
+        );
+        assert_eq!(second_login, second.updated_at);
+    }
+
+    #[tokio::test]
+    async fn preferred_username_unsanitizable_falls_back_to_subject() {
+        // When sanitization yields nothing URL-safe ("!!!"), the username
+        // falls back to the SSO subject instead of failing the login.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "opaque-sub-42",
+            "preferred_username": "!!!"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let user = state
+            .users
+            .find_by_external_id("opaque-sub-42")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.username, "opaque-sub-42");
+    }
+
+    #[tokio::test]
+    async fn unsanitizable_preferred_username_falls_back_to_url_safe_handle() {
+        use gyre_domain::User;
+
+        // The subject is an opaque IdP identifier (RFC 7519 StringOrURI):
+        // "auth0|12345" is a real Auth0 sub shape and is NOT URL-safe. The
+        // fallback handle must still satisfy the URL-safe username contract
+        // (validate_username) — the migration's sanitize pass renames such
+        // rows to "u-<row id>", and the runtime provisioning path must not
+        // persist what the migration would have repaired.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "auth0|12345",
+            "preferred_username": "!!!"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let user = state
+            .users
+            .find_by_external_id("auth0|12345")
+            .await
+            .unwrap()
+            .expect("user provisioned");
+        assert!(
+            User::validate_username(&user.username).is_ok(),
+            "fallback username {:?} must satisfy the URL-safe handle contract",
+            user.username
+        );
+        assert!(
+            !user.username.contains('|'),
+            "the raw subject must not leak into the username verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_derived_username_resolves_with_suffix_and_logs_in() {
+        // sanitize_username is lossy: distinct IdP handles ("Jordan Sell"
+        // and "Jordan_Sell") both derive "jordan-sell", and usernames are
+        // globally unique. The second SSO user's first login must resolve
+        // the collision with the migration's suffix scheme (base-2) instead
+        // of failing with a 401 that would repeat forever (find_by_external_id
+        // keeps missing, username immutable, no pre-auth recovery path).
+        let state = make_test_state_with_jwt();
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+
+        let first_claims = serde_json::json!({
+            "sub": "collision-sub-1",
+            "preferred_username": "Jordan Sell"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", sign_test_jwt(&first_claims, 3600)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let second_claims = serde_json::json!({
+            "sub": "collision-sub-2",
+            "preferred_username": "Jordan_Sell"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", sign_test_jwt(&second_claims, 3600)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a distinct SSO user whose derived handle collides must not be locked out"
+        );
+
+        let first = state
+            .users
+            .find_by_external_id("collision-sub-1")
+            .await
+            .unwrap()
+            .expect("first user provisioned");
+        assert_eq!(first.username, "jordan-sell");
+        let second = state
+            .users
+            .find_by_external_id("collision-sub-2")
+            .await
+            .unwrap()
+            .expect("second user provisioned");
+        // Migration dedup pass 1 scheme: base keeps the handle, the next
+        // colliding user gets "-2".
+        assert_eq!(second.username, "jordan-sell-2");
+        assert_eq!(second.display_name, "Jordan_Sell");
+        assert!(second.last_login_at.is_some());
+        assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn colliding_derived_username_uses_next_suffix_for_third_user() {
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        // A pre-existing handle that already occupies the "-2" slot forces
+        // the third user onto "-3" (the same walk the migration performs
+        // before creating idx_users_username).
+        let state = make_test_state_with_jwt();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut squatter = User::new_sso(
+            Id::new("u-squatter".to_string()),
+            "squatter-sub",
+            "jordan-sell-2",
+            "Squatter",
+            now,
+        );
+        squatter.roles = vec![UserRole::ReadOnly];
+        state.users.create(&squatter).await.unwrap();
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        for (sub, preferred) in [
+            ("collision-sub-1", "Jordan Sell"),
+            ("collision-sub-2", "Jordan_Sell"),
+        ] {
+            let claims = serde_json::json!({
+                "sub": sub,
+                "preferred_username": preferred
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/protected")
+                        .header(
+                            "Authorization",
+                            format!("Bearer {}", sign_test_jwt(&claims, 3600)),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "login must succeed for {sub} even with the -2 slot squatted"
+            );
+        }
+
+        let first = state
+            .users
+            .find_by_external_id("collision-sub-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.username, "jordan-sell");
+        let second = state
+            .users
+            .find_by_external_id("collision-sub-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.username, "jordan-sell-3",
+            "the -2 slot is occupied, so the walk must continue to -3"
+        );
+    }
+
+    #[test]
+    fn suffixed_username_truncates_and_repairs_the_stem() {
+        use super::suffixed_username;
+        use gyre_domain::User;
+
+        // Pure helper: the 64-char cap truncates the base, and truncation
+        // artifacts (trailing separator, dangling "--") are repaired so the
+        // candidate still passes the handle contract.
+        let long = "a".repeat(70);
+        let got = suffixed_username(&long, 2).unwrap();
+        assert_eq!(got, format!("{}-2", "a".repeat(62)));
+        assert!(User::validate_username(&got).is_ok());
+
+        // Base whose 62-char prefix ends in a separator: the stem must be
+        // trimmed back to the last alphanumeric before the suffix.
+        let mut sp = "a".repeat(61);
+        sp.push('-');
+        let got = suffixed_username(&sp, 2).unwrap();
+        assert_eq!(got, format!("{}-2", "a".repeat(61)));
+        assert!(User::validate_username(&got).is_ok());
+
+        // A non-ASCII base cannot produce an ASCII handle: hard error, not
+        // a silently mangled fallback.
+        assert!(suffixed_username("jörg", 2).is_err());
+    }
+
+    #[tokio::test]
     async fn role_extraction_from_jwt_claims() {
         use super::AuthenticatedAgent;
 
@@ -1840,6 +2387,7 @@ mod tests {
             iat: now - 7200,
             exp: now - 3600,
             scope: "agent".to_string(),
+            jti: "test-jti".to_string(),
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
             workspace_id: None,
@@ -1948,6 +2496,37 @@ mod tests {
     }
 
     // -- G11-A SSRF guard tests -----------------------------------------------
+
+    #[test]
+    fn minted_jwt_carries_unique_jti() {
+        // AgentTokenRevoked audit events attribute revocations by jti, so
+        // every minted token must carry a unique, extractable JWT ID that
+        // matches the validated claims.
+        let key = super::AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let t1 = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .expect("mint");
+        let t2 = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .expect("mint");
+
+        let j1 = key
+            .extract_jti_unverified(&t1)
+            .expect("minted token must carry a jti");
+        let j2 = key
+            .extract_jti_unverified(&t2)
+            .expect("minted token must carry a jti");
+        assert_ne!(j1, j2, "each minted token gets a fresh jti");
+
+        // The extracted jti matches the signature-validated claims.
+        let claims = key.validate(&t1, issuer).expect("validate");
+        assert_eq!(claims.jti, j1);
+
+        // Non-JWT input yields no jti — never a fabricated identifier.
+        assert!(key.extract_jti_unverified("not-a-jwt").is_none());
+        assert!(key.extract_jti_unverified("").is_none());
+    }
 
     #[test]
     fn is_same_origin_same_host_accepted() {

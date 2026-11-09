@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{User, UserRole};
+use gyre_domain::{GlobalRole, User, UserPreferences, UserRole};
 use gyre_ports::{ApiKeyRepository, UserRepository};
 use std::sync::Arc;
 
@@ -34,32 +34,56 @@ struct UserRow {
     timezone: Option<String>,
     locale: Option<String>,
     oidc_issuer: Option<String>,
+    username: String,
+    avatar_url: Option<String>,
+    preferences: Option<String>,
     last_login_at: Option<i64>,
+    tenant_id: Option<String>,
+    global_role: String,
 }
 
 impl From<UserRow> for User {
     fn from(r: UserRow) -> Self {
-        let mut u = User::new(
+        let preferences = r
+            .preferences
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let global_role = match r.global_role.as_str() {
+            "TenantAdmin" => GlobalRole::TenantAdmin,
+            _ => GlobalRole::Member,
+        };
+        let mut u = User::new_sso(
             Id::new(r.id.clone()),
             r.external_id.clone(),
+            r.username.clone(),
             r.name.clone(),
             r.created_at as u64,
         );
         u.email = r.email;
         u.roles = json_to_roles(&r.roles);
         u.updated_at = r.updated_at as u64;
-        if let Some(dn) = r.display_name {
-            u.display_name = dn;
-        }
-        if let Some(tz) = r.timezone {
-            u.timezone = tz;
-        }
-        if let Some(loc) = r.locale {
-            u.locale = loc;
-        }
+        u.display_name = r.display_name.unwrap_or_else(|| r.name.clone());
+        u.timezone = r.timezone.unwrap_or_else(|| "UTC".to_string());
+        u.locale = r.locale.unwrap_or_else(|| "en".to_string());
+        u.avatar_url = r.avatar_url;
+        u.preferences = preferences;
         u.oidc_issuer = r.oidc_issuer;
         u.last_login_at = r.last_login_at.map(|v| v.max(0) as u64);
+        u.tenant_id = r.tenant_id.map(Id::new);
+        u.global_role = global_role;
         u
+    }
+}
+
+fn prefs_to_json(prefs: &UserPreferences) -> String {
+    serde_json::to_string(prefs).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn global_role_to_str(role: &GlobalRole) -> &'static str {
+    match role {
+        GlobalRole::TenantAdmin => "TenantAdmin",
+        GlobalRole::Member => "Member",
     }
 }
 
@@ -76,6 +100,12 @@ struct UserRecord<'a> {
     display_name: Option<&'a str>,
     timezone: Option<&'a str>,
     locale: Option<&'a str>,
+    username: &'a str,
+    avatar_url: Option<&'a str>,
+    preferences: String,
+    last_login_at: Option<i64>,
+    tenant_id: Option<&'a str>,
+    global_role: String,
 }
 
 #[derive(Insertable)]
@@ -94,6 +124,25 @@ impl UserRepository for PgStorage {
         let u = user.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if id, external_id, or username already exists.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::id
+                        .eq(u.id.as_str())
+                        .or(users::external_id.eq(u.external_id.as_str()))
+                        .or(users::username.eq(u.username.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check duplicate user")?;
+            if let Some(existing_id) = dup {
+                anyhow::bail!(
+                    "user already exists (conflicting id {existing_id}) for username {}, external_id {}",
+                    u.username,
+                    u.external_id
+                );
+            }
             let roles = roles_to_json(&u.roles);
             let record = UserRecord {
                 id: u.id.as_str(),
@@ -106,6 +155,12 @@ impl UserRepository for PgStorage {
                 display_name: Some(u.display_name.as_str()),
                 timezone: Some(u.timezone.as_str()),
                 locale: Some(u.locale.as_str()),
+                username: &u.username,
+                avatar_url: u.avatar_url.as_deref(),
+                preferences: prefs_to_json(&u.preferences),
+                last_login_at: u.last_login_at.map(|v| v as i64),
+                tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
+                global_role: global_role_to_str(&u.global_role).to_string(),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -126,6 +181,21 @@ impl UserRepository for PgStorage {
                 .first::<UserRow>(&mut *conn)
                 .optional()
                 .context("find user by id")?;
+            Ok(result.map(User::from))
+        })
+        .await?
+    }
+
+    async fn find_by_username(&self, username: &str) -> Result<Option<User>> {
+        let pool = Arc::clone(&self.pool);
+        let uname = username.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let result = users::table
+                .filter(users::username.eq(uname.as_str()))
+                .first::<UserRow>(&mut *conn)
+                .optional()
+                .context("find user by username")?;
             Ok(result.map(User::from))
         })
         .await?
@@ -164,10 +234,32 @@ impl UserRepository for PgStorage {
         let u = user.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: username and external_id are immutable after
+            // creation (user-management.md §Username vs Display Name).
+            let existing: Option<UserRow> = users::table
+                .find(u.id.as_str())
+                .first::<UserRow>(&mut *conn)
+                .optional()
+                .context("load user for update")?;
+            let existing = existing
+                .ok_or_else(|| anyhow::anyhow!("cannot update user {}: not found", u.id))?;
+            if existing.username != u.username {
+                anyhow::bail!(
+                    "username is immutable: cannot change {} to {}",
+                    existing.username,
+                    u.username
+                );
+            }
+            if existing.external_id != u.external_id {
+                anyhow::bail!(
+                    "external_id is immutable: cannot change {} to {}",
+                    existing.external_id,
+                    u.external_id
+                );
+            }
             let roles = roles_to_json(&u.roles);
             diesel::update(users::table.find(u.id.as_str()))
                 .set((
-                    users::external_id.eq(&u.external_id),
                     users::name.eq(&u.display_name),
                     users::email.eq(u.email.as_deref()),
                     users::roles.eq(&roles),
@@ -175,6 +267,11 @@ impl UserRepository for PgStorage {
                     users::display_name.eq(Some(u.display_name.as_str())),
                     users::timezone.eq(Some(u.timezone.as_str())),
                     users::locale.eq(Some(u.locale.as_str())),
+                    users::avatar_url.eq(u.avatar_url.as_deref()),
+                    users::preferences.eq(prefs_to_json(&u.preferences)),
+                    users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
+                    users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
+                    users::global_role.eq(global_role_to_str(&u.global_role)),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
@@ -207,8 +304,10 @@ impl UserRepository for PgStorage {
         let uid = user_id.clone();
         let iss = oidc_issuer.to_string();
         // Interval check and write in ONE statement (no read-modify-write race):
-        // the row is only touched when last_login_at is NULL or at/older than
-        // the debounce threshold.
+        // the row is only touched when the verified issuer differs from the
+        // stored one, or last_login_at is NULL or at/older than the debounce
+        // threshold (the provisioning path re-stamps last_login_at on every
+        // auth, so the issuer carve-out is what keeps provenance correct).
         let threshold = at.saturating_sub(min_interval_secs) as i64;
         let at_i = at as i64;
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -219,8 +318,10 @@ impl UserRepository for PgStorage {
                     users::last_login_at.eq(at_i),
                 ))
                 .filter(
-                    users::last_login_at
+                    users::oidc_issuer
                         .is_null()
+                        .or(users::oidc_issuer.ne(iss.as_str()))
+                        .or(users::last_login_at.is_null())
                         .or(users::last_login_at.le(threshold)),
                 )
                 .execute(&mut *conn)

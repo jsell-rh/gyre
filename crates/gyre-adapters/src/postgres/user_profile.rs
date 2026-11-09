@@ -392,7 +392,9 @@ impl JudgmentLedgerRepository for PgStorage {
                             ),
                         ),
                         JudgmentType::TrustGrant => (
-                            str_field("workspace_id").or(wid.clone()).unwrap_or_default(),
+                            str_field("workspace_id")
+                                .or(wid.clone())
+                                .unwrap_or_default(),
                             format!(
                                 "trust {} -> {}",
                                 str_field("from").unwrap_or_default(),

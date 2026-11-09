@@ -99,14 +99,15 @@ Verify by grepping `mod.rs` for the route before writing code.
 
 Audit + gap-fill against spec §3–6, §20–21. The handler
 (`crates/gyre-server/src/explorer_ws.rs`) already carried the full surface:
-route `WS /api/v1/repos/:repo_id/explorer` (registered in `lib.rs:671-674`,
+route `WS /api/v1/repos/:repo_id/explorer` (registered in `lib.rs:688-689`,
 outside the ABAC-body middleware — auth enforced in-handler via
 `AuthenticatedAgent` + tenant/workspace/membership checks, `?token=` with
 deprecation warning, `POST /api/v1/ws-ticket` ticket flow), all four client
-messages (`message`, `save_view`, `load_view`, `list_views`, plus `delete_view`
-and `cancel` extensions) dispatched in the session loop, all four server
-messages (`text` streamed with `done` flag, `view_query`, `views`, `status`),
-view CRUD with scoping/creator-or-admin delete, and rate/session limits.
+messages (`message`, `save_view`, `load_view`, `list_views`, plus
+`delete_view` and `cancel` extensions) dispatched in the session loop, all
+four server messages (`text` streamed with `done` flag, `view_query`,
+`views`, `status`), view CRUD with scoping/creator-or-admin delete, and
+rate/session limits.
 
 The one real defect found and fixed: **off-contract status values**. Three
 send sites emitted free-form strings ("Thinking...", "Analyzing...",
@@ -115,8 +116,8 @@ send sites emitted free-form strings ("Thinking...", "Analyzing...",
 (`ExplorerChat.svelte`) maps only those three, silently dropping anything
 else, leaving the status indicator stale.
 
-- `STATUS_THINKING`/`STATUS_REFINING`/`STATUS_READY` constants are now the
-  single source of truth; all nine status send sites use them.
+- `STATUS_THINKING`/`STATUS_REFINING`/`STATUS_READY` constants are the
+  single source of truth; all status send sites use them.
 - Per-turn status ("Thinking..."/"Analyzing...") → `thinking`; forced
   synthesis after max tool turns ("Synthesizing answer...") → `refining`
   (synthesis is the final refinement pass).
@@ -127,65 +128,29 @@ else, leaving the status indicator stale.
 - Adjacent hazard fixed in the same message path: `&raw_preview[..500]`
   (JSON preview in the invalid-view-query warning) panicked on multibyte
   UTF-8 at the byte boundary; now char-boundary-safe via the shared
-  `gate_executor::truncate_bytes()` helper (after the base-`75ada1c4`
-  rebase, both sides had fixed this site independently — ours via
-  `chars().take(500)`, the base's via `truncate_bytes`; the shared helper
-  was kept). Its `byte-slice-truncation-exemptions.txt` entry is removed
-  (exemptions shrink, never grow).
+  `gate_executor::truncate_bytes()` helper. Its
+  `byte-slice-truncation-exemptions.txt` entry was removed (exemptions
+  shrink, never grow).
 
-### Test evidence
+### Current-round verification (requirements_changed repair)
 
-Re-verified at merged HEAD `00684607` (candidate `2f092bcd` rebased onto
-base `75ada1c4`, 2026-10-10):
+Base merge `ad417f8a` resolved with no content conflicts — the merged tree
+is identical to base, which already carries the candidate work (recorded
+commits `dc85eb6a`, `30dc282` are ancestors of HEAD). No code changes were
+required; the current contract is satisfied by the retained source
+checkpoint. Evidence under `/tmp/stage/review-evidence/task-069-*`:
 
-- `cargo test -p gyre-server --lib explorer_ws` → 39 passed, 0 failed
-  (includes 4 new: constants match spec exactly; Status message serializes
-  spec values end-to-end through the serializer; `normalize_status` passes
-  known values through; maps off-contract literals to valid spec values).
-- `cargo test -p gyre-server --test explorer_ws_integration --no-run` →
-  EXIT=0 (new `explorer_ws_status_progression` test compiles: drives a
-  message turn on the no-LLM fallback path, asserts every observed status ∈
-  {thinking, refining, ready}, thinking observed, terminal ready observed,
-  text done=true + view_query received).
-- Static gates at HEAD: arch, byte-slice-truncation (with the exemption
-  entry removed), abac-route-registry, mem-port-contracts,
-  inert-enforcement, fabricated-scope-defaults, task-commit-attribution —
-  all pass.
-- WS integration tests cannot run in this sandbox: loopback `accept()` is
-  seccomp-blocked (errno 95; all 8 tests in `explorer_ws_integration.rs`
-  fail identically at `WsCtx::new()`'s first HTTP request — the 7
-  pre-existing ones too; recorded in
-  `/tmp/stage/review-evidence/task-069-sandbox-listener-restriction.txt`).
-  Exact-head GitHub CI must run `explorer_ws_status_progression` and its
-  7 siblings.
-- `scripts/check-assertionless-tests.sh` exits 2 in this sandbox on clean
-  HEAD as well — mawk lacks gawk's 3-arg `match()`; CI (gawk) passes it.
-  Not task-related.
-
-### Repair rounds
-
-- Base merge onto `05709c24` (merged HEAD `b666a474`): base touched none of
-  the task-069 files (only `api/graph.rs`, briefing web files, task-196/224
-  docs); all probes re-run green. One merge-introduced CI finding fixed:
-  base commit `05709c24` (task-196, product surface) was absent from
-  `specs/tasks/task-196.md`'s `commits:` frontmatter, failing
-  `check-task-commit-attribution.sh` — added per the gate's prescribed
-  remedy (frontmatter, not the frozen exemption file).
-- Rebase onto base `75ada1c4` (merged HEAD `00684607`): one content
-  conflict in `explorer_ws.rs` — the independently-fixed truncation site,
-  resolved to the shared helper above. The base also refactored the
-  session registry from process-global to AppState-owned
-  (`ExplorerSessionRegistry`); auto-merged cleanly, status-protocol work
-  unaffected. All probes re-run green at the merged HEAD: 39 lib tests,
-  integration binary `--no-run` EXIT=0, and every static gate listed above.
-- Verification repair at base `722179f0` (merged HEAD, commit
-  `dc85eb6a`): the changed-lines gates flagged two defects in the new
-  `explorer_ws_status_progression` test — rustfmt on the closing
-  assertions, and a `clippy::useless_conversion` (`.to_string().into()`
-  into `Message::Text`, which takes `String` directly). Both fixed with
-  no behavior change. Re-verified locally:
-  `scripts/check-rustfmt-diff.py 722179f0` → EXIT=0 (changed lines
-  clean), and `cargo check -p gyre-server --test
-  explorer_ws_integration` → Finished. All-target clippy is a full gate
-  owned by verification; the flagged `.into()` site no longer exists in
-  the changed lines, so the lint cannot fire.
+- `cargo test -p gyre-server --lib explorer_ws` → **43 passed, 0 failed**
+  (includes the 4 status-protocol tests: constants match spec §6 exactly,
+  end-to-end Status serialization, `normalize_status` passthrough and
+  off-contract mapping).
+- `cargo test -p gyre-server --test explorer_ws_integration` →
+  **11 passed, 0 failed** over a real loopback transport, including
+  `explorer_ws_status_progression` (thinking → refining* → ready, text
+  `done: true`, `view_query` received) and
+  `explorer_ws_connect_and_list_views` (send `list_views`, receive
+  `views`). The previously recorded seccomp loopback-accept restriction
+  no longer applies in this sandbox.
+- Static gates at HEAD, all exit 0: arch, byte-slice-truncation
+  (exemption entry stays removed), abac-route-registry,
+  task-commit-attribution.
