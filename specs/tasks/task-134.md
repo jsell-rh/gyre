@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["b3678e2762149ba743e63c604bb618e66dd564ab"]
+commits: ["b3678e2762149ba743e63c604bb618e66dd564ab", "31c35ddb2cf13663cfc4c1ee337eff847e289253"]
 ---
 
 ## Spec Excerpt
@@ -88,92 +88,83 @@ Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gat
 
 Both `agent-gates.md` coverage sections are implemented with real, production
 behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
-runs and completed across assignments, including the review-F1/F2/F3 repairs
-and the review-round TTL repair `72c5bb03`).
+runs and completed across assignments, including the review-F1/F2/F3 repairs,
+the review-round TTL repair `72c5bb03`, and the review-repair round `31c35ddb`
+described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
-  the new `validation_type` column (migration `2026-10-09-000056`), persisted
-  by both SQLite and Postgres adapters with an upsert round-trip test. Gate
-  CRUD (`api/gates.rs`) accepts/returns both types and `validation_type`
-  (tests: `create_agent_review_gate`, `create_agent_validation_gate`).
+  the `validation_type` column (migration `2026-10-09-000056`), persisted by
+  both SQLite and Postgres adapters with an upsert round-trip test. Gate CRUD
+  (`api/gates.rs`) accepts/returns both types and `validation_type` (tests:
+  `create_agent_review_gate`, `create_agent_validation_gate`).
 - **Review spawn protocol** (`gate_executor.rs`): persona resolved
   nearest-wins (repo → workspace → tenant, no fabricated tenant scope);
   unresolvable persona/spec_ref fails the gate before any process spawns.
   MR context gathered for real: full diff via `git_ops.diff`, spec content at
-  the pinned SHA via a new `read_file_at_commit` port (unknown SHA is an
-  error, not a silent None), MR title, and task description (acceptance
-  criteria carrier) via MR → author agent → task.
+  the pinned SHA via the `read_file_at_commit` port (unknown SHA is an error,
+  not a silent None), MR title, and task description (acceptance criteria
+  carrier) via MR → author agent → task.
 - **Scoped token**: `AgentSigningKey::mint_scoped` mints a JWT with
   `scope: review:submit` only (review agents) or `validation:report`
-  (validation agents, review F2 — validators have no review-submission
-  capability). Enforcement is real and layered, all exact-match capability
-  comparison (review F3): `git_http` denies push (403 read-only), the ABAC
-  middleware allow-lists each capability's routes only (403 outside;
-  validators are read-only MR context), and `submit_review` binds the
-  reviewer identity to the token subject (forged `reviewer_agent_id` in the
-  body is ignored). Covered by `tests/task134_review_probe.rs` (7 passed) —
-  oneshot router calls, no listener required.
-- **Token TTL tracks the configured gate window** (review repair `72c5bb03`):
-  both mint sites derive the JWT TTL from
+  (validation agents — validators have no review-submission capability).
+  Enforcement is real and layered, all exact-match capability comparison:
+  `git_http` denies push (403 read-only), the ABAC middleware allow-lists
+  each capability's routes only, and `submit_review` binds the reviewer
+  identity to the token subject (forged `reviewer_agent_id` in the body is
+  ignored). Covered by `tests/task134_review_probe.rs` — oneshot router
+  calls, no listener required.
+- **Token TTL tracks the configured gate window** (repair `72c5bb03`): both
+  mint sites derive the JWT TTL from
   `gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS) + 60` via the shared
-  `gate_token_ttl_secs` helper. Previously the TTL was fixed at 360s while
-  the process timeout honored per-gate `timeout_secs`, so a verdict
-  submitted after t=360s in a `timeout_secs > 360` gate hit a 401 (expired
-  JWT) and the gate falsely failed with "exited without submitting a
-  review". Regression tests on both mint paths
-  (`review_token_ttl_covers_configured_gate_timeout`,
-  `validation_token_ttl_covers_configured_gate_timeout`) assert the minted
-  token's `exp − iat` covers a configured `timeout_secs=700` window; both
-  fail against the previous fixed-TTL code (verified by mutation).
+  `gate_token_ttl_secs` helper, so a verdict submitted late in a
+  long-timeout gate no longer 401s on an expired JWT. Regression tests on
+  both mint paths assert the minted token's `exp − iat` covers a configured
+  `timeout_secs=700` window; both fail against the previous fixed-TTL code
+  (verified by mutation).
 - **Verdict mapping**: Approved → Passed, ChangesRequested → Failed with the
   agent's feedback surfaced in gate output; only the gate's own agent's
   verdict counts; exit-0-without-review fails ("cannot determine state" is
   not "state is fine"). Unit tests plus two end-to-end tests that bind a real
   axum server, a real bare git repo with a spec pinned at a pre-tip SHA, and
-  drive the fixture `review_agent_driver.sh` through the live Review API.
-  Both e2e tests seed builtin ABAC policies (review F1: `build_state` wires
-  an empty policy store; unseeded default-deny made the driver's review POST
-  403 on loopback-capable hosts); `e2e_review_submission_is_abac_allowed_`
-  `with_seeded_policies` guards that regression without needing loopback.
+  drive the fixture `review_agent_driver.sh` through the live Review API;
+  `e2e_review_submission_is_abac_allowed_with_seeded_policies` guards the
+  seeded-policies ABAC regression without needing loopback.
 - **Teardown**: token revoked (`kv_remove`) on every exit path (verdict,
   timeout, spawn failure) — asserted by tests; temp spec/diff files removed.
 - **AgentValidation**: spawns the configured validation agent with
   `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
   the exit code; no-command fails closed.
 
+### Review-repair round `31c35ddb` (findings b916825b)
+
+Two review findings repaired on the merged tree; no product behavior
+changed:
+
+- **Exemption freeze slack** (process): `check-fabricated-scope-defaults.sh`
+  still read `FROZEN_EXEMPTION_COUNT=4` although the exemption file holds 2
+  entries and prior notes claimed the count was lowered — leaving two slots
+  of silent-growth slack. Lowered to 2. Verified: baseline passes, and a
+  growth probe (a third entry appended temporarily) now FAILS the check as
+  the any-growth-fails freeze principle requires (probe output retained in
+  this round's review evidence).
+- **Non-discriminating test** (test):
+  `scoped_review_token_denied_outside_allowlist` did not seed builtin
+  policies, so its 403 came from the empty policy store's default-deny
+  regardless of the allow-list. It now calls `seed_builtin_policies` (as its
+  siblings do), so the seeded `builtin-agent-scoped-access` policy would
+  permit the Agent-role GET `/api/v1/repos` and the asserted 403 is
+  attributable to the scoped-token allow-list. Verified discriminating by
+  mutation: with `is_reviewer`/`is_validator` forced false in
+  `abac_middleware.rs`, the test now FAILS (200 vs 403) — previously it
+  passed under the same mutation (probe output retained in this round's
+  review evidence). The mutation was reverted after the probe.
+
 ### Test evidence
 
-Rebase-repair round (branch
-`pipeline/task-134/dc745ac59e0d4cce98c897c7169aeef3-1`, merge commit
-`eacee766a`, resolving the merge of the task-134 candidate `9248f6e0`
-with base `c5deca80`). No product behavior changed: the four conflicted
-files were resolved preserving both sides' intent — the candidate's
-`read_file_at_commit` port method and `validation_type` gate field
-against base's expanded `revert_commit` docs and base-added
-`QualityGate` test literals (two in `api/recovery.rs` completed with
-`validation_type: None` after the auto-merge left them uncompilable).
-The `fabricated-scope-defaults-exemptions.txt` conflict resolved to the
-truth of the merged tree: the auth.rs entry renumbered 773→837 (same
-pre-existing, test-pinned site — `jwt_missing_tenant_id_defaults_to_default`
-— shifted by the candidate's `mint_scoped` additions), and the
-gate_executor.rs:111 entry deleted because the candidate's gate-executor
-rewrite genuinely fixed that site (skip-and-log on unresolvable MR);
-FROZEN_EXEMPTION_COUNT lowered 4→2 to match the remaining entries. Also
-unwrapped the discarded `seed_builtin_policies` Results at the task-134
-test call sites (must-use lint; a seeding failure now fails the test
-instead of silently default-denying).
-
-All focused suites re-ran green on the merged tree: gate_executor 37/37
-(including both TTL regression tests and both e2e review tests),
-task134_review_probe 7/7, and the merge-touched surfaces
-api::gates + api::merge_requests + api::mr_timeline + merge_processor +
-api::recovery + git_http 163/163, git_integration 16/16. Mechanical
-probes pass on the merged tree: check-fabricated-scope-defaults,
-check-arch, check-mem-port-contracts, check-migration-versions,
-check-dead-message-kinds, check-scope-literal-defaults; the exemption
-freeze adds no entries relative to either merge parent. The earlier TTL
-mutation check (both regression tests FAIL against the pre-fix fixed-TTL
-code) is documented in the prior round's evidence. `cargo test --all` and
-the full mechanical-check suite are owned by verification and
-publication.
+On the tree at `31c35ddb` (base merge `94029b2ff` + the two repairs):
+`task134_review_probe` 7/7 and `gate_executor` 37/37 (including both TTL
+regression tests and both e2e review tests) pass;
+`check-fabricated-scope-defaults.sh` passes with the count now enforced at
+2. `cargo test --all` and the full mechanical-check suite are owned by
+verification and publication.
