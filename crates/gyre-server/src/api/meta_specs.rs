@@ -2,6 +2,8 @@
 //!
 //! GET  /api/v1/workspaces/{id}/meta-spec-set  — get workspace meta-spec set
 //! PUT  /api/v1/workspaces/{id}/meta-spec-set  — update (Admin only)
+//! GET  /api/v1/workspaces/{id}/meta-specs/rollout-policy — get rollout policy (§7)
+//! PUT  /api/v1/workspaces/{id}/meta-specs/rollout-policy — update (Admin only, §7)
 //! GET  /api/v1/meta-specs/{path}/blast-radius — blast radius for a meta-spec
 //! POST /api/v1/workspaces/{id}/meta-specs/preview — preview a draft meta-spec change
 //! GET  /api/v1/workspaces/{id}/meta-specs/preview/{preview_id} — poll preview status
@@ -69,6 +71,18 @@ pub struct UpdateMetaSpecSetRequest {
     pub standards: Vec<MetaSpecPinnedEntry>,
     #[serde(default)]
     pub process: Vec<MetaSpecPinnedEntry>,
+}
+
+/// Request body for PUT /api/v1/workspaces/{id}/meta-specs/rollout-policy
+/// (meta-spec-reconciliation.md §7). `strategy` is required; the other
+/// fields default to the workspace's current values so a partial update
+/// (e.g. `{"strategy": "immediate"}`) keeps the rest of the policy.
+#[derive(Deserialize)]
+pub struct UpdateRolloutPolicyRequest {
+    pub strategy: String,
+    pub max_concurrent_agents: Option<u32>,
+    pub priority: Option<String>,
+    pub auto_merge: Option<bool>,
 }
 
 /// An affected repo entry in a blast radius response.
@@ -295,6 +309,118 @@ pub async fn put_meta_spec_set(
     }
 
     Ok((StatusCode::OK, Json(set)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/workspaces/{id}/meta-specs/rollout-policy  (§7)
+// ---------------------------------------------------------------------------
+
+pub async fn get_rollout_policy(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<gyre_domain::RolloutPolicy>, ApiError> {
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&Id::new(&workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
+
+    // Unset policy → spec default (§7: Rolling / Normal / auto_merge false).
+    let policy =
+        crate::reconciliation::get_workspace_rollout_policy(&state, &Id::new(&workspace_id)).await;
+    Ok(Json(policy))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/v1/workspaces/{id}/meta-specs/rollout-policy  (Admin only, §7)
+// ---------------------------------------------------------------------------
+
+pub async fn put_rollout_policy(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<UpdateRolloutPolicyRequest>,
+) -> Result<(StatusCode, Json<gyre_domain::RolloutPolicy>), ApiError> {
+    // Admin-only: the rollout policy governs how reconciliation proceeds for
+    // the whole workspace — same governance class as meta-spec-set bindings
+    // (NEW-26: non-Admin callers, including agents, must not be able to
+    // rewrite the rules that govern their own rollout).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace rollout policy".to_string(),
+        ));
+    }
+
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&Id::new(&workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
+
+    // Merge with the current (or default) policy so omitted fields keep
+    // their present values.
+    let current =
+        crate::reconciliation::get_workspace_rollout_policy(&state, &Id::new(&workspace_id)).await;
+
+    let strategy = gyre_domain::RolloutStrategy::parse(&req.strategy).ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "unknown strategy '{}': expected immediate, rolling, or background",
+            req.strategy
+        ))
+    })?;
+    let priority = match req.priority.as_deref() {
+        None => current.priority,
+        Some(p) => gyre_domain::ReconciliationPriority::parse(p).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "unknown priority '{p}': expected high, normal, or low"
+            ))
+        })?,
+    };
+    let max_concurrent_agents = req
+        .max_concurrent_agents
+        .unwrap_or(current.max_concurrent_agents);
+    if max_concurrent_agents == 0 {
+        return Err(ApiError::InvalidInput(
+            "max_concurrent_agents must be at least 1 — a rolling rollout with batch size 0 \
+             would never create a task"
+                .to_string(),
+        ));
+    }
+
+    let policy = gyre_domain::RolloutPolicy {
+        strategy,
+        max_concurrent_agents,
+        priority,
+        auto_merge: req.auto_merge.unwrap_or(current.auto_merge),
+    };
+
+    let json = serde_json::to_string(&policy)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize rollout_policy: {e}")))?;
+    state
+        .rollout_policies
+        .upsert(&Id::new(&workspace_id), &json)
+        .await?;
+
+    // §11-style observability: policy change is an auditable workspace event.
+    state
+        .emit_event(
+            Some(Id::new(workspace_id.clone())),
+            gyre_common::message::Destination::Workspace(Id::new(workspace_id.clone())),
+            gyre_common::message::MessageKind::Custom("rollout_policy_updated".to_string()),
+            Some(serde_json::json!({
+                "workspace_id": workspace_id,
+                "strategy": policy.strategy.as_str(),
+                "max_concurrent_agents": policy.max_concurrent_agents,
+                "priority": policy.priority.as_str(),
+                "auto_merge": policy.auto_merge,
+            })),
+        )
+        .await;
+
+    Ok((StatusCode::OK, Json(policy)))
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +759,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         // Create a workspace using the admin static token.
@@ -695,6 +823,233 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rollout policy endpoint tests (meta-spec-reconciliation.md §7)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_rollout_policy_returns_spec_default() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-default-ws").await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // §7: "Default: `Rolling` strategy, `Normal` priority, `auto_merge: false`".
+        assert_eq!(json["strategy"], "rolling");
+        assert_eq!(json["priority"], "normal");
+        assert_eq!(json["auto_merge"], false);
+        assert!(json["max_concurrent_agents"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_round_trips() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-put-ws").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"strategy":"immediate","max_concurrent_agents":3,"priority":"high","auto_merge":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["strategy"], "immediate");
+        assert_eq!(json["max_concurrent_agents"], 3);
+        assert_eq!(json["priority"], "high");
+        assert_eq!(json["auto_merge"], true);
+
+        // Read back through GET — the stored policy, not the request echo.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["strategy"], "immediate");
+        assert_eq!(json["max_concurrent_agents"], 3);
+        assert_eq!(json["priority"], "high");
+        assert_eq!(json["auto_merge"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_partial_update_keeps_other_fields() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-partial-ws").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"strategy":"background"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Omitted fields fall back to the current (default) values.
+        assert_eq!(json["strategy"], "background");
+        assert_eq!(json["priority"], "normal");
+        assert_eq!(json["auto_merge"], false);
+        assert!(json["max_concurrent_agents"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_requires_admin() {
+        // A Developer-role JWT must be rejected with 403 — the rollout policy
+        // governs reconciliation for the whole workspace (same governance
+        // class as meta-spec-set bindings, NEW-26).
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"policy-admin-ws","slug":"policy-admin-ws"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-policy-sub",
+                "preferred_username": "policy-developer",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"strategy":"immediate"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_rejects_invalid_values() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-invalid-ws").await;
+
+        for (body, what) in [
+            (r#"{"strategy":"staged"}"#, "unknown strategy"),
+            (
+                r#"{"strategy":"rolling","priority":"urgent"}"#,
+                "unknown priority",
+            ),
+            (
+                r#"{"strategy":"rolling","max_concurrent_agents":0}"#,
+                "zero batch size (rolling rollout would stall forever)",
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!(
+                            "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                        ))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "must reject {what}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollout_policy_unknown_workspace_404() {
+        let app = app();
+        for method in ["GET", "PUT"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/v1/workspaces/00000000-0000-0000-0000-000000000000/meta-specs/rollout-policy")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"strategy":"immediate"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} on missing workspace"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -875,7 +1230,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         // Create workspace as admin.
@@ -1015,6 +1372,15 @@ pub async fn list_meta_specs_registry(
     auth: AuthenticatedAgent,
     Query(q): Query<ListMetaSpecsQuery>,
 ) -> Result<Json<Vec<MetaSpec>>, ApiError> {
+    // Admin-only: the registry is tenant-wide governance configuration (it
+    // defines the meta-specs that can be bound to any workspace). This route
+    // is ABAC-exempt, so the handler is the only authorization surface —
+    // any authenticated agent must not enumerate cross-workspace governance.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may list the meta-specs registry".to_string(),
+        ));
+    }
     let scope = match q.scope.as_deref() {
         None => None,
         Some(s) => Some(parse_scope(s)?),
@@ -1086,14 +1452,12 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
-    // Admin-only (per-handler authorization; route is ABAC-exempt):
-    // registry content governs agent behavior across every workspace that
-    // binds it — the same NEW-26 rule as `put_meta_spec_set`. A non-Admin
-    // principal creating governing content could pre-write the persona a
-    // reconciliation wave later re-reads.
+    // Admin-only (ABAC-exempt route — the handler is the authorization
+    // surface): creating registry entries defines tenant-wide governance;
+    // non-Admin callers must not mint meta-specs.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
         return Err(ApiError::Forbidden(
-            "only Admin role may create meta-spec registry entries".to_string(),
+            "only Admin role may create meta-specs registry entries".to_string(),
         ));
     }
     let kind = parse_kind(&req.kind)?;
@@ -1157,14 +1521,12 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
-    // Admin-only (per-handler authorization; route is ABAC-exempt):
-    // PUT edits governing content and can approve it — meta-spec approval is
-    // human-only (meta-spec-reconciliation.md §1: `human_only` approval for
-    // personas/principles/process). A non-Admin approval would forge the §6
-    // reconciliation trigger with content the caller wrote.
+    // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
+    // the handler is the authorization surface). Without this gate, any
+    // authenticated agent could edit governance prompts and reset approvals.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
         return Err(ApiError::Forbidden(
-            "only Admin role may update meta-spec registry entries".to_string(),
+            "only Admin role may update meta-specs registry entries".to_string(),
         ));
     }
     let mut ms = state
@@ -1290,12 +1652,11 @@ pub async fn delete_meta_spec_registry(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    // Admin-only (per-handler authorization; route is ABAC-exempt, and
-    // docs/api-reference.md marks DELETE Admin-only): deleting a registry
-    // entry removes governing content every bound workspace depends on.
+    // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
+    // the handler is the authorization surface).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
         return Err(ApiError::Forbidden(
-            "only Admin role may delete meta-spec registry entries".to_string(),
+            "only Admin role may delete meta-specs registry entries".to_string(),
         ));
     }
     let rid = Id::new(&id);
@@ -1920,6 +2281,90 @@ mod registry_tests {
         let payload = msgs[0].payload.as_ref().unwrap();
         assert_eq!(payload["name"].as_str().unwrap(), "event-worker");
         assert_eq!(payload["version"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_endpoints_reject_non_admin() {
+        // The meta-specs-registry routes are ABAC-exempt (legacy exemption
+        // file), so the handler is the only authorization surface. A
+        // Developer-role JWT must get 403 from every registry mutation and
+        // from the list — governance configuration is Admin-only (docs:
+        // "Admin only for PUT/DELETE"; list/create follow the same class).
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let router = crate::api::api_router().with_state(state);
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let auth = format!("Bearer {dev_token}");
+
+        // LIST
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // CREATE
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:principle","name":"x","scope":"Global","prompt":"p"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // UPDATE + DELETE against a known id shape (403 must precede 404 —
+        // the gate runs before the store lookup).
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"p2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test(flavor = "multi_thread")]

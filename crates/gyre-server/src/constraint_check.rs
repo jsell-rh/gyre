@@ -1171,7 +1171,7 @@ async fn emit_context_binding_rejection(
 ///   - 1: Workload attestation exists but no stack fingerprint (raw push)
 ///   - 2: Stack fingerprint present — self-reported via CLI
 ///   - 3: Stack fingerprint + container_id + image_hash — Gyre-managed runtime
-fn derive_attestation_level(
+pub(crate) fn derive_attestation_level(
     workload: Option<&crate::workload_attestation::WorkloadAttestation>,
 ) -> i64 {
     let Some(att) = workload else {
@@ -2203,6 +2203,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2265,6 +2266,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2880,6 +2882,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2937,6 +2940,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 

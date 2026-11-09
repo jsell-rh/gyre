@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
-use gyre_ports::{AuditQueryFilter, AuditRepository};
+use gyre_ports::{AuditQueryFilter, AuditRepository, CompressionStats};
 use std::sync::Arc;
 
 use super::SqliteStorage;
@@ -25,31 +25,46 @@ struct AuditEventRow {
     resource_id: Option<String>,
     outcome: String,
     detail: String,
+    /// zstd-compressed detail JSON; NULL = row not yet compressed
+    /// (log-compression job, observability.md §Log Retention &
+    /// Compression).
+    detail_zstd: Option<Vec<u8>>,
     source_ip: Option<String>,
     user_agent: Option<String>,
     timestamp: i64,
 }
 
-impl From<AuditEventRow> for AuditEvent {
-    fn from(r: AuditEventRow) -> Self {
-        let detail: serde_json::Value = serde_json::from_str(&r.detail)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        AuditEvent {
-            id: Id::new(r.id),
-            event_type: AuditEventType::from_str(&r.event_type),
-            agent_id: r.agent_id.map(Id::new),
-            user_id: r.user_id.map(Id::new),
-            session_id: r.session_id,
-            workspace_id: r.workspace_id.map(Id::new),
-            repo_id: r.repo_id.map(Id::new),
-            resource_type: r.resource_type,
-            resource_id: r.resource_id,
-            outcome: AuditOutcome::from_str(&r.outcome).unwrap_or(AuditOutcome::Success),
+impl AuditEventRow {
+    /// Materialize a domain event, decompressing the detail payload when
+    /// the row is compressed. Decompression or JSON parse failure of a
+    /// compressed payload is a hard error: a corrupted audit record must
+    /// surface, not silently degrade to an empty detail object.
+    fn into_event(self) -> Result<AuditEvent> {
+        let detail = match self.detail_zstd {
+            Some(z) if !z.is_empty() => {
+                let raw =
+                    zstd::decode_all(z.as_slice()).context("decompress audit detail (zstd)")?;
+                serde_json::from_slice(&raw).context("parse compressed audit detail")?
+            }
+            _ => serde_json::from_str(&self.detail)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+        };
+        Ok(AuditEvent {
+            id: Id::new(self.id),
+            event_type: AuditEventType::from_str(&self.event_type),
+            agent_id: self.agent_id.map(Id::new),
+            user_id: self.user_id.map(Id::new),
+            session_id: self.session_id,
+            workspace_id: self.workspace_id.map(Id::new),
+            repo_id: self.repo_id.map(Id::new),
+            resource_type: self.resource_type,
+            resource_id: self.resource_id,
+            outcome: AuditOutcome::from_str(&self.outcome).unwrap_or(AuditOutcome::Success),
             detail,
-            source_ip: r.source_ip,
-            user_agent: r.user_agent,
-            timestamp: r.timestamp as u64,
-        }
+            source_ip: self.source_ip,
+            user_agent: self.user_agent,
+            timestamp: self.timestamp as u64,
+        })
     }
 }
 
@@ -67,6 +82,7 @@ struct AuditEventRecord<'a> {
     resource_id: Option<&'a str>,
     outcome: &'a str,
     detail: String,
+    detail_zstd: Option<Vec<u8>>,
     source_ip: Option<&'a str>,
     user_agent: Option<&'a str>,
     timestamp: i64,
@@ -93,6 +109,9 @@ fn to_record(e: &AuditEvent) -> AuditEventRecord<'_> {
         resource_id: e.resource_id.as_deref(),
         outcome: e.outcome.as_str(),
         detail: serde_json::to_string(&e.detail).unwrap_or_else(|_| "{}".to_string()),
+        // New rows are never pre-compressed; the log-compression job
+        // picks them up once they age past 7 days.
+        detail_zstd: None,
         source_ip: e.source_ip.as_deref(),
         user_agent: e.user_agent.as_deref(),
         timestamp: e.timestamp as i64,
@@ -125,7 +144,9 @@ impl AuditRepository for SqliteStorage {
                 .limit(filter.limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
                 .context("query audit_events")?;
-            Ok(rows.into_iter().map(AuditEvent::from).collect())
+            rows.into_iter()
+                .map(AuditEventRow::into_event)
+                .collect::<Result<Vec<_>>>()
         })
         .await?
     }
@@ -142,7 +163,6 @@ impl AuditRepository for SqliteStorage {
         })
         .await?
     }
-
 
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
@@ -171,7 +191,9 @@ impl AuditRepository for SqliteStorage {
                 .limit(limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
                 .context("since_timestamp audit_events")?;
-            Ok(rows.into_iter().map(AuditEvent::from).collect())
+            rows.into_iter()
+                .map(AuditEventRow::into_event)
+                .collect::<Result<Vec<_>>>()
         })
         .await?
     }
@@ -188,18 +210,56 @@ impl AuditRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn compress_details_before(
+        &self,
+        cutoff_secs: u64,
+        limit: usize,
+    ) -> Result<CompressionStats> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<CompressionStats> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Candidates: not yet compressed, older than the cutoff.
+            let rows: Vec<(String, String)> = audit_events::table
+                .filter(audit_events::detail_zstd.is_null())
+                .filter(audit_events::timestamp.lt(cutoff_secs as i64))
+                .order(audit_events::timestamp.asc())
+                .limit(limit as i64)
+                .select((audit_events::id, audit_events::detail))
+                .load(&mut *conn)
+                .context("select audit_events for compression")?;
+
+            let mut stats = CompressionStats::default();
+            for (id, detail) in rows {
+                let compressed =
+                    zstd::encode_all(detail.as_bytes(), 3).context("zstd compress audit detail")?;
+                // The NULL guard makes the update idempotent under
+                // concurrency: only the first writer flips the row.
+                let n = diesel::update(audit_events::table)
+                    .filter(audit_events::id.eq(&id))
+                    .filter(audit_events::detail_zstd.is_null())
+                    .set((
+                        audit_events::detail.eq(""),
+                        audit_events::detail_zstd.eq(Some(compressed.clone())),
+                    ))
+                    .execute(&mut *conn)
+                    .context("compress audit detail")?;
+                if n == 1 {
+                    stats.compressed += 1;
+                    stats.bytes_before += detail.len() as u64;
+                    stats.bytes_after += compressed.len() as u64;
+                }
+            }
+            Ok(stats)
+        })
+        .await?
+    }
 }
 
-type BoxedAuditQuery = diesel::dsl::IntoBoxed<
-    'static,
-    crate::schema::audit_events::table,
-    diesel::sqlite::Sqlite,
->;
+type BoxedAuditQuery =
+    diesel::dsl::IntoBoxed<'static, crate::schema::audit_events::table, diesel::sqlite::Sqlite>;
 
-fn apply_filters(
-    mut query: BoxedAuditQuery,
-    filter: &AuditQueryFilter,
-) -> BoxedAuditQuery {
+fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> BoxedAuditQuery {
     if let Some(s) = filter.since {
         query = query.filter(audit_events::timestamp.ge(s as i64));
     }
@@ -233,7 +293,7 @@ mod tests {
     use gyre_domain::AuditEventType;
     use tempfile::NamedTempFile;
 
-fn setup() -> (NamedTempFile, SqliteStorage) {
+    fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
         let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
         (tmp, s)
@@ -272,8 +332,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_record_and_query_all() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
+        )
+        .await;
         let results = AuditRepository::query(&s, &all()).await.unwrap();
         assert_eq!(results.len(), 2);
     }
@@ -281,8 +349,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_query_by_agent() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200),
+        )
+        .await;
         let results = AuditRepository::query(
             &s,
             &AuditQueryFilter {
@@ -299,8 +375,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_query_by_event_type() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
+        )
+        .await;
         let results = AuditRepository::query(
             &s,
             &AuditQueryFilter {
@@ -415,7 +499,12 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         for i in 1u64..=5 {
             record(
                 &s,
-                &make_event(&format!("e{}", i), "agent-1", AuditEventType::Syscall, i * 100),
+                &make_event(
+                    &format!("e{}", i),
+                    "agent-1",
+                    AuditEventType::Syscall,
+                    i * 100,
+                ),
             )
             .await;
         }
@@ -438,8 +527,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_count() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::Syscall, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::Syscall, 200),
+        )
+        .await;
         let count = AuditRepository::count(&s).await.unwrap();
         assert_eq!(count, 2);
     }
@@ -449,7 +546,11 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         let (_tmp, s) = setup();
         record(&s, &make_event("e1", "a1", AuditEventType::FileAccess, 100)).await;
         record(&s, &make_event("e2", "a1", AuditEventType::FileAccess, 200)).await;
-        record(&s, &make_event("e3", "a1", AuditEventType::NetworkConnect, 300)).await;
+        record(
+            &s,
+            &make_event("e3", "a1", AuditEventType::NetworkConnect, 300),
+        )
+        .await;
         let stats = AuditRepository::stats_by_type(&s).await.unwrap();
         let fa = stats.iter().find(|(t, _)| t == "file_access").unwrap();
         assert_eq!(fa.1, 2);
@@ -504,8 +605,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_delete_older_than_purges_old_keeps_new() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("old", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("new", "agent-1", AuditEventType::FileAccess, 200)).await;
+        record(
+            &s,
+            &make_event("old", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("new", "agent-1", AuditEventType::FileAccess, 200),
+        )
+        .await;
 
         let deleted = AuditRepository::delete_older_than(&s, 150).await.unwrap();
         assert_eq!(deleted, 1);
@@ -515,6 +624,120 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         assert_eq!(results[0].id, Id::new("new"));
 
         // Second run is idempotent.
-        assert_eq!(AuditRepository::delete_older_than(&s, 150).await.unwrap(), 0);
+        assert_eq!(
+            AuditRepository::delete_older_than(&s, 150).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_compress_details_before_compresses_only_old_uncompressed() {
+        let (_tmp, s) = setup();
+        // Repetitive JSON compresses well — the byte accounting below
+        // relies on a real ratio.
+        let detail = serde_json::json!({
+            "path": "/tmp/some/long/path/repeated/in/every/event",
+            "action": "read",
+            "pid": 1000,
+            "padding": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        let mut old = make_event("old", "agent-1", AuditEventType::FileAccess, 100);
+        old.detail = detail.clone();
+        let mut new = make_event("new", "agent-1", AuditEventType::FileAccess, 200);
+        new.detail = detail.clone();
+        record(&s, &old).await;
+        record(&s, &new).await;
+
+        let stats = AuditRepository::compress_details_before(&s, 150, 100)
+            .await
+            .unwrap();
+        assert_eq!(stats.compressed, 1, "only the old event is compressed");
+        assert!(
+            stats.bytes_before > stats.bytes_after,
+            "zstd must shrink the detail JSON"
+        );
+
+        // Transparent decompression on query: the old event keeps its
+        // original detail payload, event fields intact.
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
+        assert_eq!(results.len(), 2);
+        for e in &results {
+            assert_eq!(
+                e.detail, detail,
+                "detail must round-trip regardless of compression"
+            );
+        }
+        let old = results.iter().find(|e| e.id.as_str() == "old").unwrap();
+        assert_eq!(old.event_type, AuditEventType::FileAccess);
+        assert_eq!(old.agent_id, Some(Id::new("agent-1")));
+    }
+
+    #[tokio::test]
+    async fn audit_compress_details_is_idempotent_and_limit_bounded() {
+        let (_tmp, s) = setup();
+        for i in 0..5 {
+            record(
+                &s,
+                &make_event(
+                    &format!("e{}", i),
+                    "agent-1",
+                    AuditEventType::FileAccess,
+                    100 + i,
+                ),
+            )
+            .await;
+        }
+
+        // limit bounds one pass to 2 rows.
+        let first = AuditRepository::compress_details_before(&s, 1000, 2)
+            .await
+            .unwrap();
+        assert_eq!(first.compressed, 2);
+        // Second pass with the same limit picks up two more rows...
+        let second = AuditRepository::compress_details_before(&s, 1000, 2)
+            .await
+            .unwrap();
+        assert_eq!(second.compressed, 2);
+        // ...the third pass gets the last remaining row...
+        let third = AuditRepository::compress_details_before(&s, 1000, 2)
+            .await
+            .unwrap();
+        assert_eq!(third.compressed, 1);
+        // ...and a fourth pass finds nothing new (idempotent).
+        let fourth = AuditRepository::compress_details_before(&s, 1000, 2)
+            .await
+            .unwrap();
+        assert_eq!(fourth.compressed, 0);
+        assert_eq!(fourth.bytes_before, 0);
+        assert_eq!(fourth.bytes_after, 0);
+
+        // All rows still readable with their original detail.
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
+        assert_eq!(results.len(), 5);
+        for e in &results {
+            assert_eq!(
+                e.detail,
+                serde_json::json!({ "path": "/tmp/test", "action": "read", "pid": 1000 })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_since_timestamp_decompresses_compressed_events() {
+        // SIEM forwarding reads exclusively through since_timestamp; a
+        // compressed event must arrive with its original detail.
+        let (_tmp, s) = setup();
+        let mut e = make_event("e1", "agent-1", AuditEventType::FileAccess, 100);
+        e.detail = serde_json::json!({ "path": "/etc/shadow", "mode": "read" });
+        record(&s, &e).await;
+
+        let stats = AuditRepository::compress_details_before(&s, 200, 10)
+            .await
+            .unwrap();
+        assert_eq!(stats.compressed, 1);
+
+        let events = AuditRepository::since_timestamp(&s, 50, 10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail, e.detail);
     }
 }
