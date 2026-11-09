@@ -175,7 +175,10 @@ UPDATE users SET locale = 'en-US' WHERE locale IS NULL OR locale = '';
 UPDATE users SET global_role = 'Member' WHERE global_role IS NULL OR global_role = '';
 
 -- Default preferences JSON for rows created before the column existed.
--- Matches gyre-domain UserPreferences::default() exactly.
+-- Historical literal: matches the pre-task-112 UserPreferences::default()
+-- serialization (flat notification_channels shape). task-112 reshaped
+-- NotificationChannels to the nested §Delivery Channels form; migration
+-- 000060 converges rows backfilled here to the current shape.
 UPDATE users
 SET preferences = '{"default_workspace_id":null,"theme":"System","notification_channels":{"in_app":true,"email_enabled":false,"email_digest":"Off"},"ui_density":"Comfortable","code_font_size":14,"diff_view":"SideBySide","activity_feed_scope":"MyActivity"}'
 WHERE preferences IS NULL;

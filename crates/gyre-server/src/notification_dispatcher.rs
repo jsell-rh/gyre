@@ -654,6 +654,13 @@ mod tests {
             band(NotificationType::SecretExpiring),
             NotificationPriority::High
         );
+        // High: persona change awaiting spec-lifecycle approval (merged
+        // from main's task-116) — same pending-approval decision class as
+        // SpecPendingApproval / PersonaApprovalRequested.
+        assert_eq!(
+            band(NotificationType::PersonaChangePendingApproval),
+            NotificationPriority::High
+        );
         // Medium: stale dependency, spec drift.
         assert_eq!(
             band(NotificationType::MetaSpecDrift),

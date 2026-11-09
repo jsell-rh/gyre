@@ -371,7 +371,7 @@ pub enum NotificationPriority {
 > | Band | Notification types |
 > |---|---|
 > | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted |
-> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹ |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, PersonaChangePendingApproval², MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹ |
 > | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
 > | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
 >
@@ -388,6 +388,13 @@ pub enum NotificationPriority {
 > banded High here (recorded 2026-11, task-112 merge with main) as the same
 > approaching-deadline class as BudgetWarning — the resource still works but
 > will fail at expiry, so it needs attention soon rather than eventually.
+>
+> ² PersonaChangePendingApproval is defined by meta-spec-reconciliation.md
+> (spec-lifecycle push hook); it is banded High here (recorded 2026-11,
+> task-112 merge with main's task-116) as the same pending-approval decision
+> class as SpecPendingApproval and PersonaApprovalRequested — work continues
+> until the deadline, but the decision stalls progress soon, so it needs
+> attention soon rather than eventually.
 
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"
