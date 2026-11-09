@@ -11,7 +11,13 @@ env:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest now resolves to ubuntu 26.04, which Playwright
+    # 1.58.x cannot install browsers on ("Playwright does not support chromium
+    # on ubuntu26.04-x64"). Stay on 24.04, which the locked Playwright
+    # supports, until the lockfile moves to a Playwright release with 26.04
+    # support (a version bump also changes the chromium revision and would
+    # require regenerating visual baselines).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
