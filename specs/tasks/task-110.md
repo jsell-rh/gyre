@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "58a012bc53ef194627a13b80ad478e0b4a2a15db"]
 ---
 
 ## Spec Excerpt
@@ -99,8 +99,8 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round 10 — review finding (coverage docs), commits `<docs>` +
-`<process>`.** Single finding, docs-only: the task's four declared
+**Repair round 10 — review finding (coverage docs), commit
+`58a012bc5`.** Single finding, docs-only: the task's four declared
 coverage sections — `user-management.md` rows 5 (Tenant-Level User
 Onboarding), 6 (Workspace Invitation Flow), 7 (Invitation Expiry),
 25 (Tenant Invitations) — were still `task-assigned` with empty
