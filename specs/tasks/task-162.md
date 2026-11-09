@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5626a68fcb94469acc6f6c2504dcd2dbcd204e7c", "d588cc8792d2740cb987f4aca8d1093fa4bfdf60", "62862a9e81c5c53e46ac4b936f1b69984fdc74d4"]
 ---
 
 ## Spec Excerpt
@@ -123,11 +123,14 @@ this branch's `message_dispatcher` import vs. main's new imports):
   wiring present.
 
 Both merge commits carry no task label, so `check-task-commit-attribution.sh`
-does not force their listing; they are added to `commits:` for review
-scoping at each repaired head (4a10321c3 and the c8626b1b3 repair below),
-and their resolutions are also visible in the base..candidate diff
-regardless of frontmatter state. No task-owned file needed semantic repair
-in either merge. Focused suites re-run green
+does not force their listing; they have been re-listed in `commits:` at each
+repaired head (though executor checkpoints have repeatedly dropped them
+again — see Review repairs below), and their resolutions are also visible in
+the base..candidate diff regardless of frontmatter state. Two further
+branch-keeping merges, d588cc879 (merge of the assigned base e5415ae12) and
+62862a9e8 (merge of 3c39ab1f7, touching only docs/dev-pipeline.md and
+scripts/dashboard files), likewise carry no task label. No task-owned file
+needed semantic repair in any merge. Focused suites re-run green
 post-merge (see Test evidence); `cargo check -p gyre-server --bins`
 clean; arch, dead-message-kinds, fabricated-scope-defaults, and
 task-commit-attribution checks all pass.
@@ -156,19 +159,25 @@ host-tooling issue, unrelated to this task.
 - **Frontmatter regression (e7aa777ea, process):** head cea3f23b4 had
   again dropped 9e5a0171d from `commits:`; 4a10321c3 restored it and
   added the new merge 5626a68fc.
-- **Frontmatter regression, third recurrence (c8626b1b3, process):** the
-  executor's own checkpoint commit c1ae3230b ("process: record task-162
-  branch commits") rewrote `commits:` back to the task-labeled commits
-  only, dropping both unlabeled merge commits again and falsifying the
-  prior "recorded in commits: above" claims at that head. Repaired at the
-  current head: 9e5a0171d and 5626a68fc are re-listed in `commits:` by a
-  task-labeled follow-up commit, and this note deliberately states the
-  merge-commit identities and their content directly (main.rs
-  import-conflict union resolutions against main tips fefde294 and
-  3ced150b) rather than claiming frontmatter state, because any executor
+- **Frontmatter regression, recurrences three and four (c8626b1b3,
+  3d2b75ed, process):** executor checkpoint commits ("process: record
+  task-162 branch commits" — c1ae3230b and 683402c05) repeatedly rewrote
+  `commits:` back to the task-labeled commits only, dropping the unlabeled
+  merge commits again and falsifying earlier "re-listed at the current
+  head" claims at each rewritten head. Per the durable guidance: this note
+  does NOT claim current frontmatter state, because any executor
   checkpoint that re-derives `commits:` from task-labeled commits only
-  will drop unlabeled merge commits again. The resolutions remain
-  reviewable via the base..candidate diff even if that recurs.
+  will silently drop unlabeled merge commits again. Instead it states the
+  merge identities and their content directly — 9e5a0171d and 5626a68fc
+  resolve the crates/gyre-server/src/main.rs import conflicts as unions
+  against main tips fefde294 (`bootstrap_default_tenant`) and 3ced150b
+  (`seed_builtin_personas`); d588cc879 merges the assigned base e5415ae12;
+  62862a9e8 merges 3c39ab1f7 (docs/dashboard files only) — and the task-
+  owned main.rs wiring itself is present in listed task-labeled commit
+  51221dc02. All four merges are re-listed in `commits:` by this repair
+  commit; if a later checkpoint drops them again, the resolutions remain
+  reviewable via the base..candidate diff, and the attribution check stays
+  green regardless because merges are unlabeled.
 
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
