@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
 ---
 
 ## Spec Excerpt
@@ -261,25 +261,73 @@ under `/tmp/stage/review-evidence/`):
   level): only the four agent-claim names merge; membership-sourced and
   identity names are never claim-definable; pre-set values stand.
 
-### Test evidence (run at head 8d5494e94, after the round-2 repair)
+### Review-repair round 3 (commit 5327b8daa)
+
+Repaired the two round-3 review findings:
+
+- **Code (spec-path resource.id)** — `resource.id` was never populated on
+  `:path`-addressed spec routes: `extract_path_attributes` only derives
+  `resource.id` from an `:id` or `{resource_type}_id` path param, and every
+  `/api/v1/specs/:path*` route has neither, while the spec's §Attributes
+  table defines `resource.id` (source "Request path") with the example
+  `system/identity-security.md` — a spec path. No policy could condition
+  on the addressed spec's identity (conditions failed closed — a
+  capability gap, not a security hole). Fix: a `:path` param names the
+  addressed entity; the percent-DECODED registry path becomes
+  `resource.id` (spec routes, the repo-parented spec-assertions route,
+  and the meta-spec blast-radius route); invalid percent-encoding leaves
+  it unset (fail closed, same discipline as the entity-lookup arms).
+  Killed end-to-end by
+  `spec_resource_id_from_decoded_path_reaches_live_evaluation` — a Deny
+  at 810 keyed on `resource.id Equals "system/design.md"` on
+  `GET /api/v1/specs/system%2Fdesign.md` returns 403 fixed / 200 with
+  the defect (the raw still-encoded param value would not match the
+  decoded constant, so the deny firing also proves the decoding); a
+  retargeted Deny on a different spec path must not fire (200), proving
+  the attribute carries the addressed spec's path, not a constant. Unit
+  coverage in `path_attributes_path_param_names_addressed_spec` (decoded
+  id on the document/history/assertions routes; invalid encoding unset).
+- **Code (doc/code divergence)** — `normalize_agent_jwt_attributes`
+  documented "never overwrites an attribute already present in the
+  context" — exactly the invariant the round-2 anti-spoofing fix relies
+  on — but all three setters were unconditional, with no test catching
+  the divergence (a future reordering or different claims source would
+  silently violate the stated guarantee). Fix: `contains_key` guards
+  matching the insert-only `merge_agent_jwt_claims` that runs
+  immediately before it; pinned by
+  `normalize_agent_jwt_attributes_never_overrides_existing_attributes`.
+  No live behavior change: in the live path the only values the guards
+  now protect were defined by the same verified token.
+- **Process** — coverage row 3 (§Attributes) evidence note extended with
+  the `:path` → decoded `resource.id` population (the round-3 gap is
+  closed, not just disclosed); test route patterns derived from
+  `SPECS_PATH_ROUTE`/`REPOS_ID_ROUTE` consts so the frozen duplicate
+  `/api/v1/...` literal count stays at 17.
+
+### Test evidence (run at head 5327b8daa, after the round-3 repair)
 
 - Mutation probes (transcripts under `/tmp/stage/review-evidence/`):
-  restoring the pre-fix ungated raw-claim merge fails both round-2
-  killing tests (200-instead-of-403); a post-extraction overwrite merge
-  fails the NotIn-deny guard; earlier probes still hold (repos-prefix
-  guard removal fails the round-1 middleware tests; the fail-open
-  `resolve_dynamic_value` mutant is killed by the round-1 killing case).
-- `cargo test -p gyre-server --lib` — **1516 passed / 0 failed**
-  (includes `abac_middleware` 32, `policy_engine` 34; the five §Policy
+  disabling the `:path` → `resource.id` population fails BOTH round-3
+  spec-path tests (live: 200-instead-of-403; unit: None-instead-of-Some);
+  restoring the unguarded `normalize_agent_jwt_attributes` setters fails
+  the normalize guard test (claim value overwrites the pre-set one);
+  earlier probes still hold (the pre-fix ungated raw-claim merge fails
+  both round-2 killing tests; a post-extraction overwrite merge fails the
+  NotIn-deny guard; repos-prefix guard removal fails the round-1
+  middleware tests; the fail-open `resolve_dynamic_value` mutant is
+  killed by the round-1 killing case).
+- `cargo test -p gyre-server --lib` — **1570 passed / 0 failed**
+  (includes `abac_middleware` 35, `policy_engine` 34; the five §Policy
   Example tests, the membership/entity-lookup attribute tests, and the
-  round-1/round-2 tests run end-to-end through live tower oneshot
-  requests with non-vacuous controls).
+  round-1/2/3 tests run end-to-end through live tower oneshot requests
+  with non-vacuous controls).
 - All mechanically-enforced repo invariant scripts pass at this head,
   including `check-abac-route-registry` (duplicate count 17 = frozen
-  baseline; the specs/assist route pattern hoisted into
-  `REPOS_SPECS_ASSIST_ROUTE`), `check-arch`, `check-mem-port-contracts`,
+  baseline), `check-arch`, `check-mem-port-contracts`,
   `check-fabricated-scope-defaults`, `check-forged-scope-fields`,
-  `check-forwarded-header-trust`, `check-inert-enforcement`, and the
+  `check-forwarded-header-trust`, `check-inert-enforcement`,
+  `check-scope-literal-defaults`, `check-lossy-secret-conversion`,
+  `check-relative-path-defaults`, `check-byte-slice-truncation`, and the
   other security-pattern checks.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
