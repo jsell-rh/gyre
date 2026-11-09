@@ -310,23 +310,33 @@ async fn run_gate(
             .map(|mr| (mr.spec_ref, Some(mr.workspace_id)))
             .unwrap_or((None, None));
         let gate_agent_id = format!("gate-agent:{}", gate.id);
-        let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
-        state
-            .emit_event(
-                Some(ws_id.clone()),
-                gyre_common::message::Destination::Workspace(ws_id),
-                gyre_common::message::MessageKind::GateFailure,
-                Some(serde_json::json!({
-                    "mr_id": mr_id.to_string(),
-                    "gate_name": gate.name,
-                    "gate_type": gate_type_str,
-                    "status": "Failed",
-                    "output": output,
-                    "spec_ref": spec_ref,
-                    "gate_agent_id": gate_agent_id,
-                })),
-            )
-            .await;
+        // A missing MR means the workspace scope cannot be determined — skip
+        // the workspace-scoped event and log rather than fabricating an
+        // identity (task-097 F3; see emit_reconciliation_completed).
+        if let Some(ws_id) = workspace_id {
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    gyre_common::message::Destination::Workspace(ws_id),
+                    gyre_common::message::MessageKind::GateFailure,
+                    Some(serde_json::json!({
+                        "mr_id": mr_id.to_string(),
+                        "gate_name": gate.name,
+                        "gate_type": gate_type_str,
+                        "status": "Failed",
+                        "output": output,
+                        "spec_ref": spec_ref,
+                        "gate_agent_id": gate_agent_id,
+                    })),
+                )
+                .await;
+        } else {
+            warn!(
+                mr_id = %mr_id,
+                gate_id = %gate.id,
+                "skipping GateFailure event: MR workspace could not be resolved"
+            );
+        }
     }
 
     // Notify MR author when gate fails (HSI §2).
@@ -789,7 +799,8 @@ async fn evaluate_persona_reviews(
     let mut near_miss: Option<String> = None;
 
     for review in &reviews {
-        let Some(reviewer_persona) = lookup_reviewer_persona(state, &review.reviewer_agent_id).await
+        let Some(reviewer_persona) =
+            lookup_reviewer_persona(state, &review.reviewer_agent_id).await
         else {
             continue;
         };
@@ -2183,13 +2194,20 @@ specs:
     fn manifest_gates_empty_for_missing_inputs() {
         let manifest = parse_gates_manifest();
         // No manifest.
-        assert!(manifest_gates_for_mr(None, Some("specs/system/identity-security.md@aaaa")).is_empty());
+        assert!(
+            manifest_gates_for_mr(None, Some("specs/system/identity-security.md@aaaa")).is_empty()
+        );
         // No spec_ref.
         assert!(manifest_gates_for_mr(Some(&manifest), None).is_empty());
         // Path not in the manifest.
-        assert!(manifest_gates_for_mr(Some(&manifest), Some("specs/system/unknown.md@aaaa")).is_empty());
+        assert!(
+            manifest_gates_for_mr(Some(&manifest), Some("specs/system/unknown.md@aaaa")).is_empty()
+        );
         // Entry declares no gates.
-        assert!(manifest_gates_for_mr(Some(&manifest), Some("specs/system/no-gates.md@aaaa")).is_empty());
+        assert!(
+            manifest_gates_for_mr(Some(&manifest), Some("specs/system/no-gates.md@aaaa"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2244,7 +2262,11 @@ specs:
         if let Some(w) = workload {
             state
                 .kv_store
-                .kv_set("workload_attestations", agent_id, serde_json::to_string(&w).unwrap())
+                .kv_set(
+                    "workload_attestations",
+                    agent_id,
+                    serde_json::to_string(&w).unwrap(),
+                )
                 .await
                 .unwrap();
         }
@@ -2447,11 +2469,7 @@ specs:
                 .unwrap();
         }
         std::fs::create_dir_all(dir.path().join("specs/system")).unwrap();
-        std::fs::write(
-            dir.path().join("specs/manifest.yaml"),
-            GATES_MANIFEST_YAML,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("specs/manifest.yaml"), GATES_MANIFEST_YAML).unwrap();
         std::fs::write(
             dir.path().join("specs/system/identity-security.md"),
             "# Identity Security\n",
@@ -2499,12 +2517,7 @@ specs:
         )
         .await;
 
-        trigger_gates_for_mr(
-            state.clone(),
-            Id::new("mr-mg-1"),
-            Id::new("repo-mg-1"),
-        )
-        .await;
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-1"), Id::new("repo-mg-1")).await;
 
         let results = state.gate_results.list_by_mr_id("mr-mg-1").await.unwrap();
         let manifest_results: Vec<&str> = results
@@ -2522,7 +2535,9 @@ specs:
             "results: {results:?}"
         );
         assert!(
-            manifest_results.iter().any(|g| g.ends_with(":accountability")),
+            manifest_results
+                .iter()
+                .any(|g| g.ends_with(":accountability")),
             "results: {results:?}"
         );
 
@@ -2592,12 +2607,7 @@ specs:
         };
         state.quality_gates.save(&repo_gate).await.unwrap();
 
-        trigger_gates_for_mr(
-            state.clone(),
-            Id::new("mr-mg-2"),
-            Id::new("repo-mg-2"),
-        )
-        .await;
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-2"), Id::new("repo-mg-2")).await;
 
         let results = state.gate_results.list_by_mr_id("mr-mg-2").await.unwrap();
         let security_results: Vec<&GateResult> = results
@@ -2651,12 +2661,7 @@ specs:
         };
         state.quality_gates.save(&repo_gate).await.unwrap();
 
-        trigger_gates_for_mr(
-            state.clone(),
-            Id::new("mr-mg-3"),
-            Id::new("repo-mg-3"),
-        )
-        .await;
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-3"), Id::new("repo-mg-3")).await;
 
         let results = state.gate_results.list_by_mr_id("mr-mg-3").await.unwrap();
         assert_eq!(results.len(), 1, "no spurious gates: {results:?}");
@@ -2707,7 +2712,10 @@ specs:
             "main",
             now_secs(),
         );
-        mr.spec_ref = Some("specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567".to_string());
+        mr.spec_ref = Some(
+            "specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567"
+                .to_string(),
+        );
         state.merge_requests.create(&mr).await.unwrap();
 
         let repo_gate = QualityGate {
@@ -2725,12 +2733,7 @@ specs:
         };
         state.quality_gates.save(&repo_gate).await.unwrap();
 
-        trigger_gates_for_mr(
-            state.clone(),
-            Id::new("mr-mg-4"),
-            Id::new("repo-mg-4"),
-        )
-        .await;
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-4"), Id::new("repo-mg-4")).await;
 
         let results = state.gate_results.list_by_mr_id("mr-mg-4").await.unwrap();
         assert_eq!(results.len(), 1, "no spurious gates: {results:?}");

@@ -15,5 +15,8 @@
 #   not a use-site unwrap_or fallback; the value is a deterministic
 #   function of the verified token, and "default" is the real bootstrapped
 #   Tenant row. Entry removed, count lowered 4→3.
+#   gate_executor.rs ws_id fallback for gate event emission — FIXED in
+#   task-195's repair round: the GateFailure event is now skipped + logged
+#   when the MR's workspace cannot be resolved (the emit_reconciliation_
+#   completed pattern). Entry removed, count lowered 3→2.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
-crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission
