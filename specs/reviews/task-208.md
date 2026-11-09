@@ -51,3 +51,13 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 120 (2026-11-09) — candidate `fc94129dc`: 106th attribution clobber; product clean; not approved
+
+Assignment base `4e895f76` (already merged at `da5a8acde`, round 119). The candidate is a 1+/1− frontmatter-only commit on top of the round-119 review record: `commits:` rewritten six→five SHAs, dropping `ea006d52` (`build(web): exempt generated dist bundles from whitespace gate (task-208)`, root `.gitattributes`) — verified ancestor of HEAD (exit 0) and not of the base (exit 1), i.e. branch product surface invisible to review scoping while unlisted. AGENTS.md attribution invariant violated; the task's own Shipped record names six product commits. Root cause (109th observation): the executor-staged `/tmp/stage/dev-attribution.py` is the pre-fix version (sha256 `627fce91…`, missing the `path == '.gitattributes' or` product-surface line); round 119's in-sandbox replacement of the staged copy did not survive — the checkpoint pass re-populates the stage from the durable pre-fix source before running, so the durable fix belongs to the process owner.
+
+Fresh probes at the candidate (evidence `/tmp/stage/review-evidence/r120/`): dead-code grep → zero matches; URI grep → only the 404 regression test literals (`users.rs:996-998`); six compliant tabs in `UserProfile.svelte`, zero `my-*` references in `web/src`; spec amendment + coverage rows (22 `n/a`, 23 `task-assigned`, HSI 54 `implemented`) in place; zero task-208-surface drift since the round-119-verified state; `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 (exit 0); `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → ok (exit 0); `scripts/test_dev_attribution.py` → 2/2 OK; `scripts/check-task-commit-attribution.sh task-208` → exit 0.
+
+Repair on-branch (standing flow): six-SHA list restored via `python3 scripts/dev-attribution.py task-208 --commit` → `dd138af58` (frontmatter-only), idempotency verified (re-run no-op, clean status); staged `/tmp/stage/dev-attribution.py` replaced with the fixed in-repo script again.
+
+Verdict: **needs-revision** (process). Product contract fully satisfied; the candidate itself is the clobber. Durable remediation: update the source that populates `/tmp/stage/dev-attribution.py` to the fixed filter (in-repo `scripts/dev-attribution.py`, sha256 `c23f2505…`) — reviewer-side repairs cannot prevent recurrence.
