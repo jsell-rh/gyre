@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "8f0ee1903"]
 ---
 
 ## Spec Excerpt
@@ -94,8 +94,6 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
 
-## Shipped
-
 ### Analytics event schema and auto-emitted events (commit 38c2c5e)
 
 - `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec fields
@@ -116,254 +114,78 @@ pub struct AnalyticsEvent {
   SQLite, Postgres, and mem adapters (adapter test
   `analytics_query_filtered_all_params`).
 
-### Trigger-point completeness (review repair round, commit b818d20d)
+### Terminal-path completeness (review repair rounds b818d20d → 8f0ee1903)
 
-The branch was first reconciled with main (d81b0fe4, merge commit
-  a488d9df) — web/dist taken byte-identical from main and the coverage
-  SUMMARY TOTAL recomputed from the merged per-file rows. The
-  independent review then found three events whose trigger coverage was
-  partial: terminal queue outcomes, internal task transitions, and the
-  spec-rejection kill path. All are now wired in production code:
+Successive review rounds extended trigger coverage to every production
+path, keeping the invariant that a terminal queue-entry transition and its
+`merge_queue.processed` event cannot diverge (`fail_queue_entry`), and that
+every task-status persistence records `task.status_changed`
+(`record_task_status_changed`): terminal queue outcomes (quality-gate
+failure, MR/repo not found, dep-health, spec/breaking-change/spec-link/
+constraint/attestation-ABAC blocks, git errors, circuit-breaker
+`skipped`), internal task transitions (MCP `update_task`, spawn/completion
+auto-advance, admin force-kill, stale-abort, spec-rejection and
+repo-archive cancellation), and agent kill paths (fail, admin kill,
+stale abort, spec-rejection stop, repo-archive stop). The final repair
+round (8f0ee1903, on merge bf39f38a2 of base 4e895f766) closed the last
+three gaps found by review:
 
-- **`merge_queue.processed` on every terminal outcome** — a new
-  `fail_queue_entry()` helper in merge_processor.rs updates the entry to
-  `Failed` and records the event atomically at every failure site:
-  quality-gate failure during candidate selection (the primary failure
-  mode), MR not found (selection and atomic-group paths), repo not found,
-  dependency-closed dep-health failure, spec-policy blocks
-  (no-spec_ref/approval/stale), breaking-change policy, spec-link gates
-  (superseded/conflicts), constraint enforcement, and attestation-ABAC
-  denial. The merged/conflict/git_error sites keep their existing
-  emissions. Circuit-breaker `Cancelled` entries now record with the spec
-  outcome value `skipped` (`emit_queue_processed_terminal`). When the MR
-  no longer resolves, the event records with the MR id from the entry and
-  no fabricated scope.
-- **`task.status_changed` on internal transitions** — a shared
-  `record_task_status_changed()` helper (api/analytics.rs) is now called
-  by every production path that persists a task status transition: the
-  HTTP status endpoint and MCP `update_task` (refactored onto the
-  helper), agent-spawn auto-advance Backlog→InProgress, agent-completion
-  auto-advance →Review, admin force-kill task block →Blocked, stale-abort
-  task block →Blocked, spec-rejection cancellation →Cancelled, and
-  repo-archive cancellation →Cancelled.
-- **`agent.failed` on the remaining kill paths** — the spec-rejection
-  agent stop (reason `killed: spec rejected: …`) and the repo-archive
-  agent stop (reason `killed (repo archived)`) now record with the same
-  agent_id/task_id/reason/duration_secs properties as the
-  fail/admin-kill/stale-abort paths.
-- **CI gate repair** — a deny-by-default `clippy::never_loop` error in
-  pre-existing `rust_extractor.rs` code (loop that always broke on the
-  first iteration) fails the CI clippy gate on any error-level finding;
-  rewritten as the behavior-identical `if let Some(candidate) =
-  …next()` clippy itself suggests.
+- **`merge_queue.processed` on the two remaining `Failed` transitions** —
+  the candidate-selection non-mergeable-MR check (4b'') and the atomic-
+  group R4 member non-mergeable check now route through
+  `fail_queue_entry(..., "mr_not_mergeable", ...)`; previously both set
+  `Failed` with no event while adjacent sites in the same code paths were
+  wired.
+- **`merge_queue.processed` on operator cancellation** — `cancel_entry`
+  (DELETE /api/v1/merge-queue/:id) emits outcome `skipped` via
+  `emit_queue_processed_terminal`, same as the circuit-breaker Cancelled
+  path.
+- **`agent.failed` on the compose teardown kill path** — teardown emits
+  `agent_id`/`task_id`/`reason` ("compose session torn down")/
+  `duration_secs` for every session agent it marks Dead. (The stale-agent
+  Pause stop stays unemitted by design: pause is a configured graceful
+  stop, not a failure or kill.)
 
-Each new trigger point has a regression test that fails on the old code:
-  `gate_failure_during_selection_records_queue_processed_failed`,
-  `mr_not_found_during_selection_records_queue_processed_failed`,
-  `spec_policy_block_records_queue_processed_failed`,
-  `circuit_breaker_cancel_records_queue_processed_skipped`,
-  `spawn_auto_advance_records_task_status_changed`,
-  `complete_auto_advance_records_task_status_changed`, plus assertions
-  added to `admin_kill_blocks_active_task`,
-  `abort_records_agent_failed_analytics_event`,
-  `reject_spec_cancels_in_flight_tasks`, `archive_cancels_active_tasks`,
-  and `archive_stops_active_agents`.
+Each fix has a regression test that fails on the old code:
+`non_mergeable_mr_during_selection_records_queue_processed_failed`,
+`atomic_group_non_mergeable_member_records_queue_processed_failed`,
+`cancel_records_queue_processed_skipped`, and assertions added to
+`compose_teardown_stops_all_agents` (probe run with emissions reverted:
+4 failures; with fixes: 0).
 
-### Verification-finding repair round (commit dc13ede3)
+### Merge and gate hygiene across rounds
 
-The prior candidate failed the deterministic verification gates (rustfmt,
- clippy, forbidden exemption replacements, and four static checks). All
- findings were fixed with real enforcement, never by re-adding exemptions:
-
-- **Orchestrator tenant containment (task-093 F2/F3):** both
-  `spawn_workspace_orchestrator` and `spawn_repo_orchestrator` now load the
-  scoped entity, compare its tenant against `auth.tenant_id`, and return
-  `Forbidden` on mismatch. Integration test
-  `orchestrator_spawn_denied_across_tenants` proves 403 + no agent created
-  for a foreign-tenant workspace and 201 for a same-tenant control.
-- **Attestation ABAC enforcement (task-077 F5):** `evaluate_attestation_abac`
-  results are bound at both call sites; a `Deny` decision fails the merge
-  queue entry before the merge commit is created (with no policies stored
-  the evaluation is `Allow` and merges proceed unchanged). Regression test
-  `attestation_abac_deny_blocks_merge` fails on the old audit-only code.
-- **Advisory persona check renamed (task-099 F2):** `validate_persona` →
-  `warn_unapproved_persona`; behavior unchanged (spec: soft check), but the
-  name can no longer be mistaken for an enforcement gate.
-- **specs.rs:** SHA truncation is char-boundary-safe via `truncate_bytes`;
-  spec-rejected notification fanout resolves the tenant from the workspace
-  record (skip + warn when unresolvable) instead of fabricating a
-  `"default"` tenant from `repo_id`.
-- **gate_executor.rs:** GateFailure event emission is skipped with a
-  warning when the MR's workspace cannot be resolved, instead of
-  fabricating a `"default"` workspace scope.
-- **recovery.rs:** both `resolve_ref` sites fail closed (unresolvable
-  default-branch HEAD reports `main_green=false` with a warning;
-  `revert_mr` returns 409 when the target branch no longer resolves)
-  instead of proceeding with empty-string SHAs.
-- Exemption entries for every fixed site were deleted (never replaced),
-  `FROZEN_EXEMPTION_COUNT` for fabricated-scope-defaults lowered 5 → 3,
-  and the `scope-literal-defaults` entries restored byte-identical to
-  main (pre-existing debt this branch does not own).
-
-### Review-repair round: migration collision and exemption pin (commit 6a3ce040)
-
-The independent review found two gate regressions introduced by the
-  merge with main (a488d9df), both fixed:
-
-- **Duplicate Diesel migration version 20261008000056** — this branch's
-  `analytics_scope_columns` migration collided with
-  `2026-10-08-000056_spec_assertion_results` brought in from main.
-  Diesel runs only one migration per version (alphabetically first
-  wins), so the analytics migration was silently dropped and fresh
-  databases had no user_id/session_id/workspace_id/repo_id columns on
-  `analytics_events` (6 adapter test failures, guard-test panic,
-  check-migration-versions.sh exit 1). Renumbered to the next unused
-  sequence 000057; content unchanged. The adapter scope-filter tests
-  (`analytics_query_filtered_all_params` and siblings) now pass again on
-  real storage.
-- **Stale line-pinned exemption** — branch insertions shifted the
-  `'./repos/'` prose comment in spawn.rs from line 597 to 605,
-  invalidating the `relative-path-defaults-exemptions.txt` pin and
-  failing `check-relative-path-defaults.sh`. That round re-pinned to
-  :605, which the verification gate then rejected as a new exemption
-  (see the final repair round below, commit ab8c41a2, for the durable
-  fix). No new exemption was added.
-
-### Verification-repair round: exemption-gate compliance (commit ab8c41a2)
-
-The deterministic verification gate (`bash /tmp/stage/checks.sh`) failed
-  on exactly one finding: the re-pinned `relative-path-defaults-exemptions.txt`
-  entry (`spawn.rs:597` → `:605`) counts as a NEW exemption entry vs the
-  base, which the gate forbids by design — after which the check runs
-  unmasked and fails on the literal. Fixed for real, never by re-adding or
-  re-wording an exemption:
-
-- The spawn.rs prose comment no longer quotes the relative repos-root
-  default literally (`"./repos/"` removed from the comment text; the
-  canonicalize call the comment documents is unchanged and still
-  guards the actual behavior).
-- The `spawn.rs` exemption entry was DELETED from
-  `relative-path-defaults-exemptions.txt` — a pure deletion vs base
-  (same accepted shape as this branch's other exemption deletions),
-  per the file's own policy of removing entries once the site no
-  longer trips the check.
-
-Evidence: `check-relative-path-defaults.sh` exits 0 with no spawn.rs
-  exemption present; the exemption-file diff vs base
-  9bef21a4 contains only the deletion (retained under
-  /tmp/stage/review-evidence/relative-path-fix.txt).
-
-### Rebase-repair round: reconcile with base c5deca801 (commit 935a15413cf42ca28dd5c971ffe081079d16ea23)
-
-The controller rebased the branch onto a new base (the task-105 lineage:
-  audit detail compression, log compression background job, task-095
-  revert-conflict handling, auth on the MR status endpoint); the merge
-  left 15 content conflicts, all resolved semantically — never by
-  re-adding exemptions or dropping a fix:
-
-- **recovery.rs** — took base's task-095 evolution (`?gates=false`
-  skip, MR/repo ownership check, revert of the MR's recorded
-  `merge_commit_sha`, `RevertResult::Conflict` → 409). It preserves
-  the fail-closed properties this branch shipped: `main_green=false`
-  with a warn when the default-branch HEAD does not resolve.
-- **repos.rs / mcp.rs** — union of both sides: task-146's
-  `task.status_changed` analytics recording at repo-archive
-  cancellation and in MCP `update_task` AND base's reconciliation
-  wave-completion hooks at the same trigger points.
-- **merge_processor.rs** — kept task-146's attestation-ABAC denial
-  path through `fail_queue_entry` (records the
-  `merge_queue.processed` event); took base's
-  `revert_breaker_key`/`trip_circuit_breaker` signature,
-  `RevertResult` matching, and `spec_carry` remediation text;
-  restored base's
-  `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`
-  regression test (initially dropped by a side-taking resolution) and
-  updated the circuit-breaker test to base's new call signature.
-- **mem.rs / sqlite/audit.rs** — took base's audit-event-envelope
-  restructure (`MemAuditEntry::materialize`); kept
-  `AnalyticsQueryFilter` in the mem imports.
-- **specs.rs / spawn.rs** — kept task-146's `truncate_bytes`, spec
-  tenant-fanout fix, `spec.approved` emission, and the
-  relative-path-literal-free comment.
-- **Migration collision (recurring class)** — this branch's
-  `2026-10-08-000057_analytics_scope_columns` collided with base's
-  `2026-10-08-000057_spec_approval_attestation` (Diesel runs only one
-  migration per version; the analytics scope columns were silently
-  missing on fresh DBs — 8 adapter test failures incl. the
-  `no_duplicate_migration_version_prefixes` guard). Renumbered to
-  `2026-10-08-000059_analytics_scope_columns`; content unchanged.
-- **Exemption files** — kept this branch's deletions (orchestrator
-  spawn containment, gate_executor GateFailure, specs.rs fanout all
-  fixed for real); diffs vs base contain only deletions/comment
-  updates, never new entries.
-- **MR analytics tests** — base added an `AuthenticatedAgent`
-  requirement to `PUT /merge-requests/:id/status`; the two task-146
-  analytics tests now send the same `Bearer test-token` header the
-  base's own tests use (assertion strength unchanged).
-- `specs/coverage/SUMMARY.md` TOTAL recomputed from the merged
-  per-file rows (802 / 219 / 0 / 302 / 118 / 163 / 48%). web/dist is
-  byte-identical to base (this branch never modified it).
-
-### Review-repair round: dead exemption entry removal and base 4118553f1 reconcile (merge 28fe73a7f)
-
-The independent review of candidate a6e810ef found two findings; both
-fixed, plus the controller's rebase onto base 4118553f1 (the task-090
-lineage: rollout policies, HSI Explorer Three Lenses, explorer UI)
-resolved:
-
-- **Dead exemption entry deleted (code finding)** — the
-  `crates/gyre-server/src/api/traces.rs:150` entry in
-  `scripts/abac-exempt-handlers-exemptions.txt` had been re-added from the
-  pre-rebase lineage by merge 935a15413. It was DEAD: traces.rs is
-  byte-identical to base and its handler is fixed there (resolves span →
-  trace → MR → workspace, returns Forbidden on tenant mismatch). The
-  entry is deleted; the section comment now records the fix with no
-  entries remaining. The exemption-file diff vs base contains only
-  deletions (the orchestrator spawn entries, fixed for real by this
-  branch) and comment updates — never a new entry.
-  `check-abac-exempt-handlers.sh` prints the identical `OK (88 handler(s)
-  checked)` before and after the deletion.
-- **task-200.md commits reordering reverted (process finding)** — the
-  frontmatter list is restored byte-identical to base; this branch no
-  longer touches task-200's record.
-- **Merge conflict (spawn.rs) resolved as a union** — task-146's
-  `task.status_changed` analytics recording at the agent-completion
-  auto-advance to Review AND base's reconciliation `auto_merge` enqueue
-  hook (`maybe_auto_enqueue_reconciliation_mr`) both kept at the same
-  trigger point; no fix dropped, no exemption re-added.
-- **No migration collision this time** — base's new
-  `2026-11-06-000057_rollout_policies` and this branch's
-  `2026-10-08-000059_analytics_scope_columns` have distinct Diesel
-  versions; the `no_duplicate_migration_version_prefixes` guard and
-  `check-migration-versions.sh` pass.
+- Reconciled with main/base five times (d81b0fe4, a488d9df; 4118553f1,
+  28fe73a7f; 4e895f766, bf39f38a2) — conflicts resolved as unions, never
+  dropping a fix or re-adding an exemption. The bf39f38a2 merge unioned
+  admin.rs (analytics `agent.failed` + task-103 token revocation/lifecycle
+  audit) and stale_agents.rs tests, and intersected the fabricated-scope
+  exemption fixes: auth.rs fixed by task-103, gate_executor.rs fixed by
+  this branch → entries 3 → 1, FROZEN_EXEMPTION_COUNT lowered 3 → 1.
+- Migration collisions with base lineages (Diesel runs one migration per
+  version) were renumbered to the next unused sequence — currently
+  `2026-10-08-000059_analytics_scope_columns`.
+- Fixed for real, never via exemptions: orchestrator spawn tenant
+  containment, attestation-ABAC merge enforcement, `warn_unapproved_persona`
+  rename, char-boundary-safe SHA truncation, spec tenant fanout resolution,
+  GateFailure scope resolution, fail-closed `resolve_ref` sites, the
+  relative-path literal in spawn.rs, and the dead traces.rs exemption
+  entry. `rust_extractor.rs` `never_loop` rewritten for the CI clippy gate.
 - web/dist is byte-identical to base (this branch never modified it).
 
-### Test evidence
+### Test evidence (this round: merge bf39f38a2 + commit 8f0ee1903)
 
-- This round (merge 28fe73a7f): `cargo test -p gyre-server --lib`: 1490
-  passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
-  67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 384 passed,
-  0 failed (includes the analytics adapter tests and the duplicate-
-  version guard); `cargo fmt --check` clean; `cargo clippy -p gyre-server
-  --lib` exit 0 (warnings only, pre-existing). All previously-green
-  `scripts/check-*.sh` gates pass (incl. migration versions/portability,
-  fabricated-scope, relative-path, inert-enforcement,
-  abac-exempt-handlers, task-commit-attribution). Checks that fail on
-  base 4118553f1 identically (verified in a worktree at base: mawk
-  dialect errors and pre-existing violation counts) are documented in
-  /tmp/stage/review-evidence/test-evidence.md, not introduced by this
-  branch. Evidence retained under /tmp/stage/review-evidence.
-
-### Prior-round evidence (935a15413cf42ca28dd5c971ffe081079d16ea23)
-
-- `cargo test -p gyre-server --lib`: 1468
-  passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
-  67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 379 passed,
-  0 failed (includes the analytics adapter tests and the duplicate-
-  version guard); `cargo test -p gyre-ports -p gyre-domain -p
-  gyre-common`: 557 passed, 0 failed; all 19 `scripts/check-*.sh`
-  gates pass (incl. migration versions/portability, fabricated-scope,
-  relative-path, inert-enforcement, abac-exempt-handlers,
-  task-commit-attribution); `cargo clippy --all --all-targets` and
-  `cargo fmt --check` clean. Evidence retained under
-  /tmp/stage/review-evidence.
+- `cargo test -p gyre-server --lib`: 1517 passed, 0 failed;
+  `cargo test -p gyre-server --test api_integration`: 67 passed, 0 failed;
+  `cargo test -p gyre-adapters --lib`: 384 passed, 0 failed; `cargo fmt
+  --check` clean; `cargo clippy -p gyre-server --lib` exit 0 (warnings
+  only, pre-existing).
+- All branch-invariant `scripts/check-*.sh` gates pass (migration
+  versions/portability, fabricated-scope, scope-literal, relative-path,
+  inert-enforcement, abac-route-registry, abac-exempt-handlers,
+  mcp-write-tools, arch, task-commit-attribution, and the rest).
+- Checks that fail identically on base 4e895f766 (verified in a detached
+  worktree at the base commit: 22 mawk-dialect awk errors and the
+  pre-existing exit-1 violation sets) are documented in
+  /tmp/stage/review-evidence/test-evidence.md — not introduced by this
+  branch.
