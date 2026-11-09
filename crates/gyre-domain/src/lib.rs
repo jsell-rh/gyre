@@ -121,5 +121,8 @@ pub use user::{
     UserPreferencesPatch, UserRole,
 };
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
-pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
+pub use workspace::{
+    builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
+    Workspace, BUILTIN_PERSONA_DEFS,
+};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
