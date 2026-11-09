@@ -3,6 +3,7 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
+pub mod agent_audit;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -23,6 +24,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -35,7 +37,9 @@ pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
+pub mod reconciliation;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
@@ -53,6 +57,7 @@ pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
 pub mod trust_suggestion;
+pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
@@ -62,19 +67,21 @@ use axum::{routing::get, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
 use gyre_common::Id;
+use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
-    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
     ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
     GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -267,8 +274,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -307,6 +316,12 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Trusted reverse-proxy networks for forensic source-IP resolution
+    /// (task-102 F3 / CWE-348). Populated from `GYRE_TRUSTED_PROXIES`
+    /// (comma-separated CIDRs / bare IPs). Empty (the default) = every
+    /// connection is direct: the socket peer is always the source and
+    /// forwarded headers are ignored.
+    pub trusted_proxies: trusted_proxy::TrustedProxies,
     /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
     pub commit_signatures: commit_signatures::CommitSignatureStore,
     /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
@@ -319,12 +334,16 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
+    /// Persisted spec assertion check results (system-explorer.md §9).
+    pub spec_assertion_results: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §Budget Tracking).
+    pub budget_calls: Arc<dyn BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -353,6 +372,8 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
+    pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
@@ -946,7 +967,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
@@ -1002,6 +1023,7 @@ pub fn build_state(
             })
             .unwrap_or_default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        trusted_proxies: trusted_proxy::TrustedProxies::from_env(),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
         sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
@@ -1017,6 +1039,10 @@ pub fn build_state(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
         ),
+        spec_assertion_results: store!(
+            dyn gyre_ports::SpecAssertionResultRepository,
+            mem::MemSpecAssertionResultRepository::default()
+        ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(
             dyn BudgetRepository,
@@ -1025,6 +1051,10 @@ pub fn build_state(
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
+        ),
+        budget_calls: store!(
+            dyn BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
         ),
         search: store!(
             dyn gyre_ports::SearchPort,
@@ -1072,6 +1102,10 @@ pub fn build_state(
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        rollout_policies: store!(
+            dyn RolloutPolicyRepository,
+            mem::MemRolloutPolicyRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: message_dispatch_tx.clone(),
@@ -1152,46 +1186,53 @@ pub fn build_state(
     })
 }
 
-/// Spawn a background task that evicts stale presence entries every 30 seconds.
+/// Evict stale presence entries (server_last_seen older than 60 seconds).
 ///
-/// An entry is stale if server_last_seen is more than 60 seconds old.
-/// The evicted connection (if still open) receives a `PresenceEvicted` message.
+/// An entry is stale if `server_last_seen` is more than 60 seconds old.
+/// The evicted connection (if still open) receives a `PresenceEvicted` message,
+/// and other workspace subscribers receive a departure `UserPresence`
+/// (HSI §7 Presence Awareness — every removal path must notify others).
+pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let stale: Vec<((String, String), u64, String)> = {
+        let map = state.presence.read().await;
+        map.iter()
+            .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
+            .map(|(key, entry)| (key.clone(), entry.connection_id, entry.workspace_id.clone()))
+            .collect()
+    };
+
+    for ((user_id, session_id), conn_id, workspace_id) in stale {
+        state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.clone(), session_id.clone()));
+
+        let evict_msg = WsMessage::PresenceEvicted {
+            session_id: session_id.clone(),
+        };
+        if let Ok(payload) = serde_json::to_string(&evict_msg) {
+            let conns = state.ws_connections.read().await;
+            if let Some(tx) = conns.get(&conn_id) {
+                let _ = tx.try_send(payload);
+            }
+        }
+
+        crate::ws::broadcast_presence_departure(state, &user_id, &session_id, &workspace_id).await;
+    }
+}
+
+/// Spawn a background task that evicts stale presence entries every 30 seconds.
 pub fn spawn_presence_eviction(state: Arc<AppState>) {
-    use gyre_common::WsMessage;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let stale: Vec<((String, String), u64)> = {
-                let map = state.presence.read().await;
-                map.iter()
-                    .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
-                    .map(|(key, entry)| (key.clone(), entry.connection_id))
-                    .collect()
-            };
-
-            for ((user_id, session_id), conn_id) in stale {
-                state
-                    .presence
-                    .write()
-                    .await
-                    .remove(&(user_id, session_id.clone()));
-
-                let evict_msg = WsMessage::PresenceEvicted {
-                    session_id: session_id.clone(),
-                };
-                if let Ok(payload) = serde_json::to_string(&evict_msg) {
-                    let conns = state.ws_connections.read().await;
-                    if let Some(tx) = conns.get(&conn_id) {
-                        let _ = tx.try_send(payload);
-                    }
-                }
-            }
+            evict_stale_presence(&state).await;
         }
     });
 }
@@ -1284,6 +1325,41 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
             image = DEFAULT_IMAGE,
             "registered default container compute target (M25)"
         );
+    }
+}
+
+/// Materialize the default Tenant entity on first startup
+/// (hierarchy-enforcement.md §1 Bootstrap Behavior).
+///
+/// On an empty database the platform has no Tenant row backing the `"default"`
+/// tenant scope that every tenant-filtered adapter query resolves against —
+/// the scope would be a phantom. This creates it with the spec-mandated
+/// field values: name "Default", slug "default", no OIDC issuer, unlimited
+/// budget (`BudgetConfig::default()`), no workspace cap. The row's id is
+/// `"default"` — the operative single-tenant scope — so it is the real
+/// tenant existing data references, not an orphaned UUID (the spec's
+/// `deterministic_uuid` form is deferred multi-tenant work, §68-70).
+///
+/// Idempotent: a no-op when the default tenant already exists.
+pub async fn bootstrap_default_tenant(state: &Arc<AppState>) {
+    use gyre_domain::budget::BudgetConfig;
+    use gyre_domain::tenant::Tenant;
+
+    let default_id = Id::new("default");
+    if let Ok(Some(_)) = state.tenants.find_by_id(&default_id).await {
+        return; // already bootstrapped
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut tenant = Tenant::new(default_id, "Default", "default", now);
+    tenant.budget = Some(BudgetConfig::default());
+
+    if let Err(e) = state.tenants.create(&tenant).await {
+        tracing::warn!("failed to bootstrap default tenant: {e}");
     }
 }
 
@@ -1431,6 +1507,7 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
             approved_at: Some(now),
+            approved_content_hash: Some(sha256_hex(prompt)),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -1556,5 +1633,68 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// task-197 / hierarchy-enforcement §1 Bootstrap Behavior: startup must
+    /// materialize the default Tenant row on an empty database, with the
+    /// spec field values, and be idempotent across restarts.
+    ///
+    /// Exercises the real SQLite `TenantRepository` against the `tenants`
+    /// table (not the mem repo) so the assertions verify the durable row
+    /// production startup writes, and so "not wired" fails visibly: without
+    /// the bootstrap call, `find_by_id("default")` returns None.
+    #[tokio::test]
+    async fn bootstrap_default_tenant_materializes_row_and_is_idempotent() {
+        use gyre_common::Id;
+        use gyre_domain::budget::BudgetConfig;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        // Wire the SQLite adapter into state.tenants exactly as build_state
+        // does in DB-backed mode (store! macro path).
+        let mut base = (*mem::test_state()).clone();
+        base.tenants = Arc::new(storage);
+        let state = Arc::new(base);
+
+        // Empty database: no default tenant yet.
+        assert!(
+            state
+                .tenants
+                .find_by_id(&Id::new("default"))
+                .await
+                .unwrap()
+                .is_none(),
+            "fresh DB must not contain a default tenant before bootstrap"
+        );
+
+        bootstrap_default_tenant(&state).await;
+
+        let tenant = state
+            .tenants
+            .find_by_id(&Id::new("default"))
+            .await
+            .unwrap()
+            .expect("default tenant materialized after bootstrap");
+        assert_eq!(tenant.id, Id::new("default"));
+        assert_eq!(tenant.name, "Default");
+        assert_eq!(tenant.slug, "default");
+        assert_eq!(tenant.oidc_issuer, None);
+        assert_eq!(tenant.max_workspaces, None);
+        assert!(tenant.created_at > 0);
+        // BudgetConfig has no PartialEq — compare serialized form against
+        // Some(BudgetConfig::default()) (all limits unset = unlimited).
+        assert_eq!(
+            serde_json::to_value(tenant.budget).unwrap(),
+            serde_json::to_value(Some(BudgetConfig::default())).unwrap()
+        );
+
+        // Restart against the populated DB: exactly one default tenant remains.
+        bootstrap_default_tenant(&state).await;
+        let tenants = state.tenants.list().await.unwrap();
+        assert_eq!(
+            tenants.iter().filter(|t| t.slug == "default").count(),
+            1,
+            "second bootstrap call must not create a duplicate default tenant"
+        );
     }
 }
