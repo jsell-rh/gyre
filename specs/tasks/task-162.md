@@ -150,3 +150,12 @@ Both findings from the review round at 152e67033 are fixed:
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
 0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
 clean. Evidence recorded under /tmp/stage/review-evidence.
+
+### Frontmatter repair (finding e7aa777ea)
+
+Candidate head cea3f23b4 had dropped merge commit 9e5a0171d from the
+`commits:` frontmatter again, regressing the 73a69995 process repair — the
+Shipped claim above was false and the main.rs import-conflict resolution
+was outside review scoping. Fixed in fd8605305 by re-listing 9e5a0171d
+(full SHA). `check-task-commit-attribution.sh` passes at head
+(exit 0); evidence under /tmp/stage/review-evidence.
