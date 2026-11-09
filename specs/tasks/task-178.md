@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §1. The Navigable Architecture"
   - "ui-navigation.md §Tab: Architecture (Moldable Development Surface)"
-commits: ["197222ba96f83d640031cd04880e3f157deb3323"]
+commits: ["197222ba96f83d640031cd04880e3f157deb3323", "618f415278d033b796295fc49ad55947513c81bd"]
 ---
 
 ## Spec Excerpt
@@ -90,92 +90,87 @@ Read `system-explorer.md` §1 "The Navigable Architecture" and `ui-navigation.md
 
 ## Shipped
 
-The Navigable Architecture surface (system-explorer.md §1 + ui-navigation.md §3
-"Tab: Architecture") on top of the task-065/170/177 canvas substrate. The
-pre-existing pieces verified as already real (not re-implemented): zoomable/
-pannable canvas with semantic zoom showing boundaries then interfaces by zoom
-level, spec-coverage green/amber/red coloring (`lens-rendering.js`
-coverageDecoration, pre-existing), complexity/churn node sizing, click → detail
-panel, double-click → C4 drill-down, `/` search, timeline scrubber overlay,
-right-click context menu with View spec / View provenance / View history /
-Open in code, and the Ask input (GeneratedViewChat → POST
-/workspaces/:id/explorer-views/generate → rendered view).
+The Navigable Architecture surface (system-explorer.md §1 + ui-navigation.md
+§3 "Tab: Architecture") on the task-065/170/177 canvas substrate: zoomable/
+pannable canvas with semantic zoom (boundaries at default zoom, interfaces on
+drill-in), spec-coverage green/amber/red coloring, complexity/churn node
+sizing, click → detail panel, double-click → C4 drill-down, `/` search,
+timeline scrubber, right-click context menu (View spec / provenance /
+history / code), lens checkbox group (Structural locked on, Evaluative
+additive overlay fetching `GET /repos/:id/graph/risks`, Observable future),
+view-selector dropdown (built-in → saved → Generate view…), 200px collapsible
+in-view filter panel, Ask input (GeneratedViewChat → POST
+/workspaces/:id/explorer-views/generate), and the View Spec Editor.
 
-### Lens selector — checkbox group (was exclusive buttons)
+This round is the review repair of the four findings from checkpoint
+16e5800 (commit 618f415):
 
-`ExplorerCanvas.svelte` toolbar: Structural is a checked+locked checkbox
-(always-on base layer), Evaluative is an additive-overlay checkbox toggle
-(checked = `lens === 'evaluative'`, the rendering path where the evaluative
-overlay composes on the structural base), Observable is a locked-off future
-toggle whose label surfaces the telemetry-integration notice banner. Per
-ui-navigation.md §3 "Checkbox group (not a dropdown — checkboxes allow
-multi-select for composition)".
+### Boundaries filter reached tree-group containers (was a visible no-op)
 
-### Evaluative lens fetches and overlays risk data
+At default zoom the boundary boxes on screen are the synthetic
+package/module tree-group containers (buildPathTree/layoutPathTreeNode),
+which the draw loop exempted from the hiddenNodeIds filter — unchecking
+Boundaries changed nothing in the canonical default view. Tree-group
+containers are now filtered through their own node
+(`treeGroupFilterHidden` in ExplorerCanvas: `nodeCategory` for unchecked
+categories, `nodeMatchesConcept` for concept focus — the same
+filter-categories.js semantics as the leaf rules). A filtered group skips
+its own box but keeps drawing children, so zoomed-in content of other
+categories stays visible when only the container's category is unchecked;
+the minimap applies the same rule. The redraw effect now tracks the filter
+props by identity (swapping one unchecked category for another keeps the
+hidden set's size).
 
-`ExplorerView.svelte` fetches `GET /repos/:id/graph/risks` when the Evaluative
-lens is active (best-effort, repo-change-safe, retry on failure) and passes a
-`riskByNode` map (churn × complexity, mirroring the canvas's risk-score
-definition but sourced from the server's stored metrics) to the canvas. The
-canvas gains a `risk` evaluative metric: `EvaluativeOverlay` renders a Risk
-heat button when risk data is present (also without trace data), and the
-metric colors nodes through the existing evaluative heat pipeline
-(`getNodeMetricValue`/`evaluativeNodeColor`).
+### Canvas-draw assertions are mutation-proof (were vacuous)
 
-### View selector — dropdown
+The old snapshot-and-clear capture read empty whenever the canvas was idle
+between redraws, so `not.toContain` passed with the production hiding code
+deleted (reviewer's mutation probe: 11/11). The capture is now
+frame-bucketed per canvas element (stable per-element ctx mock;
+`drawFrame` begins with `ctx.setTransform`, delimiting frames): the latest
+frame's labels persist, and the tests wait for a frame drawn after the
+interaction (`labelsOfNextRedraw`) before asserting, with a settle wait
+before the baseline capture. Verified by re-running the mutations:
+removing the whole filter block, or only the tree-group branch, fails both
+the Boundaries and the concept-focus tests (2/12 each); the restored code
+passes 12/12.
 
-Replaces the Boundary|Spec Realization|Change|System Trace tab row with a
-dropdown (`.explorer-view-select`, keeps `data-testid="explorer-view-selector"`)
-listing built-in views, then the workspace's saved views (delivered by the
-explorer chat WebSocket `views` message, applied via their stored view query —
-works with or without the socket), then a "Generate view…" option that focuses
-the Ask/generate chat column. Selecting a saved view shows its name on the
-collapsed button and applies its query to the canvas.
+### Saved views load via REST when the dropdown opens
 
-### In-view filter panel (200px, collapsible)
+The dropdown's saved-views section no longer depends solely on the explorer
+chat WebSocket's `views` message. Opening the dropdown fetches
+`GET /workspaces/:id/explorer-views` (api.explorerViews) and
+`GET /repos/:id/views` (api.savedViews) — merged by id, mirroring the
+socket's ListViews scope mix; workspace records carry a ViewSpec and are
+translated via `viewSpecToViewQuery`, repo records carry the ViewQuery
+directly. Socket updates merge over the REST-fetched list preserving
+already-known query fields. New test covers the no-socket path end to end
+(list → select → canvas annotation applied).
 
-New `ExplorerFilterPanel.svelte` inside the Architecture content area (left of
-the canvas, `NOT` the app sidebar), toggled by a filter icon in the control
-bar. Category checkboxes — Boundaries, Interfaces, Data, Specs — with
-per-category counts, plus a Concepts section listing predefined concepts
-discovered from the knowledge graph (`filter-categories.js`: cross-cutting
-name tokens shared by ≥2 nodes, stopword-filtered; membership uses the same
-case-insensitive substring semantics as `GET /repos/:id/graph/concept/:name`).
-The panel state reduces to a hidden-node-id set (`hiddenNodeIds` prop); the
-canvas skips hidden nodes and edges touching them in the draw loop, and a
-redraw effect reacts to filter/risk changes (the round-trip test caught that
-this redraw was initially missing — a real defect fixed in this task).
+### Observable lens toggle is keyboard-operable (a11y)
 
-### View Spec Editor
+The `<label onclick>` wrapper around the disabled Observable checkbox
+emitted `a11y_click_events_have_key_events` and
+`a11y_no_noninteractive_element_interactions` on every build/test run. It is
+now a `<div role="checkbox" aria-checked="false" aria-disabled="true"
+tabindex="0">` with onclick + onkeydown (Enter/Space surface the telemetry
+notice) around the same disabled input — visually identical (all styling is
+class-driven; no CSS targets the removed label element), and the new
+warnings are gone from the build output.
 
-An "Edit view spec" button (code icon) in the control bar opens a collapsible
-JSON editor panel for the view spec grammar (data/layout/encoding/highlight).
-It prefills from the active generated ViewSpec or one synthesized from the
-current view state; Apply validates JSON, translates via `viewSpecToViewQuery`,
-and re-renders the canvas live (annotation title proves the application);
-invalid JSON shows an inline `role=alert` error and applies nothing.
+### Test evidence
 
-### Tests
-
-- `filter-categories.test.js` (new, 14): classification, concept discovery,
-  concept matching, hidden-set computation incl. category×concept
-  intersection, counts.
-- `ExplorerViewNavigableArchitecture.test.js` (new, 11): lens checkbox group
-  semantics; Evaluative checkbox → repoGraphRisks fetch + Risk metric
-  appearance/disappearance; filter panel toggle/collapse with counts;
-  category-uncheck and concept-select hide nodes in the actual canvas draw
-  output (fillText capture) with round-trip restore (non-vacuous); saved views
-  in the dropdown load and apply; "Generate view…" focuses the generator;
-  view spec editor prefill/apply/error paths.
-- Updated for the checkbox group / dropdown: ExplorerCanvas.test.js,
-  ExplorerCanvasDrillDown, ExplorerCanvasLiveness, ExplorerViewLensUrl,
-  ExplorerDefaultViews, ExplorerGeneratedViews (assertion strength kept —
-  tabs→dropdown options, active-class→checked/disabled state).
-- E2E: `explorer-visual.spec.js` evaluative-lens selector updated to the
-  checkbox; the three chrome-affected baselines regenerated (toolbar-default,
-  toolbar-evaluative, view-query-container — 2px taller from the checkbox
-  chrome) against a transient local build; web/dist itself restored to the
-  assignment base for remote integration rebuild.
-
-Evidence: full web suite 100 files / 2025 tests green; focused suites 215
-green; explorer-visual E2E 16/16 green (see /tmp/stage/review-evidence).
+- `ExplorerViewNavigableArchitecture.test.js`: 12/12 (boundaries + concept
+  tests now kill the production-code mutations; new REST saved-views and
+  Observable keyboard tests).
+- Mutation probes (evidence in /tmp/stage/review-evidence): filter block
+  removed → 2 failures; tree-group branch only removed → 2 failures;
+  restored → 12/12.
+- Related suites green: ExplorerCanvas* (6 files) + ExplorerDefaultViews +
+  ExplorerGeneratedViews + ExplorerViewLensUrl + filter-categories (265);
+  ExplorerView-* (8 files) + ExplorerChat* (3) + GeneratedViewChat (186);
+  App/Workspace/RepoMode suites importing these components (210 passed,
+  41 skipped).
+- E2E visual baselines not regenerated: the only DOM change (label→div with
+  identical class styling) is pixel-neutral, and exact-head GitHub checks
+  verify after independent review.
