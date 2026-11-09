@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
+commits: ["14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "64536dbccf6bb5b1d7fcfef754ab7342ad256cba"]
 ---
 
 ## Spec Excerpt
@@ -85,9 +85,17 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module; `a1194a81a` and `14af7abd7` repaired review findings; `016b315fd` resolved the rebase onto base `72ad2a128`; merge commit `c66ae2dd8` resolved the rebase onto base `c5deca801`; merge commit `0d1f522c7` resolved the merge of base `fefde2946`. Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module; `a1194a81a` and `14af7abd7` repaired review findings; `016b315fd` resolved the rebase onto base `72ad2a128`; merge commit `c66ae2dd8` resolved the rebase onto base `c5deca801`; merge commit `0d1f522c7` resolved the merge of base `fefde2946`; `64536dbcc` repaired the verification round against base `fefde2946` (changed-line rustfmt/clippy + exemption-growth gate). Acceptance-criteria status is recorded here rather than by editing the protected checkbox text.
 
-### This round (merge repair: merge of base fefde2946)
+### This round (verification repair: changed-line gates vs base fefde2946)
+
+- The verification round (attempt `5179d01122b44f09b72a911c3163196b`, `bash /tmp/stage/checks.sh` exit 1) diffed the candidate against the **bare base** `fefde2946`, so it re-checked the whole task diff, not just the last process commit. Three findings, all repaired in `64536dbcc` with no behavior change:
+- **rustfmt changed lines**: `abac_middleware.rs` 951-952 (let-else line not collapsed) and `api/impersonation.rs` test module (12 lines). Fixed by running rustfmt with the gate's own config (`--edition 2021 --config skip_children=true`) on both files. `check-rustfmt-diff.py` vs base: clean.
+- **clippy changed lines** in `impersonation.rs`: five `useless_conversion` (the `KvJsonStore` port returns `anyhow::Error`, which `ApiError::Internal` takes directly — the `.into()` in the kv `map_err` closures was a no-op; replaced with `map_err(ApiError::Internal)`, the serde_json mappings keep their real `.into()`) and one `collapsible_if` (the ws notification push's nested `if matches { if try_send(..) }` collapsed to one condition with identical short-circuit semantics). `check-clippy-diff.py` vs base: clean (exit 0).
+- **`new verification exemptions forbidden: scope-literal-defaults`**: task-108's insertions in `auth.rs`/`lib.rs` shifted the nine pre-existing task-099 F1 legacy sites' line numbers, so the branch's remapped file entries (from `f57ffefcb`, shifted again by the later base merges) were (a) not a subset of the base's entry strings — the gate compares exact `path:line` strings against the base and forbids any addition — and (b) stale, pointing at non-site lines. Repair: converted the nine sites to the check's documented inline `// scope-literal:ok — task-099 F1 legacy debt` markers at their true locations and deleted the stale file entries. Same nine legacy sites, same debt, no new exemptions — the file count drops 22 -> 13, the frozen ceiling (24) and every verifier script untouched; the entry set is now a strict subset of the base's. The three adapter/domain entries that are stale on the base itself (sites at 166/124 vs entries 163/119 in both trees) are left exactly as the base carries them — pre-existing main debt, not this branch's displacement. Precedent for the remap class: task-236's investigation of the identical finding.
+- Focused verification on `64536dbcc`: rustfmt-diff, clippy-diff and the exemption-subset comparison vs base all pass; static guards green (arch, abac-route-registry, abac-exempt-handlers, dead-message-kinds, byte-slice-truncation, inert-enforcement, in-memory-state-stores, scope-literal-defaults, fabricated-scope-defaults, forwarded-header-trust, forged-scope-fields); `api::impersonation` 14/14, `auth::` 45/45, `abac_middleware` 12/12, `messages` 15/15, `ws::` 89/89. Evidence: `/tmp/stage/review-evidence/task-108-verification-repair.txt`.
+
+### Previous round (merge repair: merge of base fefde2946)
 
 - The controller repair left four content conflicts, all resolved by union/deduplication against the merged tree's ground truth:
   - `notification.rs` and `audit.rs`: both sides appended new enum variants at the same tail position (`ImpersonationRequest`/`ImpersonationAlert` + `ImpersonationStarted`/`ImpersonationEnded` here; `SecretExpiring` + the `Agent*` lifecycle variants on the base). Both sets kept in the enum, its `as_str`/`parse`/`from_str`/`default_priority` arms and the round-trip tests — dropping either side would strand the other task's emitters (`check-dead-message-kinds` class) or DB round-trip.
