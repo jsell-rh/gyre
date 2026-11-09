@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "c6b520a1d19f0be266e1a01a7b25f776b8f9ad86"]
 ---
 
 ## Spec Excerpt
@@ -123,13 +123,15 @@ review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 `7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
 from merged sources), the round-4 base merge `a2bdf9a2`, the
 round-5 base merge `d9e7785`, the round-6 base merge
-`4ef962e48`, the round-7 base merge `37a8193cf`, and the
-round-8 clippy repair `5482ae4f1` carry the work
+`4ef962e48`, the round-7 base merge `37a8193cf`, the
+round-8 clippy repair `5482ae4f1`, and the round-9 SSH
+name-validation repair `c6b520a1d` carry the work
 below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
 rounds 4–6 in `round4/`, `round5-merge-repair/`, and
 `round6-merge-repair/`; round 7 in `round7-merge-repair/`; round 8
-in `round8-clippy-repair/`).
+in `round8-clippy-repair/`; round 9 in
+`round9-ssh-name-orphan/`).
 
 ### Behavior
 
@@ -336,6 +338,30 @@ Round 8 (`5482ae4f1`, verification finding at `d13ea54a` —
   `check-abac-route-registry.sh` exits 0 with no WARN both before
   and after this round.
 
+Round 9 (`c6b520a1d`, review finding at `5c8fbcd79` — SSH
+agent-name validation orphaned state):
+
+- **The SSH dispatch arm's agent-name charset/length validation
+  returned 400 AFTER the agent record, agent token, git worktree +
+  DB record, and task assignment were persisted**, leaving an
+  Active agent, the task InProgress and assigned to that agent,
+  and a worktree record behind on every rejected spawn — violating
+  the handler's own compensating-rollback invariant (the
+  worktree-creation-failure and interrogation-policy-failure paths
+  both delete the just-created agent). The base had this late
+  error only for opt-in `container_mode:true`; task-117's flip of
+  the container_mode default to true put it on every default
+  SSH-target spawn with a non-`[a-zA-Z0-9._-]` or >63-char name.
+  Fixed by hoisting the check to the top of `spawn_agent_core`,
+  beside the duplicate-name check and scoped to the same condition
+  it applied under (resolved SSH compute target), before any
+  write; the now-dead late check is deleted. Regression test
+  `spawn_rejects_unsafe_agent_name_on_ssh_target_without_orphans`
+  asserts the 400 plus absence of agent/task-assignment/worktree
+  orphans; mutation-checked against the candidate's late-check
+  shape (fails on "rejected spawn must not create an agent",
+  transcript in `round9-ssh-name-orphan/mutation-check.log`).
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -409,5 +435,14 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   mem-port-contracts, in-memory-state-stores,
   task-commit-attribution gates -> exit 0 (logs in
   `round8-clippy-repair/`).
+- Round 9 (`c6b520a1d`, SSH name-validation repair): `cargo test -p
+  gyre-server --lib api::spawn` -> **44 passed, 0 failed**
+  (43 previous + the new orphan regression test); mutation check
+  (candidate's late-check shape restored) -> test FAILS on
+  "rejected spawn must not create an agent" (exit 101, log in
+  `round9-ssh-name-orphan/mutation-check.log`);
+  `check-rustfmt-diff.py HEAD^1` / `check-clippy-diff.py HEAD^1` ->
+  "changed lines clean"; `cargo test -p gyre-server --lib
+  compute_target` -> **24 passed, 0 failed**.
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
