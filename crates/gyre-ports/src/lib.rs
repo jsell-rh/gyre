@@ -41,6 +41,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
 pub mod secret;
@@ -103,6 +104,7 @@ pub use push_gate::PushGateRepository;
 pub use quality_gate::{GateResultRepository, QualityGateRepository};
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
+pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
 pub use search::{
     FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,

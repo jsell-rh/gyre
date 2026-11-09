@@ -1055,19 +1055,17 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
         Ok(()) => {
             // meta-spec-reconciliation.md §11: ReconciliationCompleted /
             // MetaSpecDriftResolved fire when the last open reconciliation /
-            // drift-review task for a workspace reaches terminal status.
+            // drift-review task for a workspace reaches terminal status. The
+            // shared hook also advances a §7 rolling rollout (next batch)
+            // before the completion check.
             if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled)
                 && task.labels.iter().any(|l| {
                     l == crate::reconciliation::RECONCILIATION_LABEL
                         || l == crate::reconciliation::DRIFT_REVIEW_LABEL
                 })
             {
-                crate::reconciliation::maybe_emit_reconciliation_completed(
-                    state,
-                    &task.workspace_id,
-                )
-                .await;
-                crate::reconciliation::maybe_emit_drift_resolved(state, &task.workspace_id).await;
+                crate::reconciliation::on_reconciliation_task_terminal(state, &task.workspace_id)
+                    .await;
             }
             tool_result(format!("Updated task {id_str}"))
         }
@@ -2749,6 +2747,123 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
+/// The resolved secret scope of an agent caller (platform-model.md §7).
+struct AgentSecretScope {
+    tenant_id: String,
+    workspace_id: String,
+    repo_id: String,
+    task_id: Option<String>,
+}
+
+/// Resolve the caller's secret scope for `secrets://` resources
+/// (platform-model.md §7).
+///
+/// Scope comes from the agent's JWT claims (workspace_id/repo_id for
+/// orchestrators, task_id for workers) plus the agent record, with the
+/// tenant resolved from the governing workspace — never a fabricated
+/// "default" tenant. Returns `None` when no agent identity/scope can be
+/// resolved (e.g. a user token): the resource is agent-scoped by spec.
+async fn agent_secret_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Option<AgentSecretScope> {
+    // Only Gyre-minted agent JWTs (or a resolvable agent record) carry an
+    // agent scope. User/Keycloak JWTs and global tokens have none.
+    let claims = auth.jwt_claims.as_ref().filter(|_| is_agent_jwt(auth));
+
+    let mut workspace_id: Option<String> = claims
+        .and_then(|c| c.get("workspace_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut repo_id: Option<String> = claims
+        .and_then(|c| c.get("repo_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let task_id: Option<String> = claims
+        .and_then(|c| c.get("task_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Fall back to the agent record (covers worker agents whose JWT carries
+    // only task_id: the governing workspace comes from the record, the repo
+    // from the task).
+    if workspace_id.is_none() || repo_id.is_none() {
+        if let Ok(Some(agent)) = state
+            .agents
+            .find_by_id(&Id::new(auth.agent_id.clone()))
+            .await
+        {
+            workspace_id = workspace_id.or(Some(agent.workspace_id.to_string()));
+            repo_id = repo_id.or_else(|| agent.repo_id.map(|r| r.to_string()));
+        }
+    }
+    if repo_id.is_none() {
+        if let Some(tid) = &task_id {
+            if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(tid.clone())).await {
+                workspace_id = workspace_id.or(Some(task.workspace_id.to_string()));
+                if !task.repo_id.to_string().is_empty() {
+                    repo_id = Some(task.repo_id.to_string());
+                }
+            }
+        }
+    }
+
+    let workspace_id = workspace_id?;
+    // Tenant comes from the governing workspace record — never fabricated.
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id.clone()))
+        .await
+        .ok()
+        .flatten()?;
+    Some(AgentSecretScope {
+        tenant_id: ws.tenant_id.to_string(),
+        workspace_id,
+        repo_id: repo_id.unwrap_or_default(),
+        task_id,
+    })
+}
+
+/// Collect secret METADATA (never values) across the scope cascade,
+/// nearest scope winning per name — mirrors `resolve_for_agent`'s scoping
+/// without decrypting anything.
+async fn collect_secret_metadata(
+    state: &AppState,
+    tenant_id: &str,
+    workspace_id: &str,
+    repo_id: &str,
+    task_id: Option<&str>,
+) -> anyhow::Result<Vec<gyre_common::Secret>> {
+    let mut targets: Vec<(gyre_common::SecretScope, String)> = vec![
+        (gyre_common::SecretScope::Tenant, tenant_id.to_string()),
+        (
+            gyre_common::SecretScope::Workspace,
+            workspace_id.to_string(),
+        ),
+    ];
+    if !repo_id.is_empty() {
+        targets.push((gyre_common::SecretScope::Repo, repo_id.to_string()));
+    }
+    if let Some(tid) = task_id {
+        targets.push((gyre_common::SecretScope::Task, tid.to_string()));
+    }
+    // Coarse → fine: finer entries overwrite same-name coarser ones.
+    let mut by_name: std::collections::HashMap<String, gyre_common::Secret> =
+        std::collections::HashMap::new();
+    for (scope, scope_id) in targets {
+        for s in state
+            .secrets
+            .list_by_scope(scope, &scope_id, tenant_id)
+            .await?
+        {
+            by_name.insert(s.name.clone(), s);
+        }
+    }
+    let mut secrets: Vec<gyre_common::Secret> = by_name.into_values().collect();
+    secrets.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(secrets)
+}
+
 fn resource_definitions() -> Value {
     json!({
         "resources": [
@@ -2799,6 +2914,18 @@ fn resource_definitions() -> Value {
                 "description": "SDLC system trace for a merge request (HSI §3a). URI: trace://{mr_id}",
                 "mimeType": "application/json",
                 "uriTemplate": "trace://{mr_id}"
+            },
+            {
+                "uri": "secrets://names",
+                "name": "Secret Names",
+                "description": "Names of the secrets available to this agent (tenant → workspace → repo → task cascade). Values are never exposed: secrets are delivered as environment variables at spawn (platform-model.md §7).",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "secrets://status",
+                "name": "Secret Expiry Status",
+                "description": "Expiry status of the secrets available to this agent: [{name, scope, expires_at, last_rotated_at, status: active|expiring|expired}] (platform-model.md §7).",
+                "mimeType": "application/json"
             }
         ]
     })
@@ -3045,6 +3172,70 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             }
             Ok(None) => json!({"error": format!("no trace found for merge request: {mr_id}")}),
             Err(e) => json!({"error": format!("failed to load trace: {e}")}),
+        }
+    } else if uri == "secrets://names" || uri == "secrets://status" {
+        // platform-model.md §7 MCP Integration: agents discover which secret
+        // NAMES they hold (values arrive as env vars at spawn, never via MCP).
+        match agent_secret_scope(state, auth).await {
+            Some(scope) => {
+                // Metadata-only cascade (tenant → workspace → repo → task,
+                // nearest scope wins) — mirrors resolve_for_agent's scoping
+                // but never touches secret values.
+                match collect_secret_metadata(
+                    state,
+                    &scope.tenant_id,
+                    &scope.workspace_id,
+                    &scope.repo_id,
+                    scope.task_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(secrets) => {
+                        let result = if uri == "secrets://names" {
+                            let names: Vec<&str> =
+                                secrets.iter().map(|s| s.name.as_str()).collect();
+                            json!(names)
+                        } else {
+                            let now = now_secs();
+                            let status: Vec<Value> = secrets
+                                .iter()
+                                .map(|s| {
+                                    let st = if s.is_expired(now) {
+                                        "expired"
+                                    } else if s
+                                        .expires_at
+                                        .map(|e| e.saturating_sub(now) <= 3600)
+                                        .unwrap_or(false)
+                                    {
+                                        "expiring"
+                                    } else {
+                                        "active"
+                                    };
+                                    json!({
+                                        "name": s.name,
+                                        "scope": s.scope.as_str(),
+                                        "expires_at": s.expires_at,
+                                        "last_rotated_at": s.last_rotated_at,
+                                        "status": st,
+                                    })
+                                })
+                                .collect();
+                            json!(status)
+                        };
+                        json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                            }]
+                        })
+                    }
+                    Err(e) => json!({"error": format!("failed to list secrets: {e}")}),
+                }
+            }
+            None => {
+                json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
+            }
         }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
@@ -5061,6 +5252,245 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no trace found"));
+    }
+
+    // ── platform-model.md §7: secrets:// resources (task-098) ─────────────
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_secrets() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 140,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
+        assert!(uris.contains(&"secrets://names"));
+        assert!(uris.contains(&"secrets://status"));
+    }
+
+    fn agent_auth(agent_id: &str, workspace_id: &str, repo_id: Option<&str>) -> AuthenticatedAgent {
+        let mut claims = serde_json::json!({
+            "sub": agent_id,
+            "scope": "agent",
+            "task_id": agent_id,
+            "workspace_id": workspace_id
+        });
+        if let Some(r) = repo_id {
+            claims["repo_id"] = serde_json::json!(r);
+        }
+        AuthenticatedAgent {
+            agent_id: agent_id.to_string(),
+            user_id: None,
+            roles: vec![UserRole::Agent],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(claims),
+            deprecated_token_auth: false,
+        }
+    }
+
+    async fn seed_secret_state() -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-sec"),
+            Id::new("default"),
+            "MCP Secrets WS",
+            "mcp-secrets-ws",
+            1_700_000_000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let now = 1_700_000_000u64;
+        let mk = |id: &str,
+                  name: &str,
+                  scope: gyre_common::SecretScope,
+                  scope_id: &str,
+                  expires_at: Option<u64>| gyre_common::Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: gyre_common::SecretType::Rotated,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        // Tenant-wide secret.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-t",
+                    "API_KEY",
+                    gyre_common::SecretScope::Tenant,
+                    "default",
+                    None,
+                ),
+                b"tenant-value",
+            )
+            .await
+            .unwrap();
+        // Workspace secret — same name as the repo one, so nearest-scope-wins
+        // is observable.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-w",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    None,
+                ),
+                b"ws-value",
+            )
+            .await
+            .unwrap();
+        // Repo secret overriding the workspace name + an expiring one.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-r",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Repo,
+                    "repo-mcp-sec",
+                    None,
+                ),
+                b"repo-value",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-e",
+                    "OAUTH_REFRESH",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    Some(now + 1800),
+                ),
+                b"expiring-value",
+            )
+            .await
+            .unwrap();
+        // Another workspace's secret — must be invisible.
+        let ws2 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-other"),
+            Id::new("default"),
+            "Other WS",
+            "mcp-other-ws",
+            now,
+        );
+        state.workspaces.create(&ws2).await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-x",
+                    "HIDDEN",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-other",
+                    None,
+                ),
+                b"other-value",
+            )
+            .await
+            .unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_names_returns_cascade_names_only() {
+        let state = seed_secret_state().await;
+        let auth = agent_auth("agent-mcp-sec", "ws-mcp-sec", Some("repo-mcp-sec"));
+        let result = handle_resource_read(&state, &auth, "secrets://names").await;
+        let text = result["contents"][0]["text"].as_str().unwrap();
+        assert!(result.get("error").is_none(), "unexpected error: {result}");
+        let names: Vec<String> = serde_json::from_str(text).unwrap();
+        assert_eq!(names, vec!["API_KEY", "DATABASE_URL", "OAUTH_REFRESH"]);
+        // Values never appear anywhere in the resource payload.
+        assert!(!result.to_string().contains("tenant-value"));
+        assert!(!result.to_string().contains("ws-value"));
+        assert!(!result.to_string().contains("repo-value"));
+        assert!(!result.to_string().contains("other-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_status_reports_expiry() {
+        let state = seed_secret_state().await;
+        // A secret expiring within 1h of real wall-clock now → "expiring".
+        let real_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state
+            .secrets
+            .create(
+                &gyre_common::Secret {
+                    id: Id::new("sec-soon"),
+                    name: "SOON_TOKEN".to_string(),
+                    scope: gyre_common::SecretScope::Workspace,
+                    scope_id: "ws-mcp-sec".to_string(),
+                    secret_type: gyre_common::SecretType::Rotated,
+                    created_by: "system".to_string(),
+                    created_at: real_now,
+                    expires_at: Some(real_now + 600),
+                    last_rotated_at: Some(real_now - 60),
+                    tenant_id: "default".to_string(),
+                },
+                b"soon-value",
+            )
+            .await
+            .unwrap();
+        let auth = agent_auth("agent-mcp-sec", "ws-mcp-sec", Some("repo-mcp-sec"));
+        let result = handle_resource_read(&state, &auth, "secrets://status").await;
+        let text = result["contents"][0]["text"].as_str().unwrap();
+        assert!(result.get("error").is_none(), "unexpected error: {result}");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+        let by_name: std::collections::HashMap<&str, &serde_json::Value> = entries
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap(), e))
+            .collect();
+        // OAUTH_REFRESH's seeded expiry (2023) is far in the past → "expired".
+        assert_eq!(by_name["OAUTH_REFRESH"]["status"], "expired");
+        assert_eq!(by_name["SOON_TOKEN"]["status"], "expiring");
+        assert_eq!(
+            by_name["SOON_TOKEN"]["last_rotated_at"].as_u64(),
+            Some(real_now - 60)
+        );
+        assert_eq!(by_name["API_KEY"]["status"], "active");
+        assert_eq!(by_name["DATABASE_URL"]["status"], "active");
+        assert!(by_name["OAUTH_REFRESH"]["expires_at"].is_u64());
+        assert!(!result.to_string().contains("expiring-value"));
+        assert!(!result.to_string().contains("soon-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_without_agent_scope_errors() {
+        let state = seed_secret_state().await;
+        // A user token (no agent JWT, no agent record) has no secret scope.
+        let auth = AuthenticatedAgent {
+            agent_id: "some-user".to_string(),
+            user_id: Some(Id::new("u-1")),
+            roles: vec![UserRole::Developer],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        let result = handle_resource_read(&state, &auth, "secrets://names").await;
+        assert!(result["error"].as_str().unwrap().contains("agent identity"));
     }
 
     // ── TASK-010: graph_concept tool ─────────────────────────────────────────
