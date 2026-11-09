@@ -78,6 +78,8 @@ def snapshot(store):
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
             'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
+                       'inference':{key:value for key,value in store.setting('inference_health',{}).items() if key in ('condition','expires','failures')},
                        'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
             'dispatch': {'only_task': store.setting('only_task'), 'integration':store.integration_lane(),
-                         'verification_reserved':store.verification_reserve(),'priority_classes':classes(store)}}
+                         'verification_reserved':store.verification_reserve(),'priority_classes':classes(store),
+                         'integration_waiting':[task['name'] for task in records if not satisfied(task['data']) and store.integration_waiting(task['data'])]}}

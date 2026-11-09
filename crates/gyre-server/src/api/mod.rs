@@ -44,6 +44,7 @@ pub mod repos;
 pub mod saved_views;
 pub mod scim;
 pub mod search;
+pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
 pub mod spec_policy;
@@ -668,6 +669,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Rollout policy (meta-spec-reconciliation.md §7)
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+            get(meta_specs::get_rollout_policy).put(meta_specs::put_rollout_policy),
+        )
         // Orchestrator lifecycle (platform-model.md §3, task-093)
         .route(
             "/api/v1/workspaces/:id/orchestrator/spawn",
@@ -713,6 +719,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/presence",
             get(workspaces::get_workspace_presence),
         )
+        // Secrets Admin API (platform-model.md §7, task-098) — Admin only.
+        .route(
+            "/api/v1/secrets",
+            post(secrets::create_secret).get(secrets::list_secrets),
+        )
+        .route("/api/v1/secrets/:id", delete(secrets::delete_secret))
+        .route("/api/v1/secrets/:id/rotate", post(secrets::rotate_secret))
         // LLM prompt templates (Slice 2)
         .route(
             "/api/v1/workspaces/:id/llm/prompts",
@@ -901,6 +914,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/spec-assertions/check",
             post(spec_assertions::check_spec_assertions),
+        )
+        .route(
+            "/api/v1/repos/:id/specs/:path/assertions",
+            get(spec_assertions::get_spec_assertion_results),
         )
         .route(
             "/api/v1/workspaces/:id/graph",

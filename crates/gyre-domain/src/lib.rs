@@ -81,7 +81,7 @@ pub use dependency::{
     DependencyType, DetectionMethod,
 };
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
-pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 pub use go_extractor::GoExtractor;
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
@@ -90,7 +90,9 @@ pub use merge_request::{
 };
 pub use message_type::MessageType;
 pub use meta_spec::{
-    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
+    MetaSpecVersion, ReconciliationPriority, RolloutPolicy, RolloutStrategy,
+    DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
@@ -107,7 +109,7 @@ pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
 pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
-    Subject,
+    SpecAssertionResult, Subject,
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
@@ -115,7 +117,10 @@ pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
-pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
+pub use user::{
+    DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User, UserPreferences,
+    UserPreferencesPatch, UserRole,
+};
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
