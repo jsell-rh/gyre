@@ -1655,6 +1655,11 @@ pub async fn fail_agent(
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
+    // Platform Model §7: Failed is a terminal run-end (agent-runtime.md §1),
+    // so the run's task-scoped ephemeral secrets must not outlive it —
+    // revoke them alongside the teardown bookkeeping (review F2).
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
     // Notify the spawning user that the agent failed (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
         crate::notifications::notify(
@@ -1719,6 +1724,11 @@ pub async fn stop_agent(
     // Revoke the agent's token so it can no longer authenticate.
     // Revocation is audited as an AgentTokenRevoked event carrying the token's jti.
     crate::agent_audit::revoke_agent_token(&state, &agent, "agent_stopped").await;
+
+    // Platform Model §7: Stopped is terminal (no exit transitions), and the
+    // operator/orchestrator initiated it — the run is over, so revoke the
+    // task-scoped ephemeral secrets alongside the token (review F1).
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
@@ -2792,6 +2802,217 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "other tasks' secrets must survive agent completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_agent_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review F1): POST /api/v1/agents/:id/stop
+        // terminally ends the run (Stopped has no exit transitions) and
+        // revokes the agent token — it must also revoke the task-scoped
+        // ephemeral secrets, like every other run-end path.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "ws-rest-stop").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "rest stop task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/rest-stop").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let tenant = "default".to_string();
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.clone(),
+        };
+        state
+            .secrets
+            .create(
+                &mk("sec-stop-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-stop-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-stop-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/stop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = state
+            .agents
+            .find_by_id(&Id::new(&agent_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::AgentStatus::Stopped);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-stop-task"), &tenant)
+                .await
+                .unwrap()
+                .is_none(),
+            "REST agent stop must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-stop-ws"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent stop"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-stop-other"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive agent stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_agent_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review F2): POST /api/v1/agents/:id/fail
+        // marks the agent Failed — a terminal, non-recoverable run-end — so
+        // the run's task-scoped ephemeral secrets must be revoked.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "ws-rest-fail").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "rest fail task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/rest-fail").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let tenant = "default".to_string();
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.clone(),
+        };
+        state
+            .secrets
+            .create(
+                &mk("sec-fail-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-fail-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk("sec-fail-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = state
+            .agents
+            .find_by_id(&Id::new(&agent_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::AgentStatus::Failed);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-fail-task"), &tenant)
+                .await
+                .unwrap()
+                .is_none(),
+            "REST agent fail must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-fail-ws"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent fail"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-fail-other"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive agent fail"
         );
     }
 
