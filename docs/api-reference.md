@@ -50,6 +50,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
+| `POST` | `/api/v1/repos/{id}/sync-specs` | Re-run the spec-ledger sync against the repo's default-branch HEAD (same sync the post-receive hook runs on push); used by `gyre bootstrap` step 6 to initialize the spec registry at first-run. ABAC `repo:write`; handler additionally verifies the repo's workspace tenant matches the caller's tenant. Returns `{registered, head_sha}` (platform-model.md §8) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
@@ -174,6 +175,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/auth/key-binding` | Bind ephemeral Ed25519 public key to caller's identity; body: `{public_key: base64, user_signature: base64, ttl_secs?}`; server countersigns as timestamp witness; returns `KeyBindingResponse` with `platform_countersign`; TTL capped at 24h (TASK-006, authorization-provenance §2.3) |
 | `DELETE` | `/api/v1/auth/key-binding/:id` | Revoke a specific key binding; `:id` is the hex-encoded Ed25519 public key (64 hex chars); only the binding owner or a tenant admin can revoke; returns 204 on success, 404 if not found, 403 if not authorized; emits `key_binding.revoked` audit event (TASK-047, authorization-provenance §2.3, §7.7) |
 | `DELETE` | `/api/v1/auth/key-bindings` | Revoke all active key bindings for the authenticated user; useful for logout flow; returns 204; emits `key_binding.revoked` for each revoked binding (TASK-047, authorization-provenance §2.3, §7.7) |
+| `POST` | `/api/v1/users` | Create a user (bootstrap: the admin user of a new tenant) and mint an authenticating API key in the same call (platform-model.md §8). **Admin only** (per-handler role check). Body: `{username, tenant_id, roles?}` — `tenant_id` is required and must reference an existing tenant (the user is scoped at creation; the auth extractor fail-closes on unbound users). Response: `{user, api_key: {key, name}}` — `key` is the plaintext `gyre_<uuid>` API key, returned exactly once; only its SHA-256 hash is persisted (task-099) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |

@@ -5,6 +5,17 @@ from pipeline.cockpit import snapshot
 
 
 class ReportingTest(unittest.TestCase):
+    def test_shared_environment_wait_is_blocked_without_becoming_a_product_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(directory);self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{'dependencies':[], 'candidate':'code',
+                'repair':{'shared_environment':True,'prerequisite':'ci-repair'}})
+            view=snapshot(store)
+            self.assertEqual(view['tasks'][0]['state'],'blocked')
+            self.assertEqual(view['tasks'][0]['deps'],[])
+            self.assertIn('ci-repair',view['tasks'][0]['condition'])
+            self.assertEqual(view['eligible'],0)
+
     def test_pending_github_checks_are_not_an_infrastructure_failure_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)

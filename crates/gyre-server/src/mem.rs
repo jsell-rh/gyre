@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
+use gyre_domain::spec_approval::ApprovalTransitionError;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -520,10 +521,24 @@ pub struct MemRepoRepository {
 #[async_trait]
 impl RepoRepository for MemRepoRepository {
     async fn create(&self, repo: &Repository) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(repo.id.to_string(), repo.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: (workspace_id, name) is unique — the pair maps to
+        // one bare-repo path, so a duplicate row would alias another repo's
+        // storage. Guarded in code because the mem adapter has no schema to
+        // enforce SQLite's idx_repos_workspace_name unique index.
+        if let Some(existing) = store
+            .values()
+            .find(|r| r.workspace_id == repo.workspace_id && r.name == repo.name)
+        {
+            if existing.id != repo.id {
+                anyhow::bail!(
+                    "repo '{}' already exists in workspace {}",
+                    repo.name,
+                    repo.workspace_id
+                );
+            }
+        }
+        store.insert(repo.id.to_string(), repo.clone());
         Ok(())
     }
 
@@ -1658,10 +1673,23 @@ pub struct MemTenantRepository {
 #[async_trait]
 impl TenantRepository for MemTenantRepository {
     async fn create(&self, tenant: &Tenant) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(tenant.id.to_string(), tenant.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: slug is unique. The mem adapter has no schema, so
+        // the SQLite `tenants.slug UNIQUE` constraint is guarded in code —
+        // without it, a bootstrap re-run against the default in-memory dev
+        // server silently created a second tenant with the same slug and
+        // the CLI's reuse-by-slug fallback never triggered (round-3
+        // finding 4b).
+        if let Some(existing) = store.values().find(|t| t.slug == tenant.slug) {
+            if existing.id != tenant.id {
+                anyhow::bail!(
+                    "tenant with slug '{}' already exists ({})",
+                    tenant.slug,
+                    existing.id
+                );
+            }
+        }
+        store.insert(tenant.id.to_string(), tenant.clone());
         Ok(())
     }
 
@@ -1734,10 +1762,23 @@ impl MemWorkspaceRepository {
 #[async_trait]
 impl WorkspaceRepository for MemWorkspaceRepository {
     async fn create(&self, workspace: &Workspace) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(workspace.id.to_string(), workspace.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: (tenant_id, slug) is unique — /git/:ws_slug/:repo
+        // URL resolution must stay unambiguous. Guarded in code because the
+        // mem adapter has no schema to enforce SQLite's UNIQUE constraint.
+        if let Some(existing) = store
+            .values()
+            .find(|ws| ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug)
+        {
+            if existing.id != workspace.id {
+                anyhow::bail!(
+                    "workspace with slug '{}' already exists in tenant {}",
+                    workspace.slug,
+                    workspace.tenant_id
+                );
+            }
+        }
+        store.insert(workspace.id.to_string(), workspace.clone());
         Ok(())
     }
 
@@ -1796,6 +1837,26 @@ impl WorkspaceRepository for MemWorkspaceRepository {
             anyhow::bail!("simulated trust transition failure");
         }
         // In-memory writes cannot partially fail, so this is inherently atomic.
+        //
+        // Port contract (same as `create`): (tenant_id, slug) is unique.
+        // This is the path POST /api/v1/workspaces takes, so the guard here
+        // is what makes a bootstrap re-run's create fail and fall back to
+        // reuse-by-name on the default in-memory dev server.
+        {
+            let store = self.store.lock().await;
+            if let Some(existing) = store
+                .values()
+                .find(|ws| ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug)
+            {
+                if existing.id != workspace.id {
+                    anyhow::bail!(
+                        "workspace with slug '{}' already exists in tenant {}",
+                        workspace.slug,
+                        workspace.tenant_id
+                    );
+                }
+            }
+        }
         self.store
             .lock()
             .await
@@ -2704,80 +2765,123 @@ impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
-
+impl MemSpecApprovalRepository {
+    /// Apply a domain transition (approve/revoke/reject) to a stored entry:
+    /// load, validate via the domain's transition rules, persist the full
+    /// record so mutual exclusivity is guaranteed. Returns Ok(None) when the
+    /// entry does not exist.
+    async fn transition(
+        &self,
+        id: &Id,
+        apply: impl FnOnce(&mut gyre_domain::SpecApproval) -> Result<(), ApprovalTransitionError>,
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        let mut store = self.store.lock().await;
+        let Some(approval) = store.get_mut(&id.to_string()) else {
+            return Ok(None);
+        };
+        apply(approval)?;
+        Ok(Some(()))
+    }
+}
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(approval.id.to_string(), approval.clone());
+        let mut store = self.store.lock().await;
+        if store.contains_key(&approval.id.to_string()) {
+            anyhow::bail!("spec approval {} already exists", approval.id);
+        }
+        store.insert(approval.id.to_string(), approval.clone());
         Ok(())
     }
     async fn find_by_id(&self, id: &gyre_common::Id) -> Result<Option<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.get(&id.to_string()).cloned())
     }
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self
+        let mut out: Vec<_> = self
             .store
             .lock()
             .await
             .values()
             .filter(|a| a.spec_path == spec_path)
             .cloned()
-            .collect())
+            .collect();
+        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        Ok(out)
+    }
+    async fn find_by_spec_sha(
+        &self,
+        spec_path: &str,
+        spec_sha: &str,
+    ) -> Result<Vec<gyre_domain::SpecApproval>> {
+        let mut out: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spec_path == spec_path && a.spec_sha == spec_sha)
+            .cloned()
+            .collect();
+        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        Ok(out)
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self
+        let mut out: Vec<_> = self
             .store
             .lock()
             .await
             .values()
             .filter(|a| a.spec_path == spec_path && a.is_active())
             .cloned()
-            .collect())
+            .collect();
+        out.reverse();
+        Ok(out)
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
+
+    async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, |a| a.approve(now)).await
+    }
     async fn revoke(
         &self,
-        id: &gyre_common::Id,
+        id: &Id,
         revoked_by: &str,
         reason: &str,
         now: u64,
-    ) -> Result<()> {
-        if let Some(a) = self.store.lock().await.get_mut(&id.to_string()) {
-            a.revoked_at = Some(now);
-            a.revoked_by = Some(revoked_by.to_string());
-            a.revocation_reason = Some(reason.to_string());
-        }
-        Ok(())
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, |a| a.revoke(revoked_by, reason, now))
+            .await
     }
+    async fn reject(
+        &self,
+        id: &Id,
+        rejected_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, |a| a.reject(rejected_by, reason, now))
+            .await
+    }
+
     async fn revoke_all_for_path(
         &self,
         spec_path: &str,
         revoked_by: &str,
         reason: &str,
         now: u64,
-    ) -> Result<()> {
-        for a in self.store.lock().await.values_mut() {
-            if a.spec_path == spec_path && a.is_active() {
-                a.revoked_at = Some(now);
-                a.revoked_by = Some(revoked_by.to_string());
-                a.revocation_reason = Some(reason.to_string());
+    ) -> Result<u64> {
+        let mut store = self.store.lock().await;
+        let mut revoked = 0u64;
+        for a in store.values_mut() {
+            if a.spec_path == spec_path
+                && a.status() == gyre_domain::spec_approval::ApprovalStatus::Approved
+                && a.revoke(revoked_by, reason, now).is_ok()
+            {
+                revoked += 1;
             }
         }
-        Ok(())
-    }
-
-    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()> {
-        if let Some(a) = self.store.lock().await.get_mut(id.as_str()) {
-            a.rejected_at = Some(now);
-            a.rejected_by = Some(Id::new(rejected_by));
-            a.rejected_reason = Some(reason.to_string());
-        }
-        Ok(())
+        Ok(revoked)
     }
 }
 
