@@ -853,9 +853,10 @@ pub async fn revoke_all_my_sessions(
 /// can view and revoke any user's sessions").
 ///
 /// Per-handler authorization (ABAC-exempt route): the caller must hold the
-/// Admin role (TenantAdmin). The target user must exist — an unknown user
-/// id is a 404, not an empty list, so the endpoint cannot be used to probe
-/// which user ids exist.
+/// Admin role (TenantAdmin) AND be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]). The target user must exist — an
+/// unknown user id is a 404, not an empty list, so the endpoint cannot be
+/// used to probe which user ids exist.
 pub async fn list_user_sessions(
     auth: AuthenticatedAgent,
     Path(user_id): Path<String>,
@@ -867,11 +868,12 @@ pub async fn list_user_sessions(
         ));
     }
     let target_id = Id::new(user_id);
-    state
+    let target = state
         .users
         .find_by_id(&target_id)
         .await?
         .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
     let now = now_secs();
     let sessions = state.sessions.list_for_user(&target_id).await?;
     let items: Vec<UserSessionResponse> = sessions
@@ -886,7 +888,9 @@ pub async fn list_user_sessions(
 /// any user's sessions (user-management.md §Session Management).
 ///
 /// Per-handler authorization (ABAC-exempt route): Admin role required; the
-/// session must exist and belong to the path's user (404 otherwise).
+/// caller must be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]); the session must exist and
+/// belong to the path's user (404 otherwise).
 pub async fn revoke_user_session(
     auth: AuthenticatedAgent,
     Path((user_id, session_id)): Path<(String, String)>,
@@ -898,11 +902,12 @@ pub async fn revoke_user_session(
         ));
     }
     let target_id = Id::new(user_id);
-    state
+    let target = state
         .users
         .find_by_id(&target_id)
         .await?
         .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
     let sid = Id::new(session_id);
     // Confirm the session exists AND belongs to the target user before
     // revoking (a mismatched id is a 404, same as the /me variant).
@@ -922,7 +927,8 @@ pub async fn revoke_user_session(
 /// user out everywhere (user-management.md §Session Management).
 ///
 /// Per-handler authorization (ABAC-exempt route): Admin role required; the
-/// target user must exist.
+/// caller must be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]); the target user must exist.
 pub async fn revoke_all_user_sessions(
     auth: AuthenticatedAgent,
     Path(user_id): Path<String>,
@@ -934,16 +940,48 @@ pub async fn revoke_all_user_sessions(
         ));
     }
     let target_id = Id::new(user_id);
-    state
+    let target = state
         .users
         .find_by_id(&target_id)
         .await?
         .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
     state.sessions.revoke_all_for_user(&target_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ─── Bootstrap: admin user creation ──────────────────────────────────────────
+
+/// Tenant containment for the TenantAdmin session endpoints (per-handler
+/// authorization on ABAC-exempt routes, repo invariant: load the scoped
+/// entity, compare tenant against the caller, reject on mismatch).
+/// `GlobalRole::TenantAdmin` is tenant-scoped (user-management.md §Roles),
+/// so an Admin of one tenant must not view or revoke another tenant's
+/// user's sessions: the listing hands back ip_address/user_agent/
+/// last_active_at and the revokes sign the victim out. Fail-closed when
+/// the target user has no tenant binding (there is no tenant to compare,
+/// so the operation is skipped, not guessed). The system principal (the
+/// global dev token, the first-run bootstrap path before any admin
+/// exists) is exempt — same exemption as `create_user` below.
+fn ensure_same_tenant_session_target(
+    auth: &AuthenticatedAgent,
+    target: &User,
+) -> Result<(), ApiError> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    let same_tenant = target
+        .tenant_id
+        .as_ref()
+        .is_some_and(|t| t.to_string() == auth.tenant_id);
+    if !same_tenant {
+        return Err(ApiError::Forbidden(format!(
+            "cannot access sessions of user {} (caller is scoped to tenant {})",
+            target.id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct CreateUserRequest {
@@ -2666,6 +2704,175 @@ mod tests {
             StatusCode::NOT_FOUND,
             "unknown user id must 404, not return an empty session list"
         );
+    }
+
+    /// A TenantAdmin is scoped to their own tenant (user-management.md
+    /// §Roles): an Admin-role API-key principal of tenant t-2 must not
+    /// view or revoke the sessions of a tenant-t-1 user, while an Admin of
+    /// the SAME tenant still can (so the check is tenant containment, not
+    /// a blanket rejection of API-key principals).
+    #[tokio::test]
+    async fn cross_tenant_admin_cannot_view_or_revoke_another_tenants_user_sessions() {
+        let (state, victim_user_id, victim_key) = bootstrap_user("session-user").await;
+        // Second tenant so the cross-tenant attacker can be provisioned
+        // (create_user validates tenant existence, task-099 F1).
+        let t2 = gyre_domain::Tenant::new(gyre_common::Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&t2).await.unwrap();
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let victim_session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Provision two Admin-role users: one in the victim's tenant t-1,
+        // one in a different tenant t-2.
+        let app = crate::api::api_router().with_state(state.clone());
+        let (same_tenant_key, cross_tenant_key) = {
+            let mut keys = Vec::new();
+            for (username, tenant) in [("same-admin", "t-1"), ("cross-admin", "t-2")] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/users")
+                            .header("Authorization", "Bearer test-token")
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(format!(
+                                r#"{{"username":"{username}","tenant_id":"{tenant}"}}"#
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::CREATED);
+                let json = body_json(resp).await;
+                assert_eq!(
+                    json["user"]["tenant_id"], tenant,
+                    "provisioned admin must be bound to the requested tenant"
+                );
+                keys.push(json["api_key"]["key"].as_str().unwrap().to_string());
+            }
+            (keys[0].clone(), keys[1].clone())
+        };
+
+        // Cross-tenant Admin: view → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not view a tenant-t-1 user's sessions"
+        );
+
+        // Cross-tenant Admin: revoke one session → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not revoke a tenant-t-1 user's session"
+        );
+
+        // Cross-tenant Admin: revoke-all → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not sign a tenant-t-1 user out everywhere"
+        );
+
+        // The victim's session survived every forbidden attempt.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "victim's session must survive the cross-tenant forbidden attempts"
+        );
+
+        // Same-tenant Admin still can (the containment is a tenant
+        // comparison, not a rejection of every API-key principal).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {same_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Admin of the SAME tenant must still view the user's sessions"
+        );
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "same-tenant Admin sees the victim's live session"
+        );
+        assert_eq!(sessions[0]["id"].as_str().unwrap(), victim_session_id);
     }
 
     #[tokio::test]
