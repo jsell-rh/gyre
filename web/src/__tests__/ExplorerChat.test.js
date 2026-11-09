@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, fireEvent } from '@testing-library/svelte';
 import { renderMarkdown } from '../lib/markdown.js';
+import ExplorerChat from '../lib/ExplorerChat.svelte';
 
 // ---------------------------------------------------------------------------
 // Markdown XSS protection tests
@@ -1452,5 +1454,65 @@ describe('Cache invalidation heuristic', () => {
 
   it('handles mixed case correctly', () => {
     expect(shouldInvalidate('WHAT CHANGED in the code?', 5)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Saved views dropdown — system view rendering (task-035)
+// ---------------------------------------------------------------------------
+describe('ExplorerChat saved views dropdown — system views', () => {
+  const systemView = {
+    id: 'sys-1',
+    name: 'Architecture Overview',
+    description: 'Full codebase structure',
+    is_system: true,
+    created_by: 'system',
+    created_at: 1700000000,
+    query: { scope: { type: 'all' }, zoom: 'fit' },
+  };
+  const userView = {
+    id: 'usr-1',
+    name: 'My Functions',
+    is_system: false,
+    created_by: 'agent-1',
+    created_at: 1700001000,
+    query: { scope: { type: 'all' } },
+  };
+
+  function openDropdown() {
+    const btn = document.querySelector('.saved-views-btn');
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn);
+    const dropdown = document.querySelector('.saved-views-dropdown');
+    expect(dropdown).toBeTruthy();
+    return dropdown;
+  }
+
+  it('renders a System badge on system views in the dropdown', () => {
+    render(ExplorerChat, { props: { repoId: '', savedViews: [systemView, userView] } });
+    const dropdown = openDropdown();
+
+    const rows = dropdown.querySelectorAll('.saved-view-row');
+    expect(rows).toHaveLength(2);
+
+    // System view row: badge present
+    const sysRow = rows[0];
+    const badge = sysRow.querySelector('.saved-view-system-badge');
+    expect(badge).toBeTruthy();
+    expect(badge.textContent.trim()).toBe('System');
+
+    // User view row: no badge
+    expect(rows[1].querySelector('.saved-view-system-badge')).toBeNull();
+  });
+
+  it('hides the delete button for system views but shows it for user views', () => {
+    render(ExplorerChat, { props: { repoId: '', savedViews: [systemView, userView] } });
+    const dropdown = openDropdown();
+
+    const rows = dropdown.querySelectorAll('.saved-view-row');
+    // System view: no delete button (cannot be deleted by users)
+    expect(rows[0].querySelector('.saved-view-delete')).toBeNull();
+    // User view: delete button present
+    expect(rows[1].querySelector('.saved-view-delete')).toBeTruthy();
   });
 });
