@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: ["5d2c217b691ca6a6f3aea11205bad0fc8396a7f9", "a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "e475fd802eb7eb68441b09eb5e630ad35aaa65a8", "8597bbec8fd1e7d2120736cb6e798373b2d32084", "0779ae15d6dcb17307d52e9cf694b38f75106c67", "e8b09b48e0ce4660918e22e0fdf392f993fae888", "3501ed421966653f03a3323d49967afcbbcd0a52", "d38ed2f9641ea29abda0ed80a1c157b70cd14722", "e4b55cdab1db1460297a327fac313e18efe0a712", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "2076ba76e29b8474c009daaa4147451ba49aa31f", "4052081908cf27a9d7abec9923fe24ee850f1a88", "860d06502d94bea226facb13620055e8f30b433a", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+commits: ["5d2c217b691ca6a6f3aea11205bad0fc8396a7f9", "a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "e475fd802eb7eb68441b09eb5e630ad35aaa65a8", "8597bbec8fd1e7d2120736cb6e798373b2d32084", "0779ae15d6dcb17307d52e9cf694b38f75106c67", "e8b09b48e0ce4660918e22e0fdf392f993fae888", "3501ed421966653f03a3323d49967afcbbcd0a52", "d38ed2f9641ea29abda0ed80a1c157b70cd14722", "e4b55cdab1db1460297a327fac313e18efe0a712", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "2076ba76e29b8474c009daaa4147451ba49aa31f", "4052081908cf27a9d7abec9923fe24ee850f1a88", "860d06502d94bea226facb13620055e8f30b433a", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d", "d099607f6b1b3f2b719332efbc2822e46be52be2"]
 review: specs/reviews/task-205.md
 ---
 
@@ -191,50 +191,32 @@ Real work only — no substring stand-in for the manifest projection.
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests a mutation probe confirms fail under substring revert.
 
-### Contract and scope repair (assignment 739e6754)
+### Rebase repair (assignment 5bdf4967)
 
-- Repaired the round-5e13404a contract violation: that checkpoint had
-  removed the assigned `## Repair round` section, which is protected task
-  prose. The assigned task document is restored verbatim (including that
-  section); this round's notes live under `## Shipped` as an operational
-  subheading rather than a new top-level section, so the contract prose is
-  unchanged.
-- Re-owned the realized-model.md §4 coverage flip within task scope (R2
-  finding: review changed source code, and review cannot approve its own
-  source or verifier edits). The flip previously lived only in
-  verification-repair commit 0b1213017, which the restored assigned
-  frontmatter dropped; commits da4ad02a5 (reset to pre-flip) and c88fc0962
-  (re-apply the byte-identical audited content) now carry it as implementer
-  work, and 0b1213017 / 4a67c296a are recorded in `commits:` so the full
-  branch history is review-scoped.
-- Attribution repair: 5d2c217b6 (frozen-exemption-anchor fix, product
-  surface) recorded in `commits:` — `check-task-commit-attribution.sh`
-  failed at the restored 6-SHA frontmatter and passes again.
-- Re-verification at this round's HEAD (this sandbox now permits TCP
-  `accept(2)` and crates.io, lifting both restrictions that blocked earlier
-  rounds; code is unchanged from 4a67c296a — this round touches specs/ only):
-  - `cargo build --all` (SKIP_WEB_BUILD=1) → OK, 0 errors.
+- Resolved the rebase of this branch onto base fefde2946 (landed task-089
+  HSI Explorer Generated Views and task-083 briefing repo-filter work). The
+  single content conflict — `crates/gyre-server/src/api/graph.rs`, both sides
+  appending distinct test sections at the end of the tests module — was
+  resolved as a union: task-205's concept-view tests and the base's briefing
+  repo-filter tests both kept; no code from either side dropped. All task-205
+  production code (ConceptDef parsing, `glob_match`, `ConceptView::project`,
+  `get_graph_concept`/`get_workspace_graph_concept`, MCP `graph_concept`)
+  auto-merged intact; verified present and green at the resolved tree.
+- Re-verification at the resolved HEAD (d099607f6):
+  - `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) → OK.
   - `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
-    spec_registry::tests` → 154 passed, 0 failed, including
-    `graph_concept_returns_manifest_projection_not_substring`,
-    `graph_concept_undefined_concept_returns_404`,
-    `graph_concept_repo_without_manifest_returns_404`,
-    `workspace_graph_concept_unions_manifest_projections`, and
-    `mcp_graph_concept_manifest_projection_not_substring`.
+    spec_registry::tests` → 176 passed, 0 failed (all 12 concept tests
+    included).
   - `cargo test -p gyre-common --lib` → 120 passed, 0 failed.
-  - `cargo test -p gyre-server --test graph_integration` → 37 passed, 0
-    failed on a real TCP listener — the suite that failed 35/35 under the
-    previous sandbox's `accept(2)` EOPNOTSUPP restriction now passes
-    uniformly, confirming that failure was infrastructure, not code.
-  - Shell gates (full list in
-    /tmp/stage/review-evidence/task205-contract-repair-gates.md):
-    check-arch, check-abac-route-registry, check-abac-exempt-handlers,
-    check-mcp-write-tools, check-mem-port-contracts,
-    check-dead-message-kinds, check-in-memory-state-stores,
-    check-task-commit-attribution and 13 others — all pass;
-    check-unnamed-tuple-carriers fails identically at the base commit
-    (pre-existing, outside the verification gate).
-  - No production code changed this round; `web/dist` untouched.
+  - `cargo test -p gyre-server --test graph_integration` → 38 passed, 0
+    failed on a real TCP listener (base added one test).
+  - Evidence: /tmp/stage/review-evidence/task205-rebase-resolution.md.
+- Historical attribution for the earlier contract/scope repairs (re-owned
+  realized-model §4 coverage flip commits da4ad02a5/c88fc0962, exemption-anchor
+  fix 5d2c217b6) remains recorded in `commits:` above.
+- No production behavior changed this round; `web/dist` untouched by this
+  commit (staged dist changes come from the merge of the base and are restored
+  by the executor from the assignment base).
 
 ## Repair round (checkpoint d415416e, exit 130)
 
