@@ -544,6 +544,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register secret expiry check job (every 5 minutes, platform-model.md §7)
+    registry
+        .register(
+            JobDefinition {
+                name: "secret_rotation_check".to_string(),
+                description: "Creates SecretExpiring notifications for workspace admins \
+                             when secrets expire within 1 hour (platform-model.md §7)"
+                    .to_string(),
+                interval_secs: 300,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::secret_rotation::run_once(&state).await },
+        )
+        .await;
+
     // Register meta-spec conformance sweep job (runs daily,
     // meta-spec-reconciliation.md §10). Interval is configurable via
     // GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
