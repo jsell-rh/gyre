@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["93e70ce969237e6bc2622caf38dcbe151f797379", "e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["93e70ce969237e6bc2622caf38dcbe151f797379", "e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "6e679bc8b10a714c2781fe2852742971f2d4205a"]
 ---
 
 ## Spec Excerpt
@@ -161,7 +161,15 @@ orchestration with resume semantics, backed by the server pieces the spec
 requires. Implementation commits are in the frontmatter. Rounds 1-10
 closed the F1-F7 review findings, the round-9 merge, and the round-10
 exemption-drift verification findings; round 11 (`93e70ce96`) repaired
-the round-11 review findings F11/F12.
+the round-11 review findings F11/F12; the round-12 rebase onto
+`fefde2946` (`6e679bc8b`) resolved three conflicts: auth.rs JWT
+`tenant_id` claim (adopted upstream task-103's serde schema-default
+`default_tenant_claim` — behaviorally identical to this branch's
+`system_principal_tenant` resolution: absent claim → the bootstrapped
+"default" tenant; exemption stays eliminated), and the
+fabricated-scope-defaults script/exemptions pair (kept this branch's
+stricter FROZEN_EXEMPTION_COUNT=2, which matches the 2 entries present
+on both sides).
 
 ### Behavior
 
