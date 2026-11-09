@@ -4079,16 +4079,32 @@ specs:
     #[test]
     fn should_create_lifecycle_task_no_manifest_falls_back_to_prefixes() {
         // Manifest-less repo: legacy path-prefix watch rules keep working.
-        assert!(super::should_create_lifecycle_task(None, 'M', "specs/system/foo.md"));
+        assert!(super::should_create_lifecycle_task(
+            None,
+            'M',
+            "specs/system/foo.md"
+        ));
         assert!(super::should_create_lifecycle_task(
             None,
             'A',
             "specs/development/bar.md"
         ));
-        assert!(!super::should_create_lifecycle_task(None, 'M', "specs/milestones/m1.md"));
-        assert!(!super::should_create_lifecycle_task(None, 'M', "src/main.rs"));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            'M',
+            "specs/milestones/m1.md"
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            'M',
+            "src/main.rs"
+        ));
         // Unclassified change kinds never create tasks.
-        assert!(!super::should_create_lifecycle_task(None, 'X', "specs/system/foo.md"));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            'X',
+            "specs/system/foo.md"
+        ));
     }
 
     /// Build a real (non-bare) git repo in a temp dir with one commit per
@@ -4258,7 +4274,11 @@ specs:
                 _ => {}
             }
         }
-        assert_eq!(spec_changed.len(), 1, "SpecChanged events: {spec_changed:?}");
+        assert_eq!(
+            spec_changed.len(),
+            1,
+            "SpecChanged events: {spec_changed:?}"
+        );
         assert_eq!(
             spec_changed[0]["spec_path"].as_str(),
             Some("specs/system/spec-b.md")
@@ -4292,7 +4312,10 @@ specs:
         let tasks = state.tasks.list().await.unwrap();
         let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(tasks.len(), 1, "tasks: {titles:?}");
-        assert_eq!(tasks[0].title, "Review spec change: specs/system/watched.md");
+        assert_eq!(
+            tasks[0].title,
+            "Review spec change: specs/system/watched.md"
+        );
         // No manifest → no priority override: change-kind default (High).
         assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
         assert!(!titles.iter().any(|t| t.contains("unwatched")));

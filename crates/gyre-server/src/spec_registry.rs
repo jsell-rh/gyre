@@ -1360,7 +1360,10 @@ specs:
     fn effective_priority_entry_override_beats_defaults() {
         let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
         let a = manifest_entry_for_path(&m, "specs/system/spec-a.md").unwrap();
-        assert_eq!(a.effective_priority(&m.defaults), Some(TaskPriority::Critical));
+        assert_eq!(
+            a.effective_priority(&m.defaults),
+            Some(TaskPriority::Critical)
+        );
     }
 
     #[test]
@@ -1370,7 +1373,10 @@ specs:
         let b = manifest_entry_for_path(&m, "specs/system/spec-b.md").unwrap();
         assert_eq!(b.effective_priority(&m.defaults), Some(TaskPriority::Low));
         // No override anywhere (defaults has none): caller keeps its default.
-        let bare = parse_manifest("version: 1\nspecs:\n  - path: system/x.md\n    title: X\n    owner: user:t\n").unwrap();
+        let bare = parse_manifest(
+            "version: 1\nspecs:\n  - path: system/x.md\n    title: X\n    owner: user:t\n",
+        )
+        .unwrap();
         let x = &bare.specs[0];
         assert_eq!(x.effective_priority(&bare.defaults), None);
     }
