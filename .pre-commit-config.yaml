@@ -577,6 +577,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: sandbox-sweep-artifacts
+        name: sandbox sweep artifact lint
+        description: Detect npm-generated root lockfile stubs that the wip sweep would commit into task-labeled product commits
+        entry: scripts/check-sandbox-sweep-artifacts.sh
+        language: script
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

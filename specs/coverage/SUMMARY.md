@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-05
+**Last updated:** 2026-11-09
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -14,17 +14,17 @@
 | business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| explorer-canvas.md | 10 | 3 | 0 | 7 | 0 | 0 | 0% |
-| explorer-implementation.md | 33 | 3 | 0 | 25 | 0 | 5 | 16% |
+| explorer-canvas.md | 10 | 3 | 0 | 5 | 2 | 0 | 28% |
+| explorer-implementation.md | 33 | 3 | 0 | 23 | 2 | 5 | 23% |
 | forge-advantages.md | 10 | 2 | 0 | 0 | 0 | 8 | 100% |
-| hierarchy-enforcement.md | 29 | 11 | 0 | 6 | 3 | 9 | 66% |
-| human-system-interface.md | 55 | 20 | 0 | 19 | 9 | 7 | 45% |
+| hierarchy-enforcement.md | 29 | 11 | 0 | 5 | 4 | 9 | 72% |
+| human-system-interface.md | 55 | 20 | 0 | 16 | 12 | 7 | 54% |
 | identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
-| merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
+| merge-dependencies.md | 20 | 3 | 0 | 0 | 1 | 16 | 100% |
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
-| meta-spec-reconciliation.md | 18 | 7 | 0 | 7 | 4 | 0 | 36% |
-| observability.md | 9 | 0 | 0 | 3 | 3 | 3 | 66% |
+| meta-spec-reconciliation.md | 18 | 7 | 0 | 6 | 5 | 0 | 45% |
+| observability.md | 9 | 0 | 0 | 2 | 4 | 3 | 77% |
 | platform-model.md | 56 | 5 | 0 | 24 | 19 | 8 | 52% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 2 | 3 | 3 | 75% |
@@ -41,7 +41,7 @@
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 36 | 2 | 0 | 5% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
-| view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
+| user-management.md | 36 | 10 | 0 | 23 | 3 | 0 | 11% |
+| view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **219** | **0** | **309** | **111** | **163** | **46%** |
+| **TOTAL** | **802** | **219** | **0** | **282** | **138** | **163** | **51%** |

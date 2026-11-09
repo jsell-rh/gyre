@@ -9,6 +9,8 @@ def eligible(store, work):
     data = task['data']
     stage = work['stage']
     inputs = work['input'] if isinstance(work['input'], dict) else json.loads(work['input'])
+    if store.runtime_held(work):
+        return False
     if task['generation'] != work['generation']:
         return False
     if stage == 'cleanup':
