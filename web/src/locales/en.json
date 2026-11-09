@@ -1863,5 +1863,29 @@
   },
   "presence": {
     "active_users": "Active users in this workspace"
+  },
+  "generated_view": {
+    "title": "Generated Views",
+    "welcome_title": "Ask for a view",
+    "welcome_desc": "Describe what you want to see — the LLM builds the view. Flow questions animate real traces when trace data exists.",
+    "input_placeholder": "e.g. How does authentication work?",
+    "refine_placeholder": "Refine the current view — e.g. show just the middleware chain",
+    "refine_hint": "refining current view",
+    "refine_hint_title": "Follow-up questions refine the current view",
+    "status_thinking": "Generating view…",
+    "status_ready": "Ready",
+    "status_error": "Error",
+    "save_view": "Save this view",
+    "saved_label": "Saved",
+    "saved": "View saved to workspace",
+    "save_failed": "Failed to save view",
+    "untitled": "Generated view",
+    "error_occurred": "Something went wrong generating the view. Please try again.",
+    "rate_limited": "Too many generated views — please wait a minute and try again.",
+    "invalid_previous": "The previous view is no longer valid. Start a new question.",
+    "no_workspace": "No workspace selected — open a workspace first.",
+    "suggestion_structure": "How is the codebase structured?",
+    "suggestion_flow": "How does a request flow through the system?",
+    "suggestion_auth": "How does authentication work?"
   }
 }
