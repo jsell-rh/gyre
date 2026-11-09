@@ -1425,7 +1425,11 @@ pub fn should_create_lifecycle_task(
             .map(|e| e.effective_auto_create_tasks(&m.defaults))
             .unwrap_or(false),
         None => {
-            let watched = |p: &str| SPEC_WATCHED_PATHS.iter().any(|prefix| p.starts_with(prefix));
+            let watched = |p: &str| {
+                SPEC_WATCHED_PATHS
+                    .iter()
+                    .any(|prefix| p.starts_with(prefix))
+            };
             watched(path) || old_path.is_some_and(watched)
         }
     }
@@ -4482,8 +4486,14 @@ specs:
                 .output()
                 .unwrap();
             let diff = String::from_utf8_lossy(&out.stdout).to_string();
-            assert!(diff.contains("R100\tspecs/system/foo.md\tspecs/milestones/a.md"), "diff: {diff}");
-            assert!(diff.contains("R100\tspecs/system/bar.md\tdocs/b.md"), "diff: {diff}");
+            assert!(
+                diff.contains("R100\tspecs/system/foo.md\tspecs/milestones/a.md"),
+                "diff: {diff}"
+            );
+            assert!(
+                diff.contains("R100\tspecs/system/bar.md\tdocs/b.md"),
+                "diff: {diff}"
+            );
         }
 
         let repo_path_str = repo_path.to_str().unwrap().to_string();
@@ -4499,7 +4509,8 @@ specs:
         let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(tasks.len(), 2, "tasks: {titles:?}");
         assert!(
-            titles.contains(&"Update spec references: specs/system/foo.md -> specs/milestones/a.md"),
+            titles
+                .contains(&"Update spec references: specs/system/foo.md -> specs/milestones/a.md"),
             "tasks: {titles:?}"
         );
         assert!(
