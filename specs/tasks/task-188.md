@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: ["10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905"]
+commits: ["10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905", "e914d9bda3139a6912fb2e379774c3752cd3c48c"]
 ---
 
 ## Spec Excerpt
@@ -73,122 +73,79 @@ Add a real, fail-closed context-binding check that runs at every verification bo
 
 ## Shipped
 
-SignedInput §2.4 context binding is now enforced at every verification
-boundary with real comparisons against the actual push/merge target; a valid
-authorization for repo-A/workspace-A can no longer authorize work on
+SignedInput §2.4 context binding is enforced at every verification boundary
+with real comparisons against the actual push/merge target; a valid
+authorization for repo-A/workspace-A cannot authorize work on
 repo-B/workspace-B.
 
-- **`verify_context_binding`** (`crates/gyre-server/src/git_http.rs:3367`):
+### Implementation
+
+- **`verify_context_binding`** (`crates/gyre-server/src/git_http.rs`):
   compares the signed root `InputContent` against the real target —
   `repo_id`, `workspace_id`, `spec_sha` (vs the task's currently approved
   SHA), and `expected_generation` (vs the task's persisted generation) —
   each as a `context_binding.*` child of the existing `VerificationResult`
   tree. `valid_until` stays where it already was (not duplicated). Fails
-  closed: unresolvable task ⇒ `generation = None` ⇒ any generation pin
-  rejects.
-- **Enforcement** (`constraint_check.rs`): `enforce_push_constraints`
-  (:357) and `enforce_merge_constraints` (:616) call the check after
-  `verify_chain` succeeds, using the real `repo_id`/`workspace_id` already
-  in scope (git_http.rs:348, merge_processor.rs:1412). Mismatch ⇒ `Err`
-  naming the failing binding(s) + `attestation.chain_invalid` audit event +
-  `ConstraintViolation` messages and Inbox notifications via the existing
-  emission path. Audit-only mirrors in `evaluate_push_constraints` (:91)
-  and `evaluate_merge_constraints` (:860) log
+  closed: unresolvable task means `generation = None`, so any generation
+  pin rejects.
+- **Enforcement** (`crates/gyre-server/src/constraint_check.rs`):
+  `enforce_push_constraints` and `enforce_merge_constraints` call the check
+  after `verify_chain` succeeds, using the real `repo_id`/`workspace_id`
+  already in scope. Mismatch rejects with `Err` naming the failing
+  binding(s) plus the `attestation.chain_invalid` audit event and
+  `ConstraintViolation` messages/Inbox notifications via the existing
+  emission path. Audit-only mirrors in `evaluate_push_constraints` and
+  `evaluate_merge_constraints` log
   `attestation.context_binding_mismatch` without blocking (Phase 2).
 - **Real generation counter**: `Task.generation` (default 1) persisted in
-  domain, SQLite + Postgres adapters (migration
-  `2026-10-08-000059_task_generation`, portable SQL, next unused sequence
-  number — renumbered twice: from 000056 after a main-side migration at the
-  same version, then from 000057 after base `fefde294` shipped
-  `2026-10-08-000057_spec_approval_attestation`; duplicate versions are
-  silently dropped by Diesel, alphabetically-first wins) and exposed in
-  `TaskResponse`. Bumped on
-  every reassignment to a different agent in all four mutation paths:
-  `update_task` (PUT /api/v1/tasks/:id), spawn reassignment, admin
+  the domain, SQLite + Postgres adapters (portable migration
+  `2026-10-08-000059_task_generation`) and exposed in `TaskResponse`.
+  Bumped on every reassignment to a different agent in all four mutation
+  paths: `update_task` (PUT /api/v1/tasks/:id), spawn reassignment, admin
   reassign, MCP reassign.
 
-Tests that kill removal of the check (mutation-verified): with the binding
-block disabled, `enforce_push_rejects_repo_id_mismatch`,
-`enforce_push_rejects_stale_generation`, and
-`enforce_push_rejects_spec_sha_mismatch` FAIL; `enforce_merge_rejects_workspace_id_mismatch`
-covers merge; `enforce_push_matching_generation_passes` /
-`enforce_push_matching_context_passes` guard against over-rejection. All use
-real git repos, real Ed25519 signatures, and real persisted state.
+### Test evidence
+
+Mutation-verified tests (with the binding block disabled they FAIL):
+`enforce_push_rejects_repo_id_mismatch`,
+`enforce_push_rejects_stale_generation`,
+`enforce_push_rejects_spec_sha_mismatch`,
+`enforce_merge_rejects_workspace_id_mismatch`,
+`verify_context_binding_unit_matrix`;
+`enforce_push_matching_generation_passes` /
+`enforce_push_matching_context_passes` guard against over-rejection. All
+use real git repos, real Ed25519 signatures, and real persisted state.
 `task_generation_increments_on_reassignment` (port) and
 `update_task_api_reassignment_bumps_generation` (PUT API) prove the bump.
 
-Evidence: `cargo test -p gyre-server --lib -- constraint_check` → 40 passed /
-0 failed (checkpoint 3130b931); post-merge on branch head 3a9b7ab1, the four
-touched crates (gyre-common/-domain/-adapters/-server) are byte-identical to
-that checkpoint, and the wider focused filter (`constraint_check
-admin_reassign update_task_api reassign`) re-ran green there: 42 passed /
-0 failed. Mechanical gates on the merged head: `check-arch.sh`,
-`check-task-commit-attribution.sh` (after recording base commit 27bd585c
-in task-155's `commits:` frontmatter — a pre-existing main-side omission,
-reproduced at base, fixed per the gate's prescribed remediation),
+On the current head (merge of base fb1f82e31, commit e914d9bda): focused
+filter (`constraint_check admin_reassign update_task_api reassign
+verify_context_binding task_generation`) passes 43/43, spawn tests (the
+merge-conflict file) pass 52/52, and `check-arch.sh`,
 `check-migration-versions.sh`, `check-migration-sql-portability.sh`,
-`check-relative-path-defaults.sh`, `check-conditional-test-guards.sh`,
-`check-inert-enforcement.sh`, `check-scope-literal-defaults.sh`,
-`check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`,
-`check-no-em-dash.sh` → all EXIT 0. Full run details and the mutation proof
-at `/tmp/stage/review-evidence/test-results.md`.
+`check-task-commit-attribution.sh`,
+`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
+`check-inert-enforcement.sh`, `check-lossy-secret-conversion.sh` all exit
+0. Evidence: `/tmp/stage/review-evidence/` (per-round details, including
+earlier full-suite runs: gyre-server lib 1493 passed, gyre-adapters 383
+passed / 12 ignored, on head 10d235004).
 
-Sandbox restrictions recorded for host verification
-(`/tmp/stage/review-evidence/`): TCP `accept()` never completes (errno 95),
-so listener-based `ws::`/`tty::`/smart-http-clone tests can't run here —
-pre-existing tests, unchanged by this task, none touch the enforcement
-paths. `check-crypto-verify.sh` / `check-assertionless-tests.sh` fail on
-mawk 1.3.4 (gawk-only syntax) identically at the base commit — environment,
-not branch; manual confirmation of their intent for this diff recorded in
-`mechanical-checks.md`. Full workspace suite, all-target clippy, and
-exact-head GitHub CI remain with the verification stage as mandated.
+### Merge-resolution rounds
 
-Post-merge continuation (branch head 3a9b7ab1, base 27bd585c merged in): the
-four touched crates are byte-identical to the tested checkpoint 3130b931
-(merge added only gyre-cli/docs/specs files). Focused tests re-ran green on
-the merged head (42 passed / 0 failed), the touched-crate suites re-ran green
-(344+97+371 passed / 0 failed), and all mechanical gates pass; the base-side
-task-155 attribution omission (27bd585c missing from its frontmatter,
-reproduced at base) was repaired per the gate's prescribed remediation.
+Three base merges were resolved (fefde294, then repair bases), each
+verified by re-running the focused tests and mechanical gates on the
+merged head. The fb1f82e31 round had a single conflict in
+`api/spawn.rs` (scoped secret resolution): resolved in favor of the base
+version, which functionally supersedes the branch side by adding the
+Platform Model §7 `secret.accessed` audit event; the branch side was a
+comment-only rewording with identical behavior. Task-188 code was
+unchanged by every merge round.
 
-Base fefde294 merge round (branch head 44b69b651, commits 9beb1481b +
-10d235004): the rebase repair auto-merged everything except a comment-only
-conflict in `api/spawn.rs` (resolved keeping the detailed wording). Two real
-merge defects found and fixed:
+### Scope note
 
-- **Duplicate Diesel migration version `20261008000057`**: base fefde294
-  ships `2026-10-08-000057_spec_approval_attestation`, and
-  alphabetically-first-wins means the task's `task_generation` migration was
-  silently dropped — the `generation` column would never exist on fresh
-  databases. Renumbered to the next unused sequence
-  `2026-10-08-000059_task_generation`; `check-migration-versions.sh` and
-  `check-migration-sql-portability.sh` exit 0.
-- **Test-fixture field drift**: the task's fixtures in `constraint_check.rs`
-  construct `MergeRequest` and `SpecApprovalEvent` with struct literals;
-  the base added `merge_commit_sha` and `attestation_level`/`stack_hash`
-  fields, breaking compilation of the lib test target. Initialized the new
-  fields to `None` (fixture-external, no behavioral change).
-
-Post-merge verification on head 10d235004: full `cargo test -p gyre-server
---lib` → 1493 passed / 0 failed; `cargo test -p gyre-adapters` → 383 passed
-/ 12 ignored / 0 failed; focused filter (`constraint_check admin_reassign
-update_task_api reassign`) → 43 passed / 0 failed, including all five
-context-binding tests (`enforce_push_rejects_repo_id_mismatch`,
-`enforce_merge_rejects_workspace_id_mismatch`,
-`enforce_push_rejects_stale_generation`, `enforce_push_rejects_spec_sha_mismatch`,
-`verify_context_binding_unit_matrix`) and both generation-bump tests. All
-21 mechanical gates (`check-arch.sh` and the full scripts/ set listed above
-plus `check-unbounded-external-http`, `check-forged-scope-fields`,
-`check-byte-slice-truncation`, `check-dead-message-kinds`,
-`check-abac-route-registry`, `check-abac-exempt-handlers`,
-`check-mcp-write-tools`) exit 0. The implementation (verify_context_binding,
-constraint_check wiring, Task.generation persistence and bump paths) is
-unchanged by this round — only the migration directory name, two test
-fixtures, and the spawn.rs comment were touched.
-
-Scope note: the spec-approval signing endpoint (`api/specs.rs:610`) still
-creates SignedInputs with `expected_generation: None` — the signer-side pin
-is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
-against the persisted `Task.generation`) is fully implemented and
+The spec-approval signing endpoint (`api/specs.rs`) still creates
+SignedInputs with `expected_generation: None` — the signer-side pin is not
+exposed in the `ApproveSpecRequest` API. Enforcement (comparison against
+the persisted `Task.generation`) is fully implemented and
 mutation-tested; exposing a signer-side pin would extend the request
 contract and was not part of this task's enumerated scope.
