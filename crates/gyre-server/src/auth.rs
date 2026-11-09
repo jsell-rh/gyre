@@ -358,6 +358,7 @@ impl AgentSigningKey {
             iat: now,
             exp: now + ttl_secs,
             scope: scope.to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
             workspace_id: None,
