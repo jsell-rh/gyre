@@ -35,6 +35,12 @@
     governingSpecFor,
     buildTraceSteps,
   } from './causal-trace.js';
+  // Filter-panel classification (task-178): tree-group containers are
+  // synthetic nodes whose ids never appear in the parent-computed
+  // hiddenNodeIds set, so the draw loop classifies them directly — the
+  // synthetic package/module groups ARE the boundary boxes the default
+  // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
+  import { nodeCategory, nodeMatchesConcept } from './filter-categories.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -84,7 +90,20 @@
     // hiddenNodeIds) — category checkboxes and concept selection toggle
     // node visibility on the canvas.
     hiddenNodeIds = null,
+    // The same panel state BEFORE reduction to node ids: unchecked category
+    // ids and selected concepts. Tree-group containers are synthetic (ids
+    // like '__tree__src.api' are built during layout), so the id set cannot
+    // express them — the draw loop classifies the group's own node
+    // (package/module → Boundaries) and matches its name against the
+    // selected concepts to decide whether the container box is filtered.
+    hiddenCategories = null,
+    filterConcepts = null,
   } = $props();
+
+  // Filter-panel state for tree-group containers (see hiddenCategories
+  // above): derived once so every draw-frame read is cheap.
+  let hiddenFilterCategories = $derived(new Set(hiddenCategories ?? []));
+  let activeFilterConcepts = $derived(Array.isArray(filterConcepts) ? filterConcepts : []);
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
@@ -475,8 +494,11 @@
     void nodeGateStatus.size;
     // In-view filter panel (task-178): category/concept visibility changes
     // and Evaluative-lens risk data arrival must redraw without waiting for
-    // the next user interaction.
-    void hiddenNodeIds?.size;
+    // the next user interaction. Tracked by identity, not size — swapping
+    // one unchecked category for another keeps the hidden set's size.
+    void hiddenNodeIds;
+    void hiddenFilterCategories;
+    void activeFilterConcepts;
     void Object.keys(riskByNode ?? {}).length;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
@@ -2617,6 +2639,23 @@
   let lastCanvasW = 0;
   let lastCanvasH = 0;
 
+  // Is a tree-group container filtered out by the in-view filter panel?
+  // Containers follow the panel through their OWN node: synthetic groups
+  // carry node_type package/module (→ Boundaries), and real nodes drawn as
+  // containers carry their real node_type. Concept focus hides containers
+  // whose name matches no selected concept — the same matching semantics
+  // as the leaf rules in filter-categories.js.
+  function treeGroupFilterHidden(ln) {
+    if (!ln.node) return false;
+    if (hiddenFilterCategories.size > 0 && hiddenFilterCategories.has(nodeCategory(ln.node))) {
+      return true;
+    }
+    if (activeFilterConcepts.length > 0 && !activeFilterConcepts.some((c) => nodeMatchesConcept(ln.node, c))) {
+      return true;
+    }
+    return false;
+  }
+
   function drawFrame() {
     const canvas = canvasEl;
     if (!canvas) return;
@@ -2721,10 +2760,18 @@
 
       // In-view filter panel (ui-navigation.md §3): category checkboxes and
       // concept selection toggle node visibility — hidden nodes are skipped
-      // entirely (tree-group containers stay: they hold the visible children).
-      if (!isTreeGroup && hiddenNodeIds?.size > 0) {
-        const filterNid = ln.node?.id ?? ln.id;
-        if (hiddenNodeIds.has(filterNid)) return;
+      // entirely. Tree-group containers are filtered through their own node
+      // (the synthetic package/module groups are the boundary boxes the
+      // default zoom shows): a filtered group skips its box but keeps
+      // drawing children, so zoomed-in content of other categories stays
+      // visible when only the container's category is unchecked.
+      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0 || activeFilterConcepts.length > 0) {
+        if (!isTreeGroup) {
+          const filterNid = ln.node?.id ?? ln.id;
+          if (hiddenNodeIds?.has(filterNid)) return;
+        } else if (treeGroupFilterHidden(ln)) {
+          op = 0;
+        }
       }
 
       // Semantic zoom: deliberate information hierarchy per zoom level
@@ -4240,6 +4287,9 @@
 
     for (const ln of layoutNodes) {
       if (ln.treeDepth > 1) continue;
+      // In-view filter panel: containers hidden on the main canvas stay
+      // hidden on the minimap (same treeGroupFilterHidden rule).
+      if (ln.kind === 'tree-group' && treeGroupFilterHidden(ln)) continue;
       const depth = ln.treeDepth || 0;
       const colors = treeGroupColor(depth, 0);
       ctx.globalAlpha = ln.kind === 'tree-group' ? 0.5 : 0.2;
@@ -5841,16 +5891,28 @@
       </label>
       <!-- Observable is a future toggle — grayed out until production telemetry
            integration exists (system-explorer.md §1 "Observable (future)"). Clicking
-           it surfaces the notice banner instead of activating. -->
-      <label
+           it surfaces the notice banner instead of activating. The disabled input
+           is the visual checkbox; the wrapper carries the interaction (a disabled
+           input cannot receive events) as a keyboard-operable role=checkbox. -->
+      <div
         class="lens-check lens-check-observable"
         data-testid="lens-checkbox-observable"
+        role="checkbox"
+        aria-checked="false"
+        aria-disabled="true"
+        tabindex="0"
         title="Observable lens is disabled — requires production telemetry integration"
         onclick={() => { observableBannerVisible = true; }}
+        onkeydown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            observableBannerVisible = true;
+          }
+        }}
       >
         <input type="checkbox" disabled aria-disabled="true" />
         <span>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></span>
-      </label>
+      </div>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>

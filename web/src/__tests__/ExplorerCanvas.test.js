@@ -111,7 +111,9 @@ describe('ExplorerCanvas', () => {
     // (always on, locked) + Evaluative (toggle) + Observable (future, locked).
     const lensChecks = container.querySelectorAll('.lens-group input[type="checkbox"]');
     expect(lensChecks.length).toBe(3);
-    const lensLabels = Array.from(lensChecks).map((i) => i.closest('label').textContent.trim());
+    // Structural/Evaluative wrap in <label>; Observable is a div[role=checkbox]
+    // (keyboard-operable wrapper around the disabled visual input).
+    const lensLabels = Array.from(lensChecks).map((i) => i.closest('.lens-check').textContent.trim());
     expect(lensLabels[0]).toContain('Structural');
     expect(lensLabels[1]).toContain('Evaluative');
     expect(lensLabels[2]).toContain('Observable');

@@ -83,9 +83,16 @@ const GRAPH = {
   ],
 };
 
-// Captured canvas draw text (labels) — visibility assertions run against
-// what the canvas actually drew, not internal state.
-let drawnText;
+// Captured canvas draw output, attributed to the MAIN canvas
+// (.treemap-canvas) and bucketed per frame: drawFrame() begins with
+// ctx.setTransform, so each setTransform starts a new frame and every
+// fillText accumulates into the current frame's label list. Unlike a
+// snapshot-and-clear list — which reads empty whenever the canvas is idle
+// between redraws, making `not.toContain` assertions vacuous — the latest
+// frame's labels persist, so a negative assertion can only pass when a
+// frame drawn AFTER the interaction really omits the label.
+let frameCount;
+let frameLabels;
 
 beforeEach(() => {
   fns.clear();
@@ -121,21 +128,32 @@ beforeEach(() => {
   global.requestAnimationFrame = vi.fn((cb) => { cb(16); return 1; });
   global.cancelAnimationFrame = vi.fn();
 
-  drawnText = [];
-  HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
-    clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
-    beginPath: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(),
-    stroke: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
-    fillText: vi.fn((text) => { drawnText.push(String(text)); }),
-    strokeText: vi.fn(),
-    measureText: vi.fn(() => ({ width: 40 })),
-    scale: vi.fn(), setTransform: vi.fn(), save: vi.fn(), restore: vi.fn(),
-    translate: vi.fn(), rotate: vi.fn(),
-    fillStyle: '', strokeStyle: '', lineWidth: 0, globalAlpha: 1,
-    font: '', textAlign: '', textBaseline: '', shadowColor: '', shadowBlur: 0,
-    setLineDash: vi.fn(), getLineDash: vi.fn(() => []),
-    roundRect: vi.fn(),
-  }));
+  frameCount = 0;
+  frameLabels = [];
+  // One stable 2d context per canvas element (the main canvas and the
+  // minimap each get their own) so draw calls can be attributed per canvas.
+  HTMLCanvasElement.prototype.getContext = vi.fn(function () {
+    if (this.__mockCtx) return this.__mockCtx;
+    const isMain = this.classList?.contains('treemap-canvas');
+    const ctx = {
+      clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
+      beginPath: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(),
+      stroke: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+      fillText: vi.fn((text) => { if (isMain) frameLabels.push(String(text)); }),
+      strokeText: vi.fn(),
+      measureText: vi.fn(() => ({ width: 40 })),
+      scale: vi.fn(),
+      setTransform: vi.fn(() => { if (isMain) { frameCount++; frameLabels = []; } }),
+      save: vi.fn(), restore: vi.fn(),
+      translate: vi.fn(), rotate: vi.fn(),
+      fillStyle: '', strokeStyle: '', lineWidth: 0, globalAlpha: 1,
+      font: '', textAlign: '', textBaseline: '', shadowColor: '', shadowBlur: 0,
+      setLineDash: vi.fn(), getLineDash: vi.fn(() => []),
+      roundRect: vi.fn(),
+    };
+    this.__mockCtx = ctx;
+    return ctx;
+  });
 
   sockets = [];
   global.WebSocket = MockWebSocket;
@@ -162,11 +180,37 @@ async function waitForCanvas() {
 }
 
 function drawnLabels() {
-  // Snapshot + clear the captured draw output; redraws are synchronous
-  // (rAF mock), so the next read reflects the latest frame.
-  const labels = [...drawnText];
-  drawnText.length = 0;
-  return labels;
+  // Labels of the latest drawn frame. Redraws are synchronous (rAF mock),
+  // and the frame's labels persist until the next frame replaces them, so
+  // this reads the canvas's current rendered state — never an empty
+  // snapshot of an idle canvas.
+  return [...frameLabels];
+}
+
+/** Wait until the render loop settles (no new frames for two consecutive
+ *  reads) — interactions below capture a frame baseline afterwards. */
+async function waitForCanvasSettled() {
+  let prev = -1;
+  await waitFor(
+    async () => {
+      const c = frameCount;
+      if (c === prev) return;
+      prev = c;
+      await new Promise((r) => setTimeout(r, 30));
+      throw new Error('canvas still drawing');
+    },
+    { timeout: 5000 }
+  );
+}
+
+/** Wait for at least one frame drawn after `count`, then return that
+ *  frame's labels — the canvas state as actually rendered after the
+ *  interaction that triggered the redraw. */
+async function labelsOfNextRedraw(count) {
+  await waitFor(() => {
+    expect(frameCount).toBeGreaterThan(count);
+  }, { timeout: 5000 });
+  return drawnLabels();
 }
 
 // ── Lens selector: checkbox group + risk overlay ──────────────────────────
@@ -186,9 +230,18 @@ describe('ExplorerView — lens checkbox group (ui-navigation.md §3)', () => {
     // Evaluative is an additive overlay toggle.
     expect(evaluative.checked).toBe(false);
     expect(evaluative.disabled).toBe(false);
-    // Observable is future — locked off.
+    // Observable is future — locked off (role=checkbox wrapper around the
+    // disabled visual input; keyboard-operable per the a11y repair).
     expect(observable.checked).toBe(false);
     expect(observable.disabled).toBe(true);
+    const observableBox = document.querySelector('[data-testid="lens-checkbox-observable"]');
+    expect(observableBox.getAttribute('aria-checked')).toBe('false');
+    expect(observableBox.getAttribute('aria-disabled')).toBe('true');
+    // Keyboard operation surfaces the telemetry notice (same as click).
+    expect(document.querySelector('.observable-banner')).toBeNull();
+    observableBox.focus();
+    await fireEvent.keyDown(observableBox, { key: 'Enter' });
+    expect(document.querySelector('.observable-banner')).toBeTruthy();
   });
 
   it('checking Evaluative fetches GET /repos/:id/graph/risks and shows the Risk metric', async () => {
@@ -258,33 +311,43 @@ describe('ExplorerView — in-view filter panel (ui-navigation.md §3)', () => {
 
     // Default zoom draws the boundary labels (semantic zoom: boundaries first).
     await waitFor(() => {
-      expect(drawnLabels()).toEqual(expect.arrayContaining(['payment-domain']));
+      expect(frameCount).toBeGreaterThan(0);
+      expect(drawnLabels()).toContain('payment-domain');
     }, { timeout: 5000 });
+    await waitForCanvasSettled();
 
     await fireEvent.click(screen.getByTestId('filter-panel-toggle'));
     const panel = document.querySelector('[data-testid="explorer-filter-panel"]');
     const boundaries = within(panel).getByTestId('filter-category-boundaries');
+    const framesBefore = frameCount;
     await fireEvent.click(boundaries.querySelector('input'));
 
-    // The boundary nodes are no longer drawn — the filter toggles node
-    // visibility, not just decoration.
-    await waitFor(() => {
-      const labels = drawnLabels();
-      expect(labels).not.toContain('payment-domain');
-      expect(labels).not.toContain('retry');
-    });
+    // The frame drawn AFTER the filter change omits the boundary nodes —
+    // including the synthetic package/module tree-group boxes, which ARE
+    // the boundaries at default zoom (task-178 repair: the draw loop used
+    // to exempt tree-groups, making the Boundaries checkbox a user-visible
+    // no-op in the default containment layout).
+    const labels = await labelsOfNextRedraw(framesBefore);
+    expect(labels).not.toContain('payment-domain');
+    expect(labels).not.toContain('retry');
 
     // Round trip: re-checking Boundaries brings the nodes back — proves the
     // absence above was a real redraw, not a stalled canvas.
+    const framesBeforeRestore = frameCount;
     await fireEvent.click(boundaries.querySelector('input'));
-    await waitFor(() => {
-      expect(drawnLabels()).toEqual(expect.arrayContaining(['payment-domain']));
-    });
+    const restored = await labelsOfNextRedraw(framesBeforeRestore);
+    expect(restored).toContain('payment-domain');
   });
 
   it('selecting a discovered concept focuses the canvas on matching nodes', async () => {
     renderRepoScope();
     await waitForCanvas();
+
+    // The unfiltered canvas draws the top-level boundary summary.
+    await waitFor(() => {
+      expect(drawnLabels()).toContain('payment-domain');
+    }, { timeout: 5000 });
+    await waitForCanvasSettled();
 
     await fireEvent.click(screen.getByTestId('filter-panel-toggle'));
     const panel = document.querySelector('[data-testid="explorer-filter-panel"]');
@@ -295,20 +358,22 @@ describe('ExplorerView — in-view filter panel (ui-navigation.md §3)', () => {
     expect(retryChip).toBeTruthy();
     expect(within(panel).getByTestId('filter-concept-payment')).toBeTruthy();
 
+    const framesBefore = frameCount;
     await fireEvent.click(retryChip);
     expect(retryChip.getAttribute('aria-pressed')).toBe('true');
 
     // Nodes unrelated to the concept (the payment-domain package, whose
-    // name matches no "retry") disappear from the draw output.
-    await waitFor(() => {
-      expect(drawnLabels()).not.toContain('payment-domain');
-    });
+    // name matches no "retry") disappear from the frame drawn after the
+    // selection — the concept filter reaches the tree-group containers,
+    // not just the leaf nodes.
+    const labels = await labelsOfNextRedraw(framesBefore);
+    expect(labels).not.toContain('payment-domain');
 
     // Clearing the concepts restores the full graph.
+    const framesBeforeClear = frameCount;
     await fireEvent.click(within(panel).getByRole('button', { name: /clear concepts/i }));
-    await waitFor(() => {
-      expect(drawnLabels()).toEqual(expect.arrayContaining(['payment-domain']));
-    });
+    const restored = await labelsOfNextRedraw(framesBeforeClear);
+    expect(restored).toContain('payment-domain');
   });
 });
 
@@ -344,6 +409,42 @@ describe('ExplorerView — view selector dropdown (ui-navigation.md §3)', () =>
       expect(document.querySelector('.annotation-title')?.textContent).toBe('My Endpoints');
     });
     expect(document.querySelector('.view-select-btn').textContent).toContain('My Endpoints');
+  });
+
+  it('lists saved views from the REST endpoint when the dropdown opens (no chat socket required)', async () => {
+    // GET /workspaces/:id/explorer-views (workspace-scoped records carry a
+    // ViewSpec in `spec`, translated to a canvas view query on load).
+    fn('explorerViews').mockResolvedValue([
+      {
+        id: 'wv-1',
+        name: 'REST Surface',
+        description: 'workspace view delivered by REST',
+        is_builtin: false,
+        spec: { name: 'REST Surface', layout: 'graph', data: { node_types: ['type'] }, encoding: {}, highlight: {} },
+      },
+    ]);
+    renderRepoScope();
+    await waitForCanvas();
+
+    const selector = document.querySelector('[data-testid="explorer-view-selector"]');
+    await fireEvent.click(within(selector).getByRole('button', { name: /view selector/i }));
+
+    // Opening the dropdown fetches the saved-views list via REST — the
+    // chat socket never delivers a `views` message in this test.
+    await waitFor(() => {
+      expect(fn('explorerViews')).toHaveBeenCalledWith('ws-1');
+    });
+    const menu = selector.querySelector('.view-select-menu');
+    const saved = await within(menu).findByTestId('view-option-saved');
+    expect(saved.textContent).toContain('REST Surface');
+
+    await fireEvent.click(saved);
+    // The workspace record's ViewSpec is translated (viewSpecToViewQuery)
+    // and applied to the canvas — the annotation title comes from the spec.
+    await waitFor(() => {
+      expect(document.querySelector('.annotation-title')?.textContent).toBe('REST Surface');
+    });
+    expect(document.querySelector('.view-select-btn').textContent).toContain('REST Surface');
   });
 
   it('"Generate view..." focuses the natural-language view generator (Ask input)', async () => {

@@ -1117,6 +1117,45 @@
   let viewSelectOpen = $state(false);
   let activeSavedViewName = $state(null);
 
+  // Saved views via REST (task-178 repair): the dropdown must list the
+  // workspace's saved views even when the explorer chat socket fails or
+  // the chat column is collapsed before its `views` message arrives — the
+  // socket is one delivery path, not the only one. Fetched when the
+  // dropdown opens; best-effort (a failed fetch keeps the current list).
+  // Both scopes are merged by id, mirroring the socket's ListViews: the
+  // repo-scoped records carry the stored ViewQuery directly, the
+  // workspace-scoped records carry a ViewSpec (translated via
+  // viewSpecToViewQuery).
+  let savedViewsRefreshing = false;
+  async function refreshSavedViews() {
+    if (savedViewsRefreshing) return;
+    savedViewsRefreshing = true;
+    try {
+      const wsId = scope?.workspaceId;
+      const repoId = selectedRepoId;
+      const [wsViews, repoViews] = await Promise.all([
+        wsId ? api.explorerViews(wsId).catch(() => null) : null,
+        repoId ? api.savedViews(repoId).catch(() => null) : null,
+      ]);
+      if (!Array.isArray(wsViews) && !Array.isArray(repoViews)) return;
+      const byId = new Map();
+      for (const r of Array.isArray(repoViews) ? repoViews : []) {
+        if (r?.id && !byId.has(r.id)) byId.set(r.id, { ...r, query: r.query ?? null });
+      }
+      for (const r of Array.isArray(wsViews) ? wsViews : []) {
+        if (!r?.id || byId.has(r.id)) continue;
+        byId.set(r.id, {
+          ...r,
+          is_system: r.is_system ?? r.is_builtin ?? false,
+          query: r.query ?? (r.spec ? viewSpecToViewQuery(r.spec) : null),
+        });
+      }
+      explorerSavedViews = [...byId.values()];
+    } finally {
+      savedViewsRefreshing = false;
+    }
+  }
+
   /** Load a saved view: apply its query to the canvas (works with or
    *  without the chat WebSocket — the query is part of the view record). */
   function selectSavedView(view) {
@@ -1729,6 +1768,12 @@
     });
   });
 
+  // Unchecked category ids + selected concepts, BEFORE reduction to node
+  // ids: the canvas classifies tree-group containers (synthetic boundary
+  // boxes) through their own node, so it needs the panel state itself, not
+  // just the hidden leaf-id set.
+  let explorerHiddenCategories = $derived(CATEGORY_IDS.filter((id) => !activeFilterCategories[id]));
+
   // ── Evaluative lens risk overlay (task-178) ───────────────────
   // GET /repos/:id/graph/risks — fetched when the Evaluative lens is active
   // (best-effort, non-blocking; the lens renders fine without it). The score
@@ -2041,7 +2086,12 @@
         <div class="explorer-view-select" data-testid="explorer-view-selector">
           <button
             class="view-select-btn"
-            onclick={() => { viewSelectOpen = !viewSelectOpen; }}
+            onclick={() => {
+              viewSelectOpen = !viewSelectOpen;
+              // REST refresh on open: the saved-views list must not depend
+              // solely on the chat socket's `views` message.
+              if (viewSelectOpen) void refreshSavedViews();
+            }}
             aria-haspopup="listbox"
             aria-expanded={viewSelectOpen}
             aria-label="View selector"
@@ -2370,6 +2420,8 @@
                 {gateRecords}
                 riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
                 hiddenNodeIds={explorerHiddenNodeIds}
+                hiddenCategories={explorerHiddenCategories}
+                filterConcepts={activeFilterConcepts}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;
@@ -3010,7 +3062,15 @@
                   onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
-                  onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onSavedViewsUpdate={(views) => {
+                    // The socket's SavedViewSummary carries no query — keep
+                    // the query/spec fields already fetched via REST for ids
+                    // that survive the replace.
+                    const prev = new Map(explorerSavedViews.map((v) => [v.id, v]));
+                    explorerSavedViews = (views ?? []).map((v) =>
+                      prev.has(v.id) ? { ...prev.get(v.id), ...v } : v
+                    );
+                  }}
                   onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
