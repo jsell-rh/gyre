@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
+commits: ["2d4faab3a1d1038a4a6354a50823645c25e01257", "07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
 ---
 
 ## Spec Excerpt
@@ -81,7 +81,17 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 ## Shipped
 
-All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–11; current head `07794b483`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–12; current head `2d4faab3a`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+
+### Rebase repair (round 12, merge `451407535` + commit `2d4faab3a`): task-100 base merge, union resolutions, and AuthFailure on the new fail-closed API-key rejection
+
+Rebase finding `c112f2c10` on candidate `cec4cb448`: merging base `7373979e8` (task-100 secrets rotation) conflicted in `auth.rs`, `git_http.rs`, and `scripts/fabricated-scope-defaults-exemptions.txt`. All three resolved as unions of both sides' semantics:
+
+- `auth.rs` — the task-104 auth-audit helpers and the base's `impl AuthenticatedAgent::is_system_principal` (task-099 spoof-discriminator, called by the auto-merged ABAC/tenant-containment guards) both kept; in the two API-key paths, the base's task-099 F1 fail-closed tenant-binding check now runs *before* the task-104 `record_auth_success` emission, so a user without a tenant binding (403) never emits AuthSuccess.
+- `git_http.rs` — `git_upload_pack` keeps the task-104 `resolve_repo_by_slug` call (the repo record feeds the GitClone event) with the base's `&auth` resolver signature (system-principal bootstrap fallback).
+- `fabricated-scope-defaults-exemptions.txt` — HEAD's superset documentation kept; both sides agree on the same 2 remaining entries and frozen count 2.
+
+The base's fail-closed API-key rejection was a *new* auth rejection path with no audit emission — the same uninstrumented-rejection class as the round-8..11 sweeps. Commit `2d4faab3a` records an `AuthFailure` audit event (`token_kind=api_key`, `rejection_reason="user has no tenant binding; re-provision via POST /api/v1/users"`) on both API-key paths (handler extractor and the WebSocket `authenticate_token` path) before the 403. Regression test `auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding` asserts exactly one `auth_failure` event with the spec'd detail fields; mutation-verified (removing the emission fails the test).
 
 ### Review repair (round 11, commit `07794b483`): per-handler repo/workspace-level ABAC guards now record AbacDenied
 
@@ -100,7 +110,7 @@ Regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` driv
 
 ### Access control events
 
-- **AuthSuccess / AuthFailure** — wired into the `AuthenticatedAgent` extractor, the global `require_auth_middleware`, and the WebSocket `authenticate_token` path. `token_kind` distinguishes global / agent_jwt / uuid_token / api_key / user_jwt / federated_jwt; failures carry `rejection_reason` (invalid, expired, revoked). A request-extension marker dedupes AuthSuccess to exactly one event per request even when the token is validated by both the ABAC middleware and the handler extractor.
+- **AuthSuccess / AuthFailure** — wired into the `AuthenticatedAgent` extractor, the global `require_auth_middleware`, and the WebSocket `authenticate_token` path. `token_kind` distinguishes global / agent_jwt / uuid_token / api_key / user_jwt / federated_jwt; failures carry `rejection_reason` (invalid, expired, revoked, and — round 12 — user-has-no-tenant-binding). A request-extension marker dedupes AuthSuccess to exactly one event per request even when the token is validated by both the ABAC middleware and the handler extractor.
 - **AbacDenied** — emitted from the ABAC middleware deny path (with `policy_id` from the matched policy, `resource`, `action`, `claims`), from the repo-level ABAC check that guards git push, and (round 11) from every per-handler repo/workspace-level G6 guard: worktrees, jj new/squash/undo/bookmark, repo orchestrator spawn, briefing/ask repo scope, agent spawn (REST + MCP), and the conversations workspace-read guard.
 - **RbacDenied** — emitted from the `RequireAgent` extractor, from every live pure per-handler role guard in `api/` (budget, compute targets, llm config/prompts, meta-specs incl. preview, registry list and rollout policy, release, spec/stack policy, spec approve/reject, tenants, trust anchors, users, secrets, network peers incl. register/update/delete, message broadcast, MR approve guard), and from the MCP tools/call write-role gate (round 10), with `required_role`, `actual_role`, `endpoint`. Owner-or-Admin hybrid guards that reject on ownership, not role, are a different denial class and are not RbacDenied emissions.
 - **ImpersonationStarted / ImpersonationEnded** — enum variants, as_str/from_str, and CEF severity 7 exist; emission points are deferred to task-108 (impersonation itself is not implemented yet), per the task plan.
@@ -111,18 +121,20 @@ Regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` driv
 
 ### Test evidence
 
-Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the per-request AuthSuccess dedupe, the ABAC policy denial paths (middleware, git push, and the nine round-11 per-handler guards), and the RbacDenied paths (extractor, handler guards, the round-8/9 guards, and the round-10 MCP tools/call gate).
+Focused tests drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a git-declined non-fast-forward push (no accepted/rejected events, ref unchanged), a real `git clone` over a local listener, a spec-file push (spec_changed with task_id), invalid/revoked token rejections, the round-12 API-key tenant-binding rejection (AuthFailure with reason), the per-request AuthSuccess dedupe, the ABAC policy denial paths (middleware, git push, and the nine round-11 per-handler guards), and the RbacDenied paths (extractor, handler guards, the round-8/9 guards, and the round-10 MCP tools/call gate).
 
-At the round-11 repair head `07794b483` (on merged base `4e895f766` via merge `1ba9d2404`, plus base `fefde2946` task-089 merge `4b9589c8c`):
+At the round-12 head `2d4faab3a` (merge `451407535` of base `7373979e8` task-100, on top of the round-11 head `07794b483` and its earlier base merges):
 
-- `cargo test -p gyre-server --lib`: **1501 passed, 0 failed** (includes the round-8/9/10/11 regression tests plus the task-103 and task-089 tests that arrived with the base merges).
-- Mutation checks: removing the worktrees or conversations `record_abac_denied` emission fails the round-11 regression test; earlier rounds' mutation checks (rollout-policy, secrets, MCP-gate RbacDenied) still hold.
-- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has zero findings in touched files (remaining warnings pre-existing in explorer_ws.rs / gyre-ports from the task-089 base merge).
-- Round-11 probe evidence: `/tmp/stage/review-evidence/task-104-round11-*.log`.
+- `cargo test -p gyre-server --lib`: **1537 passed, 0 failed** (the round-8/9/10/11/12 regression tests plus the task-100, task-103, and task-089 tests that arrived with the base merges; 1501 before the task-100 base merge).
+- Mutation checks: removing the round-12 extractor-path AuthFailure emission fails `auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding`; the round-11 worktrees/conversations checks and earlier rounds' checks (rollout-policy, secrets, MCP-gate RbacDenied) still hold.
+- `cargo fmt --all --check` clean; `cargo clippy -p gyre-server --lib` has no findings in code touched by the round-12 resolution (remaining warnings pre-existing at the candidate and in the merged base).
+- `bash scripts/check-fabricated-scope-defaults.sh` and `bash scripts/check-arch.sh` pass.
+- Round-12 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-*.log`.
 - Full workspace suites, arch checks, and GitHub CI are owned by verification.
 
-### Repair and merge history (rounds 1–10, summarized)
+### Repair and merge history (rounds 1–11, summarized)
 
+- Round 11 (commit `07794b483`, finding on candidate `1345a7cac`): nine uninstrumented per-handler repo/workspace ABAC guards now record AbacDenied via the shared `record_abac_denied` helper; regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` (details in the section above). Round 12 (rebase finding `c112f2c10`) is described in its own section above.
 - Rounds 1–2: implementation `ac5f88365` preserved through merges of bases `233664cf8` (task-087) and `72ad2a128` (task-096).
 - Round 5 (base `414fe9aa1b`, task-120): git-declined ref updates no longer record GitPushAccepted (`ca905fe43`, `verify_applied_ref_updates`).
 - Round 6 (base `c5deca801a`, task-105, merge `0aad7a51a`): coverage-table conflict recomputed row-by-row; no source touched.
