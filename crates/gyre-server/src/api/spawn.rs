@@ -83,7 +83,10 @@ pub struct OrchestratorAgentResponse {
 /// The flattened `AgentResponse.repo_id` is left `None`: this struct already
 /// serializes `repo_id` at the outer level, and emitting the key twice makes
 /// the wire JSON unparseable for strict duplicate-field deserializers
-/// (serde default, and every generated client).
+/// (serde default, and every generated client). `persona_id` needs no
+/// neutralization because it is declared ONLY on the flattened
+/// `AgentResponse` (populated by `AgentResponse::from`) — declaring it here
+/// as well is what emitted it twice (task-099 round-3 finding 1).
 pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
     OrchestratorAgentResponse {
         agent: AgentResponse {
