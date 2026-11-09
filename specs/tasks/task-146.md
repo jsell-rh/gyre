@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "28fe73a7f"]
 ---
 
 ## Spec Excerpt
@@ -304,9 +304,59 @@ The controller rebased the branch onto a new base (the task-105 lineage:
   per-file rows (802 / 219 / 0 / 302 / 118 / 163 / 48%). web/dist is
   byte-identical to base (this branch never modified it).
 
+### Review-repair round: dead exemption entry removal and base 4118553f1 reconcile (merge 28fe73a7f)
+
+The independent review of candidate a6e810ef found two findings; both
+fixed, plus the controller's rebase onto base 4118553f1 (the task-090
+lineage: rollout policies, HSI Explorer Three Lenses, explorer UI)
+resolved:
+
+- **Dead exemption entry deleted (code finding)** — the
+  `crates/gyre-server/src/api/traces.rs:150` entry in
+  `scripts/abac-exempt-handlers-exemptions.txt` had been re-added from the
+  pre-rebase lineage by merge 935a15413. It was DEAD: traces.rs is
+  byte-identical to base and its handler is fixed there (resolves span →
+  trace → MR → workspace, returns Forbidden on tenant mismatch). The
+  entry is deleted; the section comment now records the fix with no
+  entries remaining. The exemption-file diff vs base contains only
+  deletions (the orchestrator spawn entries, fixed for real by this
+  branch) and comment updates — never a new entry.
+  `check-abac-exempt-handlers.sh` prints the identical `OK (88 handler(s)
+  checked)` before and after the deletion.
+- **task-200.md commits reordering reverted (process finding)** — the
+  frontmatter list is restored byte-identical to base; this branch no
+  longer touches task-200's record.
+- **Merge conflict (spawn.rs) resolved as a union** — task-146's
+  `task.status_changed` analytics recording at the agent-completion
+  auto-advance to Review AND base's reconciliation `auto_merge` enqueue
+  hook (`maybe_auto_enqueue_reconciliation_mr`) both kept at the same
+  trigger point; no fix dropped, no exemption re-added.
+- **No migration collision this time** — base's new
+  `2026-11-06-000057_rollout_policies` and this branch's
+  `2026-10-08-000059_analytics_scope_columns` have distinct Diesel
+  versions; the `no_duplicate_migration_version_prefixes` guard and
+  `check-migration-versions.sh` pass.
+- web/dist is byte-identical to base (this branch never modified it).
+
 ### Test evidence
 
-- This round (935a15413cf42ca28dd5c971ffe081079d16ea23): `cargo test -p gyre-server --lib`: 1468
+- This round (merge 28fe73a7f): `cargo test -p gyre-server --lib`: 1490
+  passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
+  67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 384 passed,
+  0 failed (includes the analytics adapter tests and the duplicate-
+  version guard); `cargo fmt --check` clean; `cargo clippy -p gyre-server
+  --lib` exit 0 (warnings only, pre-existing). All previously-green
+  `scripts/check-*.sh` gates pass (incl. migration versions/portability,
+  fabricated-scope, relative-path, inert-enforcement,
+  abac-exempt-handlers, task-commit-attribution). Checks that fail on
+  base 4118553f1 identically (verified in a worktree at base: mawk
+  dialect errors and pre-existing violation counts) are documented in
+  /tmp/stage/review-evidence/test-evidence.md, not introduced by this
+  branch. Evidence retained under /tmp/stage/review-evidence.
+
+### Prior-round evidence (935a15413cf42ca28dd5c971ffe081079d16ea23)
+
+- `cargo test -p gyre-server --lib`: 1468
   passed, 0 failed; `cargo test -p gyre-server --test api_integration`:
   67 passed, 0 failed; `cargo test -p gyre-adapters --lib`: 379 passed,
   0 failed (includes the analytics adapter tests and the duplicate-
