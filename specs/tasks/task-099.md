@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["93e70ce969237e6bc2622caf38dcbe151f797379", "e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["93e70ce969237e6bc2622caf38dcbe151f797379", "e555ed7881f6657a9db166eed62ab286001027e0", "14c20424d4ef8a06aba1e857038fe347a5fba911", "6131513c4a6972daa827ec025741cd4d70a0c790", "5d487f44cef3dffadb85626575a4fa34daf4e61d", "e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "851101503e92cba4ddace147403251d39970c701"]
 ---
 
 ## Spec Excerpt
@@ -249,8 +249,20 @@ on both sides).
 
 ### Verification evidence
 
-- Round-11 evidence: `/tmp/stage/review-evidence/` (source SHA
-  `93e70ce96`, test/fmt/clippy/check-script logs, mutation-check note).
+- Round-13 (`851101503`) repaired the verification clippy-diff failure:
+  `python3 scripts/check-clippy-diff.py fefde2946` (the failing gate)
+  now exits 0 ("changed lines clean, 33 Rust files"), as does
+  `check-rustfmt-diff.py`. Fixed: async_trait double_must_use spans in
+  the three undocumented gyre-ports traits (added the sibling-file
+  `#[allow]`), a doc_lazy_continuation in auth.rs, four
+  await_holding_lock HOME_GUARD holds in the CLI resume tests (guard is
+  now a tokio mutex), and two useless_format URI literals in the
+  git_http containment test. No behavior change; `cargo test -p
+  gyre-cli bootstrap` 23 passed, the edited server test passed,
+  check-arch / check-mem-port-contracts / check-no-em-dash exit 0.
+  Evidence: `/tmp/stage/review-evidence/`.
+- Round-11 evidence: source SHA `93e70ce96`, test/fmt/clippy/check-script
+  logs, mutation-check note (same evidence directory, prior run).
 - Pre-existing on the candidate head (not introduced here, unchanged):
   `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs,
   check-assertionless-tests exit 2, check-cli-spec-parity exit 1 on the
