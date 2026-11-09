@@ -4856,7 +4856,17 @@ impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
                     .map(|e| (e.path.clone(), e.workspace_id.as_ref().map(Id::new)))
                     .collect()
             };
-            for a in approvals.values().filter(|a| a.approver_id == approver_id) {
+            // Attribution (HSI §12): an approval is the approver's judgment
+            // (`approver_id` = canonical user Id, written by the approve
+            // endpoint); a rejection/revocation is the declining human's
+            // judgment (`rejected_by`/`revoked_by` = canonical user Id).
+            // Mirrors the SQL adapters: the WHERE matches any of the three
+            // keys and the row loop re-checks the right one per status.
+            for a in approvals.values().filter(|a| {
+                a.approver_id == approver_id
+                    || a.rejected_by.as_deref() == Some(approver_id)
+                    || a.revoked_by.as_deref() == Some(approver_id)
+            }) {
                 let wid = wid_for_path
                     .iter()
                     .find(|(p, _)| p == &a.spec_path)
@@ -4877,6 +4887,14 @@ impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
                     continue;
                 }
                 let rejected = a.revoked_at.is_some() || a.rejected_at.is_some();
+                if rejected
+                    && a.revoked_by.as_deref() != Some(approver_id)
+                    && a.rejected_by.as_deref() != Some(approver_id)
+                {
+                    // The rejection belongs to the human who declined or
+                    // withdrew it — not to the original approver.
+                    continue;
+                }
                 let jtype = if rejected {
                     JudgmentType::SpecRejection
                 } else {

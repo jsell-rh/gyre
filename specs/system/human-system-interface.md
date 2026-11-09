@@ -1441,13 +1441,19 @@ CREATE TABLE user_notification_preferences (
 - Sources (each category must have a real writer, or the category is inert):
   |Category|Table|Human attribution|Workspace attribution|
   |---|---|---|---|
-  |`approval` / `rejection`|`spec_approvals` (signed approval store; `rejected_at`/`revoked_at` mark a rejection)|`approver_id`|`spec_ledger_entries.workspace_id` joined on `spec_approvals.spec_path = spec_ledger_entries.path`|
+  |`approval`|`spec_approvals` where `approved_at` is set (active)|`approver_id` — the approver's **canonical user Id** (what `/users/me` resolves for the caller), written by `POST /specs/:path/approve`|`spec_ledger_entries.workspace_id` joined on `spec_approvals.spec_path = spec_ledger_entries.path`|
+  |`rejection`|`spec_approvals` where `rejected_at`/`revoked_at` is set|`rejected_by`/`revoked_by` — the canonical user Id of the human who declined or withdrew it (written by `POST /specs/:path/reject` and `POST /specs/:path/revoke`); a rejection is attributed to the declining human, NOT to the original approver whose approval they overrode|same join as `approval`|
   |`gate`|`audit_events` where `event_type = 'gate_override'`|`user_id`|`workspace_id` column|
   |`trust`|`audit_events` where `event_type = 'trust_change'`|`user_id`|`workspace_id` column|
   |`meta-spec`|`audit_events` where `event_type = 'meta_spec_publish'`|`user_id`|`workspace_id` column (from the meta-spec's own `scope`/`scope_id`)|
 - `audit_events.agent_id` names the *agent* an event is about and `spec_approval_events.approver_id`
   carries the KeyBinding identity key (`user:<display name>`), so neither is the human attribution
-  key for this ledger; `audit_events.user_id` is the authenticated human.
+  key for this ledger; `audit_events.user_id` is the authenticated human. For the same reason the
+  approve/reject/revoke endpoints write the **canonical user Id** (not the KeyBinding label) into
+  `spec_approvals.approver_id`/`rejected_by`/`revoked_by` — the label and the user Id are different
+  strings for JWT/API-key users, and mixing them makes the writer's rows invisible to the reader.
+  Agents and the global system token have no user Id and keep their `agent:<id>`/`user:<name>` labels
+  (they are not human ledger subjects).
 - A gate override is recorded when a human approves an MR whose gate results contain a failure: one
   `gate_override` event per failed gate, carrying `mr_id`, the gate type, and the status transition.
   A trust change is recorded by `PUT /api/v1/workspaces/:id` on the successful transition only,

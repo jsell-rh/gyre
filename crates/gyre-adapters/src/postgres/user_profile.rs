@@ -282,13 +282,27 @@ impl JudgmentLedgerRepository for PgStorage {
             // column is non-null and keeps them mutually exclusive: the
             // judgment timestamp is whichever column fired. Pending entries
             // (all NULL) match no timestamp comparison and drop out here.
+            //
+            // Attribution (HSI §12): an approval is the approver's judgment
+            // (`approver_id` = canonical user Id, written by the approve
+            // endpoint); a rejection/revocation is the declining human's
+            // judgment (`rejected_by`/`revoked_by` = canonical user Id). A
+            // row whose approval was withdrawn by someone else therefore
+            // surfaces in the withdrawer's ledger, not the original
+            // approver's — the WHERE matches any of the three keys and the
+            // row loop below re-checks the right one per status.
             if want_approvals {
                 let mut query = spec_approvals::table
                     .left_join(
                         spec_ledger_entries::table
                             .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
                     )
-                    .filter(spec_approvals::approver_id.eq(&approver))
+                    .filter(
+                        spec_approvals::approver_id
+                            .eq(&approver)
+                            .or(spec_approvals::rejected_by.eq(&approver))
+                            .or(spec_approvals::revoked_by.eq(&approver)),
+                    )
                     .filter(
                         spec_approvals::approved_at
                             .ge(since_i)
@@ -299,8 +313,10 @@ impl JudgmentLedgerRepository for PgStorage {
                         spec_approvals::spec_path,
                         spec_approvals::approved_at,
                         spec_approvals::revoked_at,
+                        spec_approvals::revoked_by,
                         spec_approvals::revocation_reason,
                         spec_approvals::rejected_at,
+                        spec_approvals::rejected_by,
                         spec_approvals::rejected_reason,
                         spec_ledger_entries::workspace_id.nullable(),
                     ))
@@ -313,7 +329,9 @@ impl JudgmentLedgerRepository for PgStorage {
                     Option<i64>,
                     Option<i64>,
                     Option<String>,
+                    Option<String>,
                     Option<i64>,
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                 )> = query
@@ -324,8 +342,10 @@ impl JudgmentLedgerRepository for PgStorage {
                     path,
                     approved_at,
                     revoked_at,
+                    revoked_by,
                     revoke_reason,
                     rejected_at,
+                    rejected_by,
                     reject_reason,
                     wid,
                 ) in rows
@@ -334,6 +354,15 @@ impl JudgmentLedgerRepository for PgStorage {
                     // judgment timestamp is the withdrawal/decline time
                     // (mutual exclusivity cleared approved_at).
                     let rejected = revoked_at.is_some() || rejected_at.is_some();
+                    if rejected {
+                        // The rejection belongs to the human who declined or
+                        // withdrew it — not to the original approver.
+                        if revoked_by.as_deref() != Some(approver.as_str())
+                            && rejected_by.as_deref() != Some(approver.as_str())
+                        {
+                            continue;
+                        }
+                    }
                     let jtype = if rejected {
                         JudgmentType::SpecRejection
                     } else {

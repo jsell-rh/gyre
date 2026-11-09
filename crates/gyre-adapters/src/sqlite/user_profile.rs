@@ -282,13 +282,27 @@ impl JudgmentLedgerRepository for SqliteStorage {
             // column is non-null and keeps them mutually exclusive: the
             // judgment timestamp is whichever column fired. Pending entries
             // (all NULL) match no timestamp comparison and drop out here.
+            //
+            // Attribution (HSI §12): an approval is the approver's judgment
+            // (`approver_id` = canonical user Id, written by the approve
+            // endpoint); a rejection/revocation is the declining human's
+            // judgment (`rejected_by`/`revoked_by` = canonical user Id). A
+            // row whose approval was withdrawn by someone else therefore
+            // surfaces in the withdrawer's ledger, not the original
+            // approver's — the WHERE matches any of the three keys and the
+            // row loop below re-checks the right one per status.
             if want_approvals {
                 let mut query = spec_approvals::table
                     .left_join(
                         spec_ledger_entries::table
                             .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
                     )
-                    .filter(spec_approvals::approver_id.eq(&approver))
+                    .filter(
+                        spec_approvals::approver_id
+                            .eq(&approver)
+                            .or(spec_approvals::rejected_by.eq(&approver))
+                            .or(spec_approvals::revoked_by.eq(&approver)),
+                    )
                     .filter(
                         spec_approvals::approved_at
                             .ge(since_i)
@@ -299,8 +313,10 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         spec_approvals::spec_path,
                         spec_approvals::approved_at,
                         spec_approvals::revoked_at,
+                        spec_approvals::revoked_by,
                         spec_approvals::revocation_reason,
                         spec_approvals::rejected_at,
+                        spec_approvals::rejected_by,
                         spec_approvals::rejected_reason,
                         spec_ledger_entries::workspace_id.nullable(),
                     ))
@@ -313,7 +329,9 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     Option<i64>,
                     Option<i64>,
                     Option<String>,
+                    Option<String>,
                     Option<i64>,
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                 )> = query
@@ -324,8 +342,10 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     path,
                     approved_at,
                     revoked_at,
+                    revoked_by,
                     revoke_reason,
                     rejected_at,
+                    rejected_by,
                     reject_reason,
                     wid,
                 ) in rows
@@ -334,6 +354,15 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     // judgment timestamp is the withdrawal/decline time
                     // (mutual exclusivity cleared approved_at).
                     let rejected = revoked_at.is_some() || rejected_at.is_some();
+                    if rejected {
+                        // The rejection belongs to the human who declined or
+                        // withdrew it — not to the original approver.
+                        if revoked_by.as_deref() != Some(approver.as_str())
+                            && rejected_by.as_deref() != Some(approver.as_str())
+                        {
+                            continue;
+                        }
+                    }
                     let jtype = if rejected {
                         JudgmentType::SpecRejection
                     } else {
@@ -625,6 +654,8 @@ mod tests {
         UserRepository::create(s, &make_user("u1")).await.unwrap();
         UserRepository::create(s, &make_user("u9")).await.unwrap();
         // Approvals: one in ws1, one with no workspace attribution.
+        // approver_id values are canonical user Ids — the key shape the
+        // production approve endpoint writes for JWT/API-key users.
         SpecLedgerRepository::save(s, &ledger_entry("specs/a.md", Some("ws1")))
             .await
             .unwrap();
@@ -819,6 +850,54 @@ mod tests {
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].timestamp, all[2].timestamp);
         assert_eq!(page[1].timestamp, all[3].timestamp);
+    }
+
+    /// HSI §12 attribution: a rejection/revocation is the DECLINING human's
+    /// judgment, not the original approver's. The seed's `approver_id`/
+    /// `rejected_by`/`revoked_by` values are canonical user Ids — the exact
+    /// key shape the production approve/reject/revoke endpoints write for
+    /// JWT/API-key users (verified end-to-end by the specs.rs
+    /// `*_surfaces_in_judgment_ledger` tests).
+    #[tokio::test]
+    async fn judgment_ledger_rejection_attributed_to_withdrawer() {
+        let (_tmp, s) = setup();
+        UserRepository::create(&s, &make_user("u1")).await.unwrap();
+        UserRepository::create(&s, &make_user("u2")).await.unwrap();
+        SpecLedgerRepository::save(&s, &ledger_entry("specs/w.md", Some("ws1")))
+            .await
+            .unwrap();
+        // u1 approves; u2 (an Admin) later withdraws the approval.
+        let mut ap = SpecApproval::new(Id::new("apw"), "specs/w.md", "shaw", "u1");
+        ap.approve(1000).unwrap();
+        SpecApprovalRepository::create(&s, &ap).await.unwrap();
+        let rows = SpecApprovalRepository::list_by_path(&s, "specs/w.md")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        SpecApprovalRepository::revoke(&s, &rows[0].id, "u2", "superseded", 1200)
+            .await
+            .unwrap()
+            .expect("Approved -> Revoked must transition");
+
+        // The withdrawal is u2's judgment: it surfaces in u2's ledger...
+        let u2_entries = JudgmentLedgerRepository::list_for_user(&s, "u2", None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(u2_entries.len(), 1, "got {:?}", u2_entries);
+        assert_eq!(u2_entries[0].judgment_type, JudgmentType::SpecRejection);
+        assert_eq!(u2_entries[0].entity_ref, "specs/w.md");
+        assert_eq!(u2_entries[0].detail.as_deref(), Some("superseded"));
+        assert_eq!(u2_entries[0].timestamp, 1200);
+
+        // ...and NOT in u1's: the approval no longer stands (mutual
+        // exclusivity cleared approved_at) and u1 did not withdraw it.
+        let u1_entries = JudgmentLedgerRepository::list_for_user(&s, "u1", None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            u1_entries.is_empty(),
+            "withdrawn approval must not surface for the original approver: {u1_entries:?}"
+        );
     }
 
     #[tokio::test]
