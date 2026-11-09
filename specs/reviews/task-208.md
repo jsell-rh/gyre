@@ -51,3 +51,13 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 118 (2026-11-09) — attribution clobber recurrence, product re-verified clean
+
+Assigned candidate `d4df129e5` ("process: record task-208 branch commits", the round-117 executor checkpoint pass output) rewrites `commits:` from six SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (root `.gitattributes`, task-208-labeled product surface: ancestor of the candidate, not of assigned base `60cf8fb6`). 104th recurrence of the rounds 2–115 class; root cause unchanged — the executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) is the pre-fix version missing the `path == ".gitattributes"` product-surface line, and round 117's staged-script replacement proved futile (the checkpoint re-populates `/tmp/stage` from the durable pre-fix source). Durable fix belongs to the process owner, wherever `/tmp/stage` is populated from.
+
+Repair on-branch (mechanical, product untouched): six-SHA `commits:` restored via `python3 scripts/dev-attribution.py task-208 --commit` (`f2ce5242a`); staged script replaced with the fixed in-repo version (byte-identical, sha256 `c23f2505…`).
+
+All product-side acceptance criteria re-verified PASS at the candidate with fresh exit-coded probes (`/tmp/stage/review-evidence/r118/`): dead-code grep zero matches; no route/ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` (only the 404-guard literals at `users.rs:996-998` remain); remaining `users/me/*` routes keep the per-handler-auth ABAC-exempt model unchanged; exactly six compliant profile tabs; spec amendment and coverage rows (user-management 22 `n/a`, 23 `task-assigned`, HSI 54 `implemented`) in place; `my_stuff_endpoints_are_removed` 1/1; `UserProfile.test.js` 23/23; `scripts/test_dev_attribution.py` 2/2 OK; in-repo attribution gate exit 0. Verifier must still run `cargo test --all` and `cd web && npm test`.
+
+Verdict: **needs-revision** (sole defect: the attribution clobber; repaired on-branch this round).
