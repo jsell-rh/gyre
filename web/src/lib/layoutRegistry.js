@@ -24,7 +24,6 @@
 
 import { registerLayoutName } from './types/view-spec.ts';
 import ExplorerCanvas from './ExplorerCanvas.svelte';
-import FlowRenderer from './FlowRenderer.svelte';
 import SvgGraphCanvas from './SvgGraphCanvas.svelte';
 import SideBySideView from './SideBySideView.svelte';
 import DiffView from './DiffView.svelte';
@@ -82,19 +81,23 @@ const registry = [
   },
   {
     name: 'list',
-    component: null, // list renders inline in MoldableView (table + sort controls)
+    component: null, // list renders as the shell's virtualized node list (VirtualNodeList)
     labelKey: 'moldable_view.tab_list',
     icon: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
   },
   {
     name: 'timeline',
-    component: null, // timeline renders inline (scrubber + delta markers)
+    component: null, // timeline renders via the canvas TimelineScrubber (d3-scale time axis)
     labelKey: 'moldable_view.tab_timeline',
     icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
   },
   {
+    // task-065 unified cutover: the separate FlowRenderer tab was merged
+    // into ExplorerCanvas — flow/trace data renders through the canvas's
+    // evaluative lens, so the 'flow' ViewSpec layout resolves to the same
+    // unified canvas component.
     name: 'flow',
-    component: FlowRenderer,
+    component: ExplorerCanvas,
     labelKey: 'moldable_view.tab_flow',
     icon: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 11.5l9-5M7 12.5l9 5"/>',
     requiresRepo: true,

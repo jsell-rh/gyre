@@ -36,7 +36,7 @@ class CIReconciliationTests(unittest.TestCase):
         self.calls.append(args)
         if args[:3]==('gh','pr','view'):
             pr=dict(self.pr)
-            if args[-1]=='headRefOid,statusCheckRollup,state' and self.change_on_confirmation:
+            if args[-1]=='headRefOid,statusCheckRollup,state,baseRefOid,mergeStateStatus,mergeable' and self.change_on_confirmation:
                 pr.update(self.change_on_confirmation)
             value=pr
         elif args[:2]==('gh','api'):
@@ -73,6 +73,70 @@ class CIReconciliationTests(unittest.TestCase):
             self.store.finish(work,verifier['token'],{'passed':True},{'verified':{'wrong':'late result'}})
         self.assertEqual(len(discover(self.store,'implement','even-newer-main')),1)
 
+    def test_conflict_handoff_fences_verifier_and_requests_one_worker_on_retained_pr_head(self):
+        current_base='e'*40
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid=current_base)
+        verifier_id=self.store.enqueue('verify','task-001','g',{'candidate':self.candidate,'base':'new-main'})
+        verifier=self.store.claim('verify','concurrent-verifier')
+        observer=self.observer()
+        with patch.object(observer,'command',side_effect=self.command):
+            result,updates,findings=observe(observer,self.store.task('task-001'))
+        self.assertEqual(result['status'],'merge_conflict')
+        self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
+        data=self.store.task('task-001')['data']
+        self.assertEqual(data['repair']['category'],'rebase')
+        self.assertEqual(data['repair']['base'],current_base)
+        self.assertEqual(data['candidate'],self.head)
+        self.assertEqual(data['candidate_base'],self.base)
+        self.assertEqual(data['pr'],'https://github.com/example/repo/pull/1')
+        self.assertIsNone(data['review']);self.assertIsNone(data['verified'])
+        self.assertIsNone(self.store.integration_lane())
+        with self.assertRaises(StaleClaim):self.store.finish(verifier_id,verifier['token'],{})
+        first=discover(self.store,'implement',current_base)
+        self.assertEqual(len(first),1)
+        self.assertEqual(discover(self.store,'implement',current_base),first)
+        self.assertEqual(len(self.store.findings('task-001')),1)
+        claim=self.store.claim('implement','conflict-worker',ident=first[0],eligible=lambda w:eligible(self.store,w))
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim['input']['candidate'],self.head)
+        # Subsequent polls only watch labels; they cannot emit another repair.
+        watch=self.observer()
+        with patch.object(watch,'command',side_effect=self.command),self.assertRaises(Wait):
+            observe(watch,self.store.task('task-001'))
+        self.assertEqual(len(self.store.findings('task-001')),1)
+
+    def test_green_generated_conflict_refreshes_integration_without_a_model_finding(self):
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='e'*40,
+                       statusCheckRollup=[dict(self.checks[0],conclusion='SUCCESS')])
+        observer=self.observer()
+        with patch.object(Execution,'command',side_effect=self.command),patch('pipeline.ci.generated_conflict',return_value=(True,['web/dist/index.html'])) as probe:
+            with self.assertRaises(Wait):observe(observer,self.store.task('task-001'))
+            self.assertEqual(probe.call_count,1)
+            self.store.retry(observer.claim['id'],observer.claim['token'],{},delay=0)
+            observer=self.observer()
+            with self.assertRaises(Wait):observe(observer,self.store.task('task-001'))
+            self.assertEqual(probe.call_count,1,'same head/base classification should be reused')
+        data=self.store.task('task-001')['data']
+        self.assertEqual(data['ci']['status'],'artifact_refresh')
+        self.assertFalse(data.get('repair'))
+        self.assertEqual(data['candidate'],self.candidate)
+        self.assertTrue(data['review']['approved'])
+        self.assertEqual(self.store.findings('task-001'),[])
+        self.assertEqual(discover(self.store,'implement','new-main'),[])
+        self.assertEqual(len(discover(self.store,'verify','new-main')),1)
+
+    def test_stale_or_recovered_conflict_is_not_handed_to_implementation(self):
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='e'*40)
+        for changed in ({'headRefOid':'f'*40},{'baseRefOid':'d'*40},
+                        {'mergeStateStatus':'CLEAN','mergeable':'MERGEABLE'}, {'state':'MERGED'}):
+            with self.subTest(change=changed):
+                self.change_on_confirmation=changed
+                observer=self.observer()
+                with patch.object(observer,'command',side_effect=self.command),self.assertRaises(Wait):
+                    observe(observer,self.store.task('task-001'))
+                self.store.retry(observer.claim['id'],observer.claim['token'],{},delay=0)
+                self.assertFalse(self.store.task('task-001')['data'].get('repair'))
+
     def test_pending_checks_do_not_request_implementation_or_repeat_verification(self):
         self.pr['statusCheckRollup']=self.checks[1:]
         observer=self.observer()
@@ -82,6 +146,37 @@ class CIReconciliationTests(unittest.TestCase):
         self.assertFalse(data.get('repair'))
         self.assertEqual(data['ci']['status'],'pending')
         self.assertEqual(discover(self.store,'verify','new-main'),[])
+
+    def test_merged_pr_fences_reverification_and_only_confirms_original_receipt(self):
+        self.pr.update(state='MERGED',mergeCommit={'oid':'merged-sha'})
+        verifier=self.store.enqueue('verify','task-001','g',{'candidate':self.candidate,'base':'merged-sha'})
+        claim=self.store.claim('verify','redundant-verifier')
+        observer=self.observer()
+        with patch.object(observer,'command',side_effect=self.command):
+            result,updates,findings=observe(observer,self.store.task('task-001'))
+        self.assertEqual(updates['verified'],self.receipt)
+        self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(verifier,)).fetchone()[0],'obsolete')
+        self.assertEqual(discover(self.store,'verify','merged-sha'),[])
+        publisher=discover(self.store,'publish','merged-sha')
+        self.assertEqual(len(publisher),1)
+        with self.assertRaises(StaleClaim):self.store.finish(verifier,claim['token'],{})
+
+    def test_pending_observations_preserve_wait_age_for_the_same_head(self):
+        self.pr['statusCheckRollup']=self.checks[1:]
+        observer=self.observer()
+        first=None
+        for _ in range(2):
+            with patch.object(observer,'command',side_effect=self.command),self.assertRaises(Wait):
+                observe(observer,self.store.task('task-001'))
+            current=self.store.task('task-001')['data']['ci']
+            if first is None:first=current['waiting_since']
+            self.assertEqual(current['waiting_since'],first)
+        self.pr['statusCheckRollup']=[dict(self.checks[0],conclusion='SUCCESS')]
+        self.pr['mergeStateStatus']='CLEAN'
+        with patch.object(observer,'command',side_effect=self.command),self.assertRaises(Wait):
+            observe(observer,self.store.task('task-001'))
+        self.assertNotIn('waiting_since',self.store.task('task-001')['data']['ci'])
 
     def test_upstream_failure_keeps_original_reviewed_source_for_reverification(self):
         from pipeline.ci import failure
