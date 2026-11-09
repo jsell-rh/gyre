@@ -99,41 +99,34 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round 5: merge of upstream `def0add9e` (task-157 meta-spec
-rollout policies) onto candidate `c1f347a4f`, committed as `dbfc76e13`,
-plus review findings F1a/F1b closed by `8c469c538`.**
+**Repair round 6: rebase of the task-110 branch onto upstream `fefde2946`
+(upstream task-089 HSI Explorer Generated Views + task-103 secrets
+surface / JWT tenant-claim schema default), committed as `0b8d68602`.**
 
-The merge (25 files, +2913/−68: rollout-policy ports/adapters/migration,
-reconciliation.rs rolling-rollout machinery, task-157 record) resolved
-with no textual conflicts; semantic verification confirmed no new
-interactions with task-110's surface — migration versions stay unique
-(upstream `2026-11-06-000057_rollout_policies` derives version
-`20261106000057`, distinct from every existing prefix), and the
-fresh-DB migration boot in `cargo test -p gyre-adapters` runs the
-combined migration set green.
+The merge left two conflicts, both resolved by combining the two
+sides' intents:
 
-**F1a/F1b (non-atomic creation lint):**
-`accept_tenant_invitation_claimed` (user + pre-assigned memberships)
-and `invite_to_workspace` (invitation + invitee notification) create
-across two repositories with no transaction, failing
-`scripts/check-non-atomic-creation.sh` (2 violations, exit 1). No
-cross-repo transaction facility exists in the server, and both sites
-have recoverable failure semantics, so each now carries the check's
-documented inline `// non-atomic-create:ok - <reason>` marker with its
-specific rationale (same pattern as git_http.rs/snapshot.rs/spawn.rs):
+- **`crates/gyre-server/src/auth.rs` (JwtClaims):** upstream task-103
+  replaced the use-site `tenant_id` fallback with the claim's serde
+  schema default (`tenant_id: String` + `default_tenant_claim()`);
+  task-110 added the `email_verified` claim used by
+  `find_or_create_user_tenant` to claim invitation-created local-mode
+  accounts. The merged struct keeps both — schema-default `String`
+  tenant_id plus `email_verified: Option<bool>` — which is exactly the
+  shape the auto-merged usage sites already assume
+  (`claims.tenant_id` moved as `String`; `claims.email_verified
+  .unwrap_or(false)`).
+- **`scripts/fabricated-scope-defaults-exemptions.txt`:** took
+  upstream's removal of the auth.rs JWT-fallback entry (count 4→3,
+  matching the auto-merged `FROZEN_EXEMPTION_COUNT=3` in the check
+  script). The candidate's re-anchored entry (773→777) is dead at the
+  merged tree because the use-site fallback no longer exists; no new
+  entries were added. `check-fabricated-scope-defaults.sh` exits 0.
 
-- `accept_tenant_invitation_claimed`: the caller compensates by
-  rolling the invitation back to Pending on any side-effect error; a
-  retry dedups — the user is found via `find_by_external_id` instead
-  of re-created, and membership creation skips existing rows.
-- `invite_to_workspace`: the notification is an explicitly best-effort
-  `let _ =` side channel; the invitee's durable surface is
-  `GET /api/v1/users/me/invitations`, so a lost notification cannot
-  orphan the invitation.
+web/dist assets ride the upstream merge unchanged; the executor
+restores generated assets from the assignment base.
 
-Script now exits 0. No exemption files were touched.
-
-Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-5.md`.
+Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-6.md`.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -174,33 +167,36 @@ Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-5.md`.
   selectors; `docs/server-config.md` documents
   `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
 
-### Test evidence (re-run at merged head + fix `8c469c538`, this round)
+### Test evidence (re-run at rebased head `0b8d68602`, this round)
 
 - `cargo check --all` (SKIP_WEB_BUILD=1) at the merged tree — clean.
-- `cargo test -p gyre-adapters` — 388 passed / 0 failed / 12 ignored:
-  includes the fresh-DB migration boot over the combined migration
-  set (task-110 invitations + user-tenant-scope index + upstream
-  rollout_policies) and the
-  `claim_external_id_is_the_sanctioned_repoint` contract test.
-- `cargo test -p gyre-server --lib auth::` — 46 passed / 0 failed
-  (both sides' suites: upstream provisioning/username derivation and
-  task-110 invitation-link tests).
+- `cargo test -p gyre-server --lib auth::` — 47 passed / 0 failed
+  (upstream task-103 tenant-claim schema-default tests plus task-110
+  invitation-link tests, including the `email_verified`
+  claim-link cases, through the full routing chain).
 - `cargo test -p gyre-server --lib api::invitations` — 18 passed / 0
-  failed; `reconciliation` — 36 passed / 0 failed (upstream task-157
-  suite at the merged tree).
-- `scripts/check-non-atomic-creation.sh` — exits 0 (was 2 violations
-  before `8c469c538`).
-- Mechanical guard scripts verified relative to BOTH parents: every
-  check that passes on both `def0add9e` and `c1f347a4f` passes at the
-  merged head; every check that fails on both parents fails with an
-  identical finding set (output-diffed per script; remaining diffs
-  are ordering/path-prefix/line-number drift only). One check flips:
-  `check-dependent-scope-resolution.sh` fails at the merged head on
-  upstream task-157's `maybe_advance_rolling_rollout` — but it fails
-  identically at the upstream base `def0add9e` itself (pre-existing
-  mainline condition, inherited verbatim by the merge, not introduced
-  or modified by task-110; left for an upstream-side fix rather than
-  editing approved task-157 logic on this branch).
+  failed.
+- `cargo test -p gyre-adapters secret` — 17 passed / 0 failed
+  (upstream task-103 secret surface at the merged tree).
+- Mechanical guards at the rebased head: `check-fabricated-scope-
+defaults`, `check-non-atomic-creation`, `check-arch`,
+`check-abac-route-registry`, `check-mcp-write-tools`,
+`check-migration-versions`, `check-task-commit-attribution`,
+`check-inert-enforcement`, `check-lossy-secret-conversion`,
+`check-mem-port-contracts`, `check-forwarded-header-trust`,
+`check-unbounded-external-http`, `check-fail-open-ref-resolution`,
+`check-byte-slice-truncation`, `check-relative-path-defaults`,
+`check-dead-message-kinds`, `check-in-memory-state-stores`, and
+`check-abac-exempt-handlers` — all exit 0.
+- `check-dependent-scope-resolution.sh` fails at the rebased head with
+  2 findings (`maybe_advance_rolling_rollout`, task-157;
+  `recent_mrs_with_traces`, task-089) — but both fail identically at
+  the upstream base `fefde2946` itself (verified by checking out the
+  base and re-running; finding sets identical, only the scanned-
+  function count differs from task-110's added functions). Pre-existing
+  mainline conditions inherited verbatim by the rebase, not introduced
+  or modified by task-110; left for upstream-side fixes rather than
+  editing approved task-089/157 logic on this branch.
 - Loopback TCP listeners are permitted in this sandbox and the
   in-process HTTP-layer tests above exercise the full routing chain;
   a separate live-server smoke remains for host verification / CI at
