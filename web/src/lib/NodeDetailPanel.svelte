@@ -5,6 +5,7 @@
     edges = [],
     onClose = () => {},
     onNavigate = () => {},
+    onTraceStepNavigate = null, // causal trace step click: receives the step ({nodeId, name, ...}); falls back to onNavigate
     onInteractiveQuery = () => {},
     lens = 'structural',
     traceSpans = [],
@@ -797,7 +798,13 @@
               <button
                 class="trace-step-item"
                 class:trace-current={step.nodeId === node.id}
-                onclick={() => onNavigate(nodes.find(n => n.id === step.nodeId) ?? { id: step.nodeId, name: step.name })}
+                onclick={() => {
+                  // Pan/zoom the canvas to the step's node when the host wires
+                  // the trace-specific callback; otherwise navigate within the
+                  // detail panel as before.
+                  if (onTraceStepNavigate) onTraceStepNavigate(step);
+                  else onNavigate(nodes.find(n => n.id === step.nodeId) ?? { id: step.nodeId, name: step.name });
+                }}
                 type="button"
               >
                 <span class="trace-step-num">{step.step}</span>
