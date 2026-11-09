@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab"]
+commits: ["31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab", "531434a6875f62e1ee17899032e799a0a4d5c11b"]
 ---
 
 ## Spec Excerpt
@@ -89,8 +89,8 @@ Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gat
 Both `agent-gates.md` coverage sections are implemented with real, production
 behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
 runs and completed across assignments, including the review-F1/F2/F3 repairs,
-the review-round TTL repair `72c5bb03`, and the review-repair round `31c35ddb`
-described below).
+the review-round TTL repair `72c5bb03`, the review-repair round `31c35ddb`,
+and the rebase onto `fefde294`, all described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
@@ -136,35 +136,47 @@ described below).
   `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
   the exit code; no-command fails closed.
 
-### Review-repair round `31c35ddb` (findings b916825b)
+### Repair rounds (`31c35ddb`, rebase onto `fefde294`)
 
-Two review findings repaired on the merged tree; no product behavior
-changed:
+**Review findings `31c35ddb`** (findings b916825b; no product behavior
+changed):
 
 - **Exemption freeze slack** (process): `check-fabricated-scope-defaults.sh`
-  still read `FROZEN_EXEMPTION_COUNT=4` although the exemption file holds 2
-  entries and prior notes claimed the count was lowered — leaving two slots
-  of silent-growth slack. Lowered to 2. Verified: baseline passes, and a
-  growth probe (a third entry appended temporarily) now FAILS the check as
-  the any-growth-fails freeze principle requires (probe output retained in
-  this round's review evidence).
+  still read `FROZEN_EXEMPTION_COUNT=4` although the exemption file held 2
+  entries — leaving two slots of silent-growth slack. Verified: baseline
+  passes, and a growth probe (an extra entry appended temporarily) FAILS
+  the check as the any-growth-fails freeze principle requires.
 - **Non-discriminating test** (test):
   `scoped_review_token_denied_outside_allowlist` did not seed builtin
   policies, so its 403 came from the empty policy store's default-deny
   regardless of the allow-list. It now calls `seed_builtin_policies` (as its
-  siblings do), so the seeded `builtin-agent-scoped-access` policy would
-  permit the Agent-role GET `/api/v1/repos` and the asserted 403 is
-  attributable to the scoped-token allow-list. Verified discriminating by
-  mutation: with `is_reviewer`/`is_validator` forced false in
-  `abac_middleware.rs`, the test now FAILS (200 vs 403) — previously it
-  passed under the same mutation (probe output retained in this round's
-  review evidence). The mutation was reverted after the probe.
+  siblings do), so the asserted 403 is attributable to the scoped-token
+  allow-list. Verified discriminating by mutation: with `is_reviewer`/
+  `is_validator` forced false in `abac_middleware.rs`, the test FAILS
+  (200 vs 403); previously it passed under the same mutation.
+
+**Rebase onto `fefde294`** (merge `05c99b4e2` + fix `531434a68`):
+
+- **Freeze-file conflicts resolved by combining both sides' fixes**: the
+  branch had fixed `gate_executor.rs`'s gate-event ws_id fallback (freeze at
+  2); the new base carries the repair removing the `auth.rs` JWT
+  claims.tenant_id fallback (task-103, freeze at 3). The merged tree flags
+  exactly one site (`speculative_merge.rs:372`, verified by running the
+  checker's scan over `crates/`), so the file resolves to 1 entry with
+  `FROZEN_EXEMPTION_COUNT=1` — the tightest freeze, no slack. Verified:
+  baseline passes; a temporary second entry fails (rc=1); restored baseline
+  passes (probe output retained in review evidence).
+- **Semantic merge conflict fixed** (`531434a68`): the base's `jti` field on
+  `AgentJwtClaims` broke `mint_scoped`'s initializer, which git's textual
+  auto-merge left without the field. Every scoped gate-agent token now
+  carries a unique JWT ID, so teardown-time `kv_remove` revocation is
+  attributable per token, matching the sibling mint functions.
 
 ### Test evidence
 
-On the tree at `31c35ddb` (base merge `94029b2ff` + the two repairs):
-`task134_review_probe` 7/7 and `gate_executor` 37/37 (including both TTL
-regression tests and both e2e review tests) pass;
-`check-fabricated-scope-defaults.sh` passes with the count now enforced at
-2. `cargo test --all` and the full mechanical-check suite are owned by
-verification and publication.
+On the rebased tree at `531434a68` (merge `05c99b4e2` of `31c35ddb` onto
+`fefde294` + the `jti` fix): `task134_review_probe` 7/7, `gate_executor`
+37/37 (including both TTL regression tests and both e2e review tests), and
+`auth` 44/44 pass; `check-fabricated-scope-defaults.sh` passes with the
+count enforced at 1. `cargo test --all` and the full mechanical-check suite
+are owned by verification and publication.
