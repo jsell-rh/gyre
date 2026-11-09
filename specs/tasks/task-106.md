@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["f8be8730c81540598867316d46588b6e78cd265d", "6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
 ---
 
 ## Spec Excerpt
@@ -75,6 +75,19 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 Automatic jj rebase on target branch movement (source-control.md §4).
 Core behavior shipped in rounds 1–5; later rounds were review, CI,
 verification-gate, base-merge, and completion-path repairs.
+
+### Base-merge verification repair round (R22, commit `f8be8730c`)
+
+Repaired the verification-gate failure after merging assignment base
+`fefde2946` (merge commit `8c0110150`): the base added a sixth
+`kv_store` parameter to `test_state_inner` in mem.rs, but the two
+task-106 test helpers (`test_state_with_jj_ops`,
+`test_state_with_jj_and_git_ops`) still passed five arguments, so
+`cargo test -p gyre-server --lib` failed to compile with two E0061
+errors. Both helpers now pass `None` (default `MemKvStore`), matching
+every other helper — task-106's merge-processor rebase state reads
+`state.kv_store`, which `test_state_inner` already populates. No
+behavior change; test-infrastructure signature repair only.
 
 ### Spawn-response repair round (R21, commit `6227b6e17`)
 
@@ -196,12 +209,20 @@ no-flag-clear) makes them FAIL; the fix makes them PASS (transcripts in
 
 ### Test evidence
 
-At HEAD `6227b6e17` (R21). Probe logs + exit codes in
-`/tmp/stage/review-evidence/task-106-r21/` (R20's in `…/task-106-r20/`):
+At HEAD `f8be8730c` (R22). Probe logs + exit codes in
+`/tmp/stage/review-evidence/task-106-r22/` (R21's in `…/task-106-r21/`, R20's
+in `…/task-106-r20/`):
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1439 passed,
-  0 failed** (R21's new spawn-response test + all prior task-106 tests,
-  the base's task-077/095/096 suites, and the R20 completion-path
+- R22 (post-base-merge repair): `SKIP_WEB_BUILD=1 cargo test -p
+  gyre-server --lib` → **1505 passed, 0 failed** (the pre-merge 1439 plus
+  the merged base's upstream suites; this was the exact compile-failing
+  probe in verification). `cargo check --workspace --all-targets` → EXIT 0.
+  `cargo fmt --check -p gyre-server` → EXIT 0. `check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
+  `check-task-commit-attribution.sh` → all EXIT 0.
+- R21 evidence: `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` → **1439
+  passed, 0 failed** (R21's new spawn-response test + all prior task-106
+  tests, the base's task-077/095/096 suites, and the R20 completion-path
   tests).
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` → **391 passed,
   0 failed** (new fixture test guard-skips here: no `jj` binary in this
