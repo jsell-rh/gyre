@@ -697,6 +697,18 @@ pub async fn git_receive_pack(
         )
         .await;
 
+        // Repo-defined personas (platform-model.md §2): detect persona file
+        // changes on the default branch, update the entity, reset approval,
+        // auto-create the approval task and notify the owner.
+        process_persona_changes(
+            &state_clone,
+            &repo_id_clone,
+            &repo_path_clone,
+            &default_branch_clone,
+            &ref_updates,
+        )
+        .await;
+
         // merge-dependencies.md §2: re-evaluate branch lineage dependencies
         // when a push updates branches. Covers both directions:
         // - the pushed branch itself was rebased/forked (own MR re-checked),
@@ -1377,9 +1389,10 @@ fn classify_spec_change(
     }
 }
 
-/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
-/// Only returns entries in watched spec paths.
-pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path)
+/// tuples. Returns every entry, unfiltered — callers apply their own path
+/// filters (spec-lifecycle watched paths, persona files).
+fn parse_name_status(diff_output: &str) -> Vec<(char, String, Option<String>)> {
     let mut changes = Vec::new();
 
     for line in diff_output.lines() {
@@ -1405,19 +1418,6 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
             (None, parts[1])
         };
 
-        let is_watched = SPEC_WATCHED_PATHS
-            .iter()
-            .any(|prefix| new_path.starts_with(prefix));
-        let old_is_watched = old_path.is_some_and(|p| {
-            SPEC_WATCHED_PATHS
-                .iter()
-                .any(|prefix| p.starts_with(prefix))
-        });
-
-        if !is_watched && !old_is_watched {
-            continue;
-        }
-
         changes.push((
             status_char,
             new_path.to_string(),
@@ -1426,6 +1426,420 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
     }
 
     changes
+}
+
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
+/// Only returns entries in watched spec paths.
+pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+    parse_name_status(diff_output)
+        .into_iter()
+        .filter(|(_, new_path, old_path)| {
+            let is_watched = SPEC_WATCHED_PATHS
+                .iter()
+                .any(|prefix| new_path.starts_with(prefix));
+            let old_is_watched = old_path.as_ref().is_some_and(|p| {
+                SPEC_WATCHED_PATHS
+                    .iter()
+                    .any(|prefix| p.starts_with(prefix))
+            });
+            is_watched || old_is_watched
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Repo-defined personas: push detection + approval reset
+// (platform-model.md §2 Repo-Defined Personas)
+// ---------------------------------------------------------------------------
+
+/// Directory holding repo-defined persona files (platform-model.md §2).
+const PERSONA_FILES_DIR: &str = "specs/personas/";
+
+/// True for repo-defined persona files: `*.md` directly under `specs/personas/`
+/// (e.g. `specs/personas/security.md`). Nested paths are not persona files —
+/// the spec's example set is flat.
+fn is_persona_file(path: &str) -> bool {
+    match path.strip_prefix(PERSONA_FILES_DIR) {
+        Some(rest) => !rest.is_empty() && rest.ends_with(".md") && !rest.contains('/'),
+        None => false,
+    }
+}
+
+/// Derive the persona slug from a persona file path:
+/// `specs/personas/security.md` → `security`.
+fn persona_slug_from_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(PERSONA_FILES_DIR)?;
+    let slug = rest.strip_suffix(".md")?;
+    if slug.is_empty() || slug.contains('/') {
+        return None;
+    }
+    Some(slug.to_string())
+}
+
+/// Parse `git diff --name-status` output, returning only repo-defined persona
+/// file changes (entries where the old or the new side is a persona file).
+pub fn parse_persona_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+    parse_name_status(diff_output)
+        .into_iter()
+        .filter(|(_, new_path, old_path)| {
+            is_persona_file(new_path) || old_path.as_deref().is_some_and(is_persona_file)
+        })
+        .collect()
+}
+
+/// Build the auto-created approval task for a persona change
+/// (platform-model.md §2: "Creates a task: Persona change requires human
+/// approval").
+fn persona_approval_task(
+    slug: &str,
+    persona_path: &str,
+    repo_id: &Id,
+    workspace_id: &Id,
+    change_kind: &str,
+    now: u64,
+) -> gyre_domain::Task {
+    let title = format!("Persona change requires human approval: {slug}");
+    let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let mut task = gyre_domain::Task::new(task_id, &title, now);
+    task.priority = gyre_domain::TaskPriority::High;
+    task.labels = vec!["persona-change".to_string(), "auto-created".to_string()];
+    task.description = Some(format!(
+        "Auto-created by the persona push hook (platform-model.md §2).\n\
+         Persona file: {persona_path}\nRepo: {repo_id}\nChange: {change_kind}\n\
+         The persona's approval was reset to Pending; a human must re-approve \
+         before the persona is used again."
+    ));
+    task.repo_id = repo_id.clone();
+    task.workspace_id = workspace_id.clone();
+    task.spec_path = Some(persona_path.to_string());
+    // task_type intentionally left as None: push-hook tasks are informational
+    // and must NOT trigger agent spawning (agent-runtime.md §1 Phase 4).
+    task
+}
+
+/// Read a file's content at a specific commit (`git show <sha>:<path>`).
+/// Returns `None` on failure or when the content is not valid UTF-8
+/// (persona prompts are markdown; mangled bytes would corrupt the prompt).
+async fn read_file_at(git_bin: &str, repo_path: &str, sha: &str, path: &str) -> Option<String> {
+    let out = Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("show")
+        .arg(format!("{sha}:{path}"))
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        warn!(repo_path, path, "persona-push: git show failed: {err}");
+        return None;
+    }
+    match String::from_utf8(out.stdout) {
+        Ok(content) => Some(content),
+        Err(_) => {
+            warn!(
+                repo_path,
+                path, "persona-push: file content is not valid UTF-8; skipping"
+            );
+            None
+        }
+    }
+}
+
+/// After a successful push to the default branch, detect repo-defined persona
+/// file changes and reset their approval (platform-model.md §2
+/// Repo-Defined Personas). Runs in the same post-receive pipeline as
+/// spec-lifecycle processing.
+///
+/// For each changed `specs/personas/<slug>.md` file:
+/// 1. the persona entity (looked up by slug + `PersonaScope::Repo`) is updated
+///    with the new file content and a recomputed `content_hash` — or a new
+///    repo-scoped persona is created as `Pending` when none exists yet,
+/// 2. approval is reset to `Pending` (`approved_by`/`approved_at` cleared,
+///    `version` incremented, `updated_at` refreshed),
+/// 3. a "Persona change requires human approval" task is auto-created
+///    (deduplicated against open tasks with the same title),
+/// 4. the persona owner is notified via the inbox.
+///
+/// Deleted persona files have no new content: the entity keeps its last
+/// registered prompt, but its approval still resets — a removed persona file
+/// must not keep running on a stale approval.
+async fn process_persona_changes(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    default_branch: &str,
+    ref_updates: &[RefUpdate],
+) {
+    let default_ref = format!("refs/heads/{default_branch}");
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    // Well-known SHA for the empty git tree (used as base for initial pushes).
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+        let old = if update.old_sha.starts_with("00000000") {
+            EMPTY_TREE.to_string()
+        } else {
+            update.old_sha.clone()
+        };
+
+        let out = match Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("diff")
+            .arg("--name-status")
+            .arg("--diff-filter=AMDR")
+            .arg(format!("{old}..{}", update.new_sha))
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                warn!(repo_path, "persona-push: git diff failed: {err}");
+                continue;
+            }
+            Err(e) => {
+                warn!(repo_path, "persona-push: git diff spawn failed: {e}");
+                continue;
+            }
+        };
+
+        let changes = parse_persona_changes(&String::from_utf8_lossy(&out.stdout));
+        if changes.is_empty() {
+            continue;
+        }
+
+        // Scope resolution: the repo row carries the workspace (task scoping)
+        // and its workspace carries the tenant (notification scoping). A
+        // lookup failure means the scope cannot be determined — skip the
+        // affected entity rather than fabricating a scope identity
+        // (task-097 F3 class).
+        let Some(repo) = state
+            .repos
+            .find_by_id(&Id::new(repo_id))
+            .await
+            .ok()
+            .flatten()
+        else {
+            warn!(
+                repo_id,
+                "persona-push: repo not found; skipping persona processing"
+            );
+            return;
+        };
+        let tenant_id = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id.to_string());
+
+        let existing_tasks = state.tasks.list().await.unwrap_or_default();
+        let now = crate::api::now_secs();
+        let repo_scope = gyre_domain::PersonaScope::Repo(repo.id.clone());
+
+        for (status_char, path, old_path) in changes {
+            // A change can affect two persona paths: a rename carries content
+            // for the new path and removes the old one.
+            let mut affected: Vec<(&str, bool)> = Vec::new(); // (path, has_new_content)
+            match status_char {
+                'A' | 'M' => affected.push((path.as_str(), true)),
+                'D' => affected.push((path.as_str(), false)),
+                'R' => {
+                    if let Some(old) = old_path.as_deref() {
+                        affected.push((old, false));
+                    }
+                    affected.push((path.as_str(), true));
+                }
+                _ => {}
+            }
+
+            for (persona_path, has_content) in affected {
+                let Some(slug) = persona_slug_from_path(persona_path) else {
+                    continue;
+                };
+
+                let content = if has_content {
+                    match read_file_at(&git_bin, repo_path, &update.new_sha, persona_path).await {
+                        Some(c) => Some(c),
+                        None => continue,
+                    }
+                } else {
+                    None
+                };
+
+                let existing = state
+                    .personas
+                    .find_by_slug_and_scope(&slug, &repo_scope)
+                    .await
+                    .ok()
+                    .flatten();
+
+                // Step 1+2: update the entity (or register a new one) and
+                // reset approval to Pending.
+                let persona_after: Option<gyre_domain::Persona> = match existing {
+                    Some(mut p) => {
+                        if let Some(c) = content {
+                            p.system_prompt = c;
+                            p.refresh_content_hash();
+                        }
+                        p.version += 1;
+                        p.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+                        p.approved_by = None;
+                        p.approved_at = None;
+                        p.updated_at = now;
+                        if let Err(e) = state.personas.update(&p).await {
+                            warn!(slug, "persona-push: failed to update persona: {e}");
+                            continue;
+                        }
+                        info!(
+                            slug,
+                            "persona-push: updated persona and reset approval to Pending"
+                        );
+                        Some(p)
+                    }
+                    None => match content {
+                        Some(c) => {
+                            let p = gyre_domain::Persona::new(
+                                Id::new(uuid::Uuid::new_v4().to_string()),
+                                slug.clone(),
+                                slug.clone(),
+                                repo_scope.clone(),
+                                c,
+                                now,
+                            );
+                            if let Err(e) = state.personas.create(&p).await {
+                                warn!(slug, "persona-push: failed to create persona: {e}");
+                                continue;
+                            }
+                            info!(
+                                slug,
+                                "persona-push: registered new repo-defined persona (Pending)"
+                            );
+                            Some(p)
+                        }
+                        None => {
+                            // Deleted persona file with no registered entity —
+                            // nothing to reset, nothing to approve.
+                            info!(
+                                slug,
+                                "persona-push: deleted persona file has no registered entity; skipping"
+                            );
+                            continue;
+                        }
+                    },
+                };
+
+                let change_kind = match (status_char, has_content) {
+                    ('A', true) => "added",
+                    ('M', true) => "modified",
+                    ('R', true) => "renamed",
+                    ('D', false) => "deleted",
+                    ('R', false) => "renamed (old path removed)",
+                    _ => "changed",
+                };
+
+                // Step 3: auto-create the human-approval task.
+                let title = format!("Persona change requires human approval: {slug}");
+                let task_exists = existing_tasks.iter().any(|t| {
+                    t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
+                });
+                if task_exists {
+                    info!(
+                        title,
+                        "persona-push: approval task already exists, skipping"
+                    );
+                } else {
+                    let task = persona_approval_task(
+                        &slug,
+                        persona_path,
+                        &repo.id,
+                        &repo.workspace_id,
+                        change_kind,
+                        now,
+                    );
+                    match state.tasks.create(&task).await {
+                        Err(e) => warn!(title, "persona-push: failed to create task: {e}"),
+                        Ok(()) => {
+                            info!(
+                                title,
+                                "persona-push: created approval task for persona change"
+                            );
+                            state
+                                .emit_event(
+                                    Some(repo.workspace_id.clone()),
+                                    gyre_common::message::Destination::Workspace(
+                                        repo.workspace_id.clone(),
+                                    ),
+                                    gyre_common::message::MessageKind::TaskCreated,
+                                    Some(serde_json::json!({"task_id": task.id.to_string()})),
+                                )
+                                .await;
+                        }
+                    }
+                }
+
+                // Step 4: notify the persona owner. A persona discovered from
+                // git has no owner yet, and an owner that does not resolve to
+                // a known user (e.g. an agent id) has no inbox to deliver to —
+                // skip rather than write an undeliverable notification.
+                let notify_owner = persona_after
+                    .as_ref()
+                    .and_then(|p| p.owner.clone())
+                    .filter(|o| !o.is_empty());
+                if let Some(owner) = notify_owner {
+                    let owner_id = Id::new(owner.clone());
+                    let user_exists = state
+                        .users
+                        .find_by_id(&owner_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    match (user_exists, tenant_id.as_deref()) {
+                        (false, _) => {
+                            info!(
+                                slug,
+                                owner,
+                                "persona-push: owner is not a known user; skipping notification"
+                            );
+                        }
+                        (true, None) => {
+                            warn!(
+                                slug,
+                                "persona-push: workspace tenant could not be resolved; skipping owner notification"
+                            );
+                        }
+                        (true, Some(tenant)) => {
+                            let mut notif = gyre_common::Notification::new(
+                                Id::new(uuid::Uuid::new_v4().to_string()),
+                                repo.workspace_id.clone(),
+                                owner_id,
+                                gyre_common::NotificationType::PersonaChangePendingApproval,
+                                title,
+                                tenant,
+                                now as i64,
+                            );
+                            notif.body = Some(format!(
+                                "Persona \"{slug}\" was {change_kind} in {persona_path} \
+                                 (repo {}). Its approval was reset to Pending and requires \
+                                 human review.",
+                                repo.name
+                            ));
+                            notif.entity_ref = Some(format!("persona:{slug}"));
+                            notif.repo_id = Some(repo.id.to_string());
+                            if let Err(e) = state.notifications.create(&notif).await {
+                                warn!(slug, "persona-push: failed to notify persona owner: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// After a successful push to the default branch, detect spec changes and create tasks.
@@ -5017,5 +5431,651 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(mr_a.depends_on.is_empty());
+    }
+
+    // ── Repo-defined persona push detection (platform-model.md §2) ──────────
+
+    /// SHA-256 of `prompt` + empty capabilities joined — the persona
+    /// content-hash contract for a persona with no capabilities
+    /// (domain `Persona::hash_content`).
+    fn persona_content_hash(prompt: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(prompt.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Run git in the bare repo, assert success, return trimmed stdout.
+    fn git_bare(repo_path: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Write a blob with the given content; returns its SHA.
+    fn write_blob(repo_path: &str, content: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "hash-object failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Build a tree object from (path, blob-sha) entries, creating
+    /// intermediate trees for nested paths (`mktree` is single-level).
+    fn write_tree(repo_path: &str, files: &[(&str, &str)]) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        let mut subdirs: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
+            std::collections::BTreeMap::new();
+        for (path, sha) in files {
+            match path.split_once('/') {
+                None => lines.push(format!("100644 blob {sha}\t{path}")),
+                Some((seg, rest)) => subdirs.entry(seg).or_default().push((rest, sha)),
+            }
+        }
+        for (seg, entries) in subdirs {
+            let subtree = write_tree(repo_path, &entries);
+            lines.push(format!("040000 tree {subtree}\t{seg}"));
+        }
+        lines.sort();
+        let input = lines.join("\n");
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["mktree"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "mktree failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Create a commit with the given (path, content) files on top of
+    /// `parent` (or a root commit when None) WITHOUT updating any ref.
+    fn commit_files(
+        repo_path: &str,
+        parent: Option<&str>,
+        msg: &str,
+        files: &[(&str, &str)],
+    ) -> String {
+        let blob_shas: Vec<String> = files
+            .iter()
+            .map(|(_, c)| write_blob(repo_path, c))
+            .collect();
+        let entries: Vec<(&str, &str)> = files
+            .iter()
+            .zip(&blob_shas)
+            .map(|((p, _), s)| (*p, s.as_str()))
+            .collect();
+        let tree = write_tree(repo_path, &entries);
+        match parent {
+            Some(p) => git_bare(repo_path, &["commit-tree", &tree, "-p", p, "-m", msg]),
+            None => git_bare(repo_path, &["commit-tree", &tree, "-m", msg]),
+        }
+    }
+
+    /// Push `new` onto `refname` (expected current value `old`) through the
+    /// real receive-pack HTTP handler. Asserts the push is accepted and the
+    /// ref actually moved — a push that did not move the ref would make the
+    /// post-receive assertions pass vacuously.
+    async fn push_ref(
+        app: &Router,
+        ws_slug: &str,
+        repo_name: &str,
+        repo_path: &str,
+        old: &str,
+        new: &str,
+        refname: &str,
+    ) {
+        let line = format!("{old} {new} {refname}");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{new}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        assert!(!pack.is_empty(), "pack-objects produced empty pack");
+        body.extend_from_slice(&pack);
+
+        let uri = format!("/git/{ws_slug}/{repo_name}/git-receive-pack");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            git_bare(repo_path, &["rev-parse", refname]),
+            new,
+            "receive-pack did not move {refname}"
+        );
+    }
+
+    /// Poll `state.tasks.list()` until a task with the given title exists
+    /// (bounded) — the post-receive pipeline runs in a spawned task.
+    async fn wait_for_task_title(state: &Arc<crate::AppState>, title: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let tasks = state.tasks.list().await.unwrap();
+            if tasks.iter().any(|t| t.title == title) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task {title:?} was never created"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[test]
+    fn parse_persona_changes_added_modified_deleted() {
+        let input =
+            "A\tspecs/personas/new.md\nM\tspecs/personas/security.md\nD\tspecs/personas/old.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0], ('A', "specs/personas/new.md".to_string(), None));
+        assert_eq!(
+            changes[1],
+            ('M', "specs/personas/security.md".to_string(), None)
+        );
+        assert_eq!(changes[2], ('D', "specs/personas/old.md".to_string(), None));
+    }
+
+    #[test]
+    fn parse_persona_changes_renamed() {
+        let input = "R090\tspecs/personas/old.md\tspecs/personas/new.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0],
+            (
+                'R',
+                "specs/personas/new.md".to_string(),
+                Some("specs/personas/old.md".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn parse_persona_changes_ignores_non_persona_paths() {
+        // Spec-lifecycle paths, source files, nested persona paths, and
+        // non-markdown files in the persona dir are all ignored.
+        let input = "M\tspecs/system/architecture.md\nM\tsrc/main.rs\n\
+                     A\tspecs/personas/nested/deep.md\nA\tspecs/personas/notes.txt\n\
+                     M\tspecs/README.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert!(changes.is_empty(), "got: {changes:?}");
+    }
+
+    #[test]
+    fn parse_persona_changes_rename_into_persona_dir() {
+        // A rename whose OLD side is a persona file is still a persona change.
+        let input = "R100\tspecs/personas/gone.md\tdocs/gone.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'R');
+        assert_eq!(changes[0].1, "docs/gone.md");
+        assert_eq!(changes[0].2.as_deref(), Some("specs/personas/gone.md"));
+    }
+
+    #[test]
+    fn persona_slug_from_path_direct_files_only() {
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/security.md"),
+            Some("security".to_string())
+        );
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/domain-reviewer.md"),
+            Some("domain-reviewer".to_string())
+        );
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/nested/deep.md"),
+            None
+        );
+        assert_eq!(super::persona_slug_from_path("specs/system/x.md"), None);
+        assert_eq!(super::persona_slug_from_path("specs/personas/.md"), None);
+    }
+
+    #[test]
+    fn persona_approval_task_shape() {
+        let task = super::persona_approval_task(
+            "security",
+            "specs/personas/security.md",
+            &Id::new("repo-1"),
+            &Id::new("ws-test"),
+            "modified",
+            4242,
+        );
+        assert_eq!(
+            task.title,
+            "Persona change requires human approval: security"
+        );
+        assert_eq!(
+            task.labels,
+            vec!["persona-change".to_string(), "auto-created".to_string()]
+        );
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.repo_id, Id::new("repo-1"));
+        assert_eq!(task.workspace_id, Id::new("ws-test"));
+        assert_eq!(
+            task.spec_path.as_deref(),
+            Some("specs/personas/security.md")
+        );
+        // Push-hook tasks must never trigger agent spawning.
+        assert!(task.task_type.is_none());
+        assert_eq!(task.created_at, 4242);
+    }
+
+    /// End-to-end: pushing a modification of `specs/personas/security.md`
+    /// through the real receive-pack handler updates the repo-scoped persona
+    /// entity (content + content_hash + version), resets its approval to
+    /// Pending, clears approved_by/approved_at, auto-creates the approval
+    /// task, and notifies the owner (platform-model.md §2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_persona_change_updates_entity_resets_approval_and_notifies_owner() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // The persona owner must be a real user — the hook notifies owners
+        // through the inbox.
+        let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
+        state.users.create(&owner).await.unwrap();
+
+        // Seed an APPROVED repo-scoped persona whose prompt matches the git
+        // state before the push.
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-security"),
+            "Security Agent",
+            "security",
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            "old prompt",
+            1000,
+        );
+        persona.owner = Some("user-1".to_string());
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("user-1".to_string());
+        persona.approved_at = Some(1234);
+        persona.updated_at = 1234;
+        state.personas.create(&persona).await.unwrap();
+        let hash_before = persona.content_hash.clone();
+
+        // git state: main holds specs/personas/security.md with the old
+        // content (authored with plumbing — no push, so no hook runs yet).
+        let c0 = commit_files(
+            &repo_path,
+            None,
+            "base",
+            &[("specs/personas/security.md", "old prompt")],
+        );
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        // Push a commit that modifies the persona file.
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "change persona",
+            &[
+                ("specs/personas/security.md", "new prompt v1"),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Post-receive processing runs in a spawned task — poll until the
+        // persona entity reflects the push.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let updated = loop {
+            let p = state
+                .personas
+                .find_by_slug_and_scope(
+                    "security",
+                    &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+                )
+                .await
+                .unwrap()
+                .expect("persona must exist");
+            if p.system_prompt == "new prompt v1" {
+                break p;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "persona was never updated; still: {:?}",
+                p.system_prompt
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        // Content, hash, and version updated.
+        assert_eq!(updated.system_prompt, "new prompt v1");
+        assert_eq!(updated.content_hash, persona_content_hash("new prompt v1"));
+        assert_ne!(updated.content_hash, hash_before);
+        assert_eq!(
+            updated.version, 2,
+            "version must increment on content change"
+        );
+        // Approval reset.
+        assert_eq!(
+            updated.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        assert_eq!(updated.approved_by, None);
+        assert_eq!(updated.approved_at, None);
+        assert!(updated.updated_at >= 1234);
+        // Scope and identity preserved.
+        assert_eq!(updated.id, Id::new("persona-security"));
+        assert_eq!(
+            updated.scope,
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1"))
+        );
+        assert_eq!(updated.owner.as_deref(), Some("user-1"));
+
+        // Approval task auto-created with the contract title/labels/priority.
+        let title = "Persona change requires human approval: security";
+        wait_for_task_title(&state, title).await;
+        let tasks = state.tasks.list().await.unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t.title == title)
+            .expect("approval task must exist");
+        assert_eq!(
+            task.labels,
+            vec!["persona-change".to_string(), "auto-created".to_string()]
+        );
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.repo_id, Id::new("repo-1"));
+        assert_eq!(task.workspace_id, Id::new("ws-test"));
+        assert_eq!(
+            task.spec_path.as_deref(),
+            Some("specs/personas/security.md")
+        );
+        // Exactly one approval task for this persona (no duplicates).
+        assert_eq!(tasks.iter().filter(|t| t.title == title).count(), 1);
+
+        // The owner was notified.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-1"), None, None, None, None, 100, 0)
+            .await
+            .unwrap();
+        let notif = notifs
+            .iter()
+            .find(|n| {
+                n.notification_type == gyre_common::NotificationType::PersonaChangePendingApproval
+            })
+            .expect("owner must be notified");
+        assert_eq!(notif.title, title);
+        assert_eq!(notif.entity_ref.as_deref(), Some("persona:security"));
+        assert_eq!(notif.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(notif.workspace_id, Id::new("ws-test"));
+        assert!(notif.body.as_deref().unwrap().contains("security"));
+    }
+
+    /// End-to-end: pushing a NEW persona file registers a fresh
+    /// repo-scoped persona entity with Pending approval (no prior entity,
+    /// no owner yet → task but no notification).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_new_persona_file_registers_pending_repo_scoped_entity() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let c0 = commit_files(&repo_path, None, "base", &[("src/main.rs", "fn main() {}")]);
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "add persona",
+            &[
+                ("src/main.rs", "fn main() {}"),
+                ("specs/personas/domain-reviewer.md", "review prompt"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Poll until the new entity is registered.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let persona = loop {
+            let p = state
+                .personas
+                .find_by_slug_and_scope(
+                    "domain-reviewer",
+                    &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+                )
+                .await
+                .unwrap();
+            if let Some(p) = p {
+                break p;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "new persona entity was never registered"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        assert_eq!(
+            persona.scope,
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1"))
+        );
+        assert_eq!(persona.system_prompt, "review prompt");
+        assert_eq!(persona.content_hash, persona_content_hash("review prompt"));
+        assert_eq!(persona.version, 1);
+        assert_eq!(
+            persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        assert_eq!(persona.approved_by, None);
+        assert_eq!(persona.approved_at, None);
+        assert_eq!(persona.owner, None);
+
+        // Approval task auto-created.
+        wait_for_task_title(
+            &state,
+            "Persona change requires human approval: domain-reviewer",
+        )
+        .await;
+
+        // No owner on a newly discovered persona → no notification for anyone.
+        let recent = state.notifications.list_recent(100).await.unwrap();
+        assert!(
+            recent.iter().all(|n| n.notification_type
+                != gyre_common::NotificationType::PersonaChangePendingApproval),
+            "no owner notification expected for a persona without an owner"
+        );
+    }
+
+    /// End-to-end: a push with no persona file changes must not touch persona
+    /// entities, must not create persona approval tasks, and must not notify.
+    /// The push includes a `specs/system/` change so spec-lifecycle processing
+    /// provably runs (positive control); the assertion then verifies persona
+    /// state is byte-identical after the full pipeline (graph-extraction delta
+    /// for the pushed commit is the pipeline's last write).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_without_persona_changes_leaves_personas_untouched() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
+        state.users.create(&owner).await.unwrap();
+
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-untouched"),
+            "Security Agent",
+            "security",
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            "stable prompt",
+            1000,
+        );
+        persona.owner = Some("user-1".to_string());
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("user-1".to_string());
+        persona.approved_at = Some(1234);
+        state.personas.create(&persona).await.unwrap();
+        let snapshot = persona.clone();
+
+        let c0 = commit_files(&repo_path, None, "base", &[("src/main.rs", "fn main() {}")]);
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        // Non-persona changes only: a Rust package (a Cargo.toml makes the
+        // knowledge-graph extractor produce nodes — its delta record is the
+        // pipeline's last write and our completion marker), a source file,
+        // and a specs/system/ file (the latter proves the post-receive
+        // pipeline ran past spec lifecycle — persona processing is the
+        // immediately following stage).
+        let cargo_toml =
+            "[package]\nname = \"test-proj\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "no persona changes",
+            &[
+                ("Cargo.toml", cargo_toml),
+                ("src/main.rs", "fn main() { /* v2 */ }"),
+                ("specs/system/other.md", "# other\n"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Positive control 1: spec-lifecycle task for the specs/system/ file.
+        wait_for_task_title(&state, "Implement spec: specs/system/other.md").await;
+        // Positive control 2: the pipeline's final stage (knowledge-graph
+        // extraction) records a delta for the pushed commit.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let deltas = state
+                .graph_store
+                .list_deltas(&Id::new("repo-1"), None, None)
+                .await
+                .unwrap();
+            if deltas.iter().any(|d| d.commit_sha == c1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "post-receive pipeline never completed (no graph delta for {c1})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Persona state is byte-identical to the pre-push snapshot.
+        let after = state
+            .personas
+            .find_by_slug_and_scope(
+                "security",
+                &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            )
+            .await
+            .unwrap()
+            .expect("persona must still exist");
+        assert_eq!(after.system_prompt, snapshot.system_prompt);
+        assert_eq!(after.content_hash, snapshot.content_hash);
+        assert_eq!(after.version, snapshot.version);
+        assert_eq!(
+            after.approval_status,
+            gyre_domain::PersonaApprovalStatus::Approved,
+            "approval must NOT reset when no persona file changed"
+        );
+        assert_eq!(after.approved_by, snapshot.approved_by);
+        assert_eq!(after.approved_at, snapshot.approved_at);
+        assert_eq!(after.owner, snapshot.owner);
+
+        // No persona approval tasks, no persona notifications.
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| !t
+                .title
+                .starts_with("Persona change requires human approval")),
+            "no persona approval task expected: {tasks:?}"
+        );
+        let recent = state.notifications.list_recent(100).await.unwrap();
+        assert!(recent
+            .iter()
+            .all(|n| n.notification_type
+                != gyre_common::NotificationType::PersonaChangePendingApproval));
     }
 }

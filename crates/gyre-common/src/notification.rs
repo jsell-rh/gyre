@@ -77,6 +77,10 @@ pub enum NotificationType {
     SecurityFinding,
     /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
     SecretExpiring,
+    /// Priority 2 — a repo-defined persona file changed on push and its
+    /// approval was reset to Pending (platform-model.md §2 Repo-Defined
+    /// Personas). Sent to the persona owner.
+    PersonaChangePendingApproval,
 }
 
 impl NotificationType {
@@ -110,6 +114,7 @@ impl NotificationType {
             Self::BudgetExhausted => "BudgetExhausted",
             Self::SecurityFinding => "SecurityFinding",
             Self::SecretExpiring => "SecretExpiring",
+            Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
         }
     }
 
@@ -143,6 +148,7 @@ impl NotificationType {
             "BudgetExhausted" => Some(Self::BudgetExhausted),
             "SecurityFinding" => Some(Self::SecurityFinding),
             "SecretExpiring" => Some(Self::SecretExpiring),
+            "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             _ => None,
         }
     }
@@ -177,6 +183,7 @@ impl NotificationType {
             Self::BudgetExhausted => 2,
             Self::SecurityFinding => 3,
             Self::SecretExpiring => 7,
+            Self::PersonaChangePendingApproval => 2,
         }
     }
 }
@@ -269,6 +276,10 @@ mod tests {
         assert_eq!(NotificationType::MrReverted.default_priority(), 2);
         assert_eq!(NotificationType::MergeQueueEscalation.default_priority(), 1);
         assert_eq!(NotificationType::SecretExpiring.default_priority(), 7);
+        assert_eq!(
+            NotificationType::PersonaChangePendingApproval.default_priority(),
+            2
+        );
     }
 
     #[test]
@@ -301,6 +312,7 @@ mod tests {
             NotificationType::BudgetExhausted,
             NotificationType::SecurityFinding,
             NotificationType::SecretExpiring,
+            NotificationType::PersonaChangePendingApproval,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

@@ -626,6 +626,27 @@ pub(crate) async fn spawn_agent_core(
         None
     };
 
+    // Agent-runtime §2: assemble the meta-spec prompt set for this agent —
+    // required tenant → required workspace → spec-level bindings at pinned
+    // versions. The set is injected into the agent environment and recorded
+    // (kv: agent_meta_spec_sets) so the merge attestation can cite exactly
+    // which meta-specs the agent ran under.
+    let prompt_set = crate::prompt_assembly::assemble_prompt_set(state, &task).await;
+    if !prompt_set.sections.is_empty() {
+        crate::prompt_assembly::store_prompt_set_record(
+            state,
+            &crate::prompt_assembly::AgentPromptSetRecord {
+                agent_id: agent.id.clone(),
+                task_id: task.id.clone(),
+                spec_path: task.spec_path.clone(),
+                set_sha: prompt_set.set_sha.clone(),
+                assembled_at: now,
+                meta_specs_used: prompt_set.sections.iter().map(|s| s.used.clone()).collect(),
+            },
+        )
+        .await;
+    }
+
     // Assign task to agent and advance to InProgress
     task.assigned_to = Some(agent.id.clone());
     if task.status == TaskStatus::Backlog {
@@ -705,6 +726,17 @@ pub(crate) async fn spawn_agent_core(
 
         // Inject agent context env vars so the container can bootstrap itself.
         let mut container_env = std::collections::HashMap::new();
+        // Agent-runtime §2: meta-spec system prompt. The assembled set
+        // (required tenant → required workspace → spec bindings) is the
+        // agent's behavioral instruction context.
+        let meta_prompt = crate::prompt_assembly::render_system_prompt(&prompt_set.sections);
+        if !meta_prompt.is_empty() {
+            container_env.insert("GYRE_META_SPEC_PROMPT".to_string(), meta_prompt);
+            container_env.insert(
+                "GYRE_META_SPEC_SET_SHA".to_string(),
+                prompt_set.set_sha.clone(),
+            );
+        }
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
         container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
         container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
@@ -1228,10 +1260,14 @@ pub(crate) async fn spawn_agent_core(
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
 
-    // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
-    // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
-    // Best-effort: omit when workspace cannot be efficiently determined.
-    let meta_spec_set_sha: Option<String> = None;
+    // Agent-runtime §2: meta-spec set SHA from the assembled prompt set
+    // (required tenant → required workspace → spec bindings at pinned
+    // versions). Empty set → None (no meta-specs apply to this spawn).
+    let meta_spec_set_sha: Option<String> = if prompt_set.sections.is_empty() {
+        None
+    } else {
+        Some(prompt_set.set_sha.clone())
+    };
 
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     crate::agent_audit::emit_spawned(
@@ -4213,6 +4249,154 @@ mod tests {
                 |l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"
             ),
             "no secret-sourced GYRE_CRED_* may be delivered when resolution fails:\n{dump}"
+        );
+    }
+
+    /// Env-dump variant for the meta-spec prompt delivery (agent-runtime §2):
+    /// the script writes the injected `GYRE_META_SPEC_SET_SHA` on the first
+    /// line and the raw multi-line `GYRE_META_SPEC_PROMPT` after it, atomically
+    /// (temp file + rename) so the reader never observes a partial write.
+    async fn create_meta_prompt_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let script_path = format!("{dump_path}.sh");
+        let script = format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$GYRE_META_SPEC_SET_SHA\" > '{dump_path}.tmp'\n\
+             printf '%s\\n' \"$GYRE_META_SPEC_PROMPT\" >> '{dump_path}.tmp'\n\
+             mv '{dump_path}.tmp' '{dump_path}'\n\
+             exit 0\n"
+        );
+        std::fs::write(&script_path, script).expect("writing meta-prompt dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod meta-prompt dump script");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "meta-prompt dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Agent-runtime §2 server-side delivery (task-116 repair): the
+    /// `container_env` injection of `GYRE_META_SPEC_PROMPT` /
+    /// `GYRE_META_SPEC_SET_SHA` and the `meta_spec_set_sha` spawn-response
+    /// field are guarded here end-to-end. The env-dump compute target
+    /// observes the child process environment of a real spawn with a seeded
+    /// required meta-spec; removing the `container_env.insert` block, the
+    /// `render_system_prompt` call, or the response field fails this test
+    /// while the agent-runner suite alone stays green.
+    #[tokio::test]
+    async fn spawn_delivers_meta_spec_prompt_to_agent_env() {
+        use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+        use sha2::Digest;
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("meta-dump").to_string_lossy().into_owned();
+
+        // One required, approved, tenant-scoped persona: it must be
+        // assembled into the prompt set for every spawn in any workspace.
+        let prompt_text = "You are the meta-spec delivery regression persona.";
+        let content_hash = {
+            let mut h = sha2::Sha256::new();
+            h.update(prompt_text.as_bytes());
+            hex::encode(h.finalize())
+        };
+        state
+            .meta_specs
+            .create(&gyre_domain::MetaSpec {
+                id: gyre_common::Id::new("ms-spawn-delivery"),
+                kind: MetaSpecKind::Persona,
+                name: "spawn-delivery-persona".to_string(),
+                scope: MetaSpecScope::Global,
+                scope_id: None,
+                prompt: prompt_text.to_string(),
+                version: 1,
+                content_hash,
+                required: true,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: Some("system".to_string()),
+                approved_content_hash: None,
+                approved_at: Some(1),
+                created_by: "system".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("seeding required meta-spec must succeed");
+
+        let (app, ws_id) = create_workspace(app, "meta-spec-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Meta-spec delivery task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "meta-dump-ct", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/meta-prompt");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/meta-prompt", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        // The spawn response must carry the real set SHA of the assembled set.
+        let resp_sha = json["meta_spec_set_sha"]
+            .as_str()
+            .expect("meta_spec_set_sha must be present when the prompt set is non-empty")
+            .to_string();
+        assert_eq!(resp_sha.len(), 64, "set SHA must be a SHA-256 hex digest");
+        assert!(
+            resp_sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "set SHA must be hex: {resp_sha}"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("meta-prompt dump script should have written its output");
+        let mut lines = dump.splitn(2, '\n');
+        let env_sha = lines.next().unwrap_or_default().to_string();
+        let env_prompt = lines.next().unwrap_or_default().to_string();
+
+        // The env-var delivery must carry the same set the response attests.
+        assert_eq!(
+            env_sha, resp_sha,
+            "GYRE_META_SPEC_SET_SHA env var must match the spawn response's meta_spec_set_sha"
+        );
+
+        // The rendered system prompt must contain the seeded meta-spec
+        // section: kind, name, scope, version, and the prompt content.
+        assert!(
+            env_prompt.contains("# meta:persona — spawn-delivery-persona (scope: global, v1)"),
+            "rendered prompt must contain the seeded persona section header:\n{env_prompt}"
+        );
+        assert!(
+            env_prompt.contains(prompt_text),
+            "rendered prompt must contain the seeded persona prompt text:\n{env_prompt}"
         );
     }
 
