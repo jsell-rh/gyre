@@ -71,7 +71,7 @@ From `meta-spec-reconciliation.md` §8 — Tenant-Scope Meta-Spec Changes:
 
 **Tenant scope on the registry (§8)** — `MetaSpecScope` gains a `Tenant`
 variant (scope entity in `scope_id`, mirroring the Workspace design, so the
-enum stays a plain string column). Migration `2026-11-07-000057` widens the
+enum stays a plain string column). Migration `2026-11-07-000059` (renumbered from 000057 during the rebase onto main — 000057 collided with `audit_detail_compression`) widens the
 `meta_specs.scope` CHECK to `Global|Tenant|Workspace` (portable three-table
 rebuild — children dropped before the parent, parents copied before
 children) and creates `tenant_meta_spec_sets`. Creation validates that the
@@ -193,25 +193,94 @@ One finding from the independent review of candidate `bac70a024`:
   attributes every flagged line to this task's feature commit
   `3c22bfa8`. The gate passed at the pushed head only because HEAD^1
   was a docs-only commit; on integration against the main baseline it
-  fails. Repair is mechanical rustfmt on the six files. The reformat
-  shifts a pre-existing exempted site (`specs.rs` `tenant_id`
-  fallback, fabricated-scope-defaults) from line 959 to 957; that
-  exemption entry was re-pinned to the same site (count unchanged at
-  the frozen 5, no new entries — disclosed in the commit message).
+  fails. Repair is mechanical rustfmt on the six files. (The re-pin of
+  the `specs.rs` fabricated-scope-defaults exemption entry from line
+  959 to 957 became moot in this rebase round: main's task-193 fix
+  removed that site entirely, so the entry is gone — see the rebase
+  repair section below.)
   Verified offline: rustfmt gate green against assigned base
   `233664cf8`, job base `4d6759a0b`, and `HEAD^1`; whitespace-stripped
   token comparison proves the change is formatting-only (only
   rustfmt canonical normalizations: trailing commas, closure braces,
   one import reorder); every reformatted statement contains a line
-  authored by this task's commits, so no unrelated debt was touched;
-  20 mechanical checks green. Not compiled in this sandbox (crates.io
-  unreachable — same restriction as prior rounds; see
-  `/tmp/stage/review-evidence/build-restriction-round-aa6fdd18-repair.txt`);
-  remote verification must run the deferred Rust checks.
+  authored by this task's commits, so no unrelated debt was touched.
+  Not compiled in that sandbox (crates.io unreachable — same
+  restriction as prior rounds); remote verification must run the
+  deferred Rust checks.
 
-### Test evidence (at HEAD `b7eaa775c`; prior rounds at `5ef42f5c3`)
+### Rebase repair (round 38c991eb, onto main `fefde2946`)
 
-At HEAD `b7eaa775c` (this repair round — formatting-only):
+Rebased the candidate onto the new main baseline `fefde2946` (which
+now contains task-157's rollout policies, task-103/task-193 scope-fix
+rounds, and `2026-11-07-000057_audit_detail_compression`). Conflict
+resolutions, all source-level:
+
+- **Keep-both conflicts** (schema.rs, sqlite/mod.rs table list,
+  lib.rs/mem.rs/middleware.rs AppState wiring, api/meta_specs.rs
+  types and tests, api-reference rows): §7 rollout-policy and §8
+  tenant-set code coexist — both ports wired in AppState (mem and
+  store! sites), both adapter impls, both route + ABAC resolver
+  entries, both test suites. `run_tenant_reconciliation` composes
+  with task-157's machinery: its per-workspace wave goes through
+  `run_reconciliation`, which applies each workspace's rollout
+  policy individually (§8 step 3).
+- **Migration renumber** — `2026-11-07-000057_tenant_meta_spec_sets`
+  collided with base's `2026-11-07-000057_audit_detail_compression`
+  (duplicate Diesel version: only one runs, alphabetically first).
+  Renumbered to `2026-11-07-000059_tenant_meta_spec_sets` (next
+  unused sequence; migrations are embedded by directory glob, no
+  code references the name). check-migration-versions green.
+- **fabricated-scope-defaults exemptions** — resolved to main's
+  version (2 entries, frozen count 3): main's task-193 and task-103
+  rounds fixed the specs.rs and auth.rs sites outright, making the
+  candidate's re-pinned specs.rs:957 entry stale; the git_http entry
+  is likewise gone in main. Check green against the merged tree.
+- **Coverage matrix** — row 11 (§7 Rollout Policy) takes main's
+  `implemented` (task-157 shipped there); row 12 (§8) keeps this
+  task's `implemented` row, with the migration number updated to
+  000059.
+
+Not compiled in this sandbox — crates.io unreachable (connection
+refused, no cached registry/target; same restriction as prior
+rounds — see
+`/tmp/stage/review-evidence/build-restriction-rebase-38c991eb.txt`).
+Offline verification: all 17 Rust files changed vs base parse and
+are rustfmt-canonical; `check-rustfmt-diff.py fefde2946` green; the
+20 invariant checks green; every other check script that fails on
+the merged tree fails with byte-identical (or line-shift-only)
+output on the base tree itself (see
+`/tmp/stage/review-evidence/noise-check-comparison-rebase-38c991eb.txt`).
+Remote verification must run the deferred Rust checks
+(`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` §8 suite +
+`global_spec_approval_skips_unreadable_workspace_set`,
+`SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib`).
+
+### Test evidence (at this rebase round, merged onto `fefde2946`; prior rounds below)
+
+At the rebase-repair head (round 38c991eb, merged onto main `fefde2946`):
+
+- `cargo test` could NOT run in this sandbox — crates.io unreachable
+  (connection refused), no cached registry or target dir; see
+  `/tmp/stage/review-evidence/build-restriction-rebase-38c991eb.txt`.
+  Offline verification for this round: all 17 Rust files changed vs
+  base parse and are rustfmt-canonical; `check-rustfmt-diff.py
+  fefde2946` green; the 20 invariant checks green (see
+  `/tmp/stage/review-evidence/invariant-checks-rebase-38c991eb.txt`);
+  every other check script that fails on the merged tree fails with
+  byte-identical (or line-shift-only) output on the base tree itself
+  (see
+  `/tmp/stage/review-evidence/noise-check-comparison-rebase-38c991eb.txt`).
+  Remote verification must run the full deferred Rust suite (the §8
+  tests, the rollout-policy suite from task-157 now sharing
+  `meta_specs.rs`, and `gyre-adapters` migration/repo tests — the
+  renumbered `000059_tenant_meta_spec_sets` migration must run on a
+  fresh DB).
+- No test logic was modified this round — only conflict resolution,
+  the migration directory rename, and doc updates. Both test suites
+  (§8 tenant + §7 rollout-policy) are present verbatim in
+  `api/meta_specs.rs` and `reconciliation.rs`.
+
+At HEAD `b7eaa775c` (prior round — formatting-only):
 
 - `cargo test` could NOT run in this repair sandbox — crates.io
   unreachable (connection refused), no cached registry or target dir;
