@@ -1,0 +1,29 @@
+# Review — task-100 (Platform Model Secrets Rotation Background Job)
+
+Spec: `platform-model.md` §7 "Secrets Delivery" (Rotated secret type, teardown revocation, audit events).
+Commits under review: `a42d006b8` (implementation), `b8857ff00` (task/docs bookkeeping). Base `60cf8fb64`.
+Verdict: **needs-revision** (one major finding).
+
+## Round 1
+
+Probes (all on the exact assigned branch; evidence under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --lib secret_rotation` → **8 passed, 0 failed**.
+- `cargo test -p gyre-server --lib agent_complete_revokes` / `admin_kill_revokes` → **1 passed each**.
+- `cargo test -p gyre-server --lib` → **1473 passed, 0 failed**.
+- Mutation probe 1 (no-op the `revoke_task_secrets` call in `handle_agent_complete`): `mcp::tests::agent_complete_revokes_task_scoped_secrets` **fails** — the test pins the production behavior, not a stub.
+- Mutation probe 2 (`handler_for` returns `None`): `rotation_handler_refreshes_expiring_oauth_secret` **fails** with "grant_type must be refresh_token, posted:" — the rotation test pins a real RFC 6749 §6 grant against a live local token endpoint (asserts the posted form body contains the stored refresh token and client_id).
+- Mechanical scripts: `check-arch`, `check-unbounded-external-http`, `check-mcp-write-tools`, `check-fabricated-scope-defaults`, `check-lossy-secret-conversion`, `check-scope-literal-defaults`, `check-inert-enforcement`, `check-forwarded-header-trust`, `check-forged-scope-fields` — all **pass**.
+
+Verified working (no findings):
+
+- **Rotation handler is real.** `OAuthRefreshHandler` (`secret_rotation.rs`) parses the stored credential document, performs a genuine `refresh_token` grant over the AppState client (built with a 30 s total timeout, `lib.rs:913-916`), stores the rotated document via `SecretRepository::rotate` plus the same delete/create metadata rewrite the Admin API uses (`rewrite_secret`, `api/secrets.rs:425`), sets `last_rotated_at`, and extends `expires_at` by the provider's `expires_in`. Failure (HTTP error, malformed JSON, missing fields) or no handler falls back to the task-098 priority-7 `SecretExpiring` admin notification; the failed-grant test asserts the stored value is byte-identical after a 500 response. `secret_rotation_check` is registered (`jobs.rs:531`) and spawned in `main.rs:80`, every 5 minutes.
+- **Audit events** are all present with name-only logging (never the value): `secret.accessed` per resolved secret at spawn (`spawn.rs`, inside `spawn_agent_core`, shared by the REST spawn route and MCP `gyre_spawn_worker`), `secret.rotated` on both background rotation (`rotated_by = "secret_rotation_check"`) and admin force-rotate (`api/secrets.rs:283`, `rotated_by` = admin id), `secret.revoked` per deleted task secret.
+- **Teardown on the two implemented paths is genuine**: MCP `gyre_agent_complete` (after the status update succeeds) and admin kill (alongside interrogation-policy cleanup). Tenant is derived from the agent's workspace record; an unresolvable workspace skips with a warn — no fabricated `"default"` scope. Scope selectivity is tested (other-task and workspace-scoped secrets survive).
+- Task bookkeeping: `commits:` frontmatter lists `a42d006b8`; coverage rows 39/40/41/43 in `specs/coverage/system/platform-model.md` updated accurately (they do not over-claim — row 41 still records the claims-based MCP resolution divergence).
+
+Findings:
+
+- [ ] **F1 (major): task-scoped secrets are NOT revoked on the REST agent completion path — the acceptance criterion "Task-scoped secrets revoked on agent completion/kill" is only half-enforced.** `complete_agent` (`api/spawn.rs:1255`, route `POST /api/v1/agents/:id/complete` registered at `api/mod.rs:241`) is a documented agent-completion path (`docs/api-reference.md`: "Complete agent: open MR, mark task done, clean up worktree ... agent token revoked on success"; `docs/agent-protocol.md`: "POST /api/v1/agents/{id}/complete -- teardown after work is done") and a direct sibling of the MCP `gyre_agent_complete` tool (both are fed by `spawn_agent_core`'s spawn). It performs the sibling teardown steps — agent token revocation (N-1) and interrogation-policy cleanup — but never calls `revoke_task_secrets`. Reproduced with a temporary probe test on this branch (`/tmp/stage/review-evidence/rest-complete-leak-probe.md`): spawn → seed a Task-scoped `SecretType::Ephemeral` secret for the agent's task → `POST /api/v1/agents/{id}/complete` returns 201 → the secret is still present in the secrets table. Because `run_once` scans only tenant/workspace/repo scopes (never Task), the leaked ephemeral secret also never triggers an expiry notification — it persists indefinitely until manually deleted, contradicting platform-model.md §7 ("When an agent completes or is killed, revoke any task-scoped ephemeral secrets") and the task's own acceptance criterion. The task's implementation plan names only the MCP tool and admin kill handler, but the spec text and acceptance criterion are unconditional on the completion path, and specs are the contract. Same class, lower severity (kill-adjacent rather than completion): `stale_agents.rs:37` (heartbeat-expiry abort → Dead), `api/compose.rs:213` (compose teardown), `api/repos.rs:305` (repo-archive stop), and the container/SSH/local process-exit monitors (`api/spawn.rs:964/1074/1127`) all transition agents out of Active without revoking task secrets. **Fix:** call `revoke_task_secrets` from `complete_agent` (it already has the agent's `current_task_id` and `workspace_id` at the point where it does token/policy cleanup) and add a REST-complete revocation test mirroring `agent_complete_revokes_task_scoped_secrets`; ideally also cover the stale-agent abort path.
+
+Everything else the task ships is real and well-tested; the single revision item is closing the REST completion (and, ideally, the other teardown) path(s).
