@@ -6,7 +6,7 @@ depends_on:
   - task-098
 progress: ready-for-review
 coverage_sections: []
-commits: ["c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347"]
+commits: ["c7f6d13d5049ee53a0bcbc4d24f613cb418722a4", "a42d006b8a24dbfb3fb92ea514f9ef6e5ede0347", "afd5ab18bb1b17954e04de5aafdcb6a6f4f690fe"]
 ---
 
 ## Spec Excerpt
@@ -57,10 +57,12 @@ Read `specs/system/platform-model.md` §7 "Secrets Delivery" for the rotation an
 
 All five acceptance criteria are implemented in production code on top of the task-098 `secret_rotation_check` job (already spawned every 5 minutes via `jobs::spawn_job` in `main.rs`):
 
-- **Automatic rotation via handlers.** `secret_rotation.rs` now defines a `SecretRotationHandler` trait plus a shipped `OAuthRefreshHandler` for secrets whose name ends in `_refresh_token` (e.g. `oauth_refresh_token`, `claude_max_refresh_token`). The secret's plaintext value is a JSON credential document (`token_endpoint`, `client_id`, optional `client_secret`, `refresh_token`) set by an admin through the task-098 Admin API. The handler performs a real RFC 6749 §6 `refresh_token` grant over the latency-bounded AppState HTTP client (30 s timeout), stores the rotated credential document (new access token + rotated refresh token when the provider issues one), sets `last_rotated_at`, and extends `expires_at` by the provider's `expires_in` — so a successfully rotated secret leaves the 1-hour warning window. Rotation failure (HTTP error, malformed value, missing credential fields) or a missing handler falls back to the existing priority-7 `SecretExpiring` admin notification.
-- **Teardown revocation.** `revoke_task_secrets()` deletes every Task-scoped secret for the agent's task. A shared wrapper `revoke_agent_task_secrets(state, agent)` resolves the agent's current task (no-op for taskless agents such as orchestrators) and is now called from **every path that ends an agent run**:
+- **Automatic rotation via handlers.** `secret_rotation.rs` defines a `SecretRotationHandler` trait plus a shipped `OAuthRefreshHandler` for secrets whose name ends in `_refresh_token` (e.g. `oauth_refresh_token`, `claude_max_refresh_token`). The secret's plaintext value is a JSON credential document (`token_endpoint`, `client_id`, optional `client_secret`, `refresh_token`) set by an admin through the task-098 Admin API. The handler performs a real RFC 6749 §6 `refresh_token` grant over the latency-bounded AppState HTTP client (30 s timeout), stores the rotated credential document (new access token + rotated refresh token when the provider issues one), sets `last_rotated_at`, and extends `expires_at` by the provider's `expires_in` — so a successfully rotated secret leaves the 1-hour warning window. Rotation failure (HTTP error, malformed value, missing credential fields) or a missing handler falls back to the existing priority-7 `SecretExpiring` admin notification.
+- **Teardown revocation.** `revoke_task_secrets()` deletes every Task-scoped secret for the agent's task. A shared wrapper `revoke_agent_task_secrets(state, agent)` resolves the agent's current task (no-op for taskless agents such as orchestrators) and is called from **every path that ends an agent run**:
   - MCP `gyre_agent_complete` (after the agent status update succeeds) and REST `POST /api/v1/agents/{id}/complete` (`complete_agent`, alongside token revocation and interrogation-policy cleanup — review round-1 F1);
+  - REST `POST /api/v1/agents/{id}/stop` (`stop_agent`, alongside token revocation — review round-2 F1) and `POST /api/v1/agents/{id}/fail` (`fail_agent`, after the terminal Failed transition — review round-2 F2);
   - `POST /api/v1/admin/agents/{id}/kill` (alongside policy cleanup);
+  - the spec-reject cascaded shutdown (`reject_spec` in `api/specs.rs`, which cancels the spec's in-flight tasks and stops their Active agents — review round-2 F3, mirroring the repo-archive stop);
   - stale-agent heartbeat abort (`stale_agents.rs`, the kill that marks the agent Dead), compose teardown (`POST /api/v1/compose/teardown`), repo-archive agent stop (the agents' tasks are cancelled, so their one-time secrets must not outlive the task), and the process/container/SSH exit monitors in `spawn.rs` (the run's process is gone).
 
   The tenant is resolved from the agent's workspace record; an unresolvable workspace skips revocation with a warn — no fabricated scope.
@@ -71,15 +73,16 @@ All five acceptance criteria are implemented in production code on top of the ta
 
 ### Test evidence
 
-- `cargo test -p gyre-server --lib` — **1484 passed, 0 failed** (after the round-1 repair, on the branch with the task-103 base merged in), including:
+- `cargo test -p gyre-server --lib` — **1495 passed, 0 failed** (after the round-2 repair, on the branch with the task-103 base merged in), including:
   - `secret_rotation::tests::rotation_handler_refreshes_expiring_oauth_secret` — real refresh grant against a local token endpoint; asserts the grant posted the stored refresh token/client_id, the stored value is the rotated document, expiry extended past the window, `last_rotated_at` set, and no admin notification.
   - `secret_rotation::tests::rotation_handler_failure_falls_back_to_admin_notification` — 500 from the endpoint leaves the value untouched and notifies the admin.
   - `secret_rotation::tests::malformed_handler_value_falls_back_to_admin_notification`.
   - `secret_rotation::tests::revoke_task_secrets_deletes_only_that_task_scope` / `..._skips_unresolvable_workspace`.
-  - `mcp::tests::agent_complete_revokes_task_scoped_secrets`, `api::admin::tests::admin_kill_revokes_task_scoped_secrets`, and (round-1 repair) `api::spawn::tests::complete_agent_revokes_task_scoped_secrets` — the REST completion path — each assert the task-scoped secret is deleted while workspace-scoped and other-task secrets survive. The REST test was verified to fail without the `complete_agent` fix (bug-killing, not self-confirming).
+  - `mcp::tests::agent_complete_revokes_task_scoped_secrets`, `api::admin::tests::admin_kill_revokes_task_scoped_secrets`, and (round-1) `api::spawn::tests::complete_agent_revokes_task_scoped_secrets` — the REST completion path.
+  - (round-2) `api::spawn::tests::stop_agent_revokes_task_scoped_secrets` and `api::spawn::tests::fail_agent_revokes_task_scoped_secrets` — REST stop/fail; `api::specs::tests::reject_spec_revokes_task_scoped_secrets` — the spec-reject cascaded shutdown. Each asserts the task-scoped secret is deleted while workspace-scoped and other-task secrets survive. All three were verified to FAIL when the fix call sites are removed (negative control run during the round-2 repair; evidence: `/tmp/stage/review-evidence/task-100-round2-repair.md`) — bug-killing, not self-confirming.
   - Existing task-098 tests (expiring/expired notify, dedup, healthy never notify) still pass unchanged.
 - `cargo test -p gyre-adapters secret` — 17 passed (adapter contract untouched).
-- `cargo clippy -p gyre-server --all-targets` — no warnings in any file touched by this task (the repo-wide pre-existing warning set is unchanged by the round-1 repair; the +1 count vs. the round-0 note comes from the merged task-103 base).
+- `cargo clippy -p gyre-server --all-targets` — no warnings in any region touched by this task (the repo-wide pre-existing warning set is unchanged by the round-2 repair).
 - All mechanical check scripts pass (`check-arch`, `check-unbounded-external-http`, `check-fabricated-scope-defaults`, `check-lossy-secret-conversion`, `check-scope-literal-defaults`, `check-inert-enforcement`, `check-task-commit-attribution`, and the rest).
 
 ### Notes
