@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["30fba783f1fb1ab90a52cb7ce658970eb32d3780", "727befd94d89718cc3fe45b45a4c307da3277875"]
 ---
 
 ## Spec Excerpt
@@ -51,108 +51,14 @@ From `platform-model.md` §4 — Agent Coordination Protocol (MCP-Based):
 
 ## Acceptance Criteria
 
-- [x] MCP server responds to `prompts/list` with the 4 spec-required prompts
-- [x] MCP server responds to `prompts/get` for each prompt with populated content
-- [x] `system://persona` resolves via the 3-level persona fallback (repo → workspace → tenant)
-- [x] `system://context` includes current task title, spec refs, and worktree info
-- [x] `system://constraints` includes budget limits and scope boundaries
-- [x] Spawn handler resolves persona and injects prompt content into agent environment
-- [x] `meta_spec_set_sha` is set from the resolved persona's meta-spec set (not `None`)
-- [x] Tests cover all 4 prompts and error cases
-
-## Shipped
-
-Commit `30fba783f1fb1ab90a52cb7ce658970eb32d3780` on
-`pipeline/task-150/f06d043bf7b14804af98d1a0de824406-1`.
-
-### Behavior
-
-- **`prompts/list` / `prompts/get` (mcp.rs):** two new JSON-RPC dispatcher arms.
-  `prompts/list` returns the four §4.3 prompts (`system://persona`,
-  `system://protocol`, `system://context`, `system://constraints`) in
-  spec-table order with descriptions and argument schemas (`slug` for
-  persona, `task_id` for context). `prompts/get` renders one prompt in the
-  MCP result shape `{description, messages: [{role, content: {type,
-  text}}]}`; unknown or missing `name` → JSON-RPC `-32602`. `initialize` now
-  advertises the `prompts` capability.
-- **Prompt builders (new `api/prompts.rs`, single source of truth):**
-  - `system://persona` — explicit `slug` argument resolved
-    nearest-scope-wins (repo → workspace → tenant) via
-    `resolve_persona_in_chain`; without a slug, the persona bound to the
-    agent record. Only `Approved` personas resolve (fail-closed); an
-    unbound agent errors honestly instead of getting fabricated text.
-  - `system://protocol` — static platform norms: interaction norms (MCP-only
-    interaction, heartbeat, complete-never-merge), the Ralph loop
-    (observe/plan/act/monitor/reconcile), and escalation rules (cross-repo
-    via orchestrators, spec changes are human decisions).
-  - `system://context` — task title/spec ref/description/status/priority/
-    labels/depends_on, worktree branch+path, repo name/path/default branch
-    (explicit `task_id` argument, else the caller's bound task; unknown task
-    errors).
-  - `system://constraints` — workspace + tenant budget limits with
-    used/remaining, `max_agent_lifetime_secs` cap, and tenant/workspace/repo
-    scope boundaries, read from `budget_configs`/`budget_usages` (the same
-    stores `check_spawn_budget` enforces from, so prompt and enforcement
-    cannot disagree).
-- **Spawn injection (`api/spawn.rs`):** `SpawnAgentRequest` gains an optional
-  `persona_slug`. Resolution is fail-closed (unknown or non-Approved slug →
-  400, no orphaned agent rows) and the resolved persona is persisted as
-  `agent.persona_id`. The four prompts are injected into the container env
-  as `GYRE_PROMPT_PERSONA` (only when a persona is bound — the spec defines
-  personas only for the orchestrator tiers, so an unbound worker gets no
-  persona prompt rather than a fabricated one), `GYRE_PROMPT_PROTOCOL`,
-  `GYRE_PROMPT_CONTEXT`, `GYRE_PROMPT_CONSTRAINTS`. `gyre_spawn_worker`
-  (MCP) forwards `persona_slug`.
-- **Orchestrator launches (`api/orchestrator.rs`):**
-  `launch_orchestrator_process` injects the same four prompts, the persona
-  prompt coming from the fail-closed-resolved bound persona; the
-  orchestrator context prompt honestly records "no task / no worktree"
-  (orchestrators are not task-bound).
-- **`meta_spec_set_sha`:** computed with `compute_meta_spec_set_sha` for the
-  governing workspace (the same hash spec approval and constraint evaluation
-  use); `null` only when the workspace has no meta-spec set configured.
-  Personas carry no meta-spec-set field of their own, so the workspace's
-  active set — the judgment set the persona draws from — is the source.
-- **Docs:** `GYRE_PROMPT_*` rows in docs/agent-protocol.md env-var table;
-  prompts table + spawn row update in docs/api-reference.md.
-
-### Test evidence
-
-- `mcp::tests` — 9 new prompt tests: list shape/order/argument schemas;
-  initialize capability; persona 3-level fallback + repo-scope override;
-  bound-persona without slug + honest unbound error; unapproved/unknown slug
-  rejection; context task+spec+description+worktree+repo and unknown-task
-  error; constraints budget+remaining+lifetime+scope boundaries; protocol
-  content + result shape; agent-identity requirement for scoped prompts;
-  unknown/missing name error paths. Module total: 95 passed.
-- `api::spawn::tests` — env-dump tests through a real child process:
-  all-four-prompts with persona (persona prompt verbatim, persona_id bound,
-  task title/spec ref/branch/workspace in the dump), without persona (other
-  three injected, no `GYRE_PROMPT_PERSONA`, no fabricated persona_id),
-  persona_slug fail-closed (unknown + Pending → 400, no orphaned rows),
-  `meta_spec_set_sha` = SHA-256 of the stored set JSON / null without a set.
-  Module total: 45 passed.
-- `api::orchestrator::tests` — launch-injection test (persona prompt from
-  the bound persona, all four vars, honest no-task context). Module total:
-  12 passed.
-- Full `cargo test -p gyre-server --lib`: **1552 passed, 0 failed**.
-- Mechanical checks at HEAD: `check-arch.sh`, `check-mcp-write-tools.sh`
-  (prompts are read-only, correctly outside the `needs_write` gate),
-  `check-abac-route-registry.sh`, `check-inert-enforcement.sh`,
-  `check-forged-scope-fields.sh`, `check-scope-literal-defaults.sh`,
-  `check-fabricated-scope-defaults.sh` — all OK; `cargo fmt --check` clean;
-  clippy clean on all new code.
-
-### Notes for review
-
-- A worker spawned without `persona_slug` receives no
-  `GYRE_PROMPT_PERSONA`: the spec tables personas only for the two
-  orchestrator tiers and defines no worker persona, so there is nothing
-  real to inject. `prompts/get system://persona` reports the same honestly
-  ("no persona bound; pass a slug").
-- Multi-line prompt values are delivered as multi-line env vars (same
-  delivery channel as `GYRE_CRED_*`); the reference entrypoint/agent-runner
-  reads them as whole variables.
+- [ ] MCP server responds to `prompts/list` with the 4 spec-required prompts
+- [ ] MCP server responds to `prompts/get` for each prompt with populated content
+- [ ] `system://persona` resolves via the 3-level persona fallback (repo → workspace → tenant)
+- [ ] `system://context` includes current task title, spec refs, and worktree info
+- [ ] `system://constraints` includes budget limits and scope boundaries
+- [ ] Spawn handler resolves persona and injects prompt content into agent environment
+- [ ] `meta_spec_set_sha` is set from the resolved persona's meta-spec set (not `None`)
+- [ ] Tests cover all 4 prompts and error cases
 
 ## Agent Instructions
 
@@ -162,3 +68,83 @@ Commit `30fba783f1fb1ab90a52cb7ce658970eb32d3780` on
 - Read `crates/gyre-domain/src/workspace.rs` for the Persona struct (line ~107-175)
 - Follow the existing JSON-RPC pattern in mcp.rs for the new handlers
 - The prompts/list and prompts/get methods are part of the MCP specification — follow the same response shape as tools/list and resources/list
+
+## Shipped
+
+### MCP prompts/list + prompts/get (mcp.rs)
+
+`prompts/list` returns the four §4.3 prompts (`system://persona`,
+`system://protocol`, `system://context`, `system://constraints`) with
+descriptions and argument schemas (`slug` for persona, `task_id` for
+context). `prompts/get` renders one prompt as
+`{description, messages: [{role, content: {type, text}}]}`; unknown or
+missing `name` → JSON-RPC `-32602`. `initialize` advertises the `prompts`
+capability.
+
+### Prompt builders (api/prompts.rs, single source of truth)
+
+- `system://persona` — explicit `slug` resolved nearest-scope-wins
+  (repo → workspace → tenant) via `resolve_persona_in_chain`; without a
+  slug, the persona bound to the agent record. Only `Approved` personas
+  resolve (fail-closed); an unbound agent errors honestly instead of
+  getting fabricated text.
+- `system://protocol` — static platform norms: MCP-only interaction,
+  heartbeat, complete-never-merge, the Ralph loop
+  (observe/plan/act/monitor/reconcile), and escalation rules.
+- `system://context` — task title/spec ref/description/status/priority,
+  worktree branch+path, repo name/path/default branch (explicit `task_id`
+  argument, else the caller's bound task; unknown task errors).
+- `system://constraints` — workspace + tenant budget limits with remaining
+  budget, agent lifetime cap, and workspace/tenant scope boundaries.
+
+### Spawn injection (api/spawn.rs)
+
+Optional `persona_slug` request field resolves the persona through the
+repo → workspace → tenant chain, fails closed (400) on unknown or
+unapproved slugs, and persists the binding as the agent's `persona_id`.
+The four prompts are injected into the container env as `GYRE_PROMPT_PERSONA`
+(only when a persona is bound), `GYRE_PROMPT_PROTOCOL`,
+`GYRE_PROMPT_CONTEXT`, and `GYRE_PROMPT_CONSTRAINTS` — content identical
+to what `prompts/get` serves.
+
+### meta_spec_set_sha semantics (merge reconciliation)
+
+This round merged the assignment base `402142b1` (task-106 jj rebase +
+task-116 meta-spec prompt assembly) into the candidate branch. Where both
+sides had fixed the previously-hardcoded `None` `meta_spec_set_sha`, the
+resolution keeps task-116's approved semantics: the spawn response carries
+the SHA-256 of the **assembled meta-spec prompt set** (required tenant →
+required workspace → spec bindings), which is exactly the set delivered as
+`GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — the response attests
+what was actually injected. Null when the assembled set is empty. The
+candidate's parallel workspace-`meta_spec_sets` hash was dropped in favor
+of that single source of truth, and `docs/api-reference.md` describes the
+actual semantics. `docs/agent-protocol.md` retains the pre-existing M32
+wording inherited unchanged from the base.
+
+### Test evidence
+
+Focused probes (logs under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --lib -- api::spawn::tests:: mcp::tests::
+  prompt_assembly::` — **155 passed, 0 failed**, including:
+  `spawn_injects_all_four_system_prompts_with_persona` (env-dump compute
+  target asserts all four `GYRE_PROMPT_*` vars with task title, spec ref,
+  branch, workspace scope), `spawn_without_persona_injects_prompts_but_no_persona`,
+  `spawn_persona_slug_fails_closed` (unknown slug 400 "not found in scope
+  chain", Pending persona 400, no orphaned agent rows), the four
+  `mcp_prompts_*` suites (list shape, all four get handlers, `-32602`
+  errors, scope-chain persona resolution, budget/scope constraints),
+  `spawn_delivers_meta_spec_prompt_to_agent_env` (task-116 delivery guard)
+  and `spawn_omits_meta_spec_set_sha_without_required_meta_specs`
+  (empty-set null case, added this round).
+- `docker/gyre-agent` `npm test` — 12/12 pass (cred-proxy + agent-runner).
+- Invariant scripts all exit 0: check-arch, check-mcp-write-tools,
+  check-abac-route-registry, check-migration-versions,
+  check-byte-slice-truncation, check-relative-path-defaults,
+  check-inert-enforcement, check-dead-message-kinds,
+  check-mem-port-contracts, check-fail-open-ref-resolution.
+- `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) succeeds. A
+  `cargo clippy` failure in `gyre-common` (`used as a loop counter`) is
+  pre-existing on the assigned base — `gyre-common` is byte-identical to
+  `402142b1` in this branch; not introduced by this task.
