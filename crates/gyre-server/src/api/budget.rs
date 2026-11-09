@@ -12,7 +12,8 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use gyre_domain::{BudgetConfig, BudgetUsage};
+use gyre_common::Id;
+use gyre_domain::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 use serde::{Deserialize, Serialize};
 
 use super::{new_id, now_secs};
@@ -337,58 +338,70 @@ pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64
         .await;
 }
 
-/// Record one LLM invocation into the budget audit log and the real-time
-/// workspace + tenant usage counters (platform-model.md §5 Budget Tracking).
+/// Per-call LLM usage detail sufficient to append one `BudgetCallRecord`
+/// (platform-model.md §Budget Tracking) and roll it into the real-time
+/// workspace/tenant counters. Callers supply the scope they resolved from
+/// authenticated context — never caller-supplied form fields.
+#[derive(Debug, Clone)]
+pub struct LlmCallUsage {
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    /// None for user-initiated LLM queries with no repo context.
+    pub repo_id: Option<Id>,
+    /// None for user-initiated LLM queries.
+    pub agent_id: Option<Id>,
+    pub task_id: Option<Id>,
+    /// "agent_run" or "llm_query".
+    pub usage_type: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub model: String,
+    /// Git SHA of the prompt template that produced the call, for audit
+    /// (ui-layout.md §2: "git SHA recorded in cost entries").
+    pub prompt_template_sha: Option<String>,
+}
+
+/// Append one per-call budget audit record and increment the workspace +
+/// tenant `tokens_used_today` / `cost_today` counters for it.
 ///
-/// Single entry point shared by the agent usage report path (`agent_run`) and
-/// every user-initiated LLM query path (`llm_query`: briefing/ask,
-/// explorer-views/generate, specs/assist, MCP specs/assist). Appends a
-/// `BudgetCallRecord` via `state.budget_calls` and increments the
-/// `tokens_used_today`/`cost_today` counters via [`record_budget_usage`].
+/// This is the single entry point for LLM usage recording: every
+/// agent-initiated report (`POST /api/v1/agents/:id/usage`) and every
+/// user-initiated LLM query path (briefing/ask, explorer-views/generate,
+/// specs/assist, MCP spec_assist) funnels through here so the per-call audit
+/// trail and the aggregate counters can never diverge.
 ///
-/// Best-effort on the audit insert (a failed audit row must not fail the LLM
-/// response), but the counter increment always runs.
-pub async fn record_llm_budget_call(
-    state: &AppState,
-    tenant_id: &str,
-    workspace_id: &str,
-    repo_id: Option<&str>,
-    agent_id: Option<&str>,
-    task_id: Option<&str>,
-    usage_type: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-    model: &str,
-    prompt_template_sha: Option<&str>,
-) {
-    let record = gyre_domain::BudgetCallRecord {
+/// Best-effort persistence: a failed append or counter increment is logged
+/// and never fails the caller's request (the LLM answer is already produced;
+/// usage recording must not discard it).
+pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
+    let record = BudgetCallRecord {
         id: new_id(),
-        tenant_id: gyre_common::Id::new(tenant_id.to_string()),
-        workspace_id: gyre_common::Id::new(workspace_id.to_string()),
-        repo_id: repo_id.map(|i| gyre_common::Id::new(i.to_string())),
-        agent_id: agent_id.map(|i| gyre_common::Id::new(i.to_string())),
-        task_id: task_id.map(|i| gyre_common::Id::new(i.to_string())),
-        usage_type: usage_type.to_string(),
-        input_tokens,
-        output_tokens,
-        cost_usd,
-        model: model.to_string(),
-        prompt_template_sha: prompt_template_sha.map(str::to_string),
+        tenant_id: usage.tenant_id.clone(),
+        workspace_id: usage.workspace_id.clone(),
+        repo_id: usage.repo_id.clone(),
+        agent_id: usage.agent_id.clone(),
+        task_id: usage.task_id.clone(),
+        usage_type: usage.usage_type.clone(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cost_usd: usage.cost_usd,
+        model: usage.model.clone(),
+        prompt_template_sha: usage.prompt_template_sha.clone(),
         timestamp: now_secs(),
     };
     if let Err(e) = state.budget_calls.save(&record).await {
         tracing::warn!(
-            workspace_id = %workspace_id,
-            usage_type = %usage_type,
-            "Failed to persist budget call record: {e}"
+            workspace_id = %usage.workspace_id,
+            usage_type = %usage.usage_type,
+            "failed to persist budget call record: {e}"
         );
     }
     record_budget_usage(
         state,
-        workspace_id,
-        input_tokens.saturating_add(output_tokens),
-        cost_usd,
+        &usage.workspace_id.to_string(),
+        usage.input_tokens.saturating_add(usage.output_tokens),
+        usage.cost_usd,
     )
     .await;
 }
@@ -636,79 +649,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_llm_budget_call_increments_counters_and_persists_record() {
-        // Regression (ui-layout.md §2 Budget charging): every LLM call must
-        // charge the workspace budget. If the wiring from
-        // record_llm_budget_call is removed, this test fails on both the
-        // counter and the audit-record assertions.
+    async fn record_llm_call_usage_increments_workspace_and_tenant_counters() {
+        // task-190 regression: recording one LLM call must append a
+        // BudgetCallRecord and increment BOTH the workspace and the tenant
+        // tokens_used_today/cost_today counters. With the wiring removed
+        // (record_budget_usage having zero callers) these stayed frozen at 0.
         let state = crate::mem::test_state();
-        let ws_key = super::workspace_key("ws-budget-rec");
-        let tenant_key = super::tenant_key().to_string();
-        super::record_llm_budget_call(
+        super::record_llm_call_usage(
             &state,
-            "tenant-1",
-            "ws-budget-rec",
-            None,
-            None,
-            None,
-            "llm_query",
-            700,
-            300,
-            0.01,
-            "test-model",
-            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: gyre_common::Id::new("ws-budget"),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: 700,
+                output_tokens: 300,
+                cost_usd: 0.05,
+                model: "test-model".to_string(),
+                prompt_template_sha: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            },
         )
         .await;
 
-        // Workspace counters incremented by input+output.
         let ws_usage = state
             .budget_usages
-            .get_usage(&ws_key)
+            .get_usage(&super::workspace_key("ws-budget"))
             .await
             .unwrap()
-            .expect("workspace usage entry must exist after recording");
+            .expect("workspace usage must exist after recording");
         assert_eq!(ws_usage.tokens_used_today, 1000);
-        assert!((ws_usage.cost_today - 0.01).abs() < 1e-9);
+        assert!((ws_usage.cost_today - 0.05).abs() < 1e-9);
 
-        // Tenant counters incremented too (forge aggregates in real time).
         let tenant_usage = state
             .budget_usages
-            .get_usage(&tenant_key)
+            .get_usage(super::tenant_key())
             .await
             .unwrap()
-            .expect("tenant usage entry must exist after recording");
+            .expect("tenant usage must exist after recording");
         assert_eq!(tenant_usage.tokens_used_today, 1000);
+        assert!((tenant_usage.cost_today - 0.05).abs() < 1e-9);
 
-        // Audit record retrievable via the repository.
         let records = state
             .budget_calls
-            .list_by_workspace("ws-budget-rec", 0, 10)
+            .list_by_workspace("ws-budget", 0, 10)
             .await
             .unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].usage_type, "llm_query");
-        assert_eq!(records[0].input_tokens, 700);
-        assert_eq!(records[0].output_tokens, 300);
-        assert_eq!(records[0].tenant_id.as_str(), "tenant-1");
-        assert_eq!(records[0].model, "test-model");
+        assert_eq!(records.len(), 1, "one BudgetCallRecord must be appended");
+        let r = &records[0];
+        assert_eq!(r.usage_type, "llm_query");
+        assert_eq!(r.input_tokens, 700);
+        assert_eq!(r.output_tokens, 300);
+        assert!((r.cost_usd - 0.05).abs() < 1e-9);
+        assert_eq!(r.tenant_id.as_str(), "tenant-1");
+        assert!(r.agent_id.is_none() && r.task_id.is_none() && r.repo_id.is_none());
         // Prompt-template provenance persisted on the audit record
         // (ui-layout.md §2 "git SHA recorded in cost entries").
         assert_eq!(
-            records[0].prompt_template_sha.as_deref(),
+            r.prompt_template_sha.as_deref(),
             Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         );
     }
 
     #[tokio::test]
-    async fn recorded_usage_enforces_max_tokens_per_day() {
-        // Budget charging feeds real enforcement: record usage past a
-        // workspace token limit and assert check_spawn_budget fires. Guards
-        // against counters that never move (frozen-zero regression).
+    async fn recorded_usage_makes_token_budget_limit_fire() {
+        // task-190 regression: check_spawn_budget's max_tokens_per_day arm
+        // can only fire if recorded usage actually reaches the counters.
+        // Before the wiring, tokens_used_today was always 0 and this
+        // check passed regardless of the limit.
         let state = crate::mem::test_state();
         state
             .budget_configs
             .set_config(
-                &super::workspace_key("ws-cap"),
+                &super::workspace_key("ws-limit"),
                 &gyre_domain::BudgetConfig {
                     max_tokens_per_day: Some(1000),
                     ..Default::default()
@@ -716,24 +730,54 @@ mod tests {
             )
             .await
             .unwrap();
-        super::record_llm_budget_call(
+
+        // Below the limit: spawn budget check passes.
+        super::record_llm_call_usage(
             &state,
-            "tenant-1",
-            "ws-cap",
-            None,
-            None,
-            None,
-            "llm_query",
-            600,
-            600,
-            0.0,
-            "test-model",
-            None,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: gyre_common::Id::new("ws-limit"),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: 400,
+                output_tokens: 100,
+                cost_usd: 0.0,
+                model: "test-model".to_string(),
+                prompt_template_sha: None,
+            },
         )
         .await;
+        assert!(
+            super::check_spawn_budget(&state, "ws-limit").await.is_ok(),
+            "500/1000 tokens used: spawn must be allowed"
+        );
 
-        let result = super::check_spawn_budget(&state, "ws-cap").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("max_tokens_per_day=1000"));
+        // Past the limit: the counters are real inputs, so the check fires.
+        super::record_llm_call_usage(
+            &state,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: gyre_common::Id::new("ws-limit"),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: 400,
+                output_tokens: 200,
+                cost_usd: 0.0,
+                model: "test-model".to_string(),
+                prompt_template_sha: None,
+            },
+        )
+        .await;
+        let err = super::check_spawn_budget(&state, "ws-limit")
+            .await
+            .expect_err("1100/1000 tokens used: spawn must be rejected");
+        assert!(
+            err.contains("max_tokens_per_day"),
+            "error must name the exceeded limit, got: {err}"
+        );
     }
 }

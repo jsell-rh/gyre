@@ -484,16 +484,20 @@ pub async fn assist_spec(
         return Ok(sse_error_stream(err));
     }
 
-    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
+    // platform-model.md §Budget Tracking). The LlmPort does not return actual
+    // usage, so keep the existing estimate — ~4 chars per token for the
+    // prompts plus response overhead and a 3x reasoning multiplier — and
+    // split it into input/output for the per-call budget record so that
+    // input + output equals the estimate.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
-    let base_estimate = (estimated_input + 500) as f64;
-    let estimated_tokens = base_estimate * 3.0;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(caller.agent_id.clone()),
         None,
         "llm_query",
-        estimated_tokens,
+        base_estimate,
         "tokens",
         now_secs(),
     );
@@ -501,41 +505,39 @@ pub async fn assist_spec(
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
     }
 
-    // Budget Tracking (platform-model.md §5): persist an `llm_query`
-    // BudgetCallRecord and increment the workspace + tenant counters. The
-    // LlmPort does not report actual usage for stream_complete, so the
-    // existing estimate is split into input/output tokens. Tenant scope comes
-    // from the repo's workspace; skip and log if unresolvable.
-    let tenant_id = state
+    // Per-call `llm_query` budget record + workspace/tenant counter
+    // increment (platform-model.md §Budget Tracking), with the
+    // prompt-template git SHA for audit (ui-layout.md §2). Tenant scope
+    // comes from the repo's workspace; skip and log if unresolvable.
+    let ws_for_budget = state
         .workspaces
         .find_by_id(&repo.workspace_id)
         .await
         .ok()
-        .flatten()
-        .map(|ws| ws.tenant_id.to_string());
-    match tenant_id {
-        Some(tenant_id) => {
-            super::budget::record_llm_budget_call(
-                &state,
-                &tenant_id,
-                repo.workspace_id.as_str(),
-                Some(repo.id.as_str()),
-                None,
-                None,
-                "llm_query",
-                estimated_input as u64,
-                (estimated_tokens - estimated_input as f64) as u64,
-                0.0,
-                &model,
-                template.sha.as_deref(),
-            )
-            .await;
-        }
-        None => tracing::warn!(
-            repo_id = %repo_id,
+        .flatten();
+    if let Some(ws) = ws_for_budget {
+        super::budget::record_llm_call_usage(
+            &state,
+            &super::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: Some(repo.id.clone()),
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
             workspace_id = %repo.workspace_id,
-            "specs/assist: workspace unresolvable; budget counters not incremented"
-        ),
+            "specs/assist budget recording skipped: workspace not found"
+        );
     }
 
     // Build SSE events: partial events stream the explanation progressively,

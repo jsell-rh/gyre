@@ -1198,6 +1198,17 @@ pub(crate) async fn spawn_agent_core(
     // Best-effort: omit when workspace cannot be efficiently determined.
     let meta_spec_set_sha: Option<String> = None;
 
+    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    crate::agent_audit::emit_spawned(
+        state,
+        &agent,
+        &req.task_id,
+        &compute_target_label,
+        &req.branch,
+        &auth.agent_id,
+    )
+    .await;
+
     Ok(SpawnAgentResponse {
         agent: {
             let mut r = AgentResponse::from(agent);
@@ -1335,6 +1346,14 @@ pub async fn complete_agent(
             let _ = task.transition_status(TaskStatus::Review);
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
+
+            // meta-spec-reconciliation.md §7 auto_merge: when the workspace's
+            // rollout policy sets auto_merge, a reconciliation MR merges
+            // automatically once its gates pass — enqueue it into the merge
+            // queue here (gate passage is still required; the merge processor
+            // merges only after gates pass). Default (auto_merge: false)
+            // leaves the MR for a human/agent-triggered enqueue.
+            crate::reconciliation::maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
         }
     }
 
@@ -1352,8 +1371,19 @@ pub async fn complete_agent(
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
 
+    // Agent lifecycle audit events (observability.md §Audit Event Types).
+    crate::agent_audit::emit_completed(
+        &state,
+        &agent,
+        agent.current_task_id.as_ref(),
+        &mr.id,
+        &mr.source_branch,
+    )
+    .await;
+
     // Revoke the agent's token — completed agents must not continue to authenticate (N-1).
-    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
+    // Revocation is audited as an AgentTokenRevoked event carrying the token's jti.
+    crate::agent_audit::revoke_agent_token(&state, &agent, "agent_completed").await;
 
     // HSI §4: Clean up interrogation ABAC policies on completion.
     cleanup_interrogation_policies(&state, &id).await;
@@ -1498,6 +1528,18 @@ pub async fn record_agent_usage(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
+    let workspace = state
+        .workspaces
+        .find_by_id(&agent.workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "agent {} references missing workspace {}",
+                agent.id,
+                agent.workspace_id
+            ))
+        })?;
+
     let now = now_secs();
     let usage = AgentUsage {
         agent_id: agent.id.clone(),
@@ -1508,6 +1550,32 @@ pub async fn record_agent_usage(
     };
 
     state.agents.record_usage(&usage).await?;
+
+    // Platform-model.md §Budget Tracking: every usage report appends one
+    // per-call budget record and rolls into the workspace + tenant
+    // tokens_used_today / cost_today counters (the input check_spawn_budget
+    // evaluates). Best-effort — never fails the report.
+    super::budget::record_llm_call_usage(
+        &state,
+        &super::budget::LlmCallUsage {
+            tenant_id: workspace.tenant_id.clone(),
+            workspace_id: agent.workspace_id.clone(),
+            repo_id: agent.repo_id.clone(),
+            agent_id: Some(agent.id.clone()),
+            task_id: agent.current_task_id.clone(),
+            usage_type: "agent_run".to_string(),
+            input_tokens: req.tokens_input,
+            output_tokens: req.tokens_output,
+            cost_usd: req.cost_usd,
+            model: workspace
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
+            // Agent-initiated runs have no user-facing prompt template.
+            prompt_template_sha: None,
+        },
+    )
+    .await;
 
     tracing::info!(
         agent_id = %id,
@@ -1609,7 +1677,8 @@ pub async fn stop_agent(
     state.agents.update(&agent).await?;
 
     // Revoke the agent's token so it can no longer authenticate.
-    let _ = state.kv_store.kv_remove("agent_tokens", &id).await;
+    // Revocation is audited as an AgentTokenRevoked event carrying the token's jti.
+    crate::agent_audit::revoke_agent_token(&state, &agent, "agent_stopped").await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
@@ -1923,6 +1992,7 @@ mod tests {
     use crate::mem::{test_state, test_state_with_secrets};
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -2440,6 +2510,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_emits_agent_spawned_audit_event() {
+        // observability.md §Audit Event Types: a successful spawn must record
+        // an AgentSpawned audit event with name/task_id/compute_target/branch/
+        // spawned_by detail fields.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "audit spawn task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/audit-spawn").await;
+        let agent_id = json["agent"]["id"].as_str().unwrap();
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_spawned").await;
+        assert_eq!(events.len(), 1, "exactly one agent_spawned event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some(agent_id));
+        assert_eq!(ev.agent_id.as_ref().map(|id| id.as_str()), Some(agent_id));
+        assert_eq!(ev.detail["name"], "worker-1");
+        assert_eq!(ev.detail["task_id"], task_id);
+        assert_eq!(ev.detail["compute_target"], "local");
+        assert_eq!(ev.detail["branch"], "feat/audit-spawn");
+        // Global test token authenticates as "system".
+        assert_eq!(ev.detail["spawned_by"], "system");
+    }
+
+    #[tokio::test]
+    async fn complete_emits_agent_completed_and_token_revoked_audit_events() {
+        // observability.md §Audit Event Types: a successful complete must
+        // record AgentCompleted (task_id/mr_id/branch) and the token
+        // revocation must be audited with the revoked token's jti.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "audit complete task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/audit-complete").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/audit-complete",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        let mr_id = mr_json["id"].as_str().unwrap().to_string();
+
+        let completed = crate::agent_audit::recorded_events(&state, "agent_completed").await;
+        assert_eq!(completed.len(), 1, "exactly one agent_completed event");
+        let ev = &completed[0];
+        assert_eq!(ev.resource_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.detail["task_id"], task_id);
+        assert_eq!(ev.detail["mr_id"], mr_id);
+        assert_eq!(ev.detail["branch"], "feat/audit-complete");
+
+        let revoked = crate::agent_audit::recorded_events(&state, "agent_token_revoked").await;
+        assert_eq!(revoked.len(), 1, "exactly one agent_token_revoked event");
+        assert_eq!(revoked[0].detail["reason"], "agent_completed");
+        let jti = revoked[0].detail["jti"]
+            .as_str()
+            .unwrap_or_else(|| panic!("jti must be a string: {}", revoked[0].detail));
+        assert!(!jti.is_empty(), "revocation must carry the token's jti");
+        // The audited jti must match the jti actually embedded in the minted token.
+        let minted_jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&agent_token)
+            .expect("minted token must carry a jti");
+        assert_eq!(jti, minted_jti);
+    }
+
+    #[tokio::test]
     async fn complete_revokes_agent_token() {
         let app = app();
         let (app, repo_id) = create_repo(app).await;
@@ -2747,6 +2898,98 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    // ── Agent usage reporting → budget recording (task-190) ────────────────────
+
+    #[tokio::test]
+    async fn agent_usage_report_records_budget_call_and_increments_counters() {
+        // task-190 regression: POST /api/v1/agents/:id/usage must (a) append a
+        // BudgetCallRecord with usage_type "agent_run" and (b) increment the
+        // workspace AND tenant tokens_used_today/cost_today counters, so that
+        // GET /api/v1/workspaces/:id/budget reflects the usage and
+        // check_spawn_budget has real inputs. With the recording wiring
+        // removed, the counters stay frozen at 0 and this test fails.
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(Arc::clone(&state));
+        let (app, ws_id) = create_workspace(app, "ws-usage-budget").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "usage budget task").await;
+        let (_, spawn_json) = do_spawn(app.clone(), &repo_id, &task_id, "feat/usage-budget").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "tokens_input": 600,
+            "tokens_output": 400,
+            "cost_usd": 0.12,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/usage"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // (a) Per-call audit record retrievable via list_by_workspace.
+        let records = state
+            .budget_calls
+            .list_by_workspace(&ws_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "usage report must append exactly one BudgetCallRecord"
+        );
+        let r = &records[0];
+        assert_eq!(r.usage_type, "agent_run");
+        assert_eq!(r.input_tokens, 600);
+        assert_eq!(r.output_tokens, 400);
+        assert!((r.cost_usd - 0.12).abs() < 1e-9);
+        assert_eq!(r.agent_id.as_ref().unwrap().as_str(), agent_id);
+        assert_eq!(r.workspace_id.as_str(), ws_id);
+
+        // (b) Workspace + tenant counters incremented.
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&super::super::budget::workspace_key(&ws_id))
+            .await
+            .unwrap()
+            .expect("workspace budget usage must exist after usage report");
+        assert_eq!(ws_usage.tokens_used_today, 1000);
+        assert!((ws_usage.cost_today - 0.12).abs() < 1e-9);
+        let tenant_usage = state
+            .budget_usages
+            .get_usage(super::super::budget::tenant_key())
+            .await
+            .unwrap()
+            .expect("tenant budget usage must exist after usage report");
+        assert_eq!(tenant_usage.tokens_used_today, 1000);
+        assert!((tenant_usage.cost_today - 0.12).abs() < 1e-9);
+
+        // GET /api/v1/workspaces/:id/budget reflects the increased usage.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/budget"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["usage"]["tokens_used_today"], 1000);
+        assert!((v["usage"]["cost_today"].as_f64().unwrap() - 0.12).abs() < 1e-9);
     }
 
     #[tokio::test]
@@ -3109,7 +3352,6 @@ mod tests {
 
     use crate::AppState;
     use gyre_common::{Secret, SecretScope, SecretType};
-    use std::sync::Arc;
 
     fn test_secret(name: &str, scope: SecretScope, scope_id: &str, tenant_id: &str) -> Secret {
         let id = uuid::Uuid::new_v4().to_string();
@@ -3469,6 +3711,13 @@ mod tests {
                 _id: &gyre_common::Id,
                 _tenant_id: &str,
             ) -> anyhow::Result<Option<Vec<u8>>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn find_by_id(
+                &self,
+                _id: &gyre_common::Id,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Option<gyre_common::Secret>> {
                 anyhow::bail!("failing secrets port")
             }
             async fn list_by_scope(

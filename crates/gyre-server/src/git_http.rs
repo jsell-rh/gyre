@@ -610,6 +610,10 @@ pub async fn git_receive_pack(
                         if let Some(ref rs) = signer {
                             ctx.set("subject.root_signer", rs);
                         }
+                        // An attestation chain was located for this push — the
+                        // attribute `builtin:require-signed-authorization`
+                        // (§7.2) keys its unless-clause on.
+                        ctx.set_bool("subject.attestation_chain_present", true);
                         ctx.set("resource.type", "attestation");
                         ctx.set("resource.repo_id", &repo_id_clone);
 
@@ -791,6 +795,10 @@ pub async fn git_receive_pack(
                 divergence_ports,
                 Arc::clone(&state_clone.spec_assertion_results),
                 notification_scope,
+                Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                    kv: Arc::clone(&state_clone.kv_store),
+                    metrics: Arc::clone(&state_clone.metrics),
+                }),
             )
             .await;
         }

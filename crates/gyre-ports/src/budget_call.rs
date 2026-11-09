@@ -2,20 +2,23 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_domain::BudgetCallRecord;
 
-/// Persistence port for per-call LLM budget audit records (platform-model.md §5
-/// Budget Tracking).
+/// Append-only persistence port for per-call LLM budget audit records
+/// (platform-model.md §Budget Tracking).
 ///
-/// Append-only log of every LLM invocation — agent-initiated (`agent_run`) and
-/// user-initiated (`llm_query`: briefing/ask, explorer-views/generate,
-/// specs/assist). Written by the budget recording helpers; read for reporting
-/// and retention.
+/// Every LLM invocation — agent-initiated (`usage_type = "agent_run"`) or
+/// user-initiated (`"llm_query"`: briefing/ask, explorer-views/generate,
+/// specs/assist) — appends one record. The aggregate counters in
+/// `BudgetUsageRepository` are the enforcement input; this table is the
+/// per-call audit trail behind them and the basis for later reporting and
+/// retention.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait BudgetCallRepository: Send + Sync {
-    /// Append a call record. Insert-only; the record id is unique.
+    /// Append a per-call record. Insert-only; duplicate `id` is an error.
     async fn save(&self, record: &BudgetCallRecord) -> Result<()>;
 
-    /// List call records for a workspace with `timestamp >= since`, newest
-    /// first, at most `limit` rows.
+    /// List records for a workspace, newest first, filtered to
+    /// `timestamp >= since`. `limit` caps the number of rows returned.
     async fn list_by_workspace(
         &self,
         workspace_id: &str,

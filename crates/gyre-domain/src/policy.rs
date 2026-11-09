@@ -58,7 +58,7 @@ pub enum ConditionValue {
 }
 
 /// A single attribute match condition. All conditions in a policy are ANDed.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Condition {
     /// Dot-separated attribute path, e.g. `"subject.workspace_role"`.
     pub attribute: String,

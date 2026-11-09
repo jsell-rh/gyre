@@ -47,6 +47,7 @@ impl From<BudgetCallRow> for BudgetCallRecord {
         }
     }
 }
+
 #[derive(Insertable)]
 #[diesel(table_name = budget_call_records)]
 struct NewBudgetCallRow<'a> {
@@ -104,16 +105,18 @@ impl BudgetCallRepository for PgStorage {
     ) -> Result<Vec<BudgetCallRecord>> {
         let pool = Arc::clone(&self.pool);
         let ws = workspace_id.to_string();
+        let tenant_id = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = budget_call_records::table
+                .filter(budget_call_records::tenant_id.eq(&tenant_id))
                 .filter(budget_call_records::workspace_id.eq(&ws))
                 .filter(budget_call_records::timestamp.ge(since as i64))
                 .order_by(budget_call_records::timestamp.desc())
                 .then_order_by(budget_call_records::id.desc())
                 .limit(limit)
                 .load::<BudgetCallRow>(&mut *conn)
-                .context("list budget call records")?;
+                .context("list budget call records by workspace")?;
             Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
         })
         .await?

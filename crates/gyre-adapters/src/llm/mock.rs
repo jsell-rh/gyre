@@ -10,6 +10,7 @@ use gyre_ports::{
     ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCallingResponse,
     ToolDefinition,
 };
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -33,6 +34,13 @@ pub struct MockLlmAdapter {
     /// The error emitted after the partial chunks in `stream_error_after`
     /// mode.
     pub stream_error_message: String,
+    /// Scripted response sequence for `complete_with_tools`: each call
+    /// returns the next entry (the last entry repeats once exhausted).
+    /// When set, it takes precedence over `response` for tool-calling
+    /// completions — used to test multi-turn agent loops (e.g. the explorer
+    /// self-check refinement flow) where consecutive calls must return
+    /// different outputs.
+    script: Option<std::sync::Mutex<VecDeque<String>>>,
 }
 
 impl MockLlmAdapter {
@@ -44,9 +52,9 @@ impl MockLlmAdapter {
             stream_error_after: None,
             partial_chunks: vec![],
             stream_error_message: String::new(),
+            script: None,
         }
     }
-
     /// Create an adapter that echoes the user_prompt verbatim.
     ///
     /// Useful for asserting that prompt construction logic is correct.
@@ -68,6 +76,7 @@ impl MockLlmAdapter {
             stream_error_after: None,
             partial_chunks: vec![],
             stream_error_message: String::new(),
+            script: None,
         }
     }
 
@@ -81,6 +90,34 @@ impl MockLlmAdapter {
             stream_error_after: Some(chunks.len()),
             partial_chunks: chunks,
             stream_error_message: message.into(),
+            script: None,
+        }
+    }
+
+    /// Create an adapter whose `complete_with_tools` calls return the given
+    /// responses in order (last repeats once exhausted). Other methods
+    /// (`complete`, `stream_complete`, `predict_json`) keep the fixed
+    /// `response` behavior.
+    pub fn scripted_tool_responses(responses: Vec<String>) -> Self {
+        Self {
+            response: String::new(),
+            failure: None,
+            stream_error_after: None,
+            partial_chunks: vec![],
+            stream_error_message: String::new(),
+            script: Some(std::sync::Mutex::new(VecDeque::from(responses))),
+        }
+    }
+
+    /// Next scripted tool-calling response, or `None` when not scripted.
+    fn next_scripted(&self) -> Option<String> {
+        let mut script = self.script.as_ref()?.lock().ok()?;
+        if script.len() > 1 {
+            script.pop_front()
+        } else {
+            // Keep the last entry so the adapter never runs dry — callers
+            // may loop more times than the script anticipates.
+            script.front().cloned()
         }
     }
 
@@ -169,6 +206,13 @@ impl LlmPort for MockLlmAdapter {
         _tools: &[ToolDefinition],
         _max_tokens: Option<u32>,
     ) -> Result<ToolCallingResponse> {
+        if let Some(text) = self.next_scripted() {
+            return Ok(ToolCallingResponse {
+                text,
+                tool_calls: vec![],
+                stop_reason: "end_turn".to_string(),
+            });
+        }
         let user_text = messages
             .iter()
             .filter(|m| m.role == "user")
@@ -199,6 +243,15 @@ impl MockLlmPortFactory {
     pub fn echo() -> Self {
         Self {
             inner: Arc::new(MockLlmAdapter::echo()),
+        }
+    }
+
+    /// Create a factory whose adapter returns the given responses from
+    /// `complete_with_tools` in order (last repeats once exhausted).
+    /// See `MockLlmAdapter::scripted_tool_responses`.
+    pub fn scripted_tool_responses(responses: Vec<String>) -> Self {
+        Self {
+            inner: Arc::new(MockLlmAdapter::scripted_tool_responses(responses)),
         }
     }
 }
@@ -284,5 +337,48 @@ mod tests {
         let _port1 = factory.for_model("gemini-2.0-flash-001");
         let _port2 = factory.for_model("gemini-1.5-pro-002");
         // No panic = success.
+    }
+
+    #[tokio::test]
+    async fn mock_scripted_tool_responses_return_in_order() {
+        // Each complete_with_tools call returns the next scripted response.
+        let factory =
+            MockLlmPortFactory::scripted_tool_responses(vec!["first".into(), "second".into()]);
+        let port = factory.for_model("any");
+        let r1 = port
+            .complete_with_tools("sys", &[], &[], None)
+            .await
+            .unwrap();
+        let r2 = port
+            .complete_with_tools("sys", &[], &[], None)
+            .await
+            .unwrap();
+        assert_eq!(r1.text, "first");
+        assert_eq!(r2.text, "second");
+        assert_eq!(r2.stop_reason, "end_turn");
+    }
+
+    #[tokio::test]
+    async fn mock_scripted_tool_responses_repeat_last_when_exhausted() {
+        // The adapter never runs dry — the last entry repeats.
+        let factory = MockLlmPortFactory::scripted_tool_responses(vec!["only".to_string()]);
+        let port = factory.for_model("any");
+        for _ in 0..3 {
+            let r = port
+                .complete_with_tools("sys", &[], &[], None)
+                .await
+                .unwrap();
+            assert_eq!(r.text, "only");
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_scripted_tool_responses_do_not_affect_plain_complete() {
+        // Only complete_with_tools is scripted; complete() keeps the fixed
+        // response behavior.
+        let mut adapter = MockLlmAdapter::scripted_tool_responses(vec!["scripted".into()]);
+        adapter.response = "fixed".to_string();
+        let r = adapter.complete("sys", "user", None).await.unwrap();
+        assert_eq!(r, "fixed");
     }
 }
