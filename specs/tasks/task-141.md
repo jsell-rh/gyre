@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Repo-Defined Personas"
-commits: ["7ffe72535"]
+commits: ["7ffe72535721289c39b3ffca17d9c422439ab61c"]
 ---
 
 ## Spec Excerpt
