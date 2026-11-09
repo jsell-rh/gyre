@@ -11,7 +11,7 @@ use crate::AppState;
 const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
 
 /// Run one stale-agent detection cycle. Used by the job framework for manual triggering.
-pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
+pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -87,7 +87,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "dead",
                         "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
                     })),
-                );
+                ).await;
 
                 // Notify the spawning user that the agent was abandoned (HSI §2).
                 if let Some(ref spawned_by) = agent.spawned_by {
@@ -131,7 +131,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "stopped",
                         "reason": format!("Agent {} stopped (no heartbeat, pause behavior)", agent.name),
                     })),
-                );
+                ).await;
             }
 
             DisconnectedBehavior::ContinueOffline => {
@@ -146,7 +146,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
 /// TASK-093 (§3.3): spawn a replacement for a dead orchestrator. Fresh id,
 /// unique name suffix, same scope/tier, new scoped JWT. No task, no worktree.
-async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: u64) {
+async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, now: u64) {
     // Unique replacement name: append a restart counter suffix.
     let base = dead.name.split("-restart-").next().unwrap_or(&dead.name);
     let mut n = 1;
@@ -164,6 +164,9 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     replacement.repo_id = dead.repo_id.clone();
     replacement.orchestrator_type = dead.orchestrator_type.clone();
     replacement.restart_on_failure = true;
+    // F2: keep the persona binding across restarts — the replacement must
+    // run with the same persona as the orchestrator it replaces.
+    replacement.persona_id = dead.persona_id.clone();
     if let Err(e) = replacement.transition_status(AgentStatus::Active) {
         warn!("restart: failed to activate replacement: {e}");
         return;
@@ -186,11 +189,11 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
         &dead.orchestrator_type.to_string(),
     );
-    match token {
+    match &token {
         Ok(t) => {
             let _ = state
                 .kv_store
-                .kv_set("agent_tokens", &replacement.id.to_string(), t)
+                .kv_set("agent_tokens", &replacement.id.to_string(), t.clone())
                 .await;
         }
         Err(e) => warn!("restart: failed to mint orchestrator JWT: {e}"),
@@ -202,6 +205,34 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     // Budget: the dead agent's slot was freed by the Dead transition, claim it.
     crate::api::budget::increment_active_agents(state, &dead.workspace_id.to_string()).await;
 
+    // F3: relaunch the process. A replacement that is only a persisted row
+    // is not a running orchestrator; if the launch fails the replacement
+    // will be declared Dead by this same detector and restarted again.
+    if let Ok(t) = &token {
+        if let Some(workspace) = state
+            .workspaces
+            .find_by_id(&replacement.workspace_id)
+            .await
+            .ok()
+            .flatten()
+        {
+            let outcome = crate::api::orchestrator::launch_orchestrator_process(
+                state,
+                &replacement,
+                &workspace,
+                t,
+            )
+            .await;
+            if outcome.launch_status != "running" {
+                warn!(
+                    agent_id = %replacement.id,
+                    detail = outcome.launch_detail.as_deref().unwrap_or_default(),
+                    "restart: orchestrator process launch failed"
+                );
+            }
+        }
+    }
+
     info!(
         agent_id = %replacement.id,
         replaced = %dead.id,
@@ -212,7 +243,7 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
 
 /// TASK-093 (§3.3): notify the live workspace orchestrator that a repo
 /// orchestrator died (Directed-tier Escalation message).
-async fn escalate_repo_orchestrator_death(state: &AppState, dead: &gyre_domain::Agent) {
+async fn escalate_repo_orchestrator_death(state: &Arc<AppState>, dead: &gyre_domain::Agent) {
     use gyre_common::message::Destination;
 
     let peers = match state.agents.list_by_workspace(&dead.workspace_id).await {
