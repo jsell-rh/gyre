@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "262782a688a55fd4b17a68f602c663e9fddfe43c"]
 ---
 
 ## Spec Excerpt
@@ -122,7 +122,8 @@ threshold logic):
 
 ### Test evidence
 
-All commands and outputs in `/tmp/stage/review-evidence/task-191-evidence.md`.
+All commands and outputs in `/tmp/stage/review-evidence/task-191-evidence.md`
+(post-rebase run).
 `cargo test -p gyre-server --lib api::budget` — 17 pass, including the
 acceptance tests that fail if enforcement is removed: 85% warning
 (message + notification, agent alive, no re-fire on subsequent calls),
@@ -130,10 +131,29 @@ below-threshold silence, ≥100% graceful stop (agent `Dead`, counter 0,
 worktree record intact, reassignment task referencing the task id, no
 re-fire), HardKill inline (no timer), QueuePause (kv pause state set, agent
 alive), cost-limit crossing, serde round-trips, and API/SQLite persistence.
-Admin kill tests (33) pass after the helper cutover; full touched-crate
-suites pass (`gyre-server` 1383, `gyre-adapters` 369+12 ignored,
-`gyre-domain` 426); `check-arch.sh` and all mechanical check scripts pass;
-clippy is clean in the touched files.
+Admin kill tests (35) pass after the helper cutover (including the upstream
+`admin_kill_emits_lifecycle_audit_events`, which pins token revocation with
+reason `admin_kill` and the `AgentKilled` audit attribution); the full
+`gyre-server` lib suite passes post-merge (1492); `check-arch.sh`, the
+migration-version and migration-portability checks, and the other relevant
+mechanical check scripts pass; clippy is clean in the touched files.
+
+### Rebase resolution (merge of assignment base fefde294)
+
+The assignment base added audit hardening to `admin_kill_agent` (auth
+extractor for `killed_by` attribution, PID capture + attested-PID fallback
+for the `AgentKilled` event, `revoke_agent_token`, `emit_killed`) while this
+branch had extracted that same body into the shared `kill_agent` helper.
+Resolution folded the upstream additions INTO the helper (no fork):
+`kill_agent(state, agent, reason, preserve_worktree, killed_by,
+revoke_reason)` now performs the kill/decrement/worktree handling plus token
+revocation and the `AgentKilled` audit event; the admin handler passes the
+caller identity and `"admin_kill"` (upstream test asserts this exactly),
+budget enforcement passes `"budget_enforcement"` / `"budget_kill"`. The
+budget migration `2026-10-10-000058_budget_enforcement_action` does not
+collide with the base's `2026-10-08-000058_user_entity_profile_fields`
+(Diesel versions include the date prefix; `check-migration-versions.sh`
+passes).
 
 ### Notes for review
 
