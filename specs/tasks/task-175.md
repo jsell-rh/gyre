@@ -61,9 +61,8 @@ Read `ui-layout.md` §6-§8 for the exact layout specifications. Also reference 
 
 ## Shipped
 
-The full §6-§8 surface was built across earlier rounds; this round repaired the verification
-findings (rustfmt + clippy in `specs_assist.rs`) and resolved the merge onto base 59ff5d01
-(task-172 Editor Split / AccordionItem refactor).
+The full §6-§8 surface was built across earlier rounds; this round resolved the merge onto base
+fefde2946f3a0af1f212588f54591516fee0f7b2 (task-089 HSI Explorer Generated Views).
 
 **§6 Specs View** (`SpecDashboard.svelte` + `DetailPanel.svelte`): workspace/tenant scope renders
 the sortable table (Path, Status, Kind, Owner, Last Updated) with status/kind filter pills and the
@@ -106,42 +105,40 @@ keys referenced by Inbox.svelte (view_mr, view_agent, resume_queue, resuming_que
 queue_resumed, resume_failed) - those buttons rendered raw key text. Key-extraction audit
 reports zero missing keys for Inbox/Briefing/SpecDashboard.
 
-**Repairs this round (verification finding 1462f7a9)**:
-- rustfmt: `crates/gyre-server/src/api/specs_assist.rs` reformatted where the fan-out round
-  left lines unformatted (the `get_blob_sha` call chain in `save_spec` and the
-  `list_for_user` call in the fan-out test).
-- clippy `needless_borrows_for_generic_args`: `Id::new(&format!("membership-{uid}"))` changed
-  to `Id::new(format!("membership-{uid}"))` in the fan-out test.
-- Merge onto base 59ff5d01: the `Inbox.test.js` conflict was resolved keeping BOTH suites -
-  this branch's P5 conflict-action, PascalCase wire-format, and spec_approval inline-diff
-  tests, plus the base's entity-ref detail-panel and accordion-header-structure tests. Both
-  suites pass against the merged `Inbox.svelte`/`AccordionItem.svelte`.
+**Repairs this round (rebase repair 4417ddd7, base fefde2946f3a0af1f212588f54591516fee0f7b2)**:
+Three conflicted files resolved as source-conflict unions (merge commit 04dd1c3ef):
+- `Inbox.svelte` typeNormMap: kept this branch's full map (all HSI §8 priority types +
+  extended NotificationType variants + legacy rows) and re-added base's `MrCreated` legacy
+  entry; verified against the merged `gyre-common/src/notification.rs` variant list.
+- `en.json`: dropped base's `decisions.reconciliation_note` — superseded by the real Reconcile
+  action (createTask) and unreferenced after the merge; kept this branch's
+  `decisions.accept = "Confirm"` (HSI §8 P10 specced label Confirm/Dismiss).
+- `Inbox.test.js`: kept BOTH suites — this branch's P5 conflict-action, spec_approval
+  inline-diff, and PascalCase wire-format tests, plus base's HSI §1.5 scope-filtering and
+  system-explorer §9 assertion-failure tests. No duplicate test names in the union.
+No Rust source conflicts this round; the earlier rustfmt/clippy repairs in `specs_assist.rs`
+ride through the merge unchanged.
 
 **Test evidence** (focused probes; full gates owned by verification):
 - `cd web && npx vitest run src/__tests__/Inbox.test.js src/__tests__/AccordionItem.test.js
-  src/__tests__/AccordionScoping.test.js` - 78 passed, 0 failed.
+  src/__tests__/AccordionScoping.test.js` - 83 passed, 0 failed (up from 78 pre-merge:
+  base's scope-filtering + assertion-failure tests joined the suite).
 - `cd web && npx vitest run src/__tests__/Briefing.test.js src/__tests__/SpecDashboard.test.js
-  src/__tests__/DetailPanel.test.js src/__tests__/EditorSplit.test.js` - 127 passed, 0 failed.
+  src/__tests__/DetailPanel.test.js src/__tests__/EditorSplit.test.js` - 133 passed, 0 failed
+  (up from 127 pre-merge).
   Together the probes cover: accordion behavior, all 10 priority types' action buttons incl.
   the PascalCase wire-format matrix, tenant-scope workspace badges, P2 inline diff before
   approve, P3 override/close-MR API calls, P5 revert arbitration, P7 pause paths, briefing
   sections, entity-ref detail-panel navigation, time-range selector, spec table
   columns/sorting/filters, repo-scope progressbar aria attributes, spec detail-panel tab set,
-  and the merged AccordionItem header/quick-link structure.
-- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec` - 8 passed, 0 failed,
-  including `save_spec_fans_out_approval_notification_to_eligible_members` (Admin+Developer
-  get exactly one notification with the structured body, Viewer gets none, system fallback
-  unused when members exist).
-- `rustfmt --edition 2021 --check crates/gyre-server/src/api/specs_assist.rs` - clean; the
-  clippy finding is fixed (no specs_assist diagnostics from a local `cargo clippy -p
-  gyre-server --lib` pass).
+  HSI §1.5 scope filtering, and the merged AccordionItem header/quick-link structure.
+- i18n key audit (every `$t('...')` key in Inbox/Briefing/SpecDashboard/Inbox.test resolved
+  against `en.json`) - zero missing keys; dropping `reconciliation_note` broke no reference.
 - `cd web && npx vite build` - clean (dist rebuild not committed, per task-210 convention
   08361ee0).
 
-Sandbox notes: this sandbox's cargo registry cache is cold, so crates were fetched online
-instead of `--offline`. The sandbox clippy (1.99) additionally fires `never_loop` on
-pre-existing `gyre-domain/src/rust_extractor.rs` code that is identical on base 59ff5d01 -
-not a task finding, left to verification's pinned toolchain. TCP listener probe unsupported,
-so no local server/browser end-to-end run; component tests + production build stand in.
+Sandbox notes: frontend deps installed via `npm ci` (locked versions). No Rust conflicts
+this round so no cargo probes repeated. TCP listener probe unsupported, so no local
+server/browser end-to-end run; component tests + production build stand in.
 Probe commands, exit codes, and outputs are recorded in
 `/tmp/stage/review-evidence/task-175-probes.md`.
