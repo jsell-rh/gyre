@@ -636,7 +636,16 @@ async fn kill_exhausted_agents(state: &AppState, ws_id: &Id) {
         // Preserve the worktree/branch/partial MR — the work must survive
         // for reassignment (platform-model.md §5).
         let reason = "killed after budget exhaustion (grace period elapsed)";
-        if let Err(e) = super::admin::kill_agent(state, &agent, reason, true).await {
+        if let Err(e) = super::admin::kill_agent(
+            state,
+            &agent,
+            reason,
+            true,
+            "budget_enforcement",
+            "budget_kill",
+        )
+        .await
+        {
             tracing::warn!(agent_id = %agent.id, "budget enforcement: kill failed: {e}");
             continue;
         }
