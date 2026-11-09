@@ -966,8 +966,7 @@ pub(crate) async fn spawn_agent_core(
                                             // Platform Model §7: the run's process is gone — revoke its
                                             // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
                                             crate::secret_rotation::revoke_agent_task_secrets(
-                                                &state_mon,
-                                                &a,
+                                                &state_mon, &a,
                                             )
                                             .await;
                                         }
@@ -1083,8 +1082,7 @@ pub(crate) async fn spawn_agent_core(
                                             // Platform Model §7: the run's process is gone — revoke its
                                             // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
                                             crate::secret_rotation::revoke_agent_task_secrets(
-                                                &state_mon,
-                                                &a,
+                                                &state_mon, &a,
                                             )
                                             .await;
                                         }
@@ -1143,8 +1141,7 @@ pub(crate) async fn spawn_agent_core(
                                             // Platform Model §7: the run's process is gone — revoke its
                                             // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
                                             crate::secret_rotation::revoke_agent_task_secrets(
-                                                &state_mon,
-                                                &a,
+                                                &state_mon, &a,
                                             )
                                             .await;
                                         }
@@ -1430,7 +1427,6 @@ pub async fn complete_agent(
     // for the agent's task and logs `secret.revoked` per secret. Mirrors the
     // MCP gyre_agent_complete teardown.
     crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
-
 
     // Create a jj bookmark for the agent's branch in their worktree (best-effort).
     // This persists the branch tip in jj's bookmark namespace for traceability.
@@ -2736,7 +2732,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-rest-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                &mk(
+                    "sec-rest-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    task_id.clone(),
+                ),
                 b"v1",
             )
             .await
@@ -2744,7 +2745,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-rest-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                &mk(
+                    "sec-rest-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    ws_id.clone(),
+                ),
                 b"v2",
             )
             .await
@@ -2752,7 +2758,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-rest-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                &mk(
+                    "sec-rest-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
                 b"v3",
             )
             .await
@@ -2841,7 +2852,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-stop-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                &mk(
+                    "sec-stop-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    task_id.clone(),
+                ),
                 b"v1",
             )
             .await
@@ -2849,7 +2865,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-stop-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                &mk(
+                    "sec-stop-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    ws_id.clone(),
+                ),
                 b"v2",
             )
             .await
@@ -2857,7 +2878,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-stop-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                &mk(
+                    "sec-stop-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
                 b"v3",
             )
             .await
@@ -2946,7 +2972,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-fail-task", "EPHEMERAL_DB", SecretScope::Task, task_id.clone()),
+                &mk(
+                    "sec-fail-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    task_id.clone(),
+                ),
                 b"v1",
             )
             .await
@@ -2954,7 +2985,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-fail-ws", "SHARED_KEY", SecretScope::Workspace, ws_id.clone()),
+                &mk(
+                    "sec-fail-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    ws_id.clone(),
+                ),
                 b"v2",
             )
             .await
@@ -2962,7 +2998,12 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-fail-other", "OTHER_TASK", SecretScope::Task, "task-unrelated".to_string()),
+                &mk(
+                    "sec-fail-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
                 b"v3",
             )
             .await
