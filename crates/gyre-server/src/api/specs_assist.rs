@@ -761,11 +761,7 @@ pub async fn save_spec(
                 .ok()
                 .flatten()
                 .is_some();
-            let target = if known {
-                recipient
-            } else {
-                Id::new("system")
-            };
+            let target = if known { recipient } else { Id::new("system") };
             if !resolved.contains(&target) {
                 resolved.push(target);
             }

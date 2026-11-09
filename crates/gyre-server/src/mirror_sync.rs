@@ -87,8 +87,10 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             let state = std::sync::Arc::clone(&fanout_state);
                             let notif = notif.clone();
                             futures_util::FutureExt::boxed(async move {
-                                crate::notification_dispatcher::dispatch_to_channels(&state, &notif)
-                                    .await;
+                                crate::notification_dispatcher::dispatch_to_channels(
+                                    &state, &notif,
+                                )
+                                .await;
                             })
                         };
                         let divergence_ports = Some(crate::graph_extraction::DivergencePorts {

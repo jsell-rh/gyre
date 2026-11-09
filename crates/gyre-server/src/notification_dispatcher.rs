@@ -627,21 +627,51 @@ mod tests {
         // user-management.md §Notification Entity band comments (authoritative
         // examples) + the task-112 review amendment recording the full table.
         // Urgent: security finding, agent escalation, MR reverted.
-        assert_eq!(band(NotificationType::SecurityFinding), NotificationPriority::Urgent);
-        assert_eq!(band(NotificationType::AgentEscalation), NotificationPriority::Urgent);
-        assert_eq!(band(NotificationType::MrReverted), NotificationPriority::Urgent);
+        assert_eq!(
+            band(NotificationType::SecurityFinding),
+            NotificationPriority::Urgent
+        );
+        assert_eq!(
+            band(NotificationType::AgentEscalation),
+            NotificationPriority::Urgent
+        );
+        assert_eq!(
+            band(NotificationType::MrReverted),
+            NotificationPriority::Urgent
+        );
         // High: budget warning, gate failure.
-        assert_eq!(band(NotificationType::BudgetWarning), NotificationPriority::High);
-        assert_eq!(band(NotificationType::GateFailure), NotificationPriority::High);
+        assert_eq!(
+            band(NotificationType::BudgetWarning),
+            NotificationPriority::High
+        );
+        assert_eq!(
+            band(NotificationType::GateFailure),
+            NotificationPriority::High
+        );
         // High: secret approaching expiry (platform-model §7, merged from
         // main) — same approaching-deadline class as budget warning.
-        assert_eq!(band(NotificationType::SecretExpiring), NotificationPriority::High);
+        assert_eq!(
+            band(NotificationType::SecretExpiring),
+            NotificationPriority::High
+        );
         // Medium: stale dependency, spec drift.
-        assert_eq!(band(NotificationType::MetaSpecDrift), NotificationPriority::Medium);
-        assert_eq!(band(NotificationType::DependencyChainTooDeep), NotificationPriority::Medium);
+        assert_eq!(
+            band(NotificationType::MetaSpecDrift),
+            NotificationPriority::Medium
+        );
+        assert_eq!(
+            band(NotificationType::DependencyChainTooDeep),
+            NotificationPriority::Medium
+        );
         // Low: informational (MR merged, gate passed).
-        assert_eq!(band(NotificationType::AgentCompleted), NotificationPriority::Low);
-        assert_eq!(band(NotificationType::SuggestedSpecLink), NotificationPriority::Low);
+        assert_eq!(
+            band(NotificationType::AgentCompleted),
+            NotificationPriority::Low
+        );
+        assert_eq!(
+            band(NotificationType::SuggestedSpecLink),
+            NotificationPriority::Low
+        );
     }
 
     /// One captured outbound HTTP delivery: (url, body, headers).
@@ -705,7 +735,7 @@ mod tests {
 
     fn sample_notif(user: &str, notification_type: NotificationType) -> Notification {
         let title = format!("{} event", notification_type.as_str());
-        let n = Notification::new(
+        Notification::new(
             Id::new("notif-1"),
             Id::new("ws-1"),
             Id::new(user),
@@ -713,8 +743,7 @@ mod tests {
             title,
             "tenant-1",
             2_000_000,
-        );
-        n
+        )
     }
 
     #[tokio::test]
@@ -1014,11 +1043,12 @@ mod tests {
             1,
             "Urgent agent escalation must notify workspace Owners even when the spawner is online"
         );
-        assert_eq!(spawner_notifs.len(), 1, "spawner remains the primary recipient");
-        assert!(
-            admin_notifs.is_empty(),
-            "online spawner: no Admin fan-out"
+        assert_eq!(
+            spawner_notifs.len(),
+            1,
+            "spawner remains the primary recipient"
         );
+        assert!(admin_notifs.is_empty(), "online spawner: no Admin fan-out");
     }
 
     #[tokio::test]
