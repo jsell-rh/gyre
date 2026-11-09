@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["29ad56fb6bb5bb7a27302272753228cb6c902de2", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7"]
 ---
 
 ## Spec Excerpt
@@ -125,15 +125,16 @@ Read `specs/system/abac-policy-engine.md` §Core Concepts through §Policy Examp
 
 ## Shipped
 
-Domain types (`gyre-domain/src/policy.rs`): `Policy` carries every spec field
-(`id`, `name`, `description`, `scope`, `scope_id: Option<Id>`, `priority`,
-`effect`, `conditions`, `actions`, `resource_types`, `enabled`, `immutable`,
-`created_by: Id`, `created_at`, `updated_at`) plus `built_in` (required by the
-spec's Built-In Policies section). `PolicyScope` = {Tenant, Workspace, Repo};
-`PolicyEffect` = {Allow, Deny}; `ConditionOp` has all 8 variants;
-`ConditionValue` = {String, StringList, Number, Bool} plus `Null` as the
-value-side placeholder for `Exists`. `builtin_policies()` and
-`trust_policies_for_level()` produce the built-in/trust-preset policy sets.
+Domain types (`gyre-domain/src/policy.rs`): `Policy` carries every spec
+field (`id`, `name`, `description`, `scope`, `scope_id: Option<Id>`,
+`priority`, `effect`, `conditions`, `actions`, `resource_types`,
+`enabled`, `immutable`, `created_by: Id`, `created_at`, `updated_at`) plus
+`built_in` (required by the spec's Built-In Policies section).
+`PolicyScope` = {Tenant, Workspace, Repo}; `PolicyEffect` = {Allow, Deny};
+`ConditionOp` has all 8 variants; `ConditionValue` = {String, StringList,
+Number, Bool} plus `Null` as the value-side placeholder for `Exists`.
+`builtin_policies()` and `trust_policies_for_level()` produce the
+built-in/trust-preset policy sets.
 
 Attribute model (`policy_engine.rs` `AttributeContext` + `abac_middleware.rs`
 extraction): a flat typed attribute bag (Single/List/Number/Bool) with
@@ -155,7 +156,9 @@ injected by the evaluator.
 Dynamic references: `$resource.*`/`$subject.*` resolve against the live
 context preserving the referenced attribute's type; unresolvable references
 fail the condition (fail closed — an Allow with an unresolvable reference
-cannot grant).
+cannot grant). Mutation-verified: a fail-open resolver fabricating `""` for
+missing refs is killed by the `subject.type NotEquals $resource.missing`
+case in `dynamic_reference_unresolvable_fails_closed`.
 
 Port + adapters: `PolicyRepository` (create, find_by_id, list, list_by_scope,
 update, delete, delete_by_name_prefix, delete_by_name_prefix_and_scope_id,
@@ -171,55 +174,51 @@ incl. its `$resource.repo_id` reference, `spec_example_persona_management`,
 `spec_example_viewer_no_spawn`, `spec_example_gate_approved_persona`,
 `spec_example_default_deny`).
 
-### Merge-resolution round (head 8ca9afafb)
+### Review-repair round (commit d779f1e89)
 
-Resolved the merge of assignment base `c5deca801` (task-105 head) into this
-branch at merge commit `8ca9afafb` (parents `e8540e9e3` + `c5deca801`),
-clean tree:
+Repaired the three round-1 review findings:
 
-- `abac_middleware.rs`: kept BOTH test sets — the task-128 attribute tests
-  and upstream's `builtin_policy_seeding_fails_closed_on_store_error`
-  (upstream's fail-closed `seed_builtin_policies` retained; its
-  warn-continue exemption entry correctly removed with upstream's fix).
-- `main.rs`: kept upstream's connect_info comment (code identical).
-- Three exemption files: adopted upstream's fixed-site entry removals,
-  with the auth.rs entry renumbered 773→833 where task-128's auth changes
-  moved the JWT tenant fallback line.
-- Type adaptations where upstream code assumed pre-task-128
-  `Policy.scope_id: Option<String>`/`created_by: String`:
-  `merge_processor.rs` `evaluate_merge_abac` (scope comparison),
-  `merge_processor.rs`/`api/workspaces.rs`/`gyre-domain policy.rs` tests.
-- Duplicate `/api/v1/...` literal cleanup: the recovered checkpoint
-  `29ad56fb` had 31 duplicate literals vs the frozen baseline of 22 —
-  `check-abac-route-registry.sh` was FAILING there (the prior round's
-  "all scripts pass" claim was wrong for this check). After the merge the
-  count was 26 vs upstream's lowered baseline 17. Fixed without weakening
-  the check (no baseline raise, no exemptions): hoisted module-level
-  consts `REPOS_ID_ROUTE`/`SPECS_ROUTE`/`SPECS_PATH_ROUTE`/
-  `PERSONAS_ID_ROUTE` shared by the resolver registry and tests,
-  `WORKSPACES_PATH_PREFIX` for the two `extract_path_attributes`
-  `starts_with` sites, and test-only URI consts. Final count: 17 = frozen
-  baseline.
+- **Code** — `extract_path_attributes` set `resource.id` to the PARENT REPO
+  id on `/repos/:id/...` routes with non-repo resource types (gates,
+  worktrees, abac-policy, dependencies, graph, specs): the repos prefix
+  lacked the `resource_type != "repo"` guard the workspace branch has, and
+  `/repos/:id/worktrees/:worktree_id` never surfaced the worktree id. Fix:
+  a path param named `{resource_type}_id` (`:worktree_id`, `:gate_id`,
+  `:dependency_id`, `:team_id`) names the addressed entity wherever it
+  appears and takes precedence over `:id`; on parent-scoped child routes
+  the `:id` names the parent (already exposed as `resource.repo_id`) and no
+  `resource.id` is fabricated from it. Also corrects the
+  merge-request-parented dependency child route the same way. Route
+  patterns hoisted into consts (`REPOS_GATES_ROUTE`, `REPOS_GATES_ID_ROUTE`,
+  `REPOS_WORKTREES_ID_ROUTE`) so the frozen duplicate-literal count stays at
+  17.
+- **Test** — `dynamic_reference_unresolvable_fails_closed` gained the
+  demanded killing case (`subject.type NotEquals $resource.missing` on an
+  Allow policy must Deny — a fabricated `""` resolution would flip
+  NotEquals to true and ALLOW).
+- **Process** — coverage rows 2-7 of
+  `specs/coverage/system/abac-policy-engine.md` flipped to `implemented`
+  with evidence notes; SUMMARY.md regenerated.
 
-### Test evidence (run at head 8ca9afafb; crates.io reachable this round)
+### Test evidence (run at head d779f1e89)
 
-- `cargo check --workspace --all-targets` — 0 errors.
-- `cargo test -p gyre-server --lib` — **1456 passed / 0 failed** (includes
-  `abac_middleware` 25, `policy_engine` 34, `merge_processor` 67, `auth` 43,
-  `api::policies` 12, `api::workspaces` 16, `mem` 13; the five §Policy
-  Example tests and the membership/entity-lookup attribute tests run
-  end-to-end through live tower oneshot requests).
-- `cargo test -p gyre-domain -p gyre-common -p gyre-ports` — 116 + 432 + 8
-  passed / 0 failed.
-- `cargo test -p gyre-adapters --lib` — 382 passed / 0 failed / 12 ignored
-  (includes `sqlite::policy` 4).
-- All repo invariant scripts pass, including `check-abac-route-registry`
-  (duplicate count 17 = frozen baseline), `check-arch`,
-  `check-fabricated-scope-defaults`, `check-warn-continue-creation`,
-  `check-relative-path-defaults`, and the security-pattern checks;
-  repo-wide conflict-marker scan clean. Transcripts under
-  `/tmp/stage/review-evidence/` (summary: `task-1....md`; suite transcripts:
-  `task-1....txt`).
+- Mutation probes (transcripts under `/tmp/stage/review-evidence/`):
+  removing the repos-prefix guard fails 2 of the 3 new middleware tests;
+  removing child-param precedence as well (full round-1 behavior) fails all
+  3; the fail-open `resolve_dynamic_value` mutant is killed by the new
+  policy-engine killing case (previously survived the entire suite).
+- `cargo test -p gyre-server --lib` — **1481 passed / 0 failed** (includes
+  `abac_middleware` 28, `policy_engine` 34; the five §Policy Example tests,
+  the membership/entity-lookup attribute tests, and the three new
+  round-1 tests run end-to-end through live tower oneshot requests with
+  non-vacuous controls).
+- `cargo test -p gyre-domain -p gyre-common -p gyre-ports -p gyre-adapters
+  --lib` — 116 + 436 + 8 + 387 passed / 0 failed / 12 ignored.
+- All repo invariant scripts pass at this head, including
+  `check-abac-route-registry` (duplicate count 17 = frozen baseline),
+  `check-arch`, `check-task-commit-attribution`, `check-mem-port-contracts`,
+  and the security-pattern checks; repo-wide conflict-marker scan clean
+  (the single grep hit is a quoted command in a task doc).
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
 verification/publication gates.
