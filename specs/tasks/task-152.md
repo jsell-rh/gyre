@@ -2,7 +2,7 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
 commits: ["173fa028a84c9637d4101f916f9fa20f5fb483a0", "595c39034a3f2a675218e88d60b5861572378477"]
