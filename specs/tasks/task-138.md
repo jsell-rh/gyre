@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2"]
+commits: ["2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2", "c7e74aa50d9a175b7727b7d79350121c29d1baec"]
 ---
 
 ## Spec Excerpt
@@ -349,3 +349,45 @@ Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP —
 `/tmp/stage/capabilities.json`); host checklist unchanged: e2e
 `spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
 `npm test`, GitHub CI on the exact head.
+
+### Round 7 (verification repair: clippy + rustfmt findings)
+
+Repaired verification finding bb672b1a41214775b40908f88db05ddd
+(`bash /tmp/stage/checks.sh` exit 1 against base fefde2946, candidate
+fee5b3b62) in c7e74aa5. All three failing findings were lint-level, on
+task-touched lines; no behavior changed:
+
+- **clippy::double_must_use** (~20x, primary span on the
+  `#[async_trait]` line of `gyre-ports/src/spec_approval.rs`): root cause
+  is async-trait 0.1.89 (Cargo.lock pin) injecting `#[must_use]` into every
+  expanded async trait method (`async-trait-0.1.89/src/expand.rs:69`) while
+  the desugared `Pin<Box<dyn Future>>` return type is already `#[must_use]`
+  (the `Future` trait is); async-trait's own generated-code suppression list
+  (`lint_suppress_with_body/without_body`) does not cover this lint, so
+  clippy 1.99 fires per method. The same warning fires repo-wide on
+  pre-existing port traits (992 existing warnings outside the changed
+  lines — the diff gate correctly ignores those); only this task's NEW port
+  file had the attribute line inside the diff. A dependency bump is not
+  verifiable in this sandbox (no network; only 0.1.89 in the local registry
+  cache), so the fix is a scoped, commented inline
+  `#[allow(clippy::double_must_use)]` on the trait, matching the repo's
+  established inline-allow practice for clippy lints on macro-generated
+  code (20+ `#[allow(clippy::...)]` precedents in crates/). No
+  scripts/*-exemptions.txt entries were added.
+- **clippy::manual_repeat_n** (sqlite adapter test helper):
+  `repeat(seed).take(40)` → `repeat_n(seed, 40)`.
+- **rustfmt**: the round-6 merged gates.rs test hunk (lines 718-720)
+  formatted; whole-repo `cargo fmt` produced exactly this one hunk.
+
+Verification on this exact tree (evidence:
+`/tmp/stage/review-evidence/task-138-r7-verification-repair.md`):
+`check-rustfmt-diff.py fefde2946` exit 0 (13 files clean);
+`check-clippy-diff.py fefde2946` exit 0 (13 files clean, 992 existing
+warnings outside changes) — the exact gates that failed; focused suites
+`gyre-domain spec_approval` 4/4, `gyre-adapters sqlite::spec_approval`
+10/10, `api::gates` + `api::specs` 91/91 (round-6 baseline for the same
+combined filter: 91).
+
+Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP); host
+checklist unchanged: e2e `spec_approval_auto_invalidated_on_spec_change`,
+`cargo test --all`, full `npm test`, GitHub CI on the exact head.
