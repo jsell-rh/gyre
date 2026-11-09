@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: ["8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "936508da8d84bb0d5e74d1a4497d4a4d2ab57678", "11a702b89e19922db644c29d8b39f0e73fe0402d"]
 ---
 
 ## Spec Excerpt
@@ -133,13 +133,13 @@ MR detail view reads, so the graph cannot disagree with gate results.
   404).
 - `cargo test -p gyre-server --lib reconciliation::` — 24 passed,
   `merge_deps::` — 13 passed, `api::workspaces::` — 17 passed,
-  `merge_processor` — 67 passed (all selection/atomic-group/trust suites
+  `merge_processor` — 74 passed (all selection/atomic-group/trust suites
   included, since the selection loop changed).
-- `cargo test -p gyre-server --lib` (full lib) — 1365 passed, 0 failed
-  (merge-correctness probe after the repair).
-- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed in
-  the prior round (20 pre-existing + 5 drift badge/tooltip/legend tests);
-  this repair touched no web/ sources.
+- `cargo test -p gyre-server --lib` (full lib) — 1501 passed, 0 failed
+  (merge-correctness probe after the base merge repair).
+- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 29 passed
+  (20 pre-existing + 5 drift badge/tooltip/legend tests + 4 added by the
+  base); this repair touched no web/ sources.
 - Mechanical checks green: check-inert-enforcement, check-arch,
   check-abac-route-registry, check-abac-exempt-handlers,
   check-scope-literal-defaults, check-in-memory-state-stores,
@@ -151,21 +151,31 @@ MR detail view reads, so the graph cannot disagree with gate results.
   check-dead-message-kinds, check-migration-sql-portability,
   check-task-commit-attribution.
 
-### Round note (review repair)
+### Round note (base-merge repair)
 
 Original backend, policy API, drift evaluation, UI, and tests shipped in
-recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; the base
-merge repair round followed (merge with base a884329d7 keeping both sides'
-test suites, and the stale check-inert-enforcement exemption entries
-resolved by the base itself). This round (commit 8a99bd808) resolves the
-review finding that the strict-policy drift block starved the shared merge
-queue: the block was evaluated after candidate selection and returned
-early, so a strictly-blocked drifted head was re-selected and re-blocked
-every 5s tick (update_status does not rotate enqueued_at) and no later
-entry — including clean MRs in other workspaces — ever merged. Fixed by
-evaluating drift + policy during candidate selection (mirroring the
-in-tree trust-hold precedent), requeue-with-reason and continue, with the
-atomic-group mirror in the same helper. Focused evidence logs are retained
-under /tmp/stage/review-evidence/task-159-*.log. The acceptance-criteria
+recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; the
+first base merge and the starvation review repair followed (commit
+8a99bd808: drift + policy evaluation moved into candidate selection,
+requeue-with-reason and continue, mirroring the trust-hold precedent).
+
+This round merged the assigned base fefde2946 (merge commit 936508da8).
+The three content conflicts — router (`api/mod.rs`), ABAC resolver
+(`abac_middleware.rs`), and `docs/api-reference.md` — were all the same
+additive shape (task-159's `merge-policy` routes vs the base's
+`meta-specs/rollout-policy` routes at the same location) and were resolved
+by keeping both sides. The base also made the merge-time attestation-ABAC
+evaluation enforcing (a Deny fails the queue entry), which broke the three
+drift tests that assert merges: their chain attestations evaluated against
+an empty policy store and hit the engine's default-deny. Repaired in commit
+11a702b89 by seeding the startup builtin policy set in those three tests,
+following the base's own
+`guided_workspace_merge_proceeds_with_startup_seeded_builtins` precedent:
+a deployed server always seeds builtins, and the drift MR's chain
+attestation is allowed by `builtin:attested-authorization` (priority 150,
+above the default-deny catch-all), so the §9 drift behavior — not the
+empty policy store — is what the tests exercise. No production code
+changed this round. Focused evidence logs are retained under
+/tmp/stage/review-evidence/task-159-merge-*.log. The acceptance-criteria
 checkboxes are left unchecked in the task body per the assigned contract;
 the criteria themselves are satisfied by the shipped behavior above.
