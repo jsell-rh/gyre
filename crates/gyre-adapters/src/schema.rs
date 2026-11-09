@@ -260,6 +260,7 @@ diesel::table! {
         resource_id -> Nullable<Text>,
         outcome -> Text,
         detail -> Text,
+        detail_zstd -> Nullable<Binary>,
         source_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
         timestamp -> BigInt,
@@ -628,6 +629,14 @@ diesel::table! {
 
 diesel::table! {
     meta_spec_sets (workspace_id) {
+        workspace_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    rollout_policies (workspace_id) {
         workspace_id -> Text,
         json -> Text,
         updated_at -> BigInt,

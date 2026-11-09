@@ -398,6 +398,25 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register log compression job (observability.md §Log Retention &
+    // Compression) — daily by default, configurable via
+    // GYRE_LOG_COMPRESSION_INTERVAL (seconds).
+    registry
+        .register(
+            JobDefinition {
+                name: crate::log_compression::JOB_NAME.to_string(),
+                description: "Zstd-compresses audit event details and agent log \
+                     lines older than 7 days (observability §Log Retention & Compression)"
+                    .to_string(),
+                interval_secs: crate::log_compression::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
+        )
+        .await;
+
+    // Register spawn budget reset job at midnight UTC
     registry
         .register(
             JobDefinition {
@@ -502,6 +521,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
+    // Register secret expiry check job (every 5 minutes, platform-model.md §7)
+    registry
+        .register(
+            JobDefinition {
+                name: "secret_rotation_check".to_string(),
+                description: "Creates SecretExpiring notifications for workspace admins \
+                             when secrets expire within 1 hour (platform-model.md §7)"
+                    .to_string(),
+                interval_secs: 300,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::secret_rotation::run_once(&state).await },
         )
         .await;
 

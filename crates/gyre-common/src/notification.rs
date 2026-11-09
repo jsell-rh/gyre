@@ -118,6 +118,8 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
+    SecretExpiring,
 }
 
 impl NotificationType {
@@ -161,6 +163,7 @@ impl NotificationType {
             Self::AtomicGroupFailure => "AtomicGroupFailure",
             Self::SpecConflict => "SpecConflict",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::SecretExpiring => "SecretExpiring",
         }
     }
 
@@ -209,6 +212,7 @@ impl NotificationType {
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
             "SpecConflict" => Some(Self::SpecConflict),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "SecretExpiring" => Some(Self::SecretExpiring),
             _ => None,
         }
     }
@@ -266,6 +270,7 @@ impl NotificationType {
             Self::AtomicGroupFailure => 3,
             Self::SpecConflict => 2,
             Self::MergeQueueEscalation => 1,
+            Self::SecretExpiring => 7,
         }
     }
 }
@@ -530,6 +535,10 @@ mod tests {
             NotificationType::MergeQueueEscalation.default_priority_rank(),
             1
         );
+        assert_eq!(
+            NotificationType::SecretExpiring.default_priority_rank(),
+            7
+        );
     }
 
     #[test]
@@ -570,6 +579,7 @@ mod tests {
             NotificationType::AtomicGroupFailure,
             NotificationType::SpecConflict,
             NotificationType::MergeQueueEscalation,
+            NotificationType::SecretExpiring,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
