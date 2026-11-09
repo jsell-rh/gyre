@@ -2,10 +2,10 @@
 title: "Implement spec-lifecycle accountability patrol (task-age checks + orchestrator escalation)"
 spec_ref: "spec-lifecycle.md §Accountability Integration"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "8652c6160af2cca594a964a6712f88a58b53ce67"]
 ---
 
 ## Spec Excerpt
@@ -90,18 +90,19 @@ entry.
 This repair round removed a leftover kill-test mutant (`if true { return 0; }`
 stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 
-### Contract repair round
+### CI repair round (e2e run 42568047792)
 
-Accepted the executor's byte-exact restoration of the assigned task document
-(the only working-tree change; no source file was touched this round — the
-prior rounds' production fix is preserved in history, including the rustfmt
-repair of the repo-scope guard). Re-verified on the restored tree:
-`rustfmt --check` clean on every task-touched file; `cargo test -p gyre-server
---lib spec_lifecycle_patrol` — 11 passed; `... --lib api::specs::tests` — 53
-passed; `... --lib spec_patrol` — 19 passed; `check-arch.sh`,
-`check-abac-route-registry.sh`, `check-dead-message-kinds.sh`,
-`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh` all
-passed. Logs under `/tmp/stage/review-evidence/task204-*.log`.
+The e2e job failed at the browser-install step: `ubuntu-latest` now resolves
+to ubuntu-26.04, where the locked Playwright 1.58.2 cannot install browsers
+("Playwright does not support chromium on ubuntu26.04-x64"). Verified against
+the registry tarballs that 1.58.2 pins chromium/headless-shell r1208 (the
+build the committed visual baselines and the local probe infra use) and has
+no ubuntu-26.04 host entry, while ubuntu-24.04 is fully supported. Fixed by
+pinning the e2e job to `runs-on: ubuntu-24.04` (commit 8652c6160) rather
+than upgrading Playwright — an upgrade would move chromium to r1254 and
+invalidate the 17 committed visual baselines. Workflow-only change: no
+product source, no baselines, no assertion changes; ci.yml needs no browser
+install. Evidence: `/tmp/stage/review-evidence/task204-ci-repair.md`.
 
 ## Test evidence
 
@@ -127,3 +128,8 @@ passed. Logs under `/tmp/stage/review-evidence/task204-*.log`.
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
+- CI repair (this round): workflow-only runner pin; YAML re-validated
+  (`task204-ci-repair-yaml-check.log`), root cause and r1208/r1254 revision
+  evidence recorded in `/tmp/stage/review-evidence/task204-ci-repair.md`.
+  The ubuntu-24.04 e2e run itself is verified remotely by the exact-head
+  GitHub checks.
