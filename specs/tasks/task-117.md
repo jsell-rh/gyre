@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5"]
 ---
 
 ## Spec Excerpt
@@ -123,11 +123,13 @@ review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 `7e672231`), the task-092 base merge `b30c8546` (web/dist rebuilt
 from merged sources), the round-4 base merge `a2bdf9a2`, the
 round-5 base merge `d9e7785`, the round-6 base merge
-`4ef962e48`, and the round-7 base merge `37a8193cf` carry the work
+`4ef962e48`, the round-7 base merge `37a8193cf`, and the
+round-8 clippy repair `5482ae4f1` carry the work
 below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
 rounds 4–6 in `round4/`, `round5-merge-repair/`, and
-`round6-merge-repair/`; round 7 in `round7-merge-repair/`).
+`round6-merge-repair/`; round 7 in `round7-merge-repair/`; round 8
+in `round8-clippy-repair/`).
 
 ### Behavior
 
@@ -313,6 +315,27 @@ upstream):
   the assignment base). Focused suites on both merged features and
   the shared test-state builders pass (see Test evidence).
 
+Round 8 (`5482ae4f1`, verification finding at `d13ea54a` —
+`checks.sh` exit 1):
+
+- **Clippy-diff gate failed on two task-117 changed lines.**
+  `check-clippy-diff.py` reported (a) `clippy::double_must_use` at
+  `gyre-ports/src/compute.rs` — the `ComputeTarget` trait was the
+  only async port trait missing the `#[allow]` every sibling
+  carries (async_trait generates a `#[must_use]` future per
+  method), and (b) `clippy::type_complexity` at
+  `gyre-server/src/mem.rs` — the round-5 merge shape of
+  `shared_workspace_policy_pair` returned a raw 3-tuple. Fixed by
+  adding the established `#[allow(clippy::double_must_use)]`
+  attribute (same comment as the other ports) and factoring the
+  tuple into a named `SharedWorkspacePolicyPair` type alias.
+  Compile-only change, no behavior change. The verification log's
+  non-fatal `WARN: stale exemptions` naming the compute-targets
+  routes is not reproducible at HEAD: the exemption file at
+  `d13ea54a` contains no compute-target entries and
+  `check-abac-route-registry.sh` exits 0 with no WARN both before
+  and after this round.
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -371,5 +394,20 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   scope-literal-defaults, inert-enforcement, forged-scope-fields,
   forwarded-header-trust, unbounded-external-http,
   sandbox-sweep-artifacts); no new exemption entries.
+- Round 8 (`5482ae4f1`, clippy repair): `check-clippy-diff.py HEAD^1`
+  -> "changed lines clean" exit 0, and against the task assignment
+  base `fefde2946` (all 17 task-117-changed Rust files) -> "changed
+  lines clean" exit 0; full `cargo clippy --workspace --all-targets
+  --all-features` -> exit 0 with no `double_must_use` or
+  `type_complexity` on compute.rs/mem.rs changed lines (remaining
+  warnings pre-existing outside the diff, e.g. base's
+  `view_query_resolver.rs` and task-098's `MemSecretRepository`
+  store field); full `cargo test -p gyre-server --lib` -> **1494
+  passed, 0 failed**; `cargo test -p gyre-adapters compute --lib` ->
+  **39 passed, 0 failed** (4 ignored); `check-rustfmt-diff.py HEAD^1`
+  -> clean; arch, abac-route-registry, migration-versions,
+  mem-port-contracts, in-memory-state-stores,
+  task-commit-attribution gates -> exit 0 (logs in
+  `round8-clippy-repair/`).
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
