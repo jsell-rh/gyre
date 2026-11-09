@@ -32,9 +32,9 @@
 # Exemptions are legacy debt in
 # scripts/fabricated-scope-defaults-exemptions.txt (path:line form,
 # frozen count). Fix a flagged site by skipping/logging; never add entries.
-# Lowered 5 → 3 by the task-146 repair (specs.rs spec-rejected fanout and
-# gate_executor.rs GateFailure emission fixed for real).
-FROZEN_EXEMPTION_COUNT=3
+# Lowered 5 → 1: specs.rs fanout and gate_executor.rs GateFailure emission
+# fixed by task-146, auth.rs fallback fixed by task-103's repair round.
+FROZEN_EXEMPTION_COUNT=1
 #
 # Run by pre-commit and CI.
 

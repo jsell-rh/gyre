@@ -1462,6 +1462,34 @@
       "cancel": "Cancel"
     }
   },
+  "secrets_panel": {
+    "hint": "Secret values are write-only: they are set once and never displayed or returned by the API.",
+    "add": "Add secret",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "Saving\u2026",
+    "save_failed": "Failed to save secret: {error}",
+    "rotate_failed": "Failed to rotate secret: {error}",
+    "delete_failed": "Failed to delete secret: {error}",
+    "loading": "Loading secrets\u2026",
+    "empty": "No secrets in this scope.",
+    "value_label": "Value",
+    "value_hidden_label": "Value hidden",
+    "new_value_label": "New value",
+    "expires_label": "Expires (unix epoch)",
+    "col_name": "Name",
+    "col_type": "Type",
+    "col_created": "Created",
+    "col_expires": "Expires",
+    "col_last_rotated": "Last rotated",
+    "col_status": "Status",
+    "col_actions": "Actions",
+    "rotate": "Rotate",
+    "rotate_confirm": "Rotate",
+    "delete": "Delete",
+    "delete_confirm": "Delete this secret?",
+    "delete_yes": "Delete"
+  },
   "workspace_settings": {
     "page_title": "{name} Settings",
     "page_title_fallback": "Workspace Settings",
@@ -1473,10 +1501,13 @@
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
-      "audit": "Audit",
-      "repos": "Repos"
+      "repos": "Repos",
+      "secrets": "Secrets",
+      "audit": "Audit"
+
     },
     "tab_bar_label": "Workspace settings sections",
+    "secrets_need_entity": "A workspace must be loaded before managing its secrets.",
     "general": {
       "title": "General",
       "workspace_name": "Workspace Name",
@@ -1614,6 +1645,7 @@
       "users": "Users",
       "compute": "Compute Targets",
       "budget": "Budget",
+      "secrets": "Secrets",
       "workspaces": "Workspaces",
       "audit": "Audit",
       "health": "Health",
