@@ -57,6 +57,9 @@ pub struct AgentResponse {
     /// MR ID created by this agent (enriched at query time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mr_id: Option<String>,
+    /// Persona attached at spawn time (orchestrators; task-099 F2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -84,6 +87,7 @@ impl From<Agent> for AgentResponse {
             completed_at: None,
             spec_path: None,
             mr_id: None,
+            persona_id: a.persona_id.map(|id| id.to_string()),
         }
     }
 }
