@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "960cfb43dca3dbcb963ff20170d76abe8b150da7"]
 ---
 
 ## Spec Excerpt
@@ -122,16 +122,11 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 ## Shipped
 
 All three HSI §12 gaps are implemented in production code (checkpoint
-f7f3b081, call-site repair ca1ac78e, base-2badce49 merge dc7ab7c7). This
-round (merge 1eadc6d8) resolved the executor's rebase of the newer
-assigned base fefde294 (task-089 head, which also carries task-120's User
-entity columns, task-085 trust suggestions, task-090 lenses, agent
-lifecycle audit events, and audit-detail zstd compression) into the
-task-209 branch. The merge kept BOTH sides' behavior everywhere and fixed
-two real semantic collisions the auto-merge could not see (details
-below); every acceptance criterion was re-verified on the merged tree.
+f7f3b081, call-site repair ca1ac78e, base-fefde294 merge 1eadc6d8, and
+this round's base-77473763 merge 960cfb43). Every acceptance criterion
+was re-verified on the final merged tree.
 
-### Behavior shipped (unchanged from prior rounds)
+### Behavior shipped
 
 - **Spec amendment (Part 1)** — `specs/system/human-system-interface.md`
   §12 Judgment Ledger carries a concrete Sources table (category →
@@ -139,18 +134,18 @@ below); every acceptance criterion was re-verified on the merged tree.
   when each event is written, and pins `?type=` values to
   `approval|rejection|gate|trust|meta-spec` (exactly the `JudgmentType`
   wire strings).
-- **Write paths (Part 3)** — `AuditEventType` gains `TrustChange` /
-  `GateOverride` / `MetaSpecPublish` (now alongside the base's agent
-  lifecycle variants — unioned in the enum, `as_str`/`from_str`, and the
-  round-trip test). Trust transition via `PUT /api/v1/workspaces/:id`
-  writes a `trust_change` audit event attributed to the acting user. A
-  human approval review on an MR with failed gate results writes one
-  `gate_override` event per failed gate (mr_id/gate_id/gate_type/from/to);
-  agent-token approvals do not qualify. Meta-spec registry create/update
-  write `meta_spec_publish` events with kind/name/version/content_hash
-  and workspace attribution from scope. JWT validation records
-  `oidc_issuer` + `last_login_at` via `UserRepository::record_login`
-  (SQLite/Postgres/mem parity).
+- **Write paths (Part 3)** — `AuditEventType` has `TrustChange` /
+  `GateOverride` / `MetaSpecPublish` variants. Trust transition via
+  `PUT /api/v1/workspaces/:id` writes a `trust_change` audit event
+  attributed to the acting user. A human approval review on an MR with
+  failed gate results writes one `gate_override` event per failed gate
+  (mr_id/gate_id/gate_type/from/to); agent-token approvals do not
+  qualify. Meta-spec registry create/update write `meta_spec_publish`
+  events with kind/name/version/content_hash and workspace attribution
+  from scope. JWT validation records `oidc_issuer` + `last_login_at` via
+  `UserRepository::record_login` (SQLite/Postgres/mem parity; fires when
+  the stored issuer is unset or differs, so the provisioning path's
+  last_login_at stamp cannot erase issuer provenance).
 - **Aggregation + filtering (Part 2)** — `JudgmentType::GateOverride`
   (`"gate"`). `list_for_user` (SQLite/Postgres/mem parity) aggregates
   `spec_approvals` (LEFT JOIN spec_ledger_entries; `?workspace_id=`
@@ -165,82 +160,78 @@ below); every acceptance criterion was re-verified on the merged tree.
   rejects unknown notification_type with 400). `GET /users/me` returns
   read-only `oidc_issuer`/`last_login_at`.
 
-### This round's merge resolution (1eadc6d8)
+### This round's merge resolution (960cfb43, base 77473763 = task-177
+lineage, which also carries task-099 F1 tenant binding, task-140, the
+spec approval ledger, and users.tenant_id migrations)
 
-- **Conflicts (9), all resolved keeping both sides**: postgres/sqlite
-  `user.rs` + `schema.rs` — union of task-209's `users.oidc_issuer` with
-  task-120's `username`/`avatar_url`/`preferences`/`tenant_id`/
-  `global_role` columns (UserRow, From<UserRow>, and the users table
-  declaration share one column order; task-120's complete create/update
-  paths kept, task-209's `record_login` kept); `audit.rs` — union of the
-  judgment and agent-lifecycle `AuditEventType` variants;
-  `merge_requests.rs` test imports; `siem.rs` severity arms (judgment
-  events rank alongside routine lifecycle signals); `trust_suggestion.rs`
-  — the base's `trust_suggestions_for` test helper adapted to the
-  `exclude_types` signature; `fabricated-scope-defaults-exemptions.txt`
-  — base version (specs.rs/auth.rs/git_http.rs sites were genuinely
-  fixed upstream; the merged tree carries those fixes, 2 entries
-  remain); coverage matrix — HEAD's row 53 (implemented, task-209) plus
-  the base's rows 15/23 (implemented, task-085/090), header recounted
-  and awk-verified to 20/35 (0 not-started).
-- **Duplicate-column migration fix** — task-209's
-  `2026-10-07-000056_user_auth_provider_info` and the base task-120's
-  `2026-10-08-000058_user_entity_profile_fields` BOTH added
-  `users.last_login_at`; diesel runs pending migrations strictly, so
-  the merged tree failed on every fresh database. Fixed by making
-  task-209's migration add ONLY `oidc_issuer` — `last_login_at` is
-  owned by task-120's migration (which sorts after on fresh DBs and is
-  already applied on base-lineage DBs). down.sql no longer drops the
-  column it no longer adds. Fresh-DB proof: every SQLite adapter test
-  constructs `SqliteStorage` and runs the full chain (10 passed);
-  `check-migration-versions` and `check-migration-sql-portability` OK.
-- **`record_login` issuer carve-out (semantic collision)** — the base's
-  `find_or_create_user` now stamps `last_login_at` on EVERY
-  authentication via `update()` (user-management.md §User Entity),
-  which kept the column fresh and made task-209's debounced
-  `record_login` — the only `oidc_issuer` writer — always skip:
-  `get_me_returns_recorded_auth_provider_info` failed with a Null
-  issuer. Fixed at the port contract level (`gyre-ports/src/user.rs`):
-  the write also fires when the stored `oidc_issuer` is unset or
-  differs from the verified one; implemented with single-statement
-  filters in SQLite/Postgres and the equivalent guard in mem. The hot
-  path (same issuer, fresh login) still skips, preserving the debounce
-  rationale; issuer provenance can no longer be lost to the
-  provisioning path's stamp. Adapter test extended with a
-  changed-issuer-in-window case that fails without the fix.
-- **Auto-merge repairs** — `users.rs` `UserProfileResponse` had
-  `last_login_at` from both sides (deduplicated); `mem.rs`
-  `MemJudgmentLedgerRepository` now shares the base's
-  compression-aware `Vec<MemAuditEntry>` audit store and materializes
-  entries (zstd detail decompression) before reading judgment fields;
-  9 base-side `NotificationRepository::list_for_user` call sites
-  (secret_rotation, specs, merge_processor tests) adapted to the
-  `exclude_types` parameter; `cargo fmt --all` applied.
+- **Conflicts (4), all resolved keeping both sides**: `schema.rs` —
+  users table union of task-209's `oidc_issuer` with base's TASK-099
+  tenant-binding comment (tenant_id already present from the prior
+  merge; base's `2026-10-09-000056_user_tenant_id` owns it on
+  base-lineage DBs — no Diesel version collision, date included in the
+  version key, `check-migration-versions` OK); `sqlite/user_profile.rs`
+  — task-209's 4-source judgment ledger kept over base's older
+  spec_approvals-only body (strict superset: filters rather than stamps
+  workspace, adds rejected_at and audit sources); `users.rs` —
+  `UserProfileResponse`/get_me fallback carry oidc_issuer + last_login_at
+  AND tenant_id; test module keeps task-209's §12 tests alongside base's
+  `seed_tenant` helper + F1 tenant-binding tests; `mem.rs` —
+  `MemSpecApprovalRepository` keeps both `shared()` (judgment-ledger
+  handle) and base's `transition()` domain-rule helpers.
+- **Spec-approval-ledger adaptation (semantic collision)** — base's
+  `2026-11-08-000058_spec_approval_ledger` makes `approved_at` nullable
+  with status derived from mutually exclusive timestamp columns
+  (Pending = all NULL; reject/revoke clear approved_at). All three
+  `JudgmentLedgerRepository` impls adapted: the since-filter is now
+  `(approved_at >= since OR revoked_at >= since OR rejected_at >=
+  since)` so Pending rows drop out while rejections still surface, and a
+  rejection's judgment timestamp is its decline/withdrawal time, not the
+  cleared approved_at. Without this every rejected approval silently
+  vanished from the ledger. Test seed adapted to the new
+  `SpecApproval::new`/`approve`/`reject` domain API and gains a Pending
+  approval proving pending entries are excluded.
+- **Auto-merge repairs** — 3 base-side `secret_rotation.rs` test call
+  sites adapted to `NotificationRepository::list_for_user`'s
+  `exclude_types` parameter (raw view `&[]` per the port doc);
+  `cargo fmt --all` applied; coverage row 53's stale migration-ownership
+  phrase corrected (oidc_issuer = 2026-10-07-000056, last_login_at =
+  task-120's 2026-10-08-000058).
 
-### Test evidence (merged tree, post-1eadc6d8)
+### Test evidence (merged tree, post-960cfb43)
 
-- `cargo test -p gyre-server --lib`: 1491 passed, 0 failed — includes
-  the §12 write-path tests (`get_me_returns_recorded_auth_provider_info`
-  green again after the issuer carve-out), the base's task-085/090/
-  task-120 suites, and the adapted call sites.
-- `cargo test -p gyre-adapters --lib user_profile`: 10 passed (ledger
-  merge/filter/pagination, notification exclusion, record_login
-  debounce + issuer-change carve-out).
-- `cargo check --workspace`: clean.
-- `web/src/locales/en.json` (the only merge-authored web change):
-  valid JSON, no duplicate keys; all other web sources identical to the
-  published base (no web code authored this round, so the upstream web
-  suite result stands; web/dist not rebuilt per assignment).
+- `cargo test -p gyre-server --lib`: 1533 passed, 0 failed — includes
+  the §12 write-path tests (`disabled_preference_excludes_type_from_
+  inbox_and_count`, `get_me_returns_recorded_auth_provider_info`,
+  `trust_transition_writes_trust_change_audit_event`,
+  `human_approval_on_failed_gate_writes_gate_override_event`,
+  `publish_writes_meta_spec_publish_audit_event`) and the base's F1
+  tenant-binding / task-177 / task-140 suites.
+- `cargo test -p gyre-adapters --lib`: 398 passed, 0 failed (includes
+  the 10-test user_profile suite: ledger merge/filter/pagination,
+  notification exclusion, record_login debounce + issuer-change
+  carve-out).
+- `cargo check --workspace`: clean. Focused clippy on the touched
+  crates: no warnings in edited regions.
+- `web/src/locales/en.json` (the only merge-touched web source): valid
+  JSON, no duplicate keys (base's task-177 layout keys, clean
+  auto-merge); no web code authored this round, so the upstream web
+  suite result stands; web/dist restored to the staged merge state
+  (build.rs rebuilt it during cargo test — generated assets are owned
+  by the executor per assignment).
 - Mechanical checks OK: check-arch, check-migration-versions,
+  check-migration-sql-portability, check-mem-port-contracts,
   check-fabricated-scope-defaults, check-abac-exempt-handlers (88
-  handlers), check-in-memory-state-stores, check-mem-port-contracts,
-  check-forged-scope-fields, check-migration-sql-portability,
+  handlers), check-in-memory-state-stores, check-forged-scope-fields,
   check-abac-route-registry, check-mcp-write-tools,
   check-dead-message-kinds, check-inert-enforcement,
   check-lossy-secret-conversion, check-scope-literal-defaults,
   check-relative-path-defaults, check-byte-slice-truncation,
-  check-forwarded-header-trust, check-unbounded-external-http. Note:
-  `check-tenant-filter.sh` cannot execute under this sandbox's mawk
-  (gawk-only 3-arg `match()`); this round's only SQL change is the
-  user-id-keyed `record_login` UPDATE filter (no tenant-crossing
-  surface); CI runs it under gawk.
+  check-forwarded-header-trust, check-unbounded-external-http,
+  check-fail-open-ref-resolution. Note: `check-tenant-filter.sh` cannot
+  execute under this sandbox's mawk (gawk-only 3-arg `match()`); this
+  round's only SQL changes are the judgment-ledger timestamp filters on
+  caller-scoped queries (approver_id/user_id), no new tenant-crossing
+  surface; CI runs it under gawk.
+
+Evidence retained at /tmp/stage/review-evidence/task-209-rebase-77473763.md
+(controller artifact path; commands, exit codes, and outputs above).
