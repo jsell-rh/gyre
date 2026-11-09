@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2"]
+commits: ["2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2", "a8fe6e0a212a2a025801f7f9c2bb0ee8f790b703"]
 ---
 
 ## Spec Excerpt
@@ -308,3 +308,44 @@ dead-message-kinds).
 Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP); host
 checklist unchanged: e2e `spec_approval_auto_invalidated_on_spec_change`,
 `cargo test --all`, full `npm test`, GitHub CI on the exact head.
+
+### Round 6 (merge with assignment base fefde2946)
+
+Merged the new assignment base `fefde2946` (task-089 HSI Explorer Generated
+Views landing) into this branch; the only content conflict was in
+`api/gates.rs` (`mem.rs` auto-merged), resolved in `a8fe6e0a` with both
+sides' behavior preserved:
+
+- `SpecApprovalResponse`: kept task-138's `rejected_by` + derived `status`
+  fields and added base's `rejected_at`/`rejected_reason` doc comments and
+  `skip_serializing_if` attributes (`rejected_by` gets the same skip for
+  consistency). Both sides' assertions hold under the combined wire format:
+  task-138's `assert_eq!(approved["rejected_at"], Null)` passes because
+  serde_json indexing of an omitted key yields `Null`, and base's
+  `assert!(active.get("rejected_at").is_none())` passes because the field
+  is now skipped when `None`.
+- Tests: kept task-138's full Spec Approval Ledger suite verbatim
+  (`approvals_list_returns_full_ledger_data`,
+  `revoked_approval_no_longer_verifies_spec_ref`,
+  `reject_transition_pending_to_rejected_and_audit`,
+  `find_by_spec_sha_scopes_to_exact_version`) and kept base's
+  `list_spec_approvals_includes_rejection_fields`, adapted to the current
+  domain API (4-arg `SpecApproval::new`, `approve(now)`,
+  `reject(by, reason, now) -> Result`) since base wrote it against the
+  pre-ledger domain this branch replaced; the assertion set is unchanged.
+- `mem.rs` auto-merge kept: base's `MemSecretRepository::find_by_id` plus
+  task-138's mem `SpecApprovalRepository`.
+
+Verification on this exact tree (evidence:
+`/tmp/stage/review-evidence/task-138-r6-merge.md`): server suite
+`api::gates` 11/11 — both task-138's ledger tests and base's HSI
+rejection-fields test pass against the merged wire format;
+`api::specs` 80/80; base's auto-merged secret surface
+(`api::secrets` + `secret_rotation` + `stale_agents`) 11/11. Static gates
+exit 0 (arch, migration-versions, mem-port-contracts, ABAC route registry,
+task-commit-attribution, inert-enforcement).
+
+Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP —
+`/tmp/stage/capabilities.json`); host checklist unchanged: e2e
+`spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
+`npm test`, GitHub CI on the exact head.
