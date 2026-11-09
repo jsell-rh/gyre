@@ -55,6 +55,8 @@
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
     focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    playbackRequest = null, // { nonce } — start trace playback (generated "flow" views, HSI §3);
+    //                        // repeated requests re-trigger via a fresh nonce.
     windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
     //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
     //                     closes overlays most-recent-first and clears the trace query itself, so it opts
@@ -1112,6 +1114,19 @@
     evalPlaying = true;
     scheduleRedraw();
   }
+
+  // External playback request (HSI §3 Generated Views: a "flow" layout
+  // view starts the particle animation along the span tree). Nonce-based so
+  // a repeated request for the same view re-triggers.
+  $effect(() => {
+    const req = playbackRequest;
+    if (!req?.nonce) return;
+    // Only meaningful when trace data exists — the parent only fires this
+    // for trace-backed flow views, but guard anyway: without spans there is
+    // nothing to animate.
+    if ((traceData?.spans?.length ?? 0) === 0) return;
+    untrack(() => startTracePlayback());
+  });
 
   // Pan/zoom the camera to a node on external request (detail-panel trace
   // step click — explorer-canvas.md §6 step 6). `nonce` lets repeated clicks
