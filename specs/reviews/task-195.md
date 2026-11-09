@@ -1,0 +1,28 @@
+# Review — task-195 (Manifest-driven gate selection for MRs referencing a spec)
+
+Spec: `specs/system/spec-registry.md` §16 Agent Gates Integration — the manifest `gates:` field feeds the gate chain; an MR referencing a spec gets the gate agents its manifest entry declares.
+
+Candidate: `5b575a6039eba81ed7f6efbec1a17f2ff8966e41` (base `fefde294`, task commits `bb9dfd83c` + repair `35b4dc991`; cumulative diff confined to `crates/gyre-server/src/gate_executor.rs` +1067, the fabricated-scope exemption removal, coverage matrix, and the task file).
+
+Verdict: **needs revision** (not approved — 3 findings, see below).
+
+## What was verified independently (evidence: `/tmp/stage/review-evidence/`)
+
+- **Focused tests:** `cargo test -p gyre-server --lib gate_executor` → **39 passed, 0 failed** (`focused-test-run.txt`).
+- **Mutation probes (all killed, source restored + verified pristine after each):**
+  1. Manifest sourcing removed from `trigger_gates_for_mr` → `trigger_gates_runs_manifest_gates_for_spec_ref_mr` and `trigger_gates_dedupes_manifest_gate_covered_by_repo_gate` FAIL (2 failed) — the trigger tests genuinely discriminate manifest sourcing (`mutation1-no-manifest-sourcing.txt`).
+  2. Manifest-constrained gates routed to the auto-pass stub → all 6 persona-gate tests FAIL (`mutation2-persona-path-as-stub.txt`) — the "not the stub" criterion is test-enforced.
+  3. Attestation/stack-hash constraint checks neutralized → `persona_gate_fails_when_attestation_below_minimum` and `persona_gate_fails_on_stack_hash_mismatch` FAIL (`mutation3-constraints-dropped.txt`) — constraints are enforced, not recorded-only.
+- **Guard scripts on the candidate tree:** `check-fabricated-scope-defaults.sh` OK (exemption honestly removed, count 3→2 — the GateFailure `Id::new("default")` fallback is genuinely gone, replaced by skip+log), `check-arch.sh` OK.
+- **Design verifications:** `check_gates_for_mr` defaults unknown gate ids to `required = true`, so manifest-gate GateResults (deterministic id `manifest-gate:<repo>:<spec>:<persona>`, not persisted to the gate store) do block merges both when Failed (`Err`) and Pending/Running (`Ok(false)`) — matches the shipped claim. Manifest is read at HEAD via task-193's `read_manifest`, a documented, defensible deviation (the spec_ref SHA is a blob SHA, not a treeish). No-regression cases (no spec_ref / no manifest) are covered by tests. Selection is a pure helper (`manifest_gates_for_mr`) with direct assertions, as instructed.
+
+## Findings (blocking)
+
+1. **Stale `ChangesRequested` vetoes the same reviewer's later approval** (`evaluate_persona_reviews`, `gate_executor.rs` ~790). Reviews are append-only and listed chronologically; the loop returns `Rejected` on the *first* persona-matching `ChangesRequested`, so the normal review cycle (request changes → author fixes → same persona agent approves with a qualifying attestation) leaves the gate **Failed** on the stale verdict. Reproduced by probe (`probe-stale-changes-requested.txt`): ChangesRequested@t1 then Approved@t2 from the security-persona agent → `status=Failed, "requested changes: needs fixes"`. Contradicts the platform's existing approval-wins semantics (`check_review_verdict` ~675, mem `is_approved`). Fix: evaluate the latest review per reviewer (or any-qualifying-approval-passes, matching `check_review_verdict`).
+2. **Persona-overlap dedup drops the manifest constraints in favor of a possibly auto-passing repo gate** (`trigger_gates_for_mr` ~194-205). When a repo-level gate covers the same persona, the manifest gate is skipped and the repo gate "wins" — but a repo-level `AgentReview` gate with `command: None` runs `run_agent_review_gate_stub`, which **auto-passes and fabricates an approval review**. In the overlap case the manifest's `min_attestation_level`/`stack_hash` are never enforced and the merge proceeds on an auto-pass, violating the acceptance criterion that a configured manifest gate runs the real persona-driven path (not the always-pass stub). `trigger_gates_dedupes_manifest_gate_covered_by_repo_gate` asserts the repo gate wins, cementing the weaker choice; manifest-wins dedup would satisfy both the no-double-run and the real-path criteria.
+3. **The pass path is unreachable in production (spec-fidelity gap).** §16 says "Forge spawns security gate agent and accountability gate agent for this MR" — nothing spawns any agent for a manifest gate (no command, no spawn call); the gate passively polls. Worse, `lookup_reviewer_persona` reads KV `agent_personas`, which has **no production writer** anywhere (repo-wide grep: test-only writes in `gate_executor.rs:2259` and `constraint_check.rs:1703`; agent spawn never writes it; the `Agent` domain model has no persona field). So in a real deployment no reviewer can ever match a gate persona: every manifest gate waits out its 300s timeout and fails. Fail-closed (blocks merges, never bypasses), and the persona-source limitation is pre-existing (`build_agent_context` reads the same never-written namespace), but the shipped feature's happy path is demonstrable only in tests that seed the KV directly — the forge-spawns-gate-agents half of §16 remains unimplemented.
+
+## Non-blocking notes
+
+- Manifest gates resolve the repo from the loaded MR but materialize with the caller-supplied `repo_id` parameter; consistent at the only production call site (`merge_queue.rs` enqueue passes `mr.repository_id`), so no live defect.
+- Re-enqueue creates fresh GateResult rows per trigger while old Failed rows linger in `check_gates_for_mr` — identical to the pre-existing repo-level gate behavior, not a regression introduced here.
