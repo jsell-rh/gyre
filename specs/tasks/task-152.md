@@ -2,10 +2,10 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: []
+commits: ["173fa028a84c9637d4101f916f9fa20f5fb483a0", "595c39034a3f2a675218e88d60b5861572378477"]
 ---
 
 ## Spec Excerpt
@@ -84,3 +84,73 @@ From `realized-model.md` §6 — Narrative Generation:
 - Read `crates/gyre-domain/src/extractor.rs` for the extraction pipeline that produces deltas
 - The narrative module goes in `gyre-domain` (pure logic, no infrastructure deps) per hexagonal architecture
 - Follow existing patterns in `gyre-domain` for new modules (add `pub mod narrative;` to lib.rs)
+
+## Shipped
+
+Implementation of `realized-model.md` §6 Narrative Generation. Reviewed in
+`specs/reviews/task-152.md`; `crates/gyre-domain/src/narrative.rs` holds the template generator
+and grounded-facts builder (pure domain logic — the LLM call lives in `gyre-server` because
+`gyre-domain` must not depend on the LLM port), wired into the timeline/diff/briefing endpoints.
+The original "stubbed for now" narrative comment in `graph.rs` is gone.
+
+### Behavior
+
+- **Template generator**: `NarrativeGrounding::from_graph` indexes the live graph (Contains
+  parent, Implements traits, FieldOf fields, node spec paths + GovernedBy edges; soft-deleted
+  nodes/edges excluded). `generate_template_narrative` renders per-node addition/removal/
+  modification sentences (old→new field changes, char-boundary-safe truncation), groups >3
+  additions per module+type ("N types added to `module`"), renders the per-edge template
+  `"New {edge_type} relationship: `{source}` → `{target}`."` from `DeltaEdgeEntry` arrays, and
+  appends "Governed by spec: X." (grounding specs ∪ commit `spec_ref`, `@sha` stripped) and
+  "Produced by agent Y under persona Z." when present. Empty/malformed deltas → `""`.
+  Fully deterministic.
+- **Timeline/diff**: `DeltaResponse.narrative` on every delta; grounding loaded once per request
+  from real `graph_store` queries; per-delta agent attribution via real `agents.find_by_id` +
+  `agent_personas` binding.
+- **LLM synthesis** (`llm_architecture_narrative`): grounded facts JSON injected into the
+  `graph-narrative` prompt (`llm_defaults.rs`), call latency-bounded (`tokio::time::timeout`
+  10s); falls back to concatenated template narratives on unconfigured LLM, port error, timeout,
+  or empty completion.
+- **Briefing** (`assemble_briefing`, repo-filter aware): collects the workspace's recent deltas,
+  renders template narratives (LLM-synthesized when configured), and appends
+  "Architecture: {narrative}" to the summary. Both REST and MCP briefing handlers delegate to
+  `assemble_briefing`.
+- **Extractor**: `DeltaEdgeEntry { edge_type, source, target }` arrays recorded in agent-context
+  deltas (qualified names resolved from merged node state; unknown endpoints omitted), bare
+  counts in the compact no-agent branch.
+- **Docs**: `docs/api-reference.md` timeline row documents `narrative`; briefing row matches the
+  HSI §9 response shape.
+
+### Test evidence
+
+At the current merged head (candidate rebased onto base `fefde294`), `CARGO_HOME=/tmp/cargo-home`,
+`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
+
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed** (`r8-domain-narrative.log`).
+- `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed, 0 failed**
+  (`r8-server-narrative.log`) — includes `timeline_endpoint_returns_grounded_narrative` (asserts
+  every clause of the spec's template example), `briefing_summary_falls_back_to_template_
+narrative_without_llm`, `briefing_summary_uses_llm_narrative_when_configured`.
+- `cargo test -p gyre-server --lib api::graph` → **31 passed, 0 failed** (`r8-server-api-graph.log`)
+  — narrative generation tests and main's repo-scoped briefing filter tests, both kept through
+  the rebase.
+- Earlier rounds on the pre-merge tree additionally passed: full `gyre-domain --lib` (447),
+  `gyre-common --lib` (116), `graph_extraction` (31), `session_registry` (4), and the repo gate
+  suite (rustfmt/clippy diff-clean vs base, arch/ABAC/migration/attribution checks, exit 0).
+
+### Final round repairs
+
+- Resolved the rebase of the candidate onto base `fefde294`: kept both test sets in
+  `api/graph.rs`, union imports in `graph_extraction.rs`; `collect_architecture_narratives`
+  honors main's briefing `repo_filter` contract (repo filter applied uniformly to every
+  repo-derived section).
+- Verification finding repaired: `git diff --check` vs base flagged a new blank line at EOF in
+  this file (`specs/tasks/task-152.md:209`); the Shipped notes were rewritten concisely with a
+  single trailing newline, and `git diff --check fefde294 HEAD` is now clean.
+
+### Verification scope
+
+This sandbox cannot `accept()` TCP listeners (errno 95, `/tmp/stage/capabilities.json`), so
+`cargo test -p gyre-server --test explorer_ws_integration` and exact-head GitHub CI checks
+remain mandatory on the host. Committed `web/dist` is the assignment base's staged state;
+local builds ran with `SKIP_WEB_BUILD=1` so it is untouched by this round.
