@@ -110,9 +110,10 @@ Read `specs/system/user-management.md` §Notification Entity. Existing notificat
 ## Shipped
 
 Implemented (commits 27bfb2a69, deec7953a0; rebased onto base fefde294
-in merge 730073ad1 + fix f92a48916) — `user-management.md` §Notification
-Entity is closed in production code; no stand-ins remain on the creation
-paths this task owned.
+in merge 730073ad1 + fix f92a48916, then onto base 774737638 in merge
+7f0ec2b7c) — `user-management.md` §Notification Entity is closed in
+production code; no stand-ins remain on the creation paths this task
+owned.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -196,17 +197,26 @@ but have no emitting feature yet — there is no security scanner or
 system-alert source in the platform. They are recorded as such in the
 coverage row rather than wired to a fake event.
 
-### Rebase resolution (merge 730073ad1, fix f92a48916)
+### Rebase resolutions
 
-- Resolved the one content conflict (`gyre-common/src/notification.rs`,
-  `default_priorities_match_hsi_table`): kept the task's rank-based API
+- Onto fefde294 (merge 730073ad1, fix f92a48916): resolved the one
+  content conflict (`gyre-common/src/notification.rs`,
+  `default_priorities_match_hsi_table`) — kept the task's rank-based API
   (`default_priority_rank()` — `default_priority()` now returns the
   four-level `NotificationPriority`) and carried the base's new
-  `SecretExpiring` rank-7 assertion over to that API.
-- Adapted the base's new `secret_rotation.rs` expiry notifications to the
-  structured source model: the dedup check reads `source.entity_id`, and
-  creation sets `source.entity_type = "secret"`, `source.entity_id` to the
-  secret id, plus `repo_id` for repo-scoped secrets.
+  `SecretExpiring` rank-7 assertion over to that API. Adapted the base's
+  new `secret_rotation.rs` expiry notifications to the structured source
+  model: the dedup check reads `source.entity_id`, and creation sets
+  `source.entity_type = "secret"`, `source.entity_id` to the secret id,
+  plus `repo_id` for repo-scoped secrets.
+- Onto 774737638 (merge 7f0ec2b7c, this assignment): resolved the one
+  content conflict (`gyre-server/src/api/spawn.rs`, `fail_agent`) by
+  keeping both sides — the base's `revoke_agent_task_secrets` call
+  (Platform Model §7 terminal-run teardown, review F2) ahead of the
+  task's `AgentFailed` typed notification with its taxonomy comment.
+  The `notify_rich` call below the markers already carried the task's
+  `NotificationType::AgentFailed` and the 11-argument structured-source
+  signature; no other hunk conflicted.
 
 ### Test evidence (all green)
 
@@ -231,11 +241,19 @@ coverage row rather than wired to a fake event.
   all passing. All mechanical checks pass (arch, migration versions and
   portability, ABAC route registry, mem port contracts, scope-default
   and enforcement lints); clippy introduces no new warnings.
-- Post-rebase probes (this assignment): `cargo check --all` clean;
-  gyre-common 8 notification tests, gyre-server 32 notification-filtered
-  lib tests + 3 secret_rotation tests (dedup, admin-only recipients,
-  healthy-secrets-never-notify), gyre-adapters 6 notification tests —
-  all passing; mechanical checks (arch, migration versions, ABAC route
-  registry, MCP write tools, dead message kinds, mem port contracts)
-  all pass on the merged tree.
+- Post-rebase probes (this assignment, merged tree 7f0ec2b7c on base
+  774737638): `cargo check --all` clean; gyre-common 8 notification
+  tests, gyre-server 34 notification-filtered + 8 secret_rotation lib
+  tests, gyre-adapters 6 notification tests — all passing; the full
+  gyre-server lib suite ran twice consecutively green (1537/0 both
+  runs; one earlier run had a single flaky failure that did not
+  reproduce, output retained in
+  /tmp/stage/review-evidence/server-lib-tests*.txt). All 20 mechanical
+  checks pass (arch, migration versions and portability, ABAC route
+  registry and exempt handlers, MCP write tools, dead message kinds,
+  mem port contracts, byte-slice, relative paths, fail-open refs,
+  commit attribution, scope-default lints, lossy secrets, inert
+  enforcement, forwarded headers, in-memory stores, unbounded HTTP,
+  forged scope fields). Clippy on gyre-server reports only warnings
+  pre-existing in both parents (none in the resolved conflict region).
 
