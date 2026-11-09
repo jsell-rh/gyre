@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9"]
 ---
 
 ## Spec Excerpt
@@ -180,3 +180,34 @@ pre-existing deny-level `clippy::never_loop` error in
 `crates/gyre-domain/src/rust_extractor.rs:1071` (upstream commit `d7940e85`,
 present at this branch's base) fails any workspace clippy run regardless
 of this task; it is untouched here and owned by that code's task.
+
+### CI repair (verification findings, round 4)
+
+The verification run (`c081dc09`, `bash /tmp/stage/checks.sh`, exit 1)
+failed on two gates, both repaired in commit `b522dd5cd` (evidence in
+`/tmp/stage/review-evidence/task-202-ci-repair.txt`):
+
+- **rustfmt**: `check-rustfmt-diff.py` flagged changed lines needing
+  formatting in 12 task-touched `gyre-server` files — fixed with
+  `cargo fmt --all`; `check-rustfmt-diff.py` against base `fefde2946`
+  now exits 0 (24 Rust files clean), and `cargo fmt --all --check` is
+  clean.
+- **clippy**: two changed-line errors — `clippy::needless_borrow` at
+  `api/spawn.rs` (passing `&state` where `state` is already
+  `&Arc<AppState>` in `spawn_agent_core`) and
+  `clippy::too_many_arguments` on `commit_document` (8 params). Fixed by
+  passing `state` directly (both the `search_indexer::index` and
+  `budget::increment_active_agents` calls, which the reformat moved into
+  changed hunks) and adding `#[allow(clippy::too_many_arguments)]` to
+  `commit_document`, matching the established repo convention
+  (`graph_extraction.rs`, `git_http.rs`, `spec_registry.rs`, ...).
+  `check-clippy-diff.py` against base `fefde2946` now exits 0.
+
+Post-fix focused suites all green (same counts as the post-merge run):
+`search_indexer` 6, `api::spawn` 38, `api::merge_requests` 33,
+`api::tasks` 7, `merge_processor` 67, `--test search_wiring` 1, and
+`check-arch.sh` passes. No behavior change — the diff is formatting,
+reference coercion, and a lint attribute only. The Svelte warnings in
+the verification log are non-fatal `vite build` warnings (build
+succeeded); web/dist is restored from the assignment base and rebuilt by
+final integration.
