@@ -99,50 +99,21 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round 9 — review findings `d559534738b54ad398ee79fd95770725`
-(checkpoint `b95b56ea`), commit `797cf52f`.** All six findings
-re-verified against the current tree and repaired:
-
-- **F1 (SSO link):** tenant-invitation accept now LINKS an existing
-  SSO-provisioned account instead of creating a parallel local-mode
-  account that shadows it. New port method
-  `UserRepository::find_by_email` (SQLite/Postgres via portable
-  `lower(users.email) = ?`, mem; case-insensitive because invitation
-  emails are lowercased while SSO accounts store the IdP's raw
-  casing); the accept path resolves the tenant-scoped email match,
-  attaches the pre-assigned memberships and the invited GlobalRole
-  via `update()` (username/external_id untouched), and reports
-  `mode: "linked"` with the real account's id/username. Adjacent
-  defect fixed while testing: pre-assigned memberships were created
-  but never *activated* — acceptance now activates them (same
-  semantics as the workspace-invitation accept path).
-- **F2 (username collision):** derived handles go through
-  `User::sanitize_username` + `resolve_unique_username` (the auth.rs
-  deterministic suffix scheme: bob, bob-2, ...; `u-<id>` escape
-  hatch), so a colliding local-part across domains or tenants
-  resolves instead of 500 + rollback to a permanently un-acceptable
-  Pending invitation.
-- **F3 (username contract):** an explicit `username` is validated
-  with `User::validate_username` BEFORE the single-use claim (invalid
-  input must not consume/roll back the invitation) → 400; a taken
-  handle → 409; both retryable. `docs/api-reference.md` updated.
-- **F4 (low):** `GYRE_INVITE_EXPIRY_INTERVAL_SECS=0` now falls back
-  to the default instead of panicking `tokio::time::interval` at
-  startup.
-- **F5 (low):** `load_policy` fails CLOSED on a corrupt stored policy
-  row (error naming the tenant) instead of silently applying the
-  permissive defaults; enforcement callers and GET propagate it, PUT
-  policy is the documented remediation path (persists a fresh valid
-  row).
-- **F6 (test gaps):** new HTTP-layer tests with a two-tenant fixture
-  — cross-tenant 403 guards on workspace invite/list/revoke/accept
-  and tenant invitation revoke (invitation stays Pending);
-  `max_pending_invitations` cap enforced (429, capacity freed by
-  revoke); expired workspace invitation rejected (409 → Expired, no
-  membership); plus regressions for F1/F2/F3 and a SQLite adapter
-  test for `find_by_email`.
-
-Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-9.md`.
+**Repair round 10 — review finding (coverage docs), commits `<docs>` +
+`<process>`.** Single finding, docs-only: the task's four declared
+coverage sections — `user-management.md` rows 5 (Tenant-Level User
+Onboarding), 6 (Workspace Invitation Flow), 7 (Invitation Expiry),
+25 (Tenant Invitations) — were still `task-assigned` with empty
+notes even though all 10 acceptance criteria pass with independent
+evidence (26/69/1564/400 test runs; mutation probes killed;
+mechanical guards verified across rounds 8–9). Repaired in
+`specs/coverage/system/user-management.md`: rows 5/6/7/25 marked
+`implemented` with evidence notes pending independent review, header
+counts 3/36 → 7/36 (23 → 19 task-assigned, 3 → 7 implemented), per
+the task-111/task-120 ready-for-review precedent. No product code
+changed this round; re-verified at this head:
+`cargo test -p gyre-server --lib api::invitations` — 26 passed /
+0 failed.
 
 ### Shipped behavior (task-110, prior rounds)
 
@@ -185,6 +156,19 @@ Evidence log: `/tmp/stage/review-evidence/task-110-repair-round-9.md`.
   path claims through it after external_id match and verified
   same-tenant email, and stamps `last_login_at` per upstream's
   every-login contract.
+- **Repair round 9 (findings `d559534738b54ad398ee79fd95770725`,
+  commit `797cf52f`):** tenant-invitation accept LINKS an existing
+  SSO-provisioned account via the new case-insensitive, tenant-
+  scoped `UserRepository::find_by_email` (no parallel shadow
+  account) and ACTIVATES pre-assigned memberships; derived usernames
+  resolve collisions through `sanitize_username` +
+  `resolve_unique_username` (bob, bob-2, ...) while explicit handles
+  are validated before the single-use claim (400 invalid / 409
+  taken, both retryable); `GYRE_INVITE_EXPIRY_INTERVAL_SECS=0`
+  falls back to default instead of panicking the interval;
+  `load_policy` fails closed on a corrupt policy row; +6 HTTP-layer
+  two-tenant containment tests. Evidence log:
+  `/tmp/stage/review-evidence/task-110-repair-round-9.md`.
 - **Docs:** `docs/api-reference.md` covers all invitation routes,
   selectors and the policy endpoints; `docs/server-config.md`
   documents `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
