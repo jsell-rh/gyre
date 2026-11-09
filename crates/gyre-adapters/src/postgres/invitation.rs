@@ -48,6 +48,36 @@ fn parse_invitation_status(s: &str) -> Result<InvitationStatus> {
     InvitationStatus::parse(s).ok_or_else(|| anyhow!("unknown invitation status: {s}"))
 }
 
+/// True when `err` is the partial unique index on
+/// `(tenant_id, email) WHERE status = 'Pending'` — the database-level
+/// enforcement of the "one pending invitation per (tenant, email)" port
+/// contract (task-110 review F2). PostgreSQL names the violated
+/// constraint (the index); the token_hash unique index must NOT match
+/// (different constraint name).
+fn is_tenant_pending_scope_violation(err: &diesel::result::Error) -> bool {
+    use diesel::result::{DatabaseErrorKind, Error};
+    match err {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            e.message().contains("idx_tenant_invitations_pending_scope")
+                || e.constraint_name() == Some("idx_tenant_invitations_pending_scope")
+        }
+        _ => false,
+    }
+}
+
+/// Workspace counterpart of [`is_tenant_pending_scope_violation`] for the
+/// `(workspace_id, user_id) WHERE status = 'Pending'` partial index.
+fn is_workspace_pending_scope_violation(err: &diesel::result::Error) -> bool {
+    use diesel::result::{DatabaseErrorKind, Error};
+    match err {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            e.message().contains("idx_workspace_invitations_pending_scope")
+                || e.constraint_name() == Some("idx_workspace_invitations_pending_scope")
+        }
+        _ => false,
+    }
+}
+
 // ── Tenant invitations ───────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable)]
@@ -147,10 +177,25 @@ impl TenantInvitationRepository for PgStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            diesel::insert_into(tenant_invitations::table)
+            // The partial unique index (migration 000059) is the race
+            // backstop: a concurrent insert that also passed the check
+            // above is rejected by the database, and the violation is
+            // surfaced as the same port-contract error (task-110 F2).
+            // READ COMMITTED (the default) cannot serialize the
+            // check-then-insert above, so the index is the real arbiter.
+            if let Err(e) = diesel::insert_into(tenant_invitations::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert tenant invitation")?;
+            {
+                if is_tenant_pending_scope_violation(&e) {
+                    anyhow::bail!(
+                        "a pending invitation for {} in tenant {} already exists",
+                        inv.email,
+                        inv.tenant_id
+                    );
+                }
+                return Err(anyhow::Error::new(e).context("insert tenant invitation"));
+            }
             Ok(())
         })
         .await?
@@ -360,10 +405,23 @@ impl WorkspaceInvitationRepository for PgStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            diesel::insert_into(workspace_invitations::table)
+            // Same race backstop as the tenant repository: the partial
+            // unique index (migration 000059) arbitrates concurrent
+            // check-then-insert races and the violation surfaces as the
+            // port-contract error (task-110 F2).
+            if let Err(e) = diesel::insert_into(workspace_invitations::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert workspace invitation")?;
+            {
+                if is_workspace_pending_scope_violation(&e) {
+                    anyhow::bail!(
+                        "a pending invitation for user {} in workspace {} already exists",
+                        inv.user_id,
+                        inv.workspace_id
+                    );
+                }
+                return Err(anyhow::Error::new(e).context("insert workspace invitation"));
+            }
             Ok(())
         })
         .await?

@@ -320,18 +320,36 @@ async fn create_tenant_invitation(
     };
     // Duplicate guard before insert: a pending invitation for the same
     // (tenant, email) is a 409 the caller can act on (revoke or wait for
-    // expiry). The repository contract enforces the same invariant as a
-    // race backstop, but its anyhow error would surface as a 500 here.
-    let existing_pending = state
+    // expiry). The repository contract enforces the same invariant —
+    // backed by the pending-scope partial unique index (migration
+    // 000059) — as a race backstop, but its anyhow error would surface
+    // as a 500 here.
+    let existing_for_email = state
         .tenant_invitations
         .list_by_tenant(&Id::new(auth.tenant_id.clone()))
-        .await?
-        .into_iter()
-        .any(|i| i.email == email && i.status == InvitationStatus::Pending);
-    if existing_pending {
+        .await?;
+    if existing_for_email
+        .iter()
+        .any(|i| i.email == email && i.status == InvitationStatus::Pending)
+    {
         return Err(ApiError::Conflict(format!(
             "a pending invitation for {email} in tenant {} already exists",
             auth.tenant_id
+        )));
+    }
+    // InvitationPolicy.allow_re_invite (user-management.md §Invitation
+    // Expiry, default true): when false, an invitation in a terminal
+    // state (Accepted/Declined/Expired/Revoked) permanently blocks
+    // re-inviting the same email — the default flow (revoke or wait for
+    // expiry, then invite again with a fresh token) is opt-out.
+    if !policy.allow_re_invite
+        && existing_for_email
+            .iter()
+            .any(|i| i.email == email && i.status != InvitationStatus::Pending)
+    {
+        return Err(ApiError::Conflict(format!(
+            "tenant invitation policy disallows re-inviting {email} \
+             (allow_re_invite is disabled and a prior invitation exists)"
         )));
     }
     state.tenant_invitations.create(&invitation).await?;
@@ -1018,6 +1036,20 @@ pub async fn invite_to_workspace(
     {
         return Err(ApiError::Conflict(format!(
             "a pending invitation for user {user_id} in workspace {workspace_id} already exists"
+        )));
+    }
+    // InvitationPolicy.allow_re_invite (user-management.md §Invitation
+    // Expiry, default true): when false, an invitation in a terminal
+    // state for this (workspace, user) blocks re-invite — the tenant-side
+    // rule applied to the workspace flow (task-110 review F1).
+    if !policy.allow_re_invite
+        && ws_pending
+            .iter()
+            .any(|i| i.user_id == user_id && i.status != InvitationStatus::Pending)
+    {
+        return Err(ApiError::Conflict(format!(
+            "invitation policy disallows re-inviting user {user_id} to workspace \
+             {workspace_id} (allow_re_invite is disabled and a prior invitation exists)"
         )));
     }
     // max_pending_invitations cap per workspace.
@@ -2564,6 +2596,286 @@ mod tests {
             age >= 29 * day && age <= 31 * day,
             "expiry driven by configured policy, got {age}s (~{} days)",
             age / day
+        );
+    }
+
+    /// Task-110 review F1: InvitationPolicy.allow_re_invite=false must be
+    /// ENFORCED, not just stored — after a terminal invitation (here:
+    /// Revoked; Expired/Declined/Accepted are the same terminal class), a
+    /// re-invite for the same email must 409 while the policy is disabled,
+    /// and must succeed again once re-invites are re-enabled. Removes the
+    /// policy check in create_tenant_invitation and this test fails.
+    #[tokio::test]
+    async fn allow_re_invite_false_blocks_tenant_reinvite_after_revoke() {
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/tenant/invitations/:id",
+                delete(revoke_tenant_invitation),
+            )
+            .with_state(state.clone());
+
+        let invite = |app: Router| {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "reinvite@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        let put_policy = |app: Router, body: serde_json::Value| {
+            app.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+        };
+
+        // Default policy (allow_re_invite=true): invite, revoke, re-invite
+        // with a fresh token — the spec's default flow.
+        let resp = invite(app.clone()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id = json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/tenant/invitations/{inv_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = invite(app.clone()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "default policy allows re-invite after revoke"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id2 = json["id"].as_str().unwrap().to_string();
+
+        // Now disable re-invites and revoke the second invitation: a third
+        // invite for the same email must be rejected — the inert-field
+        // regression this test guards (review F1).
+        let resp = put_policy(
+            app.clone(),
+            serde_json::json!({"allow_re_invite": false}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allow_re_invite"], false, "policy persisted");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/tenant/invitations/{inv_id2}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = invite(app.clone()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "allow_re_invite=false must block re-invite after a terminal invitation"
+        );
+
+        // The block is the policy, not a permanent side effect: enabling
+        // re-invites again restores the default flow.
+        let resp = put_policy(
+            app.clone(),
+            serde_json::json!({"allow_re_invite": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = invite(app).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Two terminal (Revoked) invitations plus one live pending one.
+        let all = state
+            .tenant_invitations
+            .list_by_tenant(&Id::new("default"))
+            .await
+            .unwrap();
+        assert_eq!(
+            all.iter()
+                .filter(|i| i.status == InvitationStatus::Revoked)
+                .count(),
+            2
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|i| i.status == InvitationStatus::Pending)
+                .count(),
+            1
+        );
+    }
+
+    /// Task-110 review F1, workspace counterpart: with
+    /// allow_re_invite=false, re-inviting a user to a workspace that has a
+    /// terminal (Revoked) invitation for them must 409; with the default
+    /// policy the re-invite succeeds with a fresh token.
+    #[tokio::test]
+    async fn allow_re_invite_false_blocks_workspace_reinvite_after_revoke() {
+        let f = invitee_fixture().await;
+        let app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invite",
+                post(invite_to_workspace),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invitations/:id",
+                delete(revoke_workspace_invitation),
+            )
+            .with_state(f.state.clone());
+
+        let invite = |app: Router| {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "invitee"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+
+        // Default policy: invite, revoke, re-invite — allowed.
+        let resp = invite(app.clone()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id = json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/ws-inv/invitations/{inv_id}"))
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = invite(app.clone()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "default policy allows re-invite after revoke"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id2 = json["id"].as_str().unwrap().to_string();
+
+        // Disable re-invites, revoke the second invitation, and try again.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"allow_re_invite": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/ws-inv/invitations/{inv_id2}"))
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = invite(app).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "allow_re_invite=false must block workspace re-invite after a terminal invitation"
+        );
+
+        let all = f
+            .state
+            .workspace_invitations
+            .list_by_workspace(&Id::new("ws-inv"))
+            .await
+            .unwrap();
+        let for_invitee: Vec<_> = all
+            .iter()
+            .filter(|i| i.user_id == f.invitee_id)
+            .collect();
+        assert_eq!(for_invitee.len(), 2, "exactly the two revoked invitations");
+        assert!(
+            for_invitee
+                .iter()
+                .all(|i| i.status == InvitationStatus::Revoked),
+            "both invitations terminal, no new pending row created by the blocked re-invite"
         );
     }
 

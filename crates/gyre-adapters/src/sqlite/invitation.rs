@@ -48,6 +48,43 @@ fn parse_invitation_status(s: &str) -> Result<InvitationStatus> {
     InvitationStatus::parse(s).ok_or_else(|| anyhow!("unknown invitation status: {s}"))
 }
 
+/// True when `err` is the partial unique index on
+/// `(tenant_id, email) WHERE status = 'Pending'` — the database-level
+/// enforcement of the "one pending invitation per (tenant, email)" port
+/// contract (task-110 review F2). SQLite reports the violation either by
+/// index name (newer builds) or by the column list; the token_hash unique
+/// index must NOT match (it is a different constraint and names its own
+/// column).
+fn is_tenant_pending_scope_violation(err: &diesel::result::Error) -> bool {
+    use diesel::result::{DatabaseErrorKind, Error};
+    match err {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            let msg = e.message();
+            msg.contains("idx_tenant_invitations_pending_scope")
+                || msg.contains(
+                    "tenant_invitations.tenant_id, tenant_invitations.email",
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Workspace counterpart of [`is_tenant_pending_scope_violation`] for the
+/// `(workspace_id, user_id) WHERE status = 'Pending'` partial index.
+fn is_workspace_pending_scope_violation(err: &diesel::result::Error) -> bool {
+    use diesel::result::{DatabaseErrorKind, Error};
+    match err {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            let msg = e.message();
+            msg.contains("idx_workspace_invitations_pending_scope")
+                || msg.contains(
+                    "workspace_invitations.workspace_id, workspace_invitations.user_id",
+                )
+        }
+        _ => false,
+    }
+}
+
 // ── Tenant invitations ───────────────────────────────────────────────────────
 
 #[derive(Queryable, Selectable)]
@@ -147,10 +184,23 @@ impl TenantInvitationRepository for SqliteStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            diesel::insert_into(tenant_invitations::table)
+            // The partial unique index (migration 000059) is the race
+            // backstop: a concurrent insert that also passed the check
+            // above is rejected by the database, and the violation is
+            // surfaced as the same port-contract error (task-110 F2).
+            if let Err(e) = diesel::insert_into(tenant_invitations::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert tenant invitation")?;
+            {
+                if is_tenant_pending_scope_violation(&e) {
+                    anyhow::bail!(
+                        "a pending invitation for {} in tenant {} already exists",
+                        inv.email,
+                        inv.tenant_id
+                    );
+                }
+                return Err(anyhow::Error::new(e).context("insert tenant invitation"));
+            }
             Ok(())
         })
         .await?
@@ -360,10 +410,23 @@ impl WorkspaceInvitationRepository for SqliteStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            diesel::insert_into(workspace_invitations::table)
+            // Same race backstop as the tenant repository: the partial
+            // unique index (migration 000059) arbitrates concurrent
+            // check-then-insert races and the violation surfaces as the
+            // port-contract error (task-110 F2).
+            if let Err(e) = diesel::insert_into(workspace_invitations::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert workspace invitation")?;
+            {
+                if is_workspace_pending_scope_violation(&e) {
+                    anyhow::bail!(
+                        "a pending invitation for user {} in workspace {} already exists",
+                        inv.user_id,
+                        inv.workspace_id
+                    );
+                }
+                return Err(anyhow::Error::new(e).context("insert workspace invitation"));
+            }
             Ok(())
         })
         .await?
@@ -723,6 +786,246 @@ mod tests {
             )
             .await
             .unwrap()
+        );
+    }
+
+    /// Task-110 review F2: the "one pending invitation per (tenant, email)"
+    /// port contract must be enforced by the DATABASE (partial unique
+    /// index, migration 000059), not only by the adapter's check-then-insert
+    /// — two concurrent creates that both pass the check must not both
+    /// insert. This test bypasses the repository entirely (raw SQL) so it
+    /// fails if the index is missing, and feeds the REAL database errors
+    /// to the violation discriminators so a matcher regression (e.g. one
+    /// that swallows the token_hash constraint) also fails.
+    #[test]
+    fn pending_scope_unique_index_enforced_by_database() {
+        use diesel::sql_types::Text;
+        use diesel::RunQueryDsl;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStorage::new(dir.path().join("test.db").to_str().unwrap()).unwrap();
+        let mut conn = db.pool.get().unwrap();
+
+        let tenant_insert = "INSERT INTO tenant_invitations \
+             (id, tenant_id, email, invited_by, role, workspace_ids, workspace_roles, \
+              status, token_hash, expires_at, created_at, accepted_at) \
+             VALUES (?, ?, ?, 'u1', 'Member', '[]', '[]', ?, ?, 9999999999, 1, NULL)";
+        let ws_insert = "INSERT INTO workspace_invitations \
+             (id, tenant_id, workspace_id, user_id, invited_by, role, \
+              status, token_hash, expires_at, created_at, accepted_at) \
+             VALUES (?, 't1', ?, ?, 'u1', 'Viewer', ?, ?, 9999999999, 1, NULL)";
+
+        // Baseline pending invitation for (t1, a@x.com).
+        diesel::sql_query(tenant_insert)
+            .bind::<Text, _>("inv-1")
+            .bind::<Text, _>("t1")
+            .bind::<Text, _>("a@x.com")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("hash-1")
+            .execute(&mut conn)
+            .unwrap();
+
+        // Second Pending row for the SAME (tenant, email) → the index
+        // rejects it at the database level and the discriminator
+        // recognizes the violation as the pending-scope contract conflict.
+        let err = diesel::sql_query(tenant_insert)
+            .bind::<Text, _>("inv-2")
+            .bind::<Text, _>("t1")
+            .bind::<Text, _>("a@x.com")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("hash-2")
+            .execute(&mut conn)
+            .unwrap_err();
+        assert!(
+            is_tenant_pending_scope_violation(&err),
+            "pending-scope index did not fire or was not recognized: {err}"
+        );
+
+        // A different email for the same tenant is fine — the index is
+        // scoped to (tenant, email).
+        diesel::sql_query(tenant_insert)
+            .bind::<Text, _>("inv-3")
+            .bind::<Text, _>("t1")
+            .bind::<Text, _>("b@x.com")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("hash-3")
+            .execute(&mut conn)
+            .unwrap();
+
+        // A TERMINAL row for the same (tenant, email) does not conflict:
+        // re-invite after Revoked/Expired/Declined must keep working.
+        diesel::sql_query(tenant_insert)
+            .bind::<Text, _>("inv-4")
+            .bind::<Text, _>("t1")
+            .bind::<Text, _>("a@x.com")
+            .bind::<Text, _>("Revoked")
+            .bind::<Text, _>("hash-4")
+            .execute(&mut conn)
+            .unwrap();
+
+        // The token_hash unique index is a DIFFERENT constraint: a
+        // violation of it must NOT be mistaken for the pending-scope
+        // contract (different tenant and email, colliding hash).
+        let err = diesel::sql_query(tenant_insert)
+            .bind::<Text, _>("inv-5")
+            .bind::<Text, _>("t2")
+            .bind::<Text, _>("c@x.com")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("hash-1")
+            .execute(&mut conn)
+            .unwrap_err();
+        assert!(
+            !is_tenant_pending_scope_violation(&err),
+            "token_hash violation misclassified as pending-scope: {err}"
+        );
+
+        // Workspace variant: same contract on (workspace_id, user_id).
+        diesel::sql_query(ws_insert)
+            .bind::<Text, _>("wi-1")
+            .bind::<Text, _>("ws1")
+            .bind::<Text, _>("u9")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("whash-1")
+            .execute(&mut conn)
+            .unwrap();
+        let err = diesel::sql_query(ws_insert)
+            .bind::<Text, _>("wi-2")
+            .bind::<Text, _>("ws1")
+            .bind::<Text, _>("u9")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("whash-2")
+            .execute(&mut conn)
+            .unwrap_err();
+        assert!(
+            is_workspace_pending_scope_violation(&err),
+            "workspace pending-scope index did not fire or was not recognized: {err}"
+        );
+        // Different user, same workspace → fine.
+        diesel::sql_query(ws_insert)
+            .bind::<Text, _>("wi-3")
+            .bind::<Text, _>("ws1")
+            .bind::<Text, _>("u8")
+            .bind::<Text, _>("Pending")
+            .bind::<Text, _>("whash-3")
+            .execute(&mut conn)
+            .unwrap();
+        // Terminal row for the same (workspace, user) → fine.
+        diesel::sql_query(ws_insert)
+            .bind::<Text, _>("wi-4")
+            .bind::<Text, _>("ws1")
+            .bind::<Text, _>("u9")
+            .bind::<Text, _>("Declined")
+            .bind::<Text, _>("whash-4")
+            .execute(&mut conn)
+            .unwrap();
+    }
+
+    /// Task-110 review F2 safety net: migration 000059 must apply to a
+    /// database that ALREADY contains raced duplicate Pending rows (the
+    /// exact state the check-then-insert gap allowed) without failing at
+    /// CREATE UNIQUE INDEX — the superseded duplicates are marked Expired
+    /// (audit-preserving terminal state) and only the newest per scope
+    /// survives as Pending.
+    #[test]
+    fn migration_000059_dedupes_raced_pending_invitations_before_index() {
+        use crate::sqlite::MIGRATIONS;
+        use diesel::migration::{MigrationConnection, MigrationSource};
+        use diesel::sql_types::{Integer, Text};
+        use diesel::{Connection, RunQueryDsl};
+        use diesel_migrations::MigrationHarness;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut conn = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+
+        // Pre-000059 state: every earlier migration applied.
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
+            m.name().version().to_string() != "20261108000059"
+        });
+        assert_eq!(
+            target.len(),
+            1,
+            "000059 not found in embedded migrations"
+        );
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Seed the raced state directly (bypasses the repository's
+        // check-then-insert): three Pending rows for (t1, a@x.com) —
+        // created_at 100, 200, and a created_at tie broken by id — plus
+        // one Pending row for a different email.
+        let insert = "INSERT INTO tenant_invitations \
+             (id, tenant_id, email, invited_by, role, workspace_ids, workspace_roles, \
+              status, token_hash, expires_at, created_at, accepted_at) \
+             VALUES (?, 't1', ?, 'u1', 'Member', '[]', '[]', 'Pending', ?, 9999999999, ?, NULL)";
+        for (id, email, hash, created) in [
+            ("inv-old", "a@x.com", "h-old", 100i32),
+            ("inv-new", "a@x.com", "h-new", 200),
+            ("inv-tie-b", "a@x.com", "h-tie-b", 200),
+            ("inv-other", "b@x.com", "h-other", 50),
+        ] {
+            diesel::sql_query(insert)
+                .bind::<Text, _>(id)
+                .bind::<Text, _>(email)
+                .bind::<Text, _>(hash)
+                .bind::<Integer, _>(created)
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        // The migration must not fail on the duplicates (CREATE UNIQUE
+        // INDEX would abort without the dedupe pass).
+        conn.run_migrations(&target).unwrap();
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }`, so clippy::redundant_field_names
+        // fires on derive-generated code that inherits neither struct-
+        // nor field-level `#[allow]` (same repo-verified quirk as the
+        // row-carrier modules in sqlite/mod.rs) — scope the lint off for
+        // this small module instead.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::Text;
+
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct StatusRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) status: String,
+            }
+        }
+        use rows::StatusRow;
+        let rows: Vec<StatusRow> =
+            diesel::sql_query("SELECT id, status FROM tenant_invitations ORDER BY id")
+                .load(&mut conn)
+                .unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            rows.into_iter().map(|r| (r.id, r.status)).collect();
+        // Superseded duplicates are Expired — never deleted (audit):
+        // the older created_at (inv-old, 100) and the id-losing side of
+        // the created_at tie ("inv-new" < "inv-tie-b", both 200).
+        assert_eq!(by_id["inv-old"], "Expired");
+        assert_eq!(by_id["inv-new"], "Expired");
+        // The single newest per scope (greatest created_at, then greatest
+        // id) survives as Pending.
+        assert_eq!(by_id["inv-tie-b"], "Pending");
+        // Other scopes are untouched.
+        assert_eq!(by_id["inv-other"], "Pending");
+
+        // And the index is live after the migration: a new duplicate
+        // Pending row for (t1, a@x.com) is rejected by the database.
+        let err = diesel::sql_query(insert)
+            .bind::<Text, _>("inv-race")
+            .bind::<Text, _>("a@x.com")
+            .bind::<Text, _>("h-race")
+            .bind::<Integer, _>(300)
+            .execute(&mut conn)
+            .unwrap_err();
+        assert!(
+            is_tenant_pending_scope_violation(&err),
+            "index not enforced after migration: {err}"
         );
     }
 }
