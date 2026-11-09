@@ -745,7 +745,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
 /// gyre_spawn_repo_orchestrator (task-093): workspace-orchestrator only.
 /// Target repo must belong to the caller's workspace.
 async fn handle_spawn_repo_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     args: &Value,
     auth: &AuthenticatedAgent,
 ) -> Value {
@@ -780,10 +780,12 @@ async fn handle_spawn_repo_orchestrator(
     )
     .await
     {
-        Ok((agent, token)) => tool_result(
+        Ok((agent, token, launch)) => tool_result(
             serde_json::to_string(&crate::api::orchestrator::SpawnOrchestratorResponse {
                 agent: crate::api::spawn::orchestrator_response(agent),
                 token,
+                launch_status: launch.launch_status,
+                launch_detail: launch.launch_detail,
             })
             .unwrap_or_default(),
         ),
@@ -1432,15 +1434,17 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             }
 
             // ── Telemetry for real-time dashboard ────────────────────────────────────
-            state.emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::AgentStatusChanged,
-                Some(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "idle",
-                    "reason": format!("Agent {} completed task", agent.name),
-                })),
-            );
+            state
+                .emit_telemetry(
+                    ws_id,
+                    gyre_common::message::MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": "idle",
+                        "reason": format!("Agent {} completed task", agent.name),
+                    })),
+                )
+                .await;
 
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
@@ -5094,8 +5098,12 @@ mod tests {
         );
         st.workspaces.create(&ws).await.unwrap();
 
-        // Create user + API key so auth.user_id is Some.
-        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        // Create user + API key so auth.user_id is Some. The user MUST carry
+        // a tenant binding (task-099 F1): the API-key path of the auth
+        // extractor fail-closes on users without one, so this test would
+        // get a 403 instead of a briefing without it.
+        let mut user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        user.tenant_id = Some(Id::new("default"));
         st.users.create(&user).await.unwrap();
         let raw_key = "gyre_test_briefing_key";
         st.api_keys
@@ -6308,6 +6316,19 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
         }
+        // F2: orchestrator spawn requires an approved repo-orchestrator
+        // persona in the scope chain (tenant scope here, as bootstrap
+        // step 5 registers it).
+        let mut persona = gyre_domain::Persona::new(
+            gyre_common::Id::new("repo-orchestrator-persona"),
+            "repo-orchestrator",
+            "repo-orchestrator",
+            gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+            "test orchestrator persona",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
         state
     }
 

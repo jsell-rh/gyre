@@ -2744,6 +2744,11 @@ specs:
             0,
         );
         user.roles = vec![gyre_domain::UserRole::Admin];
+        // API-key auth resolves the tenant scope from the user's stored
+        // binding and fail-closes when it is absent (task-099 F1), so the
+        // fixture binds jsell to the seeded specs' tenant ("default", the
+        // tenant of ws-e2e) for the approval to authenticate.
+        user.tenant_id = Some(gyre_common::Id::new("default"));
         state.users.create(&user).await.unwrap();
 
         let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
