@@ -1,0 +1,40 @@
+# Review — task-165 (Supply chain — gyre-stack.lock parsing and attestation level enforcement)
+
+Spec: `specs/system/supply-chain.md` §gyre-stack.lock, §Attestation Levels, §Level 3, §Policy per Level.
+Candidate under review: `b00336dafe3afba2099f9348c88d48845a2d824c` (branch `pipeline/task-165/cfaa022328404b82953097397d57b83e-1`), diffed against assigned base `fefde2946f3a0af1f212588f54591516fee0f7b2`. Fifth round of review on this task (round 3 repair `27227f6b6` responded to review `01b41fe1`; this round reviews the recorded candidate `b00336daf`).
+Verdict: **needs-revision** (one blocking finding: rustfmt/CI regression on task-changed lines; everything substantive passed).
+
+## Probes (logs under /tmp/stage/review-evidence/, task165-r4-*)
+
+- `bash scripts/check-event-payload.sh` → exit 0 (1 event kind checked) — the round-3 §7.5 payload fix holds.
+- `bash scripts/check-arch.sh`, `check-inert-enforcement.sh`, `check-dead-message-kinds.sh`, `check-relative-path-defaults.sh`, `check-mem-port-contracts.sh`, `check-migration-versions.sh` → all exit 0.
+- `cargo test -p gyre-domain stack` → 9 passed. `cargo test -p gyre-server git_http::` → 46 passed. `cargo test -p gyre-server api::stack_attest` → 14 passed. `cargo test -p gyre-adapters sqlite::agent` → 17 passed. `cargo test -p gyre-cli` → 135 passed + ws_integration 1 passed.
+- **Kill-check**: with `if level < policy.min_attestation_level` temporarily neutered to `if false && ...` in `enforce_stack_policy`, `push_below_min_attestation_level_blocked` FAILS (panic at the 403 assertion, exit 101); restored (`git checkout --`, tree verified clean at `b00336daf`), the test passes again. The block-mode enforcement is real, not mirrored logic.
+- `cargo run -p gyre-cli -- stack lock --help` → exit 0, command wired with `--output` flag.
+- `python3 scripts/check-rustfmt-diff.py fefde2946f3a0af1f212588f54591516fee0f7b2` → **exit 1** (client.rs:46, lib.rs:56) — see F1.
+- `cargo test -p gyre-cli --test ws_integration` → **passes** in this sandbox. The shipped note claiming `test_auth_and_ping_roundtrip` fails on `TcpListener::bind` errno 95 is stale: `/tmp/stage/capabilities.json` records `tcp_listener_probe.supported=true` and the test is green here. This favors the candidate (no deferred verification needed on that test), but the shipped-evidence claim was inaccurate.
+
+## Verified working (no findings)
+
+- **Lockfile schema** (`gyre-domain/src/stack.rs`): real TOML schema with all specced components + composite fingerprint; parse/to_toml round-trip, `verify_integrity` (recompute fingerprint — catches tampering with a component without regenerating the fingerprint), `check_drift` (names differing components). 9 domain tests.
+- **Push enforcement is real end-to-end**: `enforce_stack_policy` (`git_http.rs:1382`) runs on every push with ref updates, after receive-pack applies refs and before the response, so Block-mode rejections undo refs (`undo_ref_updates`) and return 403 — proven by tests that push real commits through the HTTP layer and assert 403 + ref deletion, and by the kill-check above. Min-level Block and Warn modes both exercised; Warn mode emits a ConstraintViolation event carrying the full §7.5 payload schema (field-presence assertions in `assert_spec_constraint_violation_payload`).
+- **Level resolution** (`resolve_push_attestation_level`): L3 = server-side workload attestation with container identity — the production spawn path is real (`api/spawn.rs:1148-1161` writes `workload_attestations` with `spawned_container_id`/`spawned_container_image` for container targets); L2 = registered stack in `agent_stacks`; L1 = otherwise. JWT `wl_container_id`+`wl_image_hash` branch exists but has no production minter (honestly recorded in coverage row 9 and shipped notes — defense-in-depth, not fakery, since the JWT is server-signed and cannot be self-minted by an agent).
+- **Level persistence**: migration `2026-10-10-000059_agent_attestation_level` (unique version — `check-migration-versions.sh` exit 0; the `2026-11-06/07-000057` pair is pre-existing in the base), SQLite + Postgres adapters round-trip the column, exposed on `GET /api/v1/agents/:id`, mapped to provenance labels (server-verified / self-reported / unattested).
+- **Policy surface**: `RepoStackPolicy.min_attestation_level` (1..=3, validated, 400 on out-of-range) + `enforcement: block|warn` (400 on unknown mode); legacy KV entries derive min from `required_level`; PUT/GET routes pre-existed in the base (no new ABAC surface).
+- **Drift detection**: lockfile read from the pushed tree at the new SHA via `read_git_file`, integrity-checked, then compared against the pushing agent's attested stack; ungated from repo policy (lockfile + no policy → warn-mode flag), Block mode under a policy rejects 403. Parse failure and integrity failure are distinguished in the event payload (`integrity_verified`, `lockfile_fingerprint`).
+- **CLI command**: `gyre stack lock [--output]` wired; `AgentStackResponse` field-for-field matches the server's `StackResponse` (`agent_id`, `stack`, `fingerprint`); lockfile construction uses the tested domain `StackLockfile::from_stack`/`to_toml`.
+
+## Findings
+
+- [open] **F1 (blocking, trivial fix): rustfmt violations on task-165-changed lines fail CI and pre-commit.** `python3 scripts/check-rustfmt-diff.py fefde2946f3a0af1f212588f54591516fee0f7b2` exits 1 with `crates/gyre-cli/src/client.rs: changed lines need formatting: 46` (stray blank line after the new `AgentStackResponse` struct) and `crates/gyre-domain/src/lib.rs: changed lines need formatting: 56` (`pub mod stack;` declared after `workspace_membership` instead of its alphabetical position — rustfmt `reorder_modules`). Additionally `cargo fmt -p gyre-cli -- --check` flags a stray blank line at `main.rs:1943` (introduced with `run_stack_lock`). CI job `fmt` (`.github/workflows/ci.yml:35-45`) runs `check-rustfmt-diff.py` and pre-commit runs `cargo fmt --all -- --check` — both fail on the candidate. The shipped evidence claims "`cargo fmt -p gyre-server -- --check` → clean", which is true but only covers one of the four crates the task touched. Remedy: run `cargo fmt` on `gyre-cli`, `gyre-domain` (and re-check `gyre-server`/`gyre-adapters`), commit the formatting-only fix, and record it in the task's `commits:` frontmatter.
+
+## Minor (not blocking, recorded for completeness)
+
+- The lockfile drift/integrity check is skipped entirely for a Level-1 (unattested) pusher (`if let Some(attested) = &attested_stack` gates the whole block), so a tampered lockfile pushed by an unattested pusher to a policy-less repo passes silently. Defensible: the plan defines drift as lockfile-vs-submitted-attestation (nothing to compare without an attestation), and a min-level policy already rejects/flags the unattested pusher. Worth a future round if the spec's "Enforced by the forge" bullet is read as lockfile-integrity-for-all-pushers.
+- Only the first ref update carrying a lockfile is drift-checked in a multi-ref push ("One lockfile per tree — first ref update settles it", documented in code). Edge case; acceptable.
+- `run_stack_lock`/`get_agent_stack` have no CLI test, though the repo has an established mock-HTTP-server pattern for client-method wiring tests (budget tests in `client.rs`). Thin wrapper over tested components with a shape-verified response type, so not blocking, but a `client.rs` wiring test would lock the URL/response shape the way the budget tests do.
+- Shipped-evidence inaccuracy (no code impact): the `ws_integration` errno-95 / listener-unsupported claim is stale — the test passes in the current sandbox (`capabilities.json` records listener support).
+
+## Verdict
+
+needs-revision — F1 only. All substantive acceptance criteria (lockfile schema, CLI command, 1/2/3 level resolution, `min_attestation_level` policy, block/warn enforcement, drift detection) are independently corroborated with kill-checked tests; the fmt regression is mechanical and localized to three lines the task introduced.
