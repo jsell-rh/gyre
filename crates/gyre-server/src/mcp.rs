@@ -1447,7 +1447,14 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                 .await;
 
             match state.agents.update(&agent).await {
-                Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
+                Ok(()) => {
+                    // Platform Model §7: revoke task-scoped ephemeral secrets
+                    // on agent completion ("Secrets access revoked" at
+                    // teardown) — deletes Task-scoped secrets for the
+                    // agent's task and logs `secret.revoked` per secret.
+                    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+                    tool_result(format!("Agent {agent_id} marked complete"))
+                }
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
             }
         }
@@ -4096,6 +4103,114 @@ mod tests {
         assert!(
             props.get("summary").is_some(),
             "gyre_agent_complete must advertise a 'summary' field in its inputSchema"
+        );
+    }
+
+    // ── agent_complete revokes task-scoped secrets (§7, task-100) ────────────
+
+    #[tokio::test]
+    async fn agent_complete_revokes_task_scoped_secrets() {
+        use gyre_common::{Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-teardown"),
+            Id::new("default"),
+            "Teardown WS",
+            "teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-teardown"), "teardown-agent", now);
+        agent.workspace_id = Id::new("ws-teardown");
+        agent.current_task_id = Some(Id::new("task-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        // Task-scoped ephemeral secret for the completing agent's task
+        // (must be revoked) and a workspace-scoped secret (must survive).
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 52,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": { "agent_id": "agent-teardown" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "agent completion must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent completion"
         );
     }
 
