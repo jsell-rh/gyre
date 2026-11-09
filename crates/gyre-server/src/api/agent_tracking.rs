@@ -157,9 +157,21 @@ pub async fn create_worktree(
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
     // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event (observability.md §Audit Event
+        // Types) — the per-handler repo-level ABAC check rejected the
+        // request outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/worktrees",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
 
     // Create the worktree via git ops.
     if let Err(e) = state

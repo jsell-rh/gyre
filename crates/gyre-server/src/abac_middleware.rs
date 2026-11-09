@@ -1288,6 +1288,326 @@ pub mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn uninstrumented_abac_guards_record_abac_denied_audit_event() {
+        // Review repair (task-104 round 11): per-handler repo/workspace-level
+        // ABAC guards — the G6 kv-store policies, the same policy layer the
+        // git push path already instruments via record_abac_denied — rejected
+        // with 403 while recording no abac_denied event: create_worktree, the
+        // four jj mutation endpoints, repo orchestrator spawn, the
+        // briefing/ask repo-scope guard, spawn_agent_core (REST + MCP), and
+        // the conversations workspace-read guard. ABAC-side equivalent of
+        // the round-8/9/10 per-handler RBAC sweep. Each sub-case gets a
+        // fresh state so the recorded event count is exactly one.
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::body::Body;
+        use http::Request;
+        use tower::ServiceExt;
+
+        // Fresh state with production-seeded builtin policies (as main.rs
+        // does) plus a G6 kv-store policy on `scope_key` requiring a
+        // `team=infra` claim no caller below carries. The builtin seed keeps
+        // the middleware layer permissive for the caller (Developer write /
+        // Admin all) so the per-handler guard is the only denial source.
+        async fn denied_state(scope_key: &str) -> Arc<AppState> {
+            let state = make_test_state_with_jwt();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(seed_builtin_policies(&state))
+                    .expect("seed built-in policies")
+            });
+            init_resolver();
+            let policies = vec![crate::abac::AbacPolicy {
+                resource_type: "repo".to_string(),
+                resource_id: None,
+                required_claims: std::iter::once(("team".to_string(), "infra".to_string()))
+                    .collect(),
+            }];
+            state
+                .kv_store
+                .kv_set(
+                    "abac_policies",
+                    scope_key,
+                    serde_json::to_string(&policies).unwrap(),
+                )
+                .await
+                .unwrap();
+            state
+        }
+
+        async fn seed_repo(state: &AppState, repo_id: &str, workspace_id: &str) {
+            use gyre_domain::Repository;
+            let repo = Repository::new(
+                gyre_common::Id::new(repo_id),
+                gyre_common::Id::new(workspace_id),
+                format!("repo-{repo_id}"),
+                format!("/repos/repo-{repo_id}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        async fn seed_workspace(state: &AppState, workspace_id: &str) {
+            let ws = gyre_domain::Workspace::new(
+                gyre_common::Id::new(workspace_id),
+                gyre_common::Id::new("tenant-1"),
+                format!("ws-{workspace_id}"),
+                format!("ws-{workspace_id}"),
+                1000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+
+        async fn assert_one_abac_denied(
+            state: &AppState,
+            resource: &str,
+            action: &str,
+            endpoint: &str,
+        ) {
+            let events = gyre_ports::AuditRepository::query(
+                &*state.audit,
+                &gyre_ports::AuditQueryFilter {
+                    event_type: Some("abac_denied".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(events.len(), 1, "one abac_denied event for {endpoint}");
+            let e = &events[0];
+            assert_eq!(e.detail["resource"], resource);
+            assert_eq!(e.detail["action"], action);
+            assert_eq!(e.detail["endpoint"], endpoint);
+            assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+        }
+
+        // Keycloak-style Developer JWT: builtin policies allow read/write/
+        // spawn at the middleware layer, but it carries jwt_claims, so the
+        // per-handler G6 evaluation must still apply (and deny).
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "dev-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        // Admin JWT for briefing/ask: "generate" is not in the Developer
+        // allow-list, so an Admin caller (allowed everywhere at the
+        // middleware layer) isolates the per-handler guard as the denial
+        // source — same construction as briefing_ask_repo_scope_abac_denied
+        //_returns_403 in graph.rs.
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-sub",
+                "preferred_username": "admin-user",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        // 1. Reviewer's probe: Developer creating a worktree on a repo whose
+        //    G6 policy requires team=infra.
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/worktrees")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "agent_id": "agent-1",
+                                "branch": "feat/x",
+                                "path": "/tmp/wt-1"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(&state, "repo", "write", "POST /api/v1/repos/:id/worktrees")
+                .await;
+        }
+
+        // 2–5. The four jj mutation endpoints share the same per-handler
+        //      repo-level guard.
+        for (suffix, body) in [
+            ("new", Some(serde_json::json!({ "description": "d" }))),
+            ("squash", None),
+            ("undo", None),
+            (
+                "bookmark",
+                Some(serde_json::json!({ "name": "b", "change_id": "c" })),
+            ),
+        ] {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let body = body
+                .map(|b| Body::from(serde_json::to_string(&b).unwrap()))
+                .unwrap_or(Body::empty());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/repo-1/jj/{suffix}"))
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "jj/{suffix}");
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "write",
+                &format!("POST /api/v1/repos/:id/jj/{suffix}"),
+            )
+            .await;
+        }
+
+        // 6. Repo orchestrator spawn (route is registry-exempt — the
+        //    per-handler check is the operative ABAC enforcement).
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/orchestrator/spawn")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({ "name": "ro" })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "write",
+                "POST /api/v1/repos/:id/orchestrator/spawn",
+            )
+            .await;
+        }
+
+        // 7. Briefing/ask with a request-body repo scope the caller's claims
+        //    do not satisfy (Admin passes the middleware layer).
+        {
+            let state = denied_state("repo-1").await;
+            seed_workspace(&state, "ws-briefing").await;
+            seed_repo(&state, "repo-1", "ws-briefing").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-briefing/briefing/ask")
+                        .header("Authorization", format!("Bearer {admin_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "question": "q",
+                                "repo_id": "repo-1"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "generate",
+                "POST /api/v1/workspaces/:id/briefing/ask",
+            )
+            .await;
+        }
+
+        // 8. Agent spawn: spawn_agent_core evaluates the repo's G6 policies
+        //    before any agent/task state is created.
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/agents/spawn")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "name": "worker",
+                                "repo_id": "repo-1",
+                                "task_id": "task-1",
+                                "branch": "feat/x"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(&state, "repo", "spawn", "POST /api/v1/agents/spawn").await;
+        }
+
+        // 9. Conversation retrieval: per-handler workspace-read guard on a
+        //    workspace whose G6 policy rejects the caller's claims.
+        {
+            let state = denied_state("ws-conv").await;
+            let sha = state
+                .conversations
+                .store(
+                    &gyre_common::Id::new("agent-1"),
+                    &gyre_common::Id::new("ws-conv"),
+                    &gyre_common::Id::new("default"),
+                    b"conversation-bytes",
+                )
+                .await
+                .unwrap();
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/conversations/{sha}"))
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "workspace",
+                "read",
+                "GET /api/v1/conversations/:sha",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolver_covers_required_routes() {
         init_resolver();
         let resolver = RESOURCE_RESOLVER.get().unwrap();

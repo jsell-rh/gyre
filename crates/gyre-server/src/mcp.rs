@@ -968,7 +968,14 @@ async fn handle_spawn_worker(
         loop_config: None,
         conversation_sha: None,
     };
-    match crate::api::spawn::spawn_agent_core(state, req, auth).await {
+    match crate::api::spawn::spawn_agent_core(
+        state,
+        req,
+        auth,
+        "POST /mcp tools/call gyre_spawn_worker",
+    )
+    .await
+    {
         Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),
         Err(e) => tool_error(format!("Failed to spawn worker: {e}")),
     }

@@ -331,6 +331,7 @@ pub(crate) async fn spawn_agent_core(
     state: &Arc<AppState>,
     req: SpawnAgentRequest,
     auth: &AuthenticatedAgent,
+    endpoint: &str,
 ) -> Result<SpawnAgentResponse, ApiError> {
     // non-atomic-create:ok - agent+worktree creation with compensating
     // rollback: if the worktree record (or the interrogation restrict-Deny)
@@ -345,9 +346,14 @@ pub(crate) async fn spawn_agent_core(
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", req.repo_id)))?;
 
     // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
-    crate::abac::check_repo_abac(&state, &req.repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &req.repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware. `endpoint` names the calling
+        // surface (REST route or MCP tool) since this core is shared.
+        crate::abac_middleware::record_abac_denied(state, auth, "repo", "spawn", None, endpoint)
+            .await;
+        return Err(ApiError::Forbidden(reason));
+    }
 
     // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
     super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
@@ -1238,7 +1244,7 @@ pub async fn spawn_agent(
     auth: AuthenticatedAgent,
     Json(req): Json<SpawnAgentRequest>,
 ) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
-    let resp = spawn_agent_core(&state, req, &auth).await?;
+    let resp = spawn_agent_core(&state, req, &auth, "POST /api/v1/agents/spawn").await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
