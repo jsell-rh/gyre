@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["8269e906749f6b995a429916c868d5c829cfe77a", "7601f79ab5fd116a7e22fb0a137b18fb895953bc"]
+commits: ["8269e906749f6b995a429916c868d5c829cfe77a", "7601f79ab5fd116a7e22fb0a137b18fb895953bc", "ea8dd97b7841718662b84f6501435a10c04cb374"]
 ---
 
 ## Shipped
@@ -86,6 +86,18 @@ conflicts confined to the seams noted in their merge commits; generated
 rebuilt remotely.
 
 ### Review repair history
+
+Verification findings 63609fed (commit ea8dd97b7, candidate abbbb1d3):
+`checks.sh` exit 1 flagged changed-line rustfmt violations in
+`gyre-ports/src/lib.rs`, `gyre-server/src/api/specs_assist.rs`,
+`gyre-server/src/mirror_sync.rs`, `gyre-server/src/notification_dispatcher.rs`,
+and a `clippy::let_and_return` at `notification_dispatcher.rs:717` (test
+helper `sample_notif` bound then returned its value). Fixed by applying
+rustfmt to the four files and returning `Notification::new(...)` directly —
+no behavior changes. Post-repair probes: `cargo fmt --check` clean; clippy
+lib+tests exit 0 with zero `let_and_return`; `notification_dispatcher` 16
+passed, `mirror_sync` 1 passed, `specs_assist` 21 passed; text gates OK.
+Evidence: `/tmp/stage/review-evidence/task-112-verification-repair.txt`.
 
 Findings 07fd53c9 (commit 8269e9067): (1) the old numeric
 `NotificationPriority::from_band` threshold mapping made the §Agent
