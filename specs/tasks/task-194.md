@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §15"
-commits: ["236056d9510cffefda2c3143321b5b92ba8bb142"]
+commits: ["236056d9510cffefda2c3143321b5b92ba8bb142", "a13cf69d74a1a2d2a4852c94b488c8386a90675e"]
 ---
 
 ## Spec Excerpt
@@ -61,7 +61,7 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 
 ## Shipped
 
-§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95` (assignment base `124a852be`).
+§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95`; the verification findings against candidate `6bd8fb491` are repaired in commit `a13cf69d7`.
 
 ### Behavior
 
@@ -80,3 +80,11 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 - Mutation check: replacing the manifest branch of the gate with prefix matching makes 3 tests fail (both gate unit tests + the e2e, which then sees tasks for spec-a and spec-c) — the tests kill a removed manifest gate.
 - `spec_registry::tests`: `manifest_entry_for_path_resolves_with_and_without_prefix`, `effective_priority_entry_override_beats_defaults`, `effective_priority_falls_back_to_defaults_then_none`.
 - Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1381 passed / 0 failed; `bash scripts/check-arch.sh` passed.
+
+### Verification repair (commit `a13cf69d7`)
+
+The verification run of candidate `6bd8fb491` failed two gates; both are repaired:
+
+- **rustfmt changed-lines** (`git_http.rs` 4082/4088/4089/4091/4261/4295, `spec_registry.rs` 1363/1373): task-194's own test asserts exceeded line width. rustfmt (edition 2021, `skip_children`) applied to both files; the reformat touches only task-194 test code. `python3 scripts/check-rustfmt-diff.py fefde2946` now reports changed lines clean.
+- **check-in-memory-state-stores FAIL**: false positive on pre-existing legacy debt — task-194's insertions above the exempted `SpecLedger`/`SpecApprovalHistory`/`SpecLinksStore` aliases shifted them from `spec_registry.rs:218/220/249` to `:260/262/291`, so the frozen `path:line` exemptions stopped matching the same three sites. The exemption coordinates were refreshed to the current positions of the byte-identical alias statements: same sites, entry count still 5, `FROZEN_EXEMPTION_COUNT` untouched, no new site exempted. `bash scripts/check-in-memory-state-stores.sh` now passes.
+- Post-repair gates: `cargo test -p gyre-server --lib` 1493 passed / 0 failed; `python3 scripts/check-clippy-diff.py fefde2946` clean; `bash scripts/check-arch.sh` passed.
