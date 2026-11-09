@@ -5,7 +5,7 @@ depends_on: [task-193]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §15"
-commits: ["06a78d19e07aea4c0a7fe9a489b814e5a3e28df7", "a13cf69d74a1a2d2a4852c94b488c8386a90675e", "236056d9510cffefda2c3143321b5b92ba8bb142"]
+commits: ["1a07e1837d98a4433d67f238eaf3e7cd7cdd7e58", "06a78d19e07aea4c0a7fe9a489b814e5a3e28df7", "a13cf69d74a1a2d2a4852c94b488c8386a90675e", "236056d9510cffefda2c3143321b5b92ba8bb142"]
 ---
 
 ## Spec Excerpt
@@ -61,7 +61,7 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 
 ## Shipped
 
-§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95`; verification findings against candidate `6bd8fb491` are repaired in commit `a13cf69d7`; the review finding on the manifest-less rename fallback (finding `c3db9fd41`, candidate `1848d17f`) is repaired in commit `06a78d19e`.
+§15 manifest-driven spec lifecycle task creation is implemented in commit `236056d95`; verification findings against candidate `6bd8fb491` are repaired in commit `a13cf69d7`; the review finding on the manifest-less rename fallback (finding `c3db9fd41`, candidate `1848d17f`) is repaired in commit `06a78d19e`; the changed-lines rustfmt regression reintroduced by that repair (finding `2358a16f1`, candidate `98b5ce45d`) is repaired in commit `1a07e1837`. No behavior change in the final repair — formatting only.
 
 ### Behavior
 
@@ -80,9 +80,14 @@ Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-154
 - `spec_lifecycle_without_manifest_rename_from_watched_prefix_e2e`: manifest-less push renaming `specs/system/foo.md` → `specs/milestones/a.md` and `specs/system/bar.md` → `docs/b.md` (real `R100` diff lines asserted) yields exactly the two legacy `Update spec references` tasks — base `fefde2946` behavior restored.
 - Mutation checks: replacing the manifest branch of the gate with prefix matching makes 3 tests fail (both gate unit tests + the manifest-gate e2e); reverting the rename-fallback fix (None arm ignoring `old_path`) makes `…_rename_either_side_watched` and `…_rename_from_watched_prefix_e2e` fail (0 tasks instead of 2). The tests kill both a removed manifest gate and a removed rename fallback.
 - `spec_registry::tests`: `manifest_entry_for_path_resolves_with_and_without_prefix`, `effective_priority_entry_override_beats_defaults`, `effective_priority_falls_back_to_defaults_then_none`.
-- Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1495 passed / 0 failed; `bash scripts/check-arch.sh`, `bash scripts/check-in-memory-state-stores.sh`, `python3 scripts/check-rustfmt-diff.py fefde2946`, and `python3 scripts/check-clippy-diff.py fefde2946` all pass.
+- Gates: `cargo build --all` ok; `cargo test -p gyre-server --lib` 1495 passed / 0 failed; `bash scripts/check-arch.sh`, `bash scripts/check-in-memory-state-stores.sh`, `python3 scripts/check-rustfmt-diff.py fefde2946`, and `python3 scripts/check-clippy-diff.py fefde2946` all pass (rustfmt/clippy re-confirmed on the final head `1a07e1837`).
 
 ### Review repair (commit `06a78d19e`, finding `c3db9fd41`)
 
 - **Manifest-less rename fallback regression vs base `fefde2946` (AC3)**: the gate's `None` arm previously checked only the NEW path against `SPEC_WATCHED_PATHS`, but base `parse_spec_changes` admitted renames when EITHER side was watched and `classify_spec_change('R')` always created a task — a manifest-less push renaming a watched spec away (e.g. `specs/system/foo.md` → `specs/milestones/a.md` or `docs/b.md`) silently stopped creating the legacy `Update spec references` task. Fixed by threading `old_path` into `should_create_lifecycle_task` and accepting the prefix fallback when either side of the rename sits under a watched prefix. Manifest-mode new-path-only matching is unchanged (per the task's explicit instruction; the reviewer confirmed it is not a defect).
 - Evidence retained at `/tmp/stage/review-evidence/rename-fallback-repair.log` (gates, mutation check, test listing).
+
+### Review repair (commit `1a07e1837`, finding `2358a16f1`)
+
+- **Changed-lines rustfmt regression (candidate `98b5ce45d`)**: the rename-fallback repair commit `06a78d19e` reintroduced rustfmt violations at `git_http.rs` lines 1428, 4485, 4486, 4502, so `python3 scripts/check-rustfmt-diff.py fefde2946` exited 1 on the final candidate. Fixed by running `rustfmt --edition 2021 --config skip_children=true` (the exact invocation the gate uses) on `crates/gyre-server/src/git_http.rs`; the reformat touches exactly those 4 sites — the `watched` closure in `should_create_lifecycle_task`'s `None` arm and three test assertion lines — and nothing else. No functional change.
+- Post-repair evidence: `python3 scripts/check-rustfmt-diff.py fefde2946` → "changed lines clean (2 Rust files checked)"; `python3 scripts/check-clippy-diff.py fefde2946` → "changed lines clean"; `cargo test -p gyre-server --lib spec_lifecycle` and `… should_create_lifecycle_task` → 7 passed / 0 failed (3 e2e + 4 gate unit tests); `bash scripts/check-arch.sh` → pass. Logs at `/tmp/stage/review-evidence/` (`rustfmt-before.log`, `clippy-diff.log`).
