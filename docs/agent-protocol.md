@@ -17,6 +17,7 @@ This document covers the full agent lifecycle: spawn, operation, and completion.
   "branch": "feat/my-feature",
   "parent_id": "<orchestrator-agent-uuid>",    // optional
   "compute_target_id": "<target-uuid>",        // optional -- remote compute target
+  "persona": "security",                       // optional -- bare persona name; recorded as the agent's persona (spec-registry.md §16) and injected as GYRE_PERSONA in the container env
   "disconnected_behavior": "Pause"             // optional -- "Pause" (default) | "ContinueOffline" | "Abort"; controls stale-agent-detector behavior when agent loses connectivity
 }
 
@@ -138,6 +139,15 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 **`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
 
 **Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+
+**Manifest-declared gates (spec-registry.md §16, task-195):** when an MR's `spec_ref` names a spec whose `specs/manifest.yaml` entry declares `gates:` (e.g. `[security, accountability]`), the forge spawns a gate agent per persona at enqueue time instead of running a subprocess — no command is involved. For each manifest gate:
+
+1. The server creates a real `Agent` record (`gate-<persona>-<mr-id>`, workspace-scoped, `spawned_by: "server"`), records the persona in the `agent_personas` namespace, and registers a scoped EdDSA JWT in `agent_tokens` (revoked when the gate resolves).
+2. A `ReviewRequest` message is dispatched to the agent carrying `{mr_id, repo_id, spec_path, spec_ref, persona, min_attestation_level, stack_hash}` — the gate agent runtime authenticates with its token, polls the message (`gyre_message_poll`), fetches the MR diff, reviews, and submits its verdict via the standard review API (`POST /api/v1/merge-requests/{id}/reviews`, `reviewer_agent_id` = its own agent id). Reviews are attributed per reviewer; each reviewer's **latest** verdict is the one that counts.
+3. The gate passes only on an `Approved` review from an agent running the gate persona whose workload attestation satisfies `min_attestation_level` (and an exact `stack_hash` match when pinned); a final `ChangesRequested` from the persona fails it; otherwise it waits up to the gate timeout, then fails closed (blocking the merge).
+4. The gate agent is torn down after its gate resolves (token revoked with an `AgentTokenRevoked` audit event, status `Stopped`) — ephemeral and single-purpose (agent-gates.md §Gate Agent Lifecycle). Re-enqueueing the MR reuses the still-running gate agent rather than double-spawning.
+
+A repo-level gate and a manifest gate targeting the same persona do not double-run: the manifest gate wins (it carries the manifest's attestation constraints) and the repo-level duplicate for that persona is skipped.
 
 **Merge processor dep failure handling (P5):** before processing each queued entry, the merge processor checks dependency health: if a dependency MR is `Closed`, the queue entry is marked `Failed` and a High-priority task `"Dependency MR-{id} was closed, reassess MR-{dependent}"` is auto-created; if a dependency has 3+ gate failures, an escalation warning is logged.
 

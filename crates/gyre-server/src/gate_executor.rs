@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use gyre_common::attestation::GateAttestation;
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
+use gyre_domain::{AgentStatus, GateResult, GateStatus, GateType, Review, ReviewDecision};
 
 use crate::otlp_receiver::TraceCaptureConfig;
 use crate::AppState;
@@ -43,6 +43,12 @@ pub(crate) struct ManifestGateSpec {
 struct GateConstraints {
     min_attestation_level: u32,
     stack_hash: Option<String>,
+    /// The forge-spawned gate agent running this gate (spec-registry.md §16:
+    /// "Forge spawns security gate agent and accountability gate agent for
+    /// this MR"). `None` for repo-level gates and direct unit-test calls;
+    /// torn down when the gate resolves (agent-gates.md §Gate Agent
+    /// Lifecycle).
+    gate_agent_id: Option<Id>,
 }
 
 /// Split a `spec_ref` of the form `"path@sha"` into `(path, sha)`.
@@ -171,6 +177,188 @@ fn materialize_manifest_gate(repo_id: &Id, mg: &ManifestGateSpec) -> gyre_domain
     }
 }
 
+/// TTL for a gate agent's JWT: the default gate timeout window plus slack
+/// for the agent runtime to poll the ReviewRequest, review the diff, and
+/// submit its verdict (plus raise its workload attestation).
+const GATE_AGENT_TOKEN_TTL_SECS: u64 = AGENT_GATE_TIMEOUT_SECS + 600;
+
+/// Spawn the ephemeral gate agent for a manifest-declared gate
+/// (spec-registry.md §16: "Forge spawns security gate agent and
+/// accountability gate agent for this MR"; agent-gates.md §Gate Agent
+/// Lifecycle: ephemeral, single-purpose, attributed).
+///
+/// This is the production spawn path for manifest gates. It creates a real
+/// `Agent` record, records the gate persona in the `agent_personas` KV
+/// namespace (the persona source `build_agent_context` and
+/// `evaluate_persona_reviews` read — spawn time is its production writer),
+/// mints a scoped auth token the gate agent runtime authenticates with, and
+/// dispatches a `ReviewRequest` message telling it to review the MR. The
+/// agent submits its verdict through the standard review API; the gate
+/// observes the review and tears the agent down once it resolves
+/// (`teardown_gate_agent`).
+///
+/// Idempotent per (MR, persona) while the gate runs: an already-Active
+/// agent with the deterministic name is reused, so re-enqueueing an MR does
+/// not double-spawn. A torn-down (terminal) agent is replaced under a
+/// fresh suffixed name.
+async fn spawn_manifest_gate_agent(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+    mg: &ManifestGateSpec,
+) -> Option<Id> {
+    let base_name = format!("gate-{}-{}", mg.persona, mr.id.as_str());
+    let mut name = base_name.clone();
+    let mut retry = 1u32;
+    loop {
+        match state.agents.find_by_name(&name).await {
+            Ok(Some(existing)) => {
+                if existing.status == AgentStatus::Active {
+                    // Gate still running from a previous enqueue — reuse its
+                    // agent rather than double-spawning the persona.
+                    info!(
+                        agent_id = %existing.id,
+                        mr_id = %mr.id,
+                        persona = %mg.persona,
+                        "manifest gate: reusing running gate agent"
+                    );
+                    return Some(existing.id);
+                }
+                // Terminal (torn down) agent retires its name; take the next
+                // one so find_by_name reuse stays unambiguous.
+                retry += 1;
+                name = format!("{base_name}-r{retry}");
+            }
+            Ok(None) => break,
+            Err(e) => {
+                warn!(
+                    mr_id = %mr.id,
+                    persona = %mg.persona,
+                    error = format!("{e:#}"),
+                    "manifest gate: gate agent name lookup failed; gate will poll reviews"
+                );
+                return None;
+            }
+        }
+    }
+
+    let mut agent = gyre_domain::Agent::new(Id::new(Uuid::new_v4().to_string()), name, now_secs());
+    agent.workspace_id = mr.workspace_id.clone();
+    agent.spawned_by = Some("server".to_string());
+    if let Err(e) = agent.transition_status(AgentStatus::Active) {
+        warn!(mr_id = %mr.id, error = e.to_string(), "manifest gate: agent activation failed");
+        return None;
+    }
+    if let Err(e) = state.agents.create(&agent).await {
+        warn!(
+            mr_id = %mr.id,
+            error = format!("{e:#}"),
+            "manifest gate: gate agent record creation failed; gate will poll reviews"
+        );
+        return None;
+    }
+
+    // Production persona record: the same namespace build_agent_context and
+    // the persona gate read. Without a writer here (and at agent spawn), no
+    // reviewer could ever match a gate persona in a real deployment.
+    if let Err(e) = state
+        .kv_store
+        .kv_set("agent_personas", agent.id.as_str(), mg.persona.clone())
+        .await
+    {
+        warn!(
+            agent_id = %agent.id,
+            error = format!("{e:#}"),
+            "manifest gate: failed to record gate agent persona"
+        );
+    }
+
+    // Scoped token: a JWT minted by the server's OIDC provider and
+    // registered in agent_tokens so the gate agent runtime can authenticate
+    // (same registration spawn_agent_core uses). Falls back to an opaque
+    // token when minting fails — the KV registration is what authenticates.
+    let token = state
+        .agent_signing_key
+        .mint(
+            agent.id.as_str(),
+            "",
+            "server",
+            &state.base_url,
+            GATE_AGENT_TOKEN_TTL_SECS,
+        )
+        .unwrap_or_else(|e| {
+            warn!("gate agent JWT mint failed, falling back to UUID token: {e}");
+            format!("gyre_gate_{}", Uuid::new_v4().simple())
+        });
+    if let Err(e) = state
+        .kv_store
+        .kv_set("agent_tokens", agent.id.as_str(), token)
+        .await
+    {
+        warn!(
+            agent_id = %agent.id,
+            error = format!("{e:#}"),
+            "manifest gate: failed to register gate agent token"
+        );
+    }
+
+    // Dispatch the review request the gate agent runtime polls for (MCP
+    // gyre_message_poll / GET messages). Carries everything the runtime
+    // needs: the MR, the persona to review as, and the attestation
+    // constraints its review must satisfy.
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            gyre_common::message::Destination::Agent(agent.id.clone()),
+            gyre_common::message::MessageKind::ReviewRequest,
+            Some(serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "spec_path": mg.spec_path,
+                "spec_ref": mr.spec_ref,
+                "persona": mg.persona,
+                "min_attestation_level": mg.min_attestation_level,
+                "stack_hash": mg.stack_hash,
+            })),
+        )
+        .await;
+
+    info!(
+        agent_id = %agent.id,
+        mr_id = %mr.id,
+        persona = %mg.persona,
+        "manifest gate: spawned gate agent"
+    );
+
+    Some(agent.id)
+}
+
+/// Tear down a forge-spawned gate agent after its gate resolved
+/// (agent-gates.md §Gate Agent Lifecycle: "Agent is torn down after
+/// submitting its verdict"). Revokes its token (audited via
+/// AgentTokenRevoked) and transitions it to Stopped — the record is kept
+/// so its reviews stay attributed.
+async fn teardown_gate_agent(state: &Arc<AppState>, agent_id: &Id) {
+    let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await else {
+        return;
+    };
+    crate::agent_audit::revoke_agent_token(state, &agent, "manifest gate resolved").await;
+    if let Err(e) = agent.transition_status(AgentStatus::Stopped) {
+        warn!(
+            agent_id = %agent_id,
+            error = e.to_string(),
+            "manifest gate: gate agent teardown status transition failed"
+        );
+        return;
+    }
+    if let Err(e) = state.agents.update(&agent).await {
+        warn!(
+            agent_id = %agent_id,
+            error = format!("{e:#}"),
+            "manifest gate: gate agent teardown update failed"
+        );
+    }
+}
+
 /// Create pending GateResult records for all gates belonging to the MR's
 /// repo, plus the per-spec gates declared by the spec manifest for the MR's
 /// `spec_ref` (spec-registry.md §16), then spawn a background task that
@@ -191,18 +379,35 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
         return;
     }
 
-    // Union, don't replace — but never double-spawn: a manifest gate whose
-    // persona is already covered by a repo-level gate is skipped, so the
-    // repo-level gate for that persona runs exactly as it does today.
-    let covered_personas: std::collections::HashSet<String> = gates
+    // Union, don't replace — but never double-spawn a persona. When a
+    // repo-level gate and a manifest gate target the same persona, the
+    // MANIFEST gate wins: it carries the min_attestation_level / stack_hash
+    // constraints the manifest declares for this spec, which the repo-level
+    // gate cannot enforce — skipping the manifest gate instead would let a
+    // no-command repo-level AgentReview gate auto-pass and merge without
+    // them. The repo-level duplicate for that persona is skipped, so the
+    // persona still runs exactly once.
+    let manifest_personas: std::collections::HashSet<&str> = manifest_gates
         .iter()
-        .filter_map(|g| g.persona.as_deref().map(persona_name_from_path))
-        .map(|p| p.to_string())
+        .map(|mg| mg.persona.as_str())
         .collect();
-    let manifest_gates: Vec<ManifestGateSpec> = manifest_gates
+    let gates: Vec<gyre_domain::QualityGate> = gates
         .into_iter()
-        .filter(|mg| !covered_personas.contains(&mg.persona))
+        .filter(|g| {
+            g.persona
+                .as_deref()
+                .map(persona_name_from_path)
+                .is_none_or(|p| !manifest_personas.contains(p))
+        })
         .collect();
+
+    // Forge-spawn the gate agent for each manifest gate (spec-registry.md
+    // §16: "Forge spawns security gate agent and accountability gate agent
+    // for this MR") — a real Agent record carrying the persona, a scoped
+    // auth token, and a dispatched ReviewRequest the agent runtime picks
+    // up. The MR is guaranteed to exist here: manifest gates resolve only
+    // for an MR whose spec_ref was read.
+    let mr = state.merge_requests.find_by_id(&mr_id).await.ok().flatten();
 
     // Create Pending GateResult for each gate.
     let mut result_ids: Vec<(Id, gyre_domain::QualityGate, Option<GateConstraints>)> = Vec::new();
@@ -221,6 +426,10 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
         result_ids.push((result_id, gate.clone(), None));
     }
     for mg in &manifest_gates {
+        let gate_agent_id = match mr.as_ref() {
+            Some(mr) => spawn_manifest_gate_agent(&state, mr, mg).await,
+            None => None,
+        };
         let gate = materialize_manifest_gate(&repo_id, mg);
         let result_id = Id::new(uuid::Uuid::new_v4().to_string());
         let result = GateResult {
@@ -239,6 +448,7 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
             Some(GateConstraints {
                 min_attestation_level: mg.min_attestation_level,
                 stack_hash: mg.stack_hash.clone(),
+                gate_agent_id,
             }),
         ));
     }
@@ -758,10 +968,10 @@ async fn run_persona_review_gate(
     let timeout_secs = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
-    loop {
+    let result = loop {
         match evaluate_persona_reviews(state, mr_id, persona, constraints).await {
-            PersonaReview::Qualified(output) => return (GateStatus::Passed, output),
-            PersonaReview::Rejected(reason) => return (GateStatus::Failed, reason),
+            PersonaReview::Qualified(output) => break (GateStatus::Passed, output),
+            PersonaReview::Rejected(reason) => break (GateStatus::Failed, reason),
             PersonaReview::Waiting(near_miss) => {
                 if tokio::time::Instant::now() >= deadline {
                     let mut msg = format!(
@@ -774,21 +984,37 @@ async fn run_persona_review_gate(
                         msg.push_str(" — ");
                         msg.push_str(&reason);
                     }
-                    return (GateStatus::Failed, msg);
+                    break (GateStatus::Failed, msg);
                 }
                 tokio::time::sleep(PERSONA_GATE_POLL_INTERVAL).await;
             }
         }
+    };
+
+    // Single-purpose gate agent: torn down once its gate resolved, whatever
+    // the outcome (agent-gates.md §Gate Agent Lifecycle — "spawned for one
+    // review, torn down after").
+    if let Some(agent_id) = &constraints.gate_agent_id {
+        teardown_gate_agent(state, agent_id).await;
     }
+
+    result
 }
 
 /// Evaluate an MR's reviews against a persona-constrained gate.
 ///
 /// Only reviews from agents running the named persona count (persona from
 /// the KV `agent_personas` cache — the same source `build_agent_context`
-/// reads). A persona agent's `ChangesRequested` fails the gate immediately;
-/// an `Approved` review passes only when the reviewer's workload attestation
-/// meets the constraints (level + pinned stack hash).
+/// reads). Reviews are append-only, so each reviewer's LATEST review is the
+/// one that counts: the normal review cycle (request changes → author
+/// fixes → same agent approves) must not leave a stale ChangesRequested
+/// vetoing that agent's own later Approved. Approval wins across reviewers
+/// (matching `check_review_verdict` and the mem `is_approved` semantics):
+/// any qualifying Approved from the persona passes even when another
+/// persona reviewer's final verdict is ChangesRequested; with no
+/// qualifying approval, a persona agent's final ChangesRequested fails the
+/// gate immediately. An `Approved` review passes only when the reviewer's
+/// workload attestation meets the constraints (level + pinned stack hash).
 async fn evaluate_persona_reviews(
     state: &Arc<AppState>,
     mr_id: &Id,
@@ -796,9 +1022,25 @@ async fn evaluate_persona_reviews(
     constraints: &GateConstraints,
 ) -> PersonaReview {
     let reviews = state.reviews.list_reviews(mr_id).await.unwrap_or_default();
-    let mut near_miss: Option<String> = None;
 
+    // Latest review per reviewer. The listing is chronological (mem and
+    // SQLite both sort by created_at); `>=` makes the later-seen review win
+    // timestamp ties, matching append order.
+    let mut latest_per_reviewer: std::collections::HashMap<&str, &Review> =
+        std::collections::HashMap::new();
     for review in &reviews {
+        let reviewer = review.reviewer_agent_id.as_str();
+        match latest_per_reviewer.get(reviewer) {
+            Some(prev) if prev.created_at > review.created_at => {}
+            _ => {
+                latest_per_reviewer.insert(reviewer, review);
+            }
+        }
+    }
+
+    let mut near_miss: Option<String> = None;
+    let mut rejection: Option<String> = None;
+    for review in latest_per_reviewer.into_values() {
         let Some(reviewer_persona) =
             lookup_reviewer_persona(state, &review.reviewer_agent_id).await
         else {
@@ -808,13 +1050,6 @@ async fn evaluate_persona_reviews(
             continue;
         }
         match review.decision {
-            ReviewDecision::ChangesRequested => {
-                let body = review.body.as_deref().unwrap_or("no feedback provided");
-                return PersonaReview::Rejected(format!(
-                    "manifest gate: persona '{persona}' agent {} requested changes: {body}",
-                    review.reviewer_agent_id
-                ));
-            }
             ReviewDecision::Approved => {
                 match check_reviewer_attestation(state, &review.reviewer_agent_id, constraints)
                     .await
@@ -834,7 +1069,22 @@ async fn evaluate_persona_reviews(
                     }
                 }
             }
+            ReviewDecision::ChangesRequested => {
+                // Deferred, not immediate: a qualifying approval from another
+                // persona reviewer wins (approval-wins). Only fail fast when
+                // no qualifying approval exists.
+                if rejection.is_none() {
+                    let body = review.body.as_deref().unwrap_or("no feedback provided");
+                    rejection = Some(format!(
+                        "manifest gate: persona '{persona}' agent {} requested changes: {body}",
+                        review.reviewer_agent_id
+                    ));
+                }
+            }
         }
+    }
+    if let Some(reason) = rejection {
+        return PersonaReview::Rejected(reason);
     }
     PersonaReview::Waiting(near_miss)
 }
@@ -2288,6 +2538,26 @@ specs:
         state.reviews.submit_review(&review).await.unwrap();
     }
 
+    /// Seed a review with an explicit `created_at` — reviews are append-only
+    /// and listed chronologically, so verdict supersession tests need
+    /// distinct timestamps.
+    async fn seed_review_at(
+        state: &Arc<AppState>,
+        mr_id: &Id,
+        reviewer: &str,
+        decision: ReviewDecision,
+        created_at: u64,
+    ) {
+        let review = Review::new(
+            Id::new(Uuid::new_v4().to_string()),
+            mr_id.clone(),
+            reviewer,
+            decision,
+            created_at,
+        );
+        state.reviews.submit_review(&review).await.unwrap();
+    }
+
     fn manifest_gate(persona: &str, timeout_secs: u64) -> QualityGate {
         QualityGate {
             id: Id::new(Uuid::new_v4().to_string()),
@@ -2308,6 +2578,7 @@ specs:
         GateConstraints {
             min_attestation_level: min_level,
             stack_hash: stack_hash.map(|s| s.to_string()),
+            gate_agent_id: None,
         }
     }
 
@@ -2448,6 +2719,157 @@ specs:
         assert!(output.contains("requested changes"), "output: {output}");
     }
 
+    #[tokio::test]
+    async fn persona_gate_later_approval_supersedes_stale_changes_requested() {
+        // Review R1: reviews are append-only, and the normal review cycle is
+        // request-changes -> author fixes -> same agent approves. The
+        // reviewer's LATEST verdict is the one that counts — a stale
+        // ChangesRequested must not permanently veto that agent's own later
+        // qualifying Approved. (Fails against first-match-wins ordering.)
+        let state = test_state();
+        let mr_id = make_mr_id();
+        seed_agent(
+            &state,
+            "agent-sec",
+            "security",
+            Some(level3_workload("agent-sec", "sha256:stack-abc")),
+        )
+        .await;
+        seed_review_at(
+            &state,
+            &mr_id,
+            "agent-sec",
+            ReviewDecision::ChangesRequested,
+            1_000,
+        )
+        .await;
+        seed_review_at(&state, &mr_id, "agent-sec", ReviewDecision::Approved, 2_000).await;
+
+        let gate = manifest_gate("security", 0);
+        let (status, output) = run_agent_review_gate(
+            &state,
+            &gate,
+            &mr_id,
+            Some(&constraints(3, Some("sha256:stack-abc"))),
+        )
+        .await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+    }
+
+    #[tokio::test]
+    async fn persona_gate_changes_requested_after_approval_fails() {
+        // The converse: an approval superseded by a LATER ChangesRequested
+        // from the same reviewer does not pass — latest-verdict-wins holds in
+        // both directions, so the gate cannot be satisfied by a withdrawn
+        // approval.
+        let state = test_state();
+        let mr_id = make_mr_id();
+        seed_agent(
+            &state,
+            "agent-sec",
+            "security",
+            Some(level3_workload("agent-sec", "sha256:stack-abc")),
+        )
+        .await;
+        seed_review_at(&state, &mr_id, "agent-sec", ReviewDecision::Approved, 1_000).await;
+        seed_review_at(
+            &state,
+            &mr_id,
+            "agent-sec",
+            ReviewDecision::ChangesRequested,
+            2_000,
+        )
+        .await;
+
+        let gate = manifest_gate("security", 60);
+        let (status, output) =
+            run_agent_review_gate(&state, &gate, &mr_id, Some(&constraints(1, None))).await;
+
+        assert_eq!(status, GateStatus::Failed, "output: {output}");
+        assert!(output.contains("requested changes"), "output: {output}");
+    }
+
+    #[tokio::test]
+    async fn gate_agent_torn_down_after_gate_resolves() {
+        // agent-gates.md §Gate Agent Lifecycle: the forge-spawned gate agent
+        // is torn down once its gate resolves — token revoked (audited),
+        // status Stopped, record kept for attribution. Exercised on the
+        // passing path here; the failing paths share the same teardown.
+        let state = test_state();
+        let mr_id = make_mr_id();
+        let mut gate_agent = gyre_domain::Agent::new(
+            Id::new(Uuid::new_v4().to_string()),
+            "gate-security-teardown",
+            now_secs(),
+        );
+        gate_agent.workspace_id = Id::new("ws-gate-agent");
+        gate_agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&gate_agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_personas",
+                gate_agent.id.as_str(),
+                "security".to_string(),
+            )
+            .await
+            .unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                gate_agent.id.as_str(),
+                "tok-secret".to_string(),
+            )
+            .await
+            .unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                gate_agent.id.as_str(),
+                serde_json::to_string(&level3_workload(gate_agent.id.as_str(), "sha256:stack-abc"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        seed_review(
+            &state,
+            &mr_id,
+            gate_agent.id.as_str(),
+            ReviewDecision::Approved,
+        )
+        .await;
+
+        let gate = manifest_gate("security", 0);
+        let cons = GateConstraints {
+            min_attestation_level: 3,
+            stack_hash: Some("sha256:stack-abc".to_string()),
+            gate_agent_id: Some(gate_agent.id.clone()),
+        };
+        let (status, output) = run_agent_review_gate(&state, &gate, &mr_id, Some(&cons)).await;
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+
+        let agent = state
+            .agents
+            .find_by_id(&gate_agent.id)
+            .await
+            .unwrap()
+            .expect("gate agent record is kept for attribution");
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "gate agent must be torn down after its gate resolves"
+        );
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", gate_agent.id.as_str())
+            .await
+            .unwrap();
+        assert!(token.is_none(), "gate agent token must be revoked");
+    }
+
     /// Create a real git repo with `specs/manifest.yaml` (and the spec file)
     /// committed at HEAD, plus a registered Repository + MR carrying spec_ref.
     async fn setup_manifest_mr(
@@ -2502,6 +2924,7 @@ specs:
             now_secs(),
         );
         mr.spec_ref = spec_ref.map(|s| s.to_string());
+        mr.workspace_id = repo.workspace_id.clone();
         state.merge_requests.create(&mr).await.unwrap();
         dir
     }
@@ -2581,7 +3004,13 @@ specs:
     }
 
     #[tokio::test]
-    async fn trigger_gates_dedupes_manifest_gate_covered_by_repo_gate() {
+    async fn trigger_gates_manifest_gate_wins_over_repo_gate_for_same_persona() {
+        // Review R2: when a repo-level gate and a manifest gate target the
+        // same persona, the MANIFEST gate wins — it carries the
+        // min_attestation_level / stack_hash constraints the manifest
+        // declares, which the repo-level gate cannot enforce. Skipping the
+        // manifest gate instead would let this no-command repo-level
+        // AgentReview gate auto-pass and merge without the constraints.
         let state = test_state();
         let _dir = setup_manifest_mr(
             &state,
@@ -2591,7 +3020,8 @@ specs:
         )
         .await;
 
-        // Repo-level gate already covering the security persona.
+        // Repo-level gate already covering the security persona, with NO
+        // command — the legacy configuration whose stub auto-passes.
         let repo_gate = QualityGate {
             id: Id::new("repo-gate-security"),
             repo_id: Id::new("repo-mg-2"),
@@ -2624,19 +3054,124 @@ specs:
         );
         assert_eq!(
             security_results[0].gate_id.as_str(),
-            "repo-gate-security",
-            "the repo-level gate wins over the manifest gate for the same persona"
+            "manifest-gate:repo-mg-2:system/identity-security.md:security",
+            "the manifest gate wins over the repo-level gate for the same persona — \
+             its attestation constraints are the ones that must be enforced"
         );
+        assert!(!results
+            .iter()
+            .any(|r| r.gate_id.as_str() == "repo-gate-security"));
         assert_eq!(
             results.len(),
             2,
-            "exactly the repo gate + the accountability manifest gate: {results:?}"
+            "exactly the manifest security gate + the accountability manifest gate: {results:?}"
         );
         assert!(
             results
                 .iter()
                 .any(|r| r.gate_id.as_str().ends_with(":accountability")),
             "the uncovered manifest persona still runs: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_gates_spawns_gate_agents_for_manifest_gates() {
+        // spec-registry.md §16: "Forge spawns security gate agent and
+        // accountability gate agent for this MR" — trigger must create real
+        // Agent records carrying the manifest persona (the production writer
+        // for the agent_personas namespace), register scoped tokens, and
+        // dispatch a ReviewRequest each gate agent runtime polls for.
+        let state = test_state();
+        let _dir = setup_manifest_mr(
+            &state,
+            "repo-mg-5",
+            "mr-mg-5",
+            Some("specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567"),
+        )
+        .await;
+
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-5"), Id::new("repo-mg-5")).await;
+
+        for persona in ["security", "accountability"] {
+            let agent = state
+                .agents
+                .find_by_name(&format!("gate-{persona}-mr-mg-5"))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("gate agent for {persona} must be spawned"));
+            assert_eq!(agent.status, AgentStatus::Active);
+            assert_eq!(agent.workspace_id, Id::new("ws-manifest-gates"));
+            assert_eq!(agent.spawned_by.as_deref(), Some("server"));
+            let recorded_persona = state
+                .kv_store
+                .kv_get("agent_personas", agent.id.as_str())
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded_persona.as_deref(),
+                Some(persona),
+                "the gate agent's persona must be recorded in agent_personas"
+            );
+            let token = state
+                .kv_store
+                .kv_get("agent_tokens", agent.id.as_str())
+                .await
+                .unwrap();
+            assert!(token.is_some(), "gate agent must have a scoped token");
+
+            // The ReviewRequest the agent runtime polls for (MCP
+            // gyre_message_poll / GET messages) — the forge's instruction to
+            // review this MR as this persona.
+            let msgs = state.messages.list_unacked(&agent.id, 10).await.unwrap();
+            let review_req = msgs
+                .iter()
+                .find(|m| m.kind == gyre_common::message::MessageKind::ReviewRequest);
+            let review_req = review_req.unwrap_or_else(|| {
+                panic!("ReviewRequest must be dispatched to the {persona} gate agent")
+            });
+            let payload = review_req
+                .payload
+                .as_ref()
+                .expect("ReviewRequest payload must carry the review context");
+            assert_eq!(payload["mr_id"].as_str(), Some("mr-mg-5"));
+            assert_eq!(payload["persona"].as_str(), Some(persona));
+            assert_eq!(
+                payload["min_attestation_level"].as_u64(),
+                Some(if persona == "security" { 1 } else { 2 }),
+                "the manifest attestation constraints must reach the gate agent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_gates_reuses_running_gate_agent_on_reenqueue() {
+        // Re-enqueue while the gate is still running must not double-spawn
+        // the persona's gate agent — the running agent is reused.
+        let state = test_state();
+        let _dir = setup_manifest_mr(
+            &state,
+            "repo-mg-6",
+            "mr-mg-6",
+            Some("specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567"),
+        )
+        .await;
+
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-6"), Id::new("repo-mg-6")).await;
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-6"), Id::new("repo-mg-6")).await;
+
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-manifest-gates"))
+            .await
+            .unwrap();
+        let security_agents: Vec<_> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("gate-security-mr-mg-6"))
+            .collect();
+        assert_eq!(
+            security_agents.len(),
+            1,
+            "re-enqueue must reuse the running gate agent, not double-spawn: {agents:?}"
         );
     }
 

@@ -585,7 +585,8 @@ fn tool_definitions() -> Value {
                         "name": { "type": "string", "description": "Worker agent name" },
                         "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
                         "parent_id": { "type": "string", "description": "Optional parent agent id" },
-                        "compute_target_id": { "type": "string", "description": "Optional compute target id" }
+                        "compute_target_id": { "type": "string", "description": "Optional compute target id" },
+                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16)" }
                     },
                     "required": ["task_id", "name", "branch"]
                 }
@@ -967,6 +968,7 @@ async fn handle_spawn_worker(
         disconnected_behavior: None,
         loop_config: None,
         conversation_sha: None,
+        persona: get_str(args, "persona").map(|s| s.to_string()),
     };
     match crate::api::spawn::spawn_agent_core(state, req, auth).await {
         Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),

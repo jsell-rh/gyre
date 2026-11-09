@@ -40,6 +40,13 @@ pub struct SpawnAgentRequest {
     pub agent_type: Option<String>,
     /// For interrogation agents: SHA-256 of the original agent's conversation to load as context.
     pub conversation_sha: Option<String>,
+    /// Persona this agent runs, as a bare name (e.g. "security" — the form
+    /// the spec manifest's `gates:` entries use). Recorded at spawn time in
+    /// the `agent_personas` KV namespace — the persona source
+    /// `build_agent_context` and the manifest-gate persona checks read
+    /// (spec-registry.md §16). Optional for backward compatibility.
+    #[serde(default)]
+    pub persona: Option<String>,
 }
 
 /// JWT TTL for interrogation agents: 30 minutes (HSI §4).
@@ -491,6 +498,17 @@ pub(crate) async fn spawn_agent_core(
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
         .await;
 
+    // Record the agent's persona (spec-registry.md §16): the
+    // `agent_personas` KV namespace is the persona source
+    // `build_agent_context` and the manifest-gate persona checks read —
+    // spawn time is its production writer.
+    if let Some(persona) = &req.persona {
+        let _ = state
+            .kv_store
+            .kv_set("agent_personas", &agent.id.to_string(), persona.clone())
+            .await;
+    }
+
     // HSI §4: For interrogation agents — create scoped ABAC policies and store
     // the conversation context for the conversation://context MCP resource.
     // Fail closed (task-077 F6): if the restriction policies cannot be created,
@@ -709,6 +727,11 @@ pub(crate) async fn spawn_agent_core(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
         container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
+        if let Some(persona) = &req.persona {
+            // Bare persona name (manifest form), not a personas/… path — the
+            // agent uses it to self-identify when submitting reviews.
+            container_env.insert("GYRE_PERSONA".to_string(), persona.clone());
+        }
 
         // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
         // repository (tenant → workspace → repo → task, nearest scope wins)
