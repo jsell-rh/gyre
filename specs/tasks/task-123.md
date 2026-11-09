@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a", "730073ad1c485b953a6fac34e2726aa345b22f1d", "f92a4891661d9c6f23b923d8e4f51e1b335fd496"]
 ---
 
 ## Spec Excerpt
@@ -109,9 +109,10 @@ Read `specs/system/user-management.md` §Notification Entity. Existing notificat
 
 ## Shipped
 
-Implemented (commit 27bfb2a69) — `user-management.md` §Notification Entity is
-closed in production code; no stands-ins remain on the creation paths this
-task owned.
+Implemented (commits 27bfb2a69, deec7953a0; rebased onto base fefde294
+in merge 730073ad1 + fix f92a48916) — `user-management.md` §Notification
+Entity is closed in production code; no stand-ins remain on the creation
+paths this task owned.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -195,6 +196,18 @@ but have no emitting feature yet — there is no security scanner or
 system-alert source in the platform. They are recorded as such in the
 coverage row rather than wired to a fake event.
 
+### Rebase resolution (merge 730073ad1, fix f92a48916)
+
+- Resolved the one content conflict (`gyre-common/src/notification.rs`,
+  `default_priorities_match_hsi_table`): kept the task's rank-based API
+  (`default_priority_rank()` — `default_priority()` now returns the
+  four-level `NotificationPriority`) and carried the base's new
+  `SecretExpiring` rank-7 assertion over to that API.
+- Adapted the base's new `secret_rotation.rs` expiry notifications to the
+  structured source model: the dedup check reads `source.entity_id`, and
+  creation sets `source.entity_type = "secret"`, `source.entity_id` to the
+  secret id, plus `repo_id` for repo-scoped secrets.
+
 ### Test evidence (all green)
 
 - gyre-common: 8 notification tests — 18-variant taxonomy round-trip,
@@ -218,4 +231,11 @@ coverage row rather than wired to a fake event.
   all passing. All mechanical checks pass (arch, migration versions and
   portability, ABAC route registry, mem port contracts, scope-default
   and enforcement lints); clippy introduces no new warnings.
+- Post-rebase probes (this assignment): `cargo check --all` clean;
+  gyre-common 8 notification tests, gyre-server 32 notification-filtered
+  lib tests + 3 secret_rotation tests (dedup, admin-only recipients,
+  healthy-secrets-never-notify), gyre-adapters 6 notification tests —
+  all passing; mechanical checks (arch, migration versions, ABAC route
+  registry, MCP write tools, dead message kinds, mem port contracts)
+  all pass on the merged tree.
 
