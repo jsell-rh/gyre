@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["206f7d9dfc31d7072ef2ffd04f1122507b4d4661", "a293e2998889f272af1be1afbf0ee265db02d50d"]
+commits: ["206f7d9dfc31d7072ef2ffd04f1122507b4d4661", "a293e2998889f272af1be1afbf0ee265db02d50d", "7d5702c72138b53c7d6305263b58b17cf8179dc7"]
 ---
 
 ## Spec Excerpt
@@ -325,6 +325,38 @@ check-task-commit-attribution — all OK; `check-clippy-diff.py
 fefde2946` — exit 0. web/dist merged cleanly (no rebuild performed,
 per assignment constraints). Evidence:
 `/tmp/stage/review-evidence/task116-rebase-fefde2946.md`.
+
+### Review repair round 7 (findings d34a2353, commit 7d5702c72)
+
+The round-7 review flagged two unguarded §2 deliverables — reverting
+the merge-attestation `meta_specs_used` wiring or the spawn-side
+`GYRE_META_SPEC_PROMPT` env injection kept the entire suite green.
+Commit `7d5702c72` adds the two missing durable regression tests (no
+production-code changes; the diff is test-module-only):
+
+- `merge_processor::tests::merge_attestation_records_author_prompt_set_meta_specs`:
+  stores an `AgentPromptSetRecord` for the MR's author agent via the real
+  kv-backed `store_prompt_set_record`, runs `process_next`, and asserts
+  the persisted signed `AttestationBundle`'s `meta_specs_used` matches
+  the record field-by-field (id, kind, content_hash, version, required,
+  scope) and that `verify_bundle` succeeds with the server's real
+  Ed25519 public key.
+- `api::spawn::tests::spawn_delivers_meta_spec_prompt_to_agent_env`:
+  seeds a required approved Global persona into the meta-spec
+  repository, spawns through the env-dump compute-target pattern (local
+  dispatch, no docker), and asserts the child env's
+  `GYRE_META_SPEC_SET_SHA` equals the spawn response's
+  `meta_spec_set_sha` (64-hex SHA-256) and that `GYRE_META_SPEC_PROMPT`
+  contains the rendered persona section header and prompt text.
+
+Both tests were mutation-checked: reverting `meta_specs_used` to
+`vec![]` fails the first; removing the `GYRE_META_SPEC_PROMPT` env
+insert fails the second. Post-repair probes (`SKIP_WEB_BUILD=1`):
+meta_spec (39), spawn (46), merge_processor::tests (64) — all passed;
+`cargo fmt --all --check` clean; check-clippy-diff.py and
+check-rustfmt-diff.py against base `fefde2946` clean; check-arch and
+check-task-commit-attribution OK. Evidence:
+`/tmp/stage/review-evidence/task116-review-repair-d34a2353.md`.
 
 ## Agent Instructions
 
