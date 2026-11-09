@@ -4,7 +4,7 @@ spec_ref: "human-system-interface.md §3 Generated Views"
 depends_on:
   - task-088
   - task-070
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §3 Generated Views (LLM-Powered, On-Demand)"
 commits: ["74af4c305c0db43c839a7e4eb262ec9826537048", "801a872a300d95fd93eaae6db572a5d6b04b4336"]
