@@ -7,7 +7,7 @@ progress: complete
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: ["8c7b0bfa1f01c8b1f7f296a8ff80b5e86b672780", "010df9cd36dc3f81ae136173b522caaa7b3d4a84"]
+commits: ["8c7b0bfa1f01c8b1f7f296a8ff80b5e86b672780", "010df9cd36dc3f81ae136173b522caaa7b3d4a84", "255ca5a31d45819f30cb08419a33d45b72b5b084"]
 ---
 
 ## Spec Excerpt
