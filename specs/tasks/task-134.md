@@ -90,12 +90,14 @@ Both `agent-gates.md` coverage sections are implemented with real, production
 behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
 runs and completed across assignments, including the review-F1/F2/F3 repairs,
 the review-round TTL repair `72c5bb03`, the review-repair round `31c35ddb`,
-the rebase onto `fefde294`, and the rebase onto task-177's `7747376`, all
+the rebase onto `fefde294`, the rebase onto task-177's `7747376`, the merge
+onto base `fb1f82e31`, and the `459f51b9` review-repair round, all
 described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
-  the `validation_type` column (migration `2026-10-09-000056`), persisted by
+  the `validation_type` column (migration `2026-10-09-000059`, renumbered
+  from `000056` after review — see the `459f51b9` repair round), persisted by
   both SQLite and Postgres adapters with an upsert round-trip test. Gate CRUD
   (`api/gates.rs`) accepts/returns both types and `validation_type` (tests:
   `create_agent_review_gate`, `create_agent_validation_gate`).
@@ -191,13 +193,47 @@ changed):
   FAILS; probe output retained in review evidence
   (`rebase-resolution-7747376.txt`).
 
+### Review-repair round (findings `459f51b9`)
+
+Findings `459f51b9` reviewed candidate `9163afc9b` at checkpoint
+`873ec0e88`; both findings share one root cause (the rebase onto
+`7747376` collided the branch's migration with the base's).
+
+- **F1 (code) — duplicate Diesel migration version `20261009000056`**:
+  the branch's `gate_validation_type` migration sat at the same Diesel
+  version as the base's (task-177 `774737638`) `user_tenant_id` migration,
+  so Diesel would run only one of them — production SQLite deployments
+  would either fail the migration or silently lose the `validation_type`
+  column, after which every quality-gate save fails. Fixed by renumbering
+  to the next unused sequence: `2026-10-09-000059_gate_validation_type`
+  (pure `git mv` directory rename; up.sql/down.sql unchanged, history
+  preserved). Verified: `check-migration-versions.sh` passes (rc=1 before),
+  `check-migration-sql-portability.sh` passes, and the three tests the
+  finding named as failing now pass — `save_upsert_updates_all_config_columns`,
+  `no_duplicate_migration_version_prefixes`,
+  `migration_000058_backfills_unique_url_safe_usernames` — with the full
+  `cargo test -p gyre-adapters --lib` suite green (396 passed, 0 failed).
+- **F2 (process) — stale test-evidence claim**: the Shipped section
+  asserted the upsert round-trip test passed on the merged tree without
+  the adapter suite having been re-run after the collision-introducing
+  rebase. The suite is now re-run on the current tree (evidence above),
+  and the Shipped migration reference corrected to `000059`.
+
+The merge onto the current base `fb1f82e31` (merge `74418dddc`, clean
+auto-merge bringing task-141's `git_http.rs` work) was verified to preserve
+the branch's scoped-token read-only push rejection; `git_http` 49/49
+(including the base's new tests), `task134_review_probe` 7/7, and
+`gate_executor` 37/37 on the merged tree. Probe output retained in review
+evidence (`repair-459f51b9.txt`).
+
 ### Test evidence
 
-On the tree rebased onto task-177's `7747376` (merge `a3b639877`):
+On the current tree (merge `74418dddc` onto base `fb1f82e31`, plus the
+`459f51b9` migration renumber): `cargo test -p gyre-adapters --lib` 396/396
+(including the upsert round-trip and the migration guard tests),
 `task134_review_probe` 7/7, `gate_executor` 37/37 (including both TTL
-regression tests and both e2e review tests), `abac_middleware` 12/12
-(including `system_token_bypasses_abac` against the hardened
-`is_system_principal()` bypass), `git_http` 40/40, and `auth` 46/46 pass;
-`check-fabricated-scope-defaults.sh` passes with the count enforced at 1.
-`cargo test --all` and the full mechanical-check suite are owned by
-verification and publication.
+regression tests and both e2e review tests), `git_http` 49/49,
+`check-migration-versions.sh` and `check-migration-sql-portability.sh`
+pass, and `check-fabricated-scope-defaults.sh` passes with the count
+enforced at 1. `cargo test --all` and the full mechanical-check suite are
+owned by verification and publication.
