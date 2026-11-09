@@ -5312,8 +5312,9 @@ mod tests {
     // on it), and step 7 must not duplicate the gate set on re-run.
 
     /// Serialize tests that touch $HOME (the resume path reads
-    /// ~/.gyre/config via Config::load).
-    static HOME_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// ~/.gyre/config via Config::load). A tokio mutex so the guard can be
+    /// held across the awaited bootstrap run.
+    static HOME_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct HomeRestore(Option<String>);
     impl Drop for HomeRestore {
@@ -5380,7 +5381,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_resume_approves_pending_persona_and_skips_existing_gates() {
-        let _guard = HOME_GUARD.lock().unwrap();
+        let _guard = HOME_GUARD.lock().await;
 
         let repo_dir = tempfile::tempdir().unwrap();
         std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
@@ -5499,7 +5500,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_resume_rejects_saved_token_for_a_different_user() {
-        let _guard = HOME_GUARD.lock().unwrap();
+        let _guard = HOME_GUARD.lock().await;
 
         let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
             (
@@ -5547,7 +5548,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_resume_rejects_admin_bound_to_a_different_tenant() {
-        let _guard = HOME_GUARD.lock().unwrap();
+        let _guard = HOME_GUARD.lock().await;
 
         let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
             (
@@ -5593,7 +5594,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_create_user_403_fails_without_adopting_saved_credentials() {
-        let _guard = HOME_GUARD.lock().unwrap();
+        let _guard = HOME_GUARD.lock().await;
 
         let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
             (

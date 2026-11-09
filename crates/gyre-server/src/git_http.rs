@@ -3624,9 +3624,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/git/default/gyre-demo/info/refs?service=git-upload-pack"
-                    ))
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -3653,9 +3651,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/git/default/gyre-demo/info/refs?service=git-upload-pack"
-                    ))
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
                     .header("Authorization", format!("Bearer {raw_key}"))
                     .body(Body::empty())
                     .unwrap(),

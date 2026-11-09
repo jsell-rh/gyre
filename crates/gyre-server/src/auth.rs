@@ -336,6 +336,7 @@ pub(crate) fn hash_api_key(key: &str) -> String {
 ///   'default'` columns reference it.
 /// - message-bus.md "Origin and tenant resolution from auth context": the
 ///   global `GYRE_AUTH_TOKEN` resolves as the default (bootstrap) tenant.
+///
 /// Callers that can resolve a real scope from stored state (e.g. API-key
 /// users via `user.tenant_id`, workspaces via `ws.tenant_id`) MUST do so
 /// and must fail closed when it is absent.

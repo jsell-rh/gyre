@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::{Persona, PersonaScope, Policy, Workspace};
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait WorkspaceRepository: Send + Sync {
     /// Fails if a workspace with the same `id`, or the same `(tenant_id,
     /// slug)`, already exists — the pair must stay unique for git URL

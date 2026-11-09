@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::Repository;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait RepoRepository: Send + Sync {
     /// Fails if a repository with the same `id`, or the same `(workspace_id,
     /// name)`, already exists — the pair maps to one bare-repo path
