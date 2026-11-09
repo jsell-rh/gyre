@@ -47,3 +47,64 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 3 (final candidate `b2c2854ed`, assignment base `fefde2946`)
+
+Independent review of the final candidate after the R3–R23 repair rounds
+(complete diff `fefde2946..b2c2854ed`: merge_processor rebase machinery,
+jj_ops adapter + port, spawn jj-workspace provisioning and completion path,
+configured_repos_path absolutization, CI jj fixture leg, e2e runner pin).
+Evidence: `/tmp/stage/review-evidence/task-106-r24/`.
+
+Verified working (no findings):
+
+- All five plan-item-5 safeguards present in `find_rebase_targets`
+  (merge_processor.rs): same target branch + same repo, MR `Open | Approved`,
+  author agent `Active`, worktree dir existence, merged-author exclusion.
+  Rebase is the LAST step after post-merge gates in both merge paths;
+  destination is the moved target branch, not the repo default.
+- Deferral/batch semantics hold on both trigger and replay paths: window hit
+  sets the pending marker (newest base wins), backoff is written only after a
+  terminal Success/Conflict outcome, an infra `Err` keeps the deferral alive,
+  and replay re-derives actionability (dropping stale markers) before running.
+- Conflict-as-state: repo-scoped MR `has_conflicts` set on conflict and
+  cleared by a later clean rebase; `SpeculativeConflict` (workspace) +
+  `Escalation` (agent, file list) on conflict; `baseline_moved` (agent,
+  `new_base_sha`) on success; audit events recorded for success, conflict,
+  and error outcomes.
+- Adapter contract: `jj git import` before rebase, `jj rebase -b @` (whole
+  in-flight stack — documented spec-vs-plan divergence), conflict detection
+  via the `jj resolve --list` exit-code contract, rebased-count parsed from
+  stderr (`run_jj_raw` returns both streams). Production wiring uses the real
+  `JjOpsAdapter`; `ConfigurableJjOps` is `#[cfg(test)]`-only.
+- Completion path (R20): `jj_bookmark_set` + `jj git export` before MR stats.
+  Spawn response (R21): `worktree_path` equals the recorded worktree path in
+  both provisioning outcomes. R22 test-helper signature repair is behavior-
+  neutral. R23 pins only the e2e job's `runs-on` to ubuntu-24.04 — the only
+  workflow job installing Playwright — matching the retained CI failure
+  (Playwright 1.58.2 lacks an ubuntu26.04-x64 registry entry); minimal and
+  correctly scoped.
+- Probes: `cargo test -p gyre-server --lib` → 1505 passed, 0 failed;
+  `-- rebase` filter → 17 passed; `cargo test -p gyre-adapters --lib -- jj`
+  → 18 passed (jj recorded-fixture tests guard-skip in a sandbox without the
+  jj binary; the CI leg installs pinned jj-vcs 0.39.0 and sets
+  `GYRE_JJ_TESTS_MUST_RUN=1`, so they execute against the real binary there).
+  22 invariant check scripts → EXIT 0.
+- Mutation probe: no-op'ing `rebase_inflight_agents` fails 11 of the 17
+  rebase tests (trigger, conflict state, backoff, deferral, replay, flag
+  clear, repo scoping all pinned); restore returns the suite to green.
+
+Restrictions recorded for remote verification (not code defects):
+
+- No `jj` binary in this sandbox — jj fixture tests skip locally; verify the
+  CI jj leg (`ci.yml` "Install pinned jj" + `GYRE_JJ_TESTS_MUST_RUN=1`)
+  passes on the candidate.
+- `check-assertionless-tests.sh` exits 2 under this sandbox's mawk 1.3.4
+  (gawk-only awk syntax); verified to fail identically on the assignment
+  base `fefde2946` — pre-existing environment difference.
+- npm registry blocked from this sandbox (EACCES) — no web rebuild probed;
+  the candidate contains no frontend product change.
+
+Verdict: **approved** — the task contract (source-control.md §4 automatic
+rebasing) is satisfied by real production code, and the shipped test suite
+genuinely pins the behavior.
