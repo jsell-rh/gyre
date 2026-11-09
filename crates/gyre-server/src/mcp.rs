@@ -745,7 +745,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
 /// gyre_spawn_repo_orchestrator (task-093): workspace-orchestrator only.
 /// Target repo must belong to the caller's workspace.
 async fn handle_spawn_repo_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     args: &Value,
     auth: &AuthenticatedAgent,
 ) -> Value {
@@ -780,10 +780,12 @@ async fn handle_spawn_repo_orchestrator(
     )
     .await
     {
-        Ok((agent, token)) => tool_result(
+        Ok((agent, token, launch)) => tool_result(
             serde_json::to_string(&crate::api::orchestrator::SpawnOrchestratorResponse {
                 agent: crate::api::spawn::orchestrator_response(agent),
                 token,
+                launch_status: launch.launch_status,
+                launch_detail: launch.launch_detail,
             })
             .unwrap_or_default(),
         ),
@@ -1438,18 +1440,27 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             }
 
             // ── Telemetry for real-time dashboard ────────────────────────────────────
-            state.emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::AgentStatusChanged,
-                Some(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "idle",
-                    "reason": format!("Agent {} completed task", agent.name),
-                })),
-            );
+            state
+                .emit_telemetry(
+                    ws_id,
+                    gyre_common::message::MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": "idle",
+                        "reason": format!("Agent {} completed task", agent.name),
+                    })),
+                )
+                .await;
 
             match state.agents.update(&agent).await {
-                Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
+                Ok(()) => {
+                    // Platform Model §7: revoke task-scoped ephemeral secrets
+                    // on agent completion ("Secrets access revoked" at
+                    // teardown) — deletes Task-scoped secrets for the
+                    // agent's task and logs `secret.revoked` per secret.
+                    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+                    tool_result(format!("Agent {agent_id} marked complete"))
+                }
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
             }
         }
@@ -4101,6 +4112,114 @@ mod tests {
         );
     }
 
+    // ── agent_complete revokes task-scoped secrets (§7, task-100) ────────────
+
+    #[tokio::test]
+    async fn agent_complete_revokes_task_scoped_secrets() {
+        use gyre_common::{Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-teardown"),
+            Id::new("default"),
+            "Teardown WS",
+            "teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-teardown"), "teardown-agent", now);
+        agent.workspace_id = Id::new("ws-teardown");
+        agent.current_task_id = Some(Id::new("task-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        // Task-scoped ephemeral secret for the completing agent's task
+        // (must be revoked) and a workspace-scoped secret (must survive).
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 52,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": { "agent_id": "agent-teardown" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "agent completion must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent completion"
+        );
+    }
+
     // ── agent_complete with unknown agent returns error ────────────────────────
 
     #[tokio::test]
@@ -5100,8 +5219,12 @@ mod tests {
         );
         st.workspaces.create(&ws).await.unwrap();
 
-        // Create user + API key so auth.user_id is Some.
-        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        // Create user + API key so auth.user_id is Some. The user MUST carry
+        // a tenant binding (task-099 F1): the API-key path of the auth
+        // extractor fail-closes on users without one, so this test would
+        // get a 403 instead of a briefing without it.
+        let mut user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        user.tenant_id = Some(Id::new("default"));
         st.users.create(&user).await.unwrap();
         let raw_key = "gyre_test_briefing_key";
         st.api_keys
@@ -6314,6 +6437,19 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
         }
+        // F2: orchestrator spawn requires an approved repo-orchestrator
+        // persona in the scope chain (tenant scope here, as bootstrap
+        // step 5 registers it).
+        let mut persona = gyre_domain::Persona::new(
+            gyre_common::Id::new("repo-orchestrator-persona"),
+            "repo-orchestrator",
+            "repo-orchestrator",
+            gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+            "test orchestrator persona",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
         state
     }
 

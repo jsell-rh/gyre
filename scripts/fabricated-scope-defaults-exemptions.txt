@@ -1,4 +1,4 @@
-# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 3 entries.
+# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 2 entries.
 # Fix a flagged site by skipping the scope-scoped operation and logging
 # (see emit_reconciliation_completed in gyre-server/src/lib.rs); never add
 # entries. If you fix a site, delete its line and lower
@@ -12,10 +12,12 @@
 #   repair round (tenant now resolved from the workspace record; fanout
 #   skipped + logged when unresolvable). Entry removed, count lowered 5→4.
 #   auth.rs JWT claims.tenant_id fallback — FIXED in task-103's repair
-#   round: the documented "absent claim = default tenant" contract is now
-#   the claim's serde schema default (default_tenant_claim on JwtClaims),
-#   not a use-site unwrap_or fallback; the value is a deterministic
-#   function of the verified token, and "default" is the real bootstrapped
-#   Tenant row. Entry removed, count lowered 4→3.
+#   round (adopted on this branch while rebasing task-099 onto it): the
+#   documented "absent claim = default tenant" contract is the claim's
+#   serde schema default (default_tenant_claim on JwtClaims), not a
+#   use-site unwrap_or fallback; the value is a deterministic function of
+#   the verified token, and "default" is the real bootstrapped Tenant row.
+#   Entry removed (task-099's round-10 had also eliminated it via
+#   system_principal_tenant before the rebase), count lowered to 2.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
 crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission
