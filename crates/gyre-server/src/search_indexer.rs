@@ -438,20 +438,38 @@ pub fn commit_document(
     }
 }
 
-/// Spec: indexed fields title/path/full content/owner, facets workspace, repo,
-/// approval_status, scope.
+/// Spec: indexed fields title/path/full content/owner/links, facets
+/// workspace, repo, approval_status, scope.
+#[allow(clippy::too_many_arguments)] // one parameter per specced indexed field
 pub fn spec_document(
     path: &str,
     title: &str,
     owner: &str,
     approval_status: &str,
     content: &str,
+    linked_tasks: &[String],
+    linked_mrs: &[String],
     workspace_id: Option<&str>,
     repo_id: Option<&str>,
 ) -> SearchDocument {
     // The spec's scope facet is the section it lives under (the first path
     // segment, e.g. "system" for "system/search.md").
     let scope = path.split('/').next().unwrap_or_default().to_string();
+    // Links (the ledger's linked task/MR ids) are indexed in the body, the
+    // same pattern as task labels.
+    let mut body = if content.is_empty() {
+        title.to_string()
+    } else {
+        content.to_string()
+    };
+    if !linked_tasks.is_empty() {
+        body.push_str("\nlinked tasks: ");
+        body.push_str(&linked_tasks.join(", "));
+    }
+    if !linked_mrs.is_empty() {
+        body.push_str("\nlinked MRs: ");
+        body.push_str(&linked_mrs.join(", "));
+    }
     SearchDocument {
         entity_type: "spec".to_string(),
         entity_id: path.to_string(),
@@ -460,11 +478,7 @@ pub fn spec_document(
         } else {
             title.to_string()
         },
-        body: if content.is_empty() {
-            title.to_string()
-        } else {
-            content.to_string()
-        },
+        body,
         workspace_id: workspace_id.map(str::to_string),
         repo_id: repo_id.map(str::to_string),
         facets: facets(vec![
@@ -597,10 +611,23 @@ pub async fn index_repo_specs(
             .await
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
-        let (title, owner, approval_status) = match state.spec_ledger.find_by_path(&path).await {
-            Ok(Some(entry)) => (entry.title, entry.owner, entry.approval_status.to_string()),
-            _ => (String::new(), String::new(), "pending".to_string()),
-        };
+        let (title, owner, approval_status, linked_tasks, linked_mrs) =
+            match state.spec_ledger.find_by_path(&path).await {
+                Ok(Some(entry)) => (
+                    entry.title,
+                    entry.owner,
+                    entry.approval_status.to_string(),
+                    entry.linked_tasks,
+                    entry.linked_mrs,
+                ),
+                _ => (
+                    String::new(),
+                    String::new(),
+                    "pending".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
         index(
             state,
             spec_document(
@@ -609,6 +636,8 @@ pub async fn index_repo_specs(
                 &owner,
                 &approval_status,
                 &content,
+                &linked_tasks,
+                &linked_mrs,
                 Some(workspace_id),
                 Some(repo_id),
             ),
@@ -760,6 +789,8 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
                 &entry.owner,
                 &entry.approval_status.to_string(),
                 &content,
+                &entry.linked_tasks,
+                &entry.linked_mrs,
                 entry.workspace_id.as_deref(),
                 entry.repo_id.as_deref(),
             ),
@@ -990,8 +1021,8 @@ mod tests {
                 current_sha: spec_blob_sha,
                 approval_mode: "human_and_agent".to_string(),
                 approval_status: ApprovalStatus::Pending,
-                linked_tasks: vec![],
-                linked_mrs: vec![],
+                linked_tasks: vec!["task-9x9".to_string()],
+                linked_mrs: vec!["mr-4y4".to_string()],
                 drift_status: "clean".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -1136,6 +1167,23 @@ mod tests {
             Some("system")
         );
 
+        // The spec's links (ledger linked_tasks/linked_mrs) are indexed —
+        // the spec is findable by a linked entity id (review finding).
+        let spec_by_link = search(&state, "task-9x9", Some("spec")).await;
+        assert_eq!(
+            spec_by_link.len(),
+            1,
+            "spec must be findable by linked task id"
+        );
+        assert_eq!(spec_by_link[0].entity_id, "system/search.md");
+        let spec_by_mr_link = search(&state, "mr-4y4", Some("spec")).await;
+        assert_eq!(
+            spec_by_mr_link.len(),
+            1,
+            "spec must be findable by linked MR id"
+        );
+        assert_eq!(spec_by_mr_link[0].entity_id, "system/search.md");
+
         let commits = search(&state, COMMIT_TERM, Some("commit")).await;
         assert_eq!(commits.len(), 1, "commit must be findable by message");
         assert_eq!(commits[0].entity_id, head_sha);
@@ -1230,6 +1278,62 @@ mod tests {
         assert_eq!(
             results[0].facets.get("approval_status").map(String::as_str),
             Some("pending")
+        );
+    }
+
+    /// The push-path spec indexer includes the ledger's linked task/MR ids —
+    /// the spec's "links" indexed field (review finding: it was never
+    /// indexed, so `?q=<linked id>` returned no spec).
+    #[tokio::test]
+    async fn index_repo_specs_indexes_linked_ids_from_ledger() {
+        let (git_dir, head_sha, spec_blob_sha) = make_git_repo().await;
+        let (_db, state) = state_with_sqlite_search();
+        let repo = Repository::new(
+            Id::new("repo-1"),
+            Id::new("ws-1"),
+            "gyre",
+            git_dir.path().to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let now = 1_800_000_000u64;
+        state
+            .spec_ledger
+            .save(&SpecLedgerEntry {
+                path: "system/search.md".to_string(),
+                title: "Search".to_string(),
+                owner: "user:test".to_string(),
+                kind: None,
+                current_sha: spec_blob_sha,
+                approval_mode: "human_and_agent".to_string(),
+                approval_status: ApprovalStatus::Approved,
+                linked_tasks: vec!["task-9x9".to_string()],
+                linked_mrs: vec!["mr-4y4".to_string()],
+                drift_status: "clean".to_string(),
+                created_at: now,
+                updated_at: now,
+                repo_id: Some("repo-1".to_string()),
+                workspace_id: Some("ws-1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let indexed = index_repo_specs(&state, "repo-1", "ws-1", &repo.path, &head_sha).await;
+        assert_eq!(indexed, 1);
+
+        let by_task_link = search(&state, "task-9x9", Some("spec")).await;
+        assert_eq!(
+            by_task_link.len(),
+            1,
+            "spec must be findable by linked task id on the push path"
+        );
+        assert_eq!(by_task_link[0].entity_id, "system/search.md");
+        let by_mr_link = search(&state, "mr-4y4", Some("spec")).await;
+        assert_eq!(
+            by_mr_link.len(),
+            1,
+            "spec must be findable by linked MR id on the push path"
         );
     }
 
