@@ -299,3 +299,20 @@ verification/publication gates.
   fabricated-scope exemption; `mint_scoped` sets the base's new `jti`
   field per mint (`minted_jwt_carries_unique_jti` contract holds); no
   task-128 behavior altered by the merge.
+- **Rebase (5c0239639):** merged base 7747376 (task-177 rendering + the
+  task-093/task-099 fix completions). Four text conflicts resolved by
+  taking the base's side on the three exemption files (their entries
+  tracked fixes now present in the merged tree: orchestrator spawn
+  handlers carry per-handler tenant containment, the void
+  `validate_persona` sites are gone, the 9 task-099 auth.rs/lib.rs
+  scope-literal sites are fixed with `FROZEN_EXEMPTION_COUNT=12`
+  matching) and regenerating `specs/coverage/SUMMARY.md` mechanically
+  from the merged coverage files — the base's copy was stale relative to
+  its own coverage files. No task-128 source conflicts; post-merge
+  probes: `cargo test -p gyre-server --lib` 1558 passed / 0 failed
+  (1516 on the pre-merge head; the base contributed the additional
+  tests), and `check-abac-exempt-handlers` (88 handlers),
+  `check-inert-enforcement`, `check-scope-literal-defaults`,
+  `check-arch`, `check-abac-route-registry`, `check-mem-port-contracts`,
+  `check-forwarded-header-trust`, `check-fabricated-scope-defaults` all
+  pass.
