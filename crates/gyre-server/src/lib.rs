@@ -3,6 +3,7 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
+pub mod agent_audit;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -37,6 +38,7 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
@@ -74,10 +76,11 @@ use gyre_ports::{
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -368,6 +371,8 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
+    pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
@@ -1071,6 +1076,10 @@ pub fn build_state(
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        rollout_policies: store!(
+            dyn RolloutPolicyRepository,
+            mem::MemRolloutPolicyRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: {
