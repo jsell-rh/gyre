@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "62862a9e81c5c53e46ac4b936f1b69984fdc74d4", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5626a68fcb94469acc6f6c2504dcd2dbcd204e7c", "d588cc8792d2740cb987f4aca8d1093fa4bfdf60", "92db84be179b04ec15ffb97db3b956b12ff7dd25"]
 ---
 
 ## Spec Excerpt
@@ -123,16 +123,28 @@ this branch's `message_dispatcher` import vs. main's new imports):
   wiring present.
 
 Both merge commits carry no task label, so `check-task-commit-attribution.sh`
-does not force their listing; they are added to `commits:` for review
-scoping at each repaired head (4a10321c3 and the c8626b1b3 repair below),
-and their resolutions are also visible in the base..candidate diff
-regardless of frontmatter state. No task-owned file needed semantic repair
+does not force their listing; they are recorded in `commits:` for review
+scoping (and their resolutions are also visible in the base..candidate diff
+regardless of frontmatter state — see the review-repair note below for why
+that fallback matters). No task-owned file needed semantic repair
 in either merge. Focused suites re-run green
 post-merge (see Test evidence); `cargo check -p gyre-server --bins`
 clean; arch, dead-message-kinds, fabricated-scope-defaults, and
 task-commit-attribution checks all pass.
 `specs/coverage/system/message-bus.md` (14/14, 3 n/a) and
 `specs/coverage/SUMMARY.md` (message-bus 100%) merged consistently.
+
+A later merge of the assigned base into this branch, **92db84be1**
+(7373979e8, task-100's Platform Model Secrets Rotation Background Job),
+auto-merged cleanly with no conflict — it touches api/, mcp.rs,
+secret_rotation.rs, stale_agents.rs and specs, not main.rs or any
+message-bus-owned file. Verified at that head: main.rs retains
+`bootstrap_default_tenant`, `seed_builtin_personas`, and
+`message_dispatcher::spawn_message_consumer`/`spawn_message_expiry` wiring
+together; `cargo check -p gyre-server --tests` clean; focused suites
+(message_dispatcher 9, gate_executor 25, reconciliation wave-completion 1)
+all pass. Earlier merges **62862a9e8** (3c39ab1f7) and **d588cc879**
+(e5415ae12, task-099) likewise merged cleanly with no task-owned conflict.
 
 Note for reviewers: `check-notification-test-coverage.sh` still exits 2 on
 this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
@@ -160,16 +172,37 @@ host-tooling issue, unrelated to this task.
   executor's own checkpoint commit c1ae3230b ("process: record task-162
   branch commits") rewrote `commits:` back to the task-labeled commits
   only, dropping both unlabeled merge commits again and falsifying the
-  prior "recorded in commits: above" claims at that head. Repaired at the
-  current head: 9e5a0171d and 5626a68fc are re-listed in `commits:` by a
-  task-labeled follow-up commit, and this note deliberately states the
-  merge-commit identities and their content directly (main.rs
-  import-conflict union resolutions against main tips fefde294 and
-  3ced150b) rather than claiming frontmatter state, because any executor
-  checkpoint that re-derives `commits:` from task-labeled commits only
-  will drop unlabeled merge commits again. The resolutions remain
-  reviewable via the base..candidate diff even if that recurs.
+  prior "recorded in commits: above" claims at that head. The bb874e517
+  repair re-listed them, but see the fourth recurrence below.
+- **Frontmatter regression, fourth recurrence (3d2b75ed, process):** the
+  same checkpoint mechanism struck again — the executor's commit
+  683402c05 ("process: record task-162 branch commits", one commit after
+  the bb874e517 repair) rewrote `commits:` back to the two task-labeled
+  commits only, and the third-recurrence note's sentence "Repaired at the
+  current head ... re-listed" was false at the assigned candidate
+  683402c05. This note therefore records the durable facts, independent
+  of any frontmatter state a future checkpoint may produce:
+
+  - The branch's merge commits and their resolutions are:
+    **9e5a0171d** (main tip fefde294) and **5626a68fc** (main tip
+    3ced150b) — main.rs import-list conflicts resolved as the union,
+    keeping `message_dispatcher` imports alongside
+    `bootstrap_default_tenant` and `seed_builtin_personas` respectively;
+    **62862a9e8** (3c39ab1f7) and **d588cc879** (e5415ae12) — clean
+    auto-merges; **92db84be1** (assigned base 7373979e8) — clean
+    auto-merge, main.rs untouched.
+  - `commits:` at the head that shipped this note lists all seven
+    content-bearing branch commits (both task-labeled commits plus all
+    five merges) so every merge resolution is inside review scoping.
+    If an executor checkpoint re-derives `commits:` from task-labeled
+    commits only and drops the merges again, that frontmatter state is
+    wrong, not this record: the merge resolutions remain reviewable via
+    the base..candidate diff and via the task-owned main.rs wiring in
+    listed commit 51221dc02.
 
 Full `cargo test -p gyre-server --lib` re-run post-fix: 1494 passed,
-0 failed (was 1493/1 at 152e67033); `cargo check -p gyre-server --tests`
-clean. Evidence recorded under /tmp/stage/review-evidence.
+0 failed (was 1493/1 at 152e67033). Re-verified at the merged head
+92db84be1 (after the task-100 base merge): `cargo check -p gyre-server
+--tests` clean, and focused suites message_dispatcher (9), gate_executor
+(25), and reconciliation wave-completion (1) all pass. Evidence recorded
+under /tmp/stage/review-evidence.
