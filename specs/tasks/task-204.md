@@ -2,10 +2,10 @@
 title: "Implement spec-lifecycle accountability patrol (task-age checks + orchestrator escalation)"
 spec_ref: "spec-lifecycle.md §Accountability Integration"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: []
+commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
 ---
 
 ## Spec Excerpt
@@ -62,3 +62,68 @@ This is a distinct concern from the existing spec-links patrol at `POST /api/v1/
 - The task-creation side (labels/priorities) it must reconcile against: `crates/gyre-server/src/git_http.rs` `process_spec_lifecycle` (~1279-1304).
 - Preserve hexagonal boundaries — patrol logic is server-side and depends only on ports/domain, never adapters directly.
 - Run validation once at the end. On completion set `progress: ready-for-review` and record commit SHAs in the frontmatter `commits` list.
+
+## Shipped
+
+The three `spec-lifecycle.md` §Accountability Integration checks are live in
+`crates/gyre-server/src/spec_lifecycle_patrol.rs` against real storage:
+
+- **Check 1** flags non-terminal `spec-drift-review` tasks older than
+  `drift_review_max_age_secs` (default 24 h ≈ one loop cycle).
+- **Check 2** flags `spec-implementation` tasks with `status == Backlog` older
+  than `implementation_backlog_max_age_secs` (default 7 d).
+- **Check 3** (defense in depth) flags watched-path ledger entries
+  (`SPEC_WATCHED_PATHS`, shared with the post-receive hook) that have a
+  `current_sha`, are not `Deprecated`, are past the hook grace window, and have
+  no non-`Cancelled` task referencing the path (both `system/x.md` and
+  `specs/system/x.md` spellings normalized; repo-scoped when the ledger entry
+  carries a `repo_id`).
+
+Every finding escalates to the workspace orchestrator as a REAL persisted
+`MessageKind::Escalation` message on the workspace event stream via
+`state.emit_event` (workspaceless findings broadcast — never a fabricated
+`"default"` scope). `POST /api/v1/patrol/spec-lifecycle` is registered in
+`api/mod.rs` beside spec-links patrol with an ABAC `RouteResourceMapping`
+(`spec` resource, write action) — real policy evaluation, no exemption file
+entry.
+
+This repair round removed a leftover kill-test mutant (`if true { return 0; }`
+stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
+
+### Contract repair round
+
+Accepted the executor's byte-exact restoration of the assigned task document
+(the only working-tree change; no source file was touched this round — the
+prior rounds' production fix is preserved in history, including the rustfmt
+repair of the repo-scope guard). Re-verified on the restored tree:
+`rustfmt --check` clean on every task-touched file; `cargo test -p gyre-server
+--lib spec_lifecycle_patrol` — 11 passed; `... --lib api::specs::tests` — 53
+passed; `... --lib spec_patrol` — 19 passed; `check-arch.sh`,
+`check-abac-route-registry.sh`, `check-dead-message-kinds.sh`,
+`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh` all
+passed. Logs under `/tmp/stage/review-evidence/task204-*.log`.
+
+## Test evidence
+
+- Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail with
+  `every finding must be escalated, not merely logged` /
+  `one escalation per finding` / `escalation must be emitted, not skipped` —
+  `spec_lifecycle_patrol` + endpoint tests detect skipped escalation
+  (`/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101).
+- Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
+  passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
+  cancelled-task coverage, threshold-override, broadcast routing tests).
+- Endpoint tests: `cargo test -p gyre-server --lib api::specs::tests` — 53
+  passed (incl. `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
+  `..._honours_thresholds`, which assert persisted escalations via the real
+  router).
+- Spec-links patrol regression (shared `PatrolFinding` gained
+  `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
+  19 passed.
+- `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` all passed.
+- HTTP checks deferred to host verification: this sandbox's listener probe is
+  unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
+  the route was verified through the in-process router tests above; exact-head
+  GitHub CI checks remain mandatory for the deployed transport check.

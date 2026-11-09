@@ -32,7 +32,7 @@
 | sdlc.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | search.md | 18 | 4 | 0 | 10 | 3 | 1 | 28% |
 | source-control.md | 13 | 2 | 0 | 1 | 0 | 10 | 90% |
-| spec-lifecycle.md | 13 | 3 | 0 | 2 | 3 | 5 | 80% |
+| spec-lifecycle.md | 13 | 3 | 0 | 1 | 4 | 5 | 90% |
 | spec-links.md | 17 | 3 | 0 | 1 | 3 | 10 | 92% |
 | spec-registry.md | 19 | 1 | 0 | 4 | 5 | 9 | 77% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
