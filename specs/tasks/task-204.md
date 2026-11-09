@@ -90,19 +90,18 @@ entry.
 This repair round removed a leftover kill-test mutant (`if true { return 0; }`
 stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 
-### CI repair round (e2e run 42568047792)
+### Contract repair round
 
-The e2e job failed at the browser-install step: `ubuntu-latest` now resolves
-to ubuntu-26.04, where the locked Playwright 1.58.2 cannot install browsers
-("Playwright does not support chromium on ubuntu26.04-x64"). Verified against
-the registry tarballs that 1.58.2 pins chromium/headless-shell r1208 (the
-build the committed visual baselines and the local probe infra use) and has
-no ubuntu-26.04 host entry, while ubuntu-24.04 is fully supported. Fixed by
-pinning the e2e job to `runs-on: ubuntu-24.04` (commit 8652c6160) rather
-than upgrading Playwright — an upgrade would move chromium to r1254 and
-invalidate the 17 committed visual baselines. Workflow-only change: no
-product source, no baselines, no assertion changes; ci.yml needs no browser
-install. Evidence: `/tmp/stage/review-evidence/task204-ci-repair.md`.
+Accepted the executor's byte-exact restoration of the assigned task document
+(the only working-tree change; no source file was touched this round — the
+prior rounds' production fix is preserved in history, including the rustfmt
+repair of the repo-scope guard). Re-verified on the restored tree:
+`rustfmt --check` clean on every task-touched file; `cargo test -p gyre-server
+--lib spec_lifecycle_patrol` — 11 passed; `... --lib api::specs::tests` — 53
+passed; `... --lib spec_patrol` — 19 passed; `check-arch.sh`,
+`check-abac-route-registry.sh`, `check-dead-message-kinds.sh`,
+`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh` all
+passed. Logs under `/tmp/stage/review-evidence/task204-*.log`.
 
 ## Test evidence
 
@@ -128,8 +127,3 @@ install. Evidence: `/tmp/stage/review-evidence/task204-ci-repair.md`.
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
-- CI repair (this round): workflow-only runner pin; YAML re-validated
-  (`task204-ci-repair-yaml-check.log`), root cause and r1208/r1254 revision
-  evidence recorded in `/tmp/stage/review-evidence/task204-ci-repair.md`.
-  The ubuntu-24.04 e2e run itself is verified remotely by the exact-head
-  GitHub checks.
