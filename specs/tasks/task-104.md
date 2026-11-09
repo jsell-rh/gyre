@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Types"
-commits: ["2d4faab3a1d1038a4a6354a50823645c25e01257", "07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b"]
+commits: ["2d4faab3a1d1038a4a6354a50823645c25e01257", "07794b483ab9bddab2f38e2e32310823c5b79f7d", "48edaaf9a1bb9e24e4f9ddaf2e452402ad478c83", "0e487df7fb413c2d57998cf1d0c2c53818a2ba28", "47190ed901d978fa05f6e377fe436cba52f4be7b", "8e6ed8eccd3ce7243d411c2378d95cccf473655a", "ca905fe432f76092f9914513d736b53bfd800631", "ac5f88365dfcde25d5ae325fd24bebb90203c99b", "738e4fed58a2134e2db4b1bf4ca30595786719b7"]
 ---
 
 ## Spec Excerpt
@@ -81,7 +81,19 @@ Read `specs/system/observability.md` §Audit Event Types for the full event type
 
 ## Shipped
 
-All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–14; current head `bd81b48e4`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+All 10 event types from observability.md §Audit Event Types are implemented with real production emission points (implementation `ac5f88365`, repaired through rounds 5–15; current head `738e4fed` on merge `4c62a8064`). Every event is recorded through the shared `api::audit::emit_server_audit_event` helper (AuditRepository port + SSE broadcast), so it lands in the same store the query/stats/SIEM paths read.
+
+### Verification repair (round 15, commit `738e4fed`): task-106 base merge — 4-arg `spawn_agent_core` test calls and the round-11 clippy borrows
+
+Verification finding (checks exit 1) on the candidate after merging base `402142b1c` (task-106 automatic jj rebase and jj workspace provisioning, carrying task-116 meta-spec prompt assembly) into the branch (merge `4c62a8064`): `crates/gyre-server/src/api/spawn.rs` failed to build and lint —
+
+- Five test call sites that arrived with the base drove `spawn_agent_core(&state, req, &auth)` with 3 arguments, but the round-11 repair had given the core a 4th `endpoint` parameter (the calling-surface label for the AbacDenied audit event), so `gyre-server` (lib test) failed to compile with five E0061 errors. Each site now passes a truthful `"spawn_agent_core (direct test drive)"` label — inert in these tests (no JWT claims → ABAC bypass); it only names the surface if the guard ever denies.
+- The clippy gate flagged the round-11 `check_repo_abac` call in the core twice (`&state` and `&auth` — double borrows on the `state: &Arc<AppState>` / `auth: &AuthenticatedAgent` params). Both borrows dropped; call semantics unchanged.
+- The three remaining `needless_borrow` findings in spawn.rs (`check_spawn_budget(&state, …)` line 408, `create_derived_input_for_agent(&state, …)` line 1443, `increment_active_agents(&state, …)` line 1463) are byte-identical at both merge parents and outside the verifier's changed-line scope; left untouched.
+
+No emission logic changed: the production `spawn_agent_core` signature and both production callers (REST `POST /api/v1/agents/spawn`, MCP `gyre_spawn_worker`) were already correct — only the merged test call sites and the two borrows were repaired.
+
+Evidence at head `738e4fed`: `cargo check -p gyre-server --all-targets` clean; clippy has no findings on any line touched by this repair; `cargo test -p gyre-server --lib` **1591 passed, 0 failed** (run twice; includes the five repaired task-106 spawn tests and every task-104 audit event test); `--test git_integration` 17 passed; `api::spawn::tests` 46 passed; `cargo fmt --all --check` clean. One filtered `--lib audit` subset run flaked once (49/50) and did not reproduce in four subsequent runs — the change is semantically inert (borrow removal + inert endpoint label), so that flake is pre-existing timing sensitivity, not a regression. Probe logs: `/tmp/stage/review-evidence/task-104-round15-*.log`.
 
 ### Rebase repair (round 14, merge `bd81b48e4`): task-141/task-177 base merge, union of the divergent git_http.rs test tails
 
@@ -156,8 +168,9 @@ At the round-14 head `bd81b48e4` (merge of base `fb1f82e31` task-141/task-177/de
 - Round-14 probe evidence: `/tmp/stage/review-evidence/task-104-rebase-round14*.log`.
 - Full workspace suites, arch checks, and GitHub CI are owned by verification.
 
-### Repair and merge history (rounds 1–13, summarized)
+### Repair and merge history (rounds 1–14, summarized)
 
+- Round 15 (verification repair, commit `738e4fed`, on merge `4c62a8064` of base `402142b1c` task-106/task-116): five merged task-106 spawn tests adapted to the 4-arg `spawn_agent_core` (truthful direct-test-drive endpoint label); the round-11 `check_repo_abac` call's `&state`/`&auth` double borrows dropped for the clippy gate (details in the section above).
 - Round 14 (rebase finding `f74348f3b`, merge `bd81b48e4` of base `fb1f82e31` task-141/task-177/PR #751): git_http.rs test-module tail conflict resolved as a plain union — both sides' helpers and tests kept, no collisions, production emission points and the base's `process_persona_changes` auto-merged intact (details in the section above).
 - Round 13 (rebase finding `0b70463af`, merge `f32cd89d7` of base `22f275e26a` task-138): spec-lifecycle hook conflict resolved as a union — base's once-per-push `ws_id` resolution kept, task-104's redundant per-change lookup removed, all SpecChanged audit emissions scoped from the per-push resolution, base's conditional workspace-event emission adopted (details in the section above).
 - Round 11 (commit `07794b483`, finding on candidate `1345a7cac`): nine uninstrumented per-handler repo/workspace ABAC guards now record AbacDenied via the shared `record_abac_denied` helper; regression test `uninstrumented_abac_guards_record_abac_denied_audit_event` (details in the section above). Round 12 (rebase finding `c112f2c10`) is described in its own section above.
