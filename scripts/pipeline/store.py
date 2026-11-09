@@ -315,13 +315,16 @@ class Store:
                                  finding.get('source'), finding['category'], json.dumps(finding), time.time()))
             self.db.execute("UPDATE work SET state='succeeded',result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (json.dumps(result), time.time(), ident))
-            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') == 'merged'):
-                victims = self.db.execute("SELECT id FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
+            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') in ('merged','environment_refresh')):
+                victims = self.db.execute("SELECT id,input FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
                 for victim in victims:
+                    if result.get('status')=='environment_refresh' and json.loads(victim['input']).get('base')==result.get('target_base'):
+                        continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
             lane = self.setting('integration_lane')
-            if lane and lane['task'] == row['task'] and self.integration_lane() is None:
+            refresh_idle=(result.get('status')=='environment_refresh' and not self.db.execute("SELECT 1 FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchone())
+            if lane and lane['task'] == row['task'] and (self.integration_lane() is None or refresh_idle):
                 self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
                 self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
