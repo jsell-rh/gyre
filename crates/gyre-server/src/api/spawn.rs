@@ -1198,14 +1198,10 @@ pub(crate) async fn spawn_agent_core(
     );
     let _ = state.analytics.record(&ev).await;
     // search.md §Searchable Entities: activity events are indexed on write.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::activity_event_document(&ev),
-    )
-    .await;
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
+    super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
 
     // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
     // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
@@ -1466,11 +1462,7 @@ pub async fn complete_agent(
     );
     let _ = state.analytics.record(&ev).await;
     // search.md §Searchable Entities: activity events are indexed on write.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::activity_event_document(&ev),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // Auto-track MR creation
     let ev = AnalyticsEvent::new(
@@ -1489,11 +1481,7 @@ pub async fn complete_agent(
     );
     let _ = state.analytics.record(&ev).await;
     // search.md §Searchable Entities: activity events are indexed on write.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::activity_event_document(&ev),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {

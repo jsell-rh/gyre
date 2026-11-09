@@ -185,8 +185,12 @@ impl AgentRepository for IndexingAgentRepository {
         // rebuild the full document so the `status` facet reflects the change.
         match self.inner.find_by_id(agent_id).await {
             Ok(Some(agent)) => index_doc(&self.search, agent_document(&agent)).await,
-            Ok(None) => tracing::warn!(agent_id = %agent_id, "search-sync: agent vanished after update_status"),
-            Err(e) => tracing::warn!(agent_id = %agent_id, error = %e, "search-sync: failed to re-fetch agent after update_status"),
+            Ok(None) => {
+                tracing::warn!(agent_id = %agent_id, "search-sync: agent vanished after update_status")
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, error = %e, "search-sync: failed to re-fetch agent after update_status")
+            }
         }
         Ok(())
     }
@@ -333,8 +337,12 @@ impl ReviewRepository for IndexingReviewRepository {
         // The review document joins the MR for title/workspace/repo facets.
         match self.mrs.find_by_id(&review.merge_request_id).await {
             Ok(Some(mr)) => index_doc(&self.search, review_document(review, &mr)).await,
-            Ok(None) => tracing::warn!(mr_id = %review.merge_request_id, "search-sync: MR missing for submitted review"),
-            Err(e) => tracing::warn!(mr_id = %review.merge_request_id, error = %e, "search-sync: failed to fetch MR for review"),
+            Ok(None) => {
+                tracing::warn!(mr_id = %review.merge_request_id, "search-sync: MR missing for submitted review")
+            }
+            Err(e) => {
+                tracing::warn!(mr_id = %review.merge_request_id, error = %e, "search-sync: failed to fetch MR for review")
+            }
         }
         Ok(())
     }

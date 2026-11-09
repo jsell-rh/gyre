@@ -902,11 +902,8 @@ async fn merge_atomic_group(
         );
         let _ = state.analytics.record(&ev).await;
         // search.md §Searchable Entities: activity events are indexed on write.
-        crate::search_indexer::index(
-            state,
-            crate::search_indexer::activity_event_document(&ev),
-        )
-        .await;
+        crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev))
+            .await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
             crate::notifications::notify_mr_merged(

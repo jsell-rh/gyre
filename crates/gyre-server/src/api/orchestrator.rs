@@ -334,11 +334,7 @@ pub async fn spawn_repo_orchestrator(
 /// exemption baseline. Grow this helper, never the call site.
 async fn record_and_index_activity(state: &AppState, ev: &AnalyticsEvent) {
     let _ = state.analytics.record(ev).await;
-    crate::search_indexer::index(
-        state,
-        crate::search_indexer::activity_event_document(ev),
-    )
-    .await;
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(ev)).await;
 }
 
 #[cfg(test)]

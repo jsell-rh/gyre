@@ -909,7 +909,10 @@ pub fn build_state(
         Arc::clone(&search),
     );
     let analytics: Arc<dyn AnalyticsRepository> = search_sync::wrap_analytics(
-        store!(dyn AnalyticsRepository, mem::MemAnalyticsRepository::default()),
+        store!(
+            dyn AnalyticsRepository,
+            mem::MemAnalyticsRepository::default()
+        ),
         Arc::clone(&search),
     );
     let audit: Arc<dyn AuditRepository> = search_sync::wrap_audit(

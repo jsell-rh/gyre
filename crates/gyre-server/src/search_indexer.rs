@@ -147,10 +147,7 @@ fn language_for(path: &str) -> &'static str {
 }
 
 fn facets(pairs: Vec<(&str, String)>) -> HashMap<String, String> {
-    pairs
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect()
+    pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 // ─── Document builders (search.md §Searchable Entities) ──────────────────────
@@ -175,7 +172,10 @@ pub fn task_document(task: &Task) -> SearchDocument {
             ("priority", task_priority_str(&task.priority).to_string()),
             (
                 "assigned_to",
-                task.assigned_to.as_ref().map(|id| id.to_string()).unwrap_or_default(),
+                task.assigned_to
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             ),
             ("workspace", task.workspace_id.to_string()),
             ("repo", task.repo_id.to_string()),
@@ -195,7 +195,10 @@ pub fn mr_document(mr: &MergeRequest) -> SearchDocument {
         entity_type: "mr".to_string(),
         entity_id: mr.id.to_string(),
         title: mr.title.clone(),
-        body: format!("{} -> {} author {}", mr.source_branch, mr.target_branch, author),
+        body: format!(
+            "{} -> {} author {}",
+            mr.source_branch, mr.target_branch, author
+        ),
         workspace_id: Some(mr.workspace_id.to_string()),
         repo_id: Some(mr.repository_id.to_string()),
         facets: facets(vec![
@@ -217,7 +220,11 @@ pub fn agent_document(agent: &Agent) -> SearchDocument {
         entity_type: "agent".to_string(),
         entity_id: agent.id.to_string(),
         title: agent.name.clone(),
-        body: format!("agent {} status {}", agent.name, agent_status_str(&agent.status)),
+        body: format!(
+            "agent {} status {}",
+            agent.name,
+            agent_status_str(&agent.status)
+        ),
         workspace_id: Some(agent.workspace_id.to_string()),
         repo_id: agent.repo_id.as_ref().map(|id| id.to_string()),
         facets: facets(vec![
@@ -225,7 +232,11 @@ pub fn agent_document(agent: &Agent) -> SearchDocument {
             ("workspace", agent.workspace_id.to_string()),
             (
                 "repo",
-                agent.repo_id.as_ref().map(|id| id.to_string()).unwrap_or_default(),
+                agent
+                    .repo_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             ),
         ]),
     }
@@ -264,7 +275,10 @@ pub fn review_document(review: &Review, mr: &MergeRequest) -> SearchDocument {
         workspace_id: Some(mr.workspace_id.to_string()),
         repo_id: Some(mr.repository_id.to_string()),
         facets: facets(vec![
-            ("decision", review_decision_str(&review.decision).to_string()),
+            (
+                "decision",
+                review_decision_str(&review.decision).to_string(),
+            ),
             ("reviewer", review.reviewer_agent_id.clone()),
             ("mr", mr.id.to_string()),
             ("workspace", mr.workspace_id.to_string()),
@@ -306,14 +320,19 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
         entity_id: event.id.to_string(),
         title: event.event_name.clone(),
         body,
-        workspace_id: if workspace.is_empty() { None } else { Some(workspace.clone()) },
-        repo_id: if repo.is_empty() { None } else { Some(repo.clone()) },
+        workspace_id: if workspace.is_empty() {
+            None
+        } else {
+            Some(workspace.clone())
+        },
+        repo_id: if repo.is_empty() {
+            None
+        } else {
+            Some(repo.clone())
+        },
         facets: facets(vec![
             ("event_type", event.event_name.clone()),
-            (
-                "agent_id",
-                event.agent_id.clone().unwrap_or_default(),
-            ),
+            ("agent_id", event.agent_id.clone().unwrap_or_default()),
             ("workspace", workspace),
             ("repo", repo),
             ("date", iso_date(event.timestamp)),
@@ -347,16 +366,28 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
             ("event_type", event.event_type.as_str()),
             (
                 "agent_id",
-                event.agent_id.as_ref().map(|id| id.to_string()).unwrap_or_default(),
+                event
+                    .agent_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             ),
             ("path", path),
             (
                 "workspace",
-                event.workspace_id.as_ref().map(|id| id.to_string()).unwrap_or_default(),
+                event
+                    .workspace_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             ),
             (
                 "repo",
-                event.repo_id.as_ref().map(|id| id.to_string()).unwrap_or_default(),
+                event
+                    .repo_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             ),
             ("date", iso_date(event.timestamp)),
         ]),
@@ -365,6 +396,7 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
 
 /// Commit: indexed fields message/SHA/author/branch, facets workspace, repo,
 /// agent_id, date.
+#[allow(clippy::too_many_arguments)]
 pub fn commit_document(
     sha: &str,
     author: &str,
@@ -379,10 +411,22 @@ pub fn commit_document(
     SearchDocument {
         entity_type: "commit".to_string(),
         entity_id: sha.to_string(),
-        title: if title.is_empty() { sha.to_string() } else { title },
+        title: if title.is_empty() {
+            sha.to_string()
+        } else {
+            title
+        },
         body: message.to_string(),
-        workspace_id: if workspace_id.is_empty() { None } else { Some(workspace_id.to_string()) },
-        repo_id: if repo_id.is_empty() { None } else { Some(repo_id.to_string()) },
+        workspace_id: if workspace_id.is_empty() {
+            None
+        } else {
+            Some(workspace_id.to_string())
+        },
+        repo_id: if repo_id.is_empty() {
+            None
+        } else {
+            Some(repo_id.to_string())
+        },
         facets: facets(vec![
             ("author", author.to_string()),
             ("branch", branch.to_string()),
@@ -411,18 +455,23 @@ pub fn spec_document(
     SearchDocument {
         entity_type: "spec".to_string(),
         entity_id: path.to_string(),
-        title: if title.is_empty() { path.to_string() } else { title.to_string() },
-        body: if content.is_empty() { title.to_string() } else { content.to_string() },
+        title: if title.is_empty() {
+            path.to_string()
+        } else {
+            title.to_string()
+        },
+        body: if content.is_empty() {
+            title.to_string()
+        } else {
+            content.to_string()
+        },
         workspace_id: workspace_id.map(str::to_string),
         repo_id: repo_id.map(str::to_string),
         facets: facets(vec![
             ("approval_status", approval_status.to_string()),
             ("owner", owner.to_string()),
             ("scope", scope),
-            (
-                "workspace",
-                workspace_id.unwrap_or_default().to_string(),
-            ),
+            ("workspace", workspace_id.unwrap_or_default().to_string()),
             ("repo", repo_id.unwrap_or_default().to_string()),
         ]),
     }
@@ -442,8 +491,16 @@ pub fn file_document(
         entity_id: path.to_string(),
         title: path.to_string(),
         body: content.to_string(),
-        workspace_id: if workspace_id.is_empty() { None } else { Some(workspace_id.to_string()) },
-        repo_id: if repo_id.is_empty() { None } else { Some(repo_id.to_string()) },
+        workspace_id: if workspace_id.is_empty() {
+            None
+        } else {
+            Some(workspace_id.to_string())
+        },
+        repo_id: if repo_id.is_empty() {
+            None
+        } else {
+            Some(repo_id.to_string())
+        },
         facets: facets(vec![
             ("language", language.to_string()),
             ("workspace", workspace_id.to_string()),
@@ -541,11 +598,7 @@ pub async fn index_repo_specs(
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
         let (title, owner, approval_status) = match state.spec_ledger.find_by_path(&path).await {
-            Ok(Some(entry)) => (
-                entry.title,
-                entry.owner,
-                entry.approval_status.to_string(),
-            ),
+            Ok(Some(entry)) => (entry.title, entry.owner, entry.approval_status.to_string()),
             _ => (String::new(), String::new(), "pending".to_string()),
         };
         index(
@@ -577,15 +630,21 @@ pub async fn index_pushed_commit(
     agent_id: &str,
 ) {
     let branch = refname.trim_start_matches("refs/heads/");
-    let (author, timestamp, message) =
-        match commit_metadata(repo_path, sha).await {
-            Some((a, t, m)) => (a, t, m),
-            None => (String::new(), crate::api::now_secs(), String::new()),
-        };
+    let (author, timestamp, message) = match commit_metadata(repo_path, sha).await {
+        Some((a, t, m)) => (a, t, m),
+        None => (String::new(), crate::api::now_secs(), String::new()),
+    };
     index(
         state,
         commit_document(
-            sha, &author, timestamp, &message, branch, agent_id, workspace_id, repo_id,
+            sha,
+            &author,
+            timestamp,
+            &message,
+            branch,
+            agent_id,
+            workspace_id,
+            repo_id,
         ),
     )
     .await;
@@ -595,12 +654,7 @@ pub async fn index_pushed_commit(
 /// tree (path, blob SHA, size via `git ls-tree -r -l`), skips binaries and
 /// oversized blobs, and indexes real content.
 pub async fn index_repo_files(state: &AppState, repo: &Repository) -> u64 {
-    let out = match git_bytes(
-        &repo.path,
-        &["ls-tree", "-r", "-l", &repo.default_branch],
-    )
-    .await
-    {
+    let out = match git_bytes(&repo.path, &["ls-tree", "-r", "-l", &repo.default_branch]).await {
         Some(o) => o,
         None => {
             tracing::debug!(
@@ -617,7 +671,9 @@ pub async fn index_repo_files(state: &AppState, repo: &Repository) -> u64 {
     let mut count = 0u64;
     for line in text.lines() {
         // Long format: "<mode> SP <type> SP <sha> SP <size> TAB <path>".
-        let Some((meta, path)) = line.split_once('\t') else { continue };
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
         let mut fields = meta.split_whitespace();
         let _mode = fields.next();
         let obj_type = fields.next().unwrap_or("");
@@ -640,13 +696,7 @@ pub async fn index_repo_files(state: &AppState, repo: &Repository) -> u64 {
         };
         index(
             state,
-            file_document(
-                path,
-                &body,
-                language_for(path),
-                &workspace_id,
-                &repo_id,
-            ),
+            file_document(path, &body, language_for(path), &workspace_id, &repo_id),
         )
         .await;
         count += 1;
@@ -816,7 +866,6 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use gyre_common::Id;
     use gyre_domain::{
         AgentCommit, ApprovalStatus, AuditEventType, AuditOutcome, PersonaScope, Review,
@@ -824,6 +873,7 @@ mod tests {
     };
     use gyre_ports::search::SearchQuery;
     use gyre_ports::SearchPort;
+    use std::sync::Arc;
 
     /// Distinctive terms used to probe the index — chosen so no other seeded
     /// document can accidentally match them.
@@ -884,8 +934,7 @@ mod tests {
     /// A test AppState whose search port is a real SQLite FTS5 backend.
     fn state_with_sqlite_search() -> (tempfile::NamedTempFile, Arc<AppState>) {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let storage =
-            gyre_adapters::SqliteStorage::new(file.path().to_str().unwrap()).unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(file.path().to_str().unwrap()).unwrap();
         (
             file,
             crate::mem::test_state_with_search(Arc::new(storage) as Arc<dyn SearchPort>),
@@ -1120,7 +1169,11 @@ mod tests {
         assert_eq!(agents[0].entity_id, "agent-1");
 
         let personas = search(&state, "ibexprompt", Some("persona")).await;
-        assert_eq!(personas.len(), 1, "persona must be findable by prompt content");
+        assert_eq!(
+            personas.len(),
+            1,
+            "persona must be findable by prompt content"
+        );
         assert_eq!(personas[0].entity_id, "persona-1");
         assert_eq!(
             personas[0].facets.get("scope").map(String::as_str),
@@ -1194,7 +1247,16 @@ mod tests {
         );
         state.repos.create(&repo).await.unwrap();
 
-        index_pushed_commit(&state, "repo-1", "ws-1", &repo.path, &head_sha, "refs/heads/main", "agent-7").await;
+        index_pushed_commit(
+            &state,
+            "repo-1",
+            "ws-1",
+            &repo.path,
+            &head_sha,
+            "refs/heads/main",
+            "agent-7",
+        )
+        .await;
 
         let results = search(&state, COMMIT_TERM, Some("commit")).await;
         assert_eq!(results.len(), 1);

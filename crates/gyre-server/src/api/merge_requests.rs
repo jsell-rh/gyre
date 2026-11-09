@@ -947,11 +947,8 @@ pub async fn transition_mr_status(
         );
         let _ = state.analytics.record(&ev).await;
         // search.md §Searchable Entities: activity events are indexed on write.
-        crate::search_indexer::index(
-            &state,
-            crate::search_indexer::activity_event_document(&ev),
-        )
-        .await;
+        crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev))
+            .await;
     }
 
     Ok(Json(MrResponse::from(mr)))
@@ -1020,11 +1017,8 @@ pub async fn submit_review(
     state.reviews.submit_review(&review).await?;
     // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
     // index updated"): reviews are indexed on submission.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::review_document(&review, &mr),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::review_document(&review, &mr))
+        .await;
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
 

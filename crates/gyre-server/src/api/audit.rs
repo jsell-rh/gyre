@@ -242,11 +242,7 @@ pub async fn record_audit_event(
     state.audit.record(&event).await?;
     // search.md §Searchable Entities: audit events are indexed on write
     // (event_type, details, path facets).
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::audit_event_document(&event),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::audit_event_document(&event)).await;
 
     // Broadcast to SSE stream subscribers via broadcast channel
     let _ = state

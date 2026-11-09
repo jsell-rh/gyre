@@ -531,8 +531,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "search_code_index".to_string(),
-                description: "Indexes repo file content for code search (search.md)"
-                    .to_string(),
+                description: "Indexes repo file content for code search (search.md)".to_string(),
                 interval_secs: 3600,
                 enabled: true,
                 run_at_utc_hour: None,

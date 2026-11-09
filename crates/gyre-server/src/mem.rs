@@ -3481,7 +3481,15 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None, None)
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3559,7 +3567,15 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None, None)
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a test AppState whose policy repo fails every `create`, used to
@@ -3648,20 +3664,17 @@ fn test_state_inner(
     // Mirror production wiring (lib.rs): entity repositories are wrapped in
     // search-sync decorators so tests exercise the same index-on-write
     // behavior as every real write path.
-    let search =
-        search.unwrap_or_else(|| Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>);
+    let search = search.unwrap_or_else(|| {
+        Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>
+    });
     let agents = crate::search_sync::wrap_agents(
         Arc::new(MemAgentRepository::default()),
         Arc::clone(&search),
     );
-    let tasks = crate::search_sync::wrap_tasks(
-        Arc::new(MemTaskRepository::default()),
-        Arc::clone(&search),
-    );
-    let merge_requests = crate::search_sync::wrap_mrs(
-        Arc::new(MemMrRepository::default()),
-        Arc::clone(&search),
-    );
+    let tasks =
+        crate::search_sync::wrap_tasks(Arc::new(MemTaskRepository::default()), Arc::clone(&search));
+    let merge_requests =
+        crate::search_sync::wrap_mrs(Arc::new(MemMrRepository::default()), Arc::clone(&search));
     let reviews = crate::search_sync::wrap_reviews(
         Arc::new(MemReviewRepository::default()),
         Arc::clone(&merge_requests),

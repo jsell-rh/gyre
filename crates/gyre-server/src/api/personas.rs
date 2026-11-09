@@ -147,11 +147,7 @@ pub async fn create_persona(
     state.personas.create(&persona).await?;
     // search.md §Searchable Entities: personas indexed by prompt content with
     // a scope facet.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::persona_document(&persona),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
 
@@ -229,11 +225,7 @@ pub async fn update_persona(
     state.personas.update(&persona).await?;
     // search.md §Index Updates: write paths re-index so prompt-content searches
     // never serve stale text.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::persona_document(&persona),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -271,11 +263,7 @@ pub async fn approve_persona(
     persona.updated_at = now;
     state.personas.update(&persona).await?;
     // search.md §Index Updates: write paths re-index.
-    crate::search_indexer::index(
-        &state,
-        crate::search_indexer::persona_document(&persona),
-    )
-    .await;
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
