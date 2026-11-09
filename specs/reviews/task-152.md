@@ -57,3 +57,53 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 3 — post-rebase + CI-repair review (candidate `2fe8ad93`, base `fefde294`)
+
+Scope: the candidate rebased onto base `fefde294` (merge `8f1095ca9`, reconcile `47e58b11`),
+plus the follow-up commits — EOF fix `ae99db0d`, e2e runner pin `75fc67f2`, docs `40f6b07`,
+process `2fe8ad93`. Round-1/2 verdicts cover the §6 implementation and gate repair; this round
+re-verified the merged tree end-to-end at the exact assigned head.
+
+Fresh probe evidence (`CARGO_HOME=/tmp/cargo-home`, `SKIP_WEB_BUILD=1`, logs in
+`/tmp/stage/review-evidence/`, all at `2fe8ad93`):
+
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed** (`r10-domain-narrative.log`).
+- `cargo test -p gyre-server --lib -- narrative briefing session_registry` → **31 passed, 0 failed**
+  (`r10-server-narrative.log`) — timeline grounded-narrative HTTP test, briefing template-floor and
+  LLM-path tests (echo mock: asserts the user prompt lands in the summary AND template fallback text
+  does not — discriminating against an always-template regression), and the 4 session-registry tests.
+- `cargo test -p gyre-server --lib graph_extraction::` → **30 passed, 0 failed**
+  (`r10-graph-extraction.log`) — includes `compact_delta_records_true_removed_edge_count`, which
+  drives the real extraction pipeline over a real bare git repo and reads the delta back through the
+  port.
+- `cargo test -p gyre-server --lib api::graph::` → **31 passed, 0 failed** (`r10-server-api-graph.log`)
+  — both the narrative tests and main's repo-scoped briefing-filter tests survived the rebase.
+- Gates: `check-arch.sh` exit 0 (narrative.rs is pure domain, LLM call stays in gyre-server per the
+  documented gyre-ports llm.rs boundary); `check-template-substitution.sh` exit 0 (round-2 probe
+  matrix already proved the repaired gate retains both true-positive classes);
+  `check-task-commit-attribution.sh` exit 0; `git diff --check fefde294 HEAD` clean.
+
+Round-3 verification of the operational deltas:
+
+- **Rebase semantics**: `collect_architecture_narratives` honors main's `repo_filter` contract
+  (filter applied before delta collection), and the compact-delta regression test carries main's
+  pass2_telemetry argument with real in-memory sinks. Confirmed by reading the merged code and the
+  passing suites above.
+- **e2e runner pin (`75fc67f2`)**: matches the retained failure log for run 42623773713
+  (head `47e58b11`): "Cannot install dependencies for ubuntu26.04-x64 with Playwright 1.58.2" at
+  "Install Playwright browsers", before any test ran — an environment drift, not a code defect.
+  Pinning to `ubuntu-24.04` is the minimal fix that preserves the locked Playwright 1.58.2 and the
+  committed chromium-1208 visual baselines; a version bump would have invalidated them. Local
+  validation of the unreachable suite was recorded in the task notes (65 passed at `47e58b11`);
+  exact-head GitHub CI on the pinned image remains the verifier's scope.
+- **Session-registry fix (from assigned checkpoint commit `595c39034`)**: `register(user, 0)`
+  previously hit `slots.remove(0)` on an empty Vec (panic on every connect under a 0 cap);
+  `max.max(1)` admits the registering session. Tests cover eviction+signaling, idempotent
+  unregister, per-instance isolation, and the zero-cap case. Genuine fix, discriminating tests.
+
+No findings. The §6 narrative implementation (template generator grounded in the live graph,
+timeline/diff `narrative` field, agent/persona attribution via real lookups, LLM synthesis with
+template floor on unconfigured/error/timeout/empty, briefing integration through
+`assemble_briefing` for both REST and MCP) satisfies every acceptance criterion with real
+production code. Round-3 verdict: **complete — approved**.
