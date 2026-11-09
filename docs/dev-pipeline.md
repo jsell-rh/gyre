@@ -470,6 +470,23 @@ artifacts are staged inside the repair sandbox. Pending checks and merge
 confirmation are expected observations, polled every 30 seconds without
 accumulating infrastructure failure backoff.
 
+Shared CI setup failures are coordinated separately from product defects.
+For Playwright's unsupported-runner failure, the observer verifies the terminal
+Actions job/attempt and failed installation step, then compares workflow and npm
+input blob identities against the exact upstream base. Product-test failures,
+mixed failures, and candidates that changed those inputs remain candidate repairs.
+An older green base run cannot establish the health of today's hosted runner.
+Matching setup failures share one SQLite-deduplicated repair task, even as main
+advances. Affected tasks retain their candidate, review, and product dependency
+contract; they do not start individual implementation workers for that failure.
+The shared repair receives automatic repair priority.
+
+Once the repair ships, retained candidates re-enter verification against a base
+containing the fix. If main already has different CI inputs when the failure is
+observed, the observer requests that integration refresh directly, without a
+repair model. This permits fresh verification only; it never marks CI green or
+merges an old failing head. New publication still requires all GitHub checks.
+
 Completing a repair clears its active finding but retains the original evidence
 as review context. The independent reviewer receives the failure source identity,
 bounded logs, and artifacts inside its own sandbox; it can verify the repair

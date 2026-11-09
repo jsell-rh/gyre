@@ -110,11 +110,14 @@ def discover(store, stage, base):
                         and not store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(name,)).fetchone()):
                     data = current['data'] | {'repair': None, 'verified': None,
                             'baseline_resolution': {'prerequisite':prerequisite['name'],
+                                'candidate':data['candidate'],'published_head':data.get('published_head'),'generation':task['generation'],
                                 'receipt':prerequisite['data'].get('resolved') or prerequisite['data'].get('delivered')}}
                     store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),name))
                     store.event('baseline_dependency_resolved', {'prerequisite':prerequisite['name'],
                                 'candidate':data['candidate']}, name)
                     task['data'] = data
+        if (data.get('repair') or {}).get('shared_environment'):
+            continue  # Operational coordination must not rewrite product dependencies.
         baseline_probe = probe(task)
         if baseline_probe and (data.get('baseline_checked') or {}).get('base') != base:
             receipt = cached(store,base,baseline_probe)
@@ -160,7 +163,7 @@ def discover(store, stage, base):
             if review.get('candidate') == candidate and review.get('approved'):
                 if verified.get('candidate') != candidate or verified.get('base') != base:
                     from .ci import verification_ready
-                    if verification_ready(store,task):
+                    if verification_ready(store,task,base):
                         inputs = {'candidate': candidate, 'base': base}
         elif stage == 'publish' and deps_ready and candidate and not repair:
             if verified.get('candidate') == candidate and (verified.get('base') == base or data.get('pr')):
