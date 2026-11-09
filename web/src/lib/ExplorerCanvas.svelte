@@ -17,6 +17,17 @@
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
   import {
+    gateStatusDecoration,
+    evaluativeNodeDecorations,
+  } from './lens-rendering.js';
+  import {
+    activeAgentNodeIds as computeActiveAgentNodeIds,
+    computeRecentChanges,
+    recentChangeAlpha,
+    computeNodeGateStatus,
+    edgeGateStatus,
+  } from './liveness.svelte.js';
+  import {
     hasCausalEdges,
     computeTraceOrder,
     governingSpecFor,
@@ -31,6 +42,8 @@
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = $bindable('all'),
     lens = $bindable('structural'),
+    gateStatusBySpec = {},   // HSI §3 Evaluative lens: spec path → 'pass' | 'fail' (most recent gate results)
+    specApprovals = [],     // HSI §3 Evaluative lens: spec approval ledger records
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
@@ -42,6 +55,8 @@
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
     focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    playbackRequest = null, // { nonce } — start trace playback (generated "flow" views, HSI §3);
+    //                        // repeated requests re-trigger via a fresh nonce.
     windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
     //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
     //                     closes overlays most-recent-first and clears the trace query itself, so it opts
@@ -56,6 +71,10 @@
     onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
     onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
     timelineDeltaStats = null, // { added, removed, modified, byType }
+    // HSI §3 Layer 1 gate status — MR gate evaluation records for the current
+    // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
+    // parent (ExplorerView); only rendered in the Evaluative lens.
+    gateRecords = [],
   } = $props();
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
@@ -122,6 +141,55 @@
     return idx;
   });
 
+  // ── Evaluative lens decorations (HSI §3 Three Lenses) ─────────────────
+  // Lens decorations compose on the structural base: the same layout and
+  // the same spec-governance coloring are reused; the evaluative lens only
+  // adds visual encodings (coverage badges, gate rings, approval icons,
+  // gate-colored edges) on top.
+  let nodesById = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) m.set(n.id, n);
+    return m;
+  });
+
+  // Spec approval ledger records (GET /api/v1/specs/approvals) by spec path.
+  let approvalRecordsByPath = $derived.by(() => {
+    const m = new Map();
+    for (const rec of specApprovals ?? []) {
+      if (!rec?.spec_path) continue;
+      if (!m.has(rec.spec_path)) m.set(rec.spec_path, []);
+      m.get(rec.spec_path).push(rec);
+    }
+    return m;
+  });
+
+  // Composed evaluative decorations per node: coverage badge (green/yellow/
+  // red from GraphNode.test_coverage), gate status ring (most recent gate
+  // results joined via the node's governing specs), and spec approval icon
+  // (✓ approved / ⏳ pending / ✗ rejected from the approval ledger).
+  let evaluativeDecorationsByNodeId = $derived.by(() => {
+    const m = new Map();
+    if (lens !== 'evaluative') return m;
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = evaluativeNodeDecorations(n, { gateStatusBySpec, approvalRecordsByPath, edges, nodesById });
+      if (d) m.set(n.id, d);
+    }
+    return m;
+  });
+
+  // Gate outcome per node id, precomputed so the per-edge render loop stays
+  // O(1) per edge (edges leaving a governed node get the gate color).
+  let gateStatusByNodeId = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = gateStatusDecoration(n, gateStatusBySpec, edges, nodesById);
+      if (d) m.set(n.id, d.status);
+    }
+    return m;
+  });
+
   function specBorderColor(node) {
     if (!node) return '#64748b';
     const conf = node.spec_confidence;
@@ -184,6 +252,9 @@
   const MIN_ZOOM = 0.05;
   const MAX_ZOOM = 20.0;
   const LERP_SPEED = 0.15;
+  // Active-agent glow pulse period (HSI §3): one full glow cycle every 2s —
+  // a subtle ambient pulse, not a flash.
+  const ACTIVE_GLOW_PERIOD_MS = 2000;
 
   // ── Canvas state ─────────────────────────────────────────────────────
   let canvasEl = $state(null);
@@ -348,6 +419,47 @@
   });
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
+
+  // ── HSI §3 Layer 1: liveness indicators ──────────────────────────────
+  // Active-agent glow: nodes governed by the spec of any currently running
+  // agent (RunStarted/RunFinished telemetry tracked in liveness.svelte.js,
+  // wired to the WebSocket in App.svelte) pulse with a subtle glow.
+  let activeAgentNodeIds = $derived.by(() => computeActiveAgentNodeIds(nodes, edges));
+  // Recent changes: nodes added/modified in the last hour per
+  // ArchitecturalDelta records get a fading highlight ring. `changedAtMs` is
+  // stored per node; the fade itself is computed at draw time from the
+  // clock so the ring keeps fading without a per-frame timer.
+  let recentChanges = $derived.by(() => computeRecentChanges(nodes, timeline, Date.now()));
+  // Slow refresh: while unfaded recent changes exist, redraw once a minute
+  // so the fade progresses even without user interaction. (The alpha is
+  // recomputed at draw time; this only nudges a redraw.)
+  $effect(() => {
+    if (recentChanges.size === 0) return;
+    const hasUnfaded = [...recentChanges.values()].some((e) => recentChangeAlpha(e) > 0);
+    if (!hasUnfaded) return;
+    const t = setInterval(() => scheduleRedraw(), 60_000);
+    return () => clearInterval(t);
+  });
+  // Gate status: per-node pass/fail from MR gate records — ONLY computed
+  // for the Evaluative lens so the Structural lens (default) never shows
+  // gate colors (spec: "default Structural lens hides gate colors").
+  let nodeGateStatus = $derived.by(() =>
+    lens === 'evaluative' ? computeNodeGateStatus(nodes, edges, gateRecords) : new Map()
+  );
+  let hasGateEdges = $derived(nodeGateStatus.size > 0);
+  // Redraw when liveness indicator state changes — a run starting/finishing,
+  // its spec resolving, or gate records loading must be reflected on the
+  // canvas without waiting for the next user interaction. The redraw is
+  // deferred to a macrotask: this effect is created before the layout
+  // effects, and drawing synchronously mid-flush (before layoutNodes is
+  // populated) would render an empty frame inside the mount flush.
+  $effect(() => {
+    void activeAgentNodeIds.size;
+    void recentChanges.size;
+    void nodeGateStatus.size;
+    const t = setTimeout(() => scheduleRedraw(), 0);
+    return () => clearTimeout(t);
+  });
 
   // ── Ghost overlay state (spec editing preview) ──────────────────────
   // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
@@ -987,6 +1099,33 @@
     // Access highlightedSpanId to create a dependency
     const _spanId = highlightedSpanId;
     if (lens === 'evaluative') scheduleRedraw();
+  });
+
+  /**
+   * HSI §3 Layer 2: start replaying the captured trace. Invoked from a
+   * node's ▶ play badge (any lens) or the playback toolbar. Switches to the
+   * Evaluative lens — the particle animation renders there — rewinds to the
+   * start of the trace, and starts the animated data flow along the span tree.
+   */
+  function startTracePlayback() {
+    lens = 'evaluative';
+    onLensChange('evaluative');
+    evalScrubber = 0;
+    evalPlaying = true;
+    scheduleRedraw();
+  }
+
+  // External playback request (HSI §3 Generated Views: a "flow" layout
+  // view starts the particle animation along the span tree). Nonce-based so
+  // a repeated request for the same view re-triggers.
+  $effect(() => {
+    const req = playbackRequest;
+    if (!req?.nonce) return;
+    // Only meaningful when trace data exists — the parent only fires this
+    // for trace-backed flow views, but guard anyway: without spans there is
+    // nothing to animate.
+    if ((traceData?.spans?.length ?? 0) === 0) return;
+    untrack(() => startTracePlayback());
   });
 
   // Pan/zoom the camera to a node on external request (detail-panel trace
@@ -3202,6 +3341,16 @@
     }
   }
 
+  /**
+   * Screen-space circle for the Layer 2 trace play icon on a node.
+   * Shared by the drawer and the click hit-test so the clickable region is
+   * exactly the drawn region. Positioned at the node's bottom-right corner.
+   */
+  function playIconRect(s, sw, sh) {
+    const r = Math.max(5, Math.min(9, Math.min(sw, sh) * 0.22));
+    return { cx: s.x + sw / 2 - r - 2, cy: s.y + sh / 2 - r - 2, r: r + 2 };
+  }
+
   function drawLeafNode(ctx, ln, s, sw, sh, op) {
     const n = ln.node;
     const r = Math.min(6, sw * 0.08);
@@ -3244,6 +3393,44 @@
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.restore();
+    }
+
+    // ── HSI §3 Layer 1: active-agent glow ────────────────────────────
+    // Nodes where an agent is currently working (RunStarted telemetry, glow
+    // removed on RunFinished) pulse with a subtle glow. Time-based sine so
+    // the pulse is smooth at any frame rate; the render loop stays alive
+    // while any glowing node is on screen (see animLoop).
+    if (activeAgentNodeIds.has(ln.id) && sw > 14 && sh > 10) {
+      const phase = (Date.now() % ACTIVE_GLOW_PERIOD_MS) / ACTIVE_GLOW_PERIOD_MS;
+      const pulse = 0.5 + 0.5 * Math.sin(phase * Math.PI * 2);
+      ctx.save();
+      ctx.globalAlpha = op * (0.25 + 0.45 * pulse);
+      ctx.strokeStyle = '#38bdf8'; // sky-400 — distinct from spec-border colors
+      ctx.lineWidth = 1.5 + pulse;
+      ctx.shadowColor = '#38bdf8';
+      ctx.shadowBlur = 4 + 8 * pulse;
+      roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // ── HSI §3 Layer 1: recent-change fading ring ───────────────────
+    // Nodes added/modified in the last hour (ArchitecturalDelta records)
+    // carry a highlight ring that fades over the hour — full opacity at the
+    // change, linear fade to zero at 60 minutes (never an instant on/off).
+    const recentChange = recentChanges.get(ln.id);
+    if (recentChange && sw > 14 && sh > 10) {
+      const fade = recentChangeAlpha(recentChange);
+      if (fade > 0) {
+        ctx.save();
+        ctx.globalAlpha = op * (0.2 + 0.65 * fade);
+        ctx.strokeStyle = '#fbbf24'; // amber-400
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, s.x - sw / 2 - 5, s.y - sh / 2 - 5, sw + 10, sh + 10, r + 3);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Border — colored by spec confidence, width scaled by churn
@@ -3322,6 +3509,63 @@
       ctx.stroke();
       ctx.shadowBlur = 0;
       ctx.restore();
+    }
+
+    // ── Evaluative lens decorations (HSI §3 Three Lenses) ──────────────
+    // Composed on top of the structural base: gate status ring, spec
+    // approval icon, and coverage badge. The structural fill, spec border,
+    // and label above remain visible underneath (lenses compose — the
+    // Evaluative overlay never replaces the Structural rendering).
+    const evalDeco = evaluativeDecorationsByNodeId.get(n?.id);
+    if (evalDeco && sw > 25 && sh > 16) {
+      // Gate status ring — green (pass) / red (fail) from the most recent
+      // gate results of the node's governing specs.
+      if (evalDeco.gate && sw > 30) {
+        ctx.save();
+        ctx.strokeStyle = evalDeco.gate.color;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Spec approval icon — ✓ approved / ⏳ pending / ✗ rejected from the
+      // spec approval ledger (bottom-left; TEST/metric badges own the top).
+      if (evalDeco.approval) {
+        const fs = Math.max(9, Math.min(12, sw * 0.12));
+        ctx.save();
+        ctx.font = `700 ${fs}px system-ui`;
+        const pillW = measureText(ctx, evalDeco.approval.icon, ctx.font) + 6;
+        const ax = s.x - sw / 2 + 2;
+        const ay = s.y + sh / 2 - fs - 4;
+        ctx.fillStyle = 'rgba(15,15,26,0.85)';
+        ctx.beginPath();
+        roundRect(ctx, ax, ay, pillW, fs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.approval.color;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.approval.icon, ax + 3, ay + 2);
+        ctx.restore();
+      }
+      // Test coverage badge — green/yellow/red heatmap from
+      // GraphNode.test_coverage (bottom-right).
+      if (evalDeco.coverage && sw > 40 && sh > 22) {
+        const bfs = Math.max(7, Math.min(10, sw * 0.09));
+        ctx.save();
+        ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
+        const bw = measureText(ctx, evalDeco.coverage.label, ctx.font) + 6;
+        const bx = s.x + sw / 2 - 2;
+        const by = s.y + sh / 2 - bfs - 4;
+        ctx.fillStyle = evalDeco.coverage.bg;
+        ctx.beginPath();
+        roundRect(ctx, bx - bw, by, bw, bfs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.coverage.fg;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.coverage.label, bx - 2, by + 2);
+        ctx.restore();
+      }
     }
 
     // Label — LOD: skip text on leaf nodes at low zoom for performance
@@ -3457,6 +3701,35 @@
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText('TEST', bx + 2, by + 1);
+        ctx.restore();
+      }
+
+      // ── HSI §3 Layer 2 scaffolding: trace play icon ──────────────────
+      // Nodes with trace data (spans linked to this graph node) show a ▶
+      // badge. Clicking it replays the captured request flow through the
+      // architecture (switches to the Evaluative lens and starts particle
+      // playback following the span tree).
+      if (n?.id && nodeSpanStats.has(n.id) && sw > 30 && sh > 18) {
+        const rect = playIconRect(s, sw, sh);
+        ctx.save();
+        // Subtle backdrop circle so the glyph reads on any fill color
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = '#0f172a';
+        ctx.beginPath();
+        ctx.arc(rect.cx, rect.cy, rect.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = evalPlaying ? '#93c5fd' : '#60a5fa';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // ▶ triangle
+        ctx.fillStyle = evalPlaying ? '#93c5fd' : '#60a5fa';
+        const t = rect.r * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(rect.cx - t * 0.7, rect.cy - t);
+        ctx.lineTo(rect.cx - t * 0.7, rect.cy + t);
+        ctx.lineTo(rect.cx + t, rect.cy);
+        ctx.closePath();
+        ctx.fill();
         ctx.restore();
       }
     }
@@ -3646,6 +3919,40 @@
         // In structural lens, thicken high-traffic edges by incoming call count
         const inCount = (adjacency.get(tgtId) ?? []).filter(nb => nb.edgeType === 'calls' && nb.reverse).length;
         if (inCount > 1) lineWidth = 1.2 + Math.min(inCount / 5, 3);
+      }
+
+      // ── HSI §3 Layer 1: gate status colors (Evaluative lens only) ─────
+      // Green when all gates passed for both connected nodes, red when at
+      // least one has a failed gate. nodeGateStatus is only populated in the
+      // Evaluative lens — the default Structural lens never shows gate colors.
+      if (lens === 'evaluative' && hasGateEdges) {
+        const gateSt = edgeGateStatus(nodeGateStatus, srcId, tgtId);
+        if (gateSt === 'passed') {
+          color = '#22c55e'; // green — all gates passed
+          edgeAlpha = Math.max(edgeAlpha, 0.55);
+          lineWidth = Math.max(lineWidth, 1.6);
+        } else if (gateSt === 'failed') {
+          color = '#ef4444'; // red — at least one gate failed
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 2);
+        }
+      }
+
+      // Evaluative lens: gate status edge coloring (HSI §3) — edges leaving
+      // a node governed by a spec with a concluded gate run are colored
+      // green (pass) / red (fail), with the most recent MR per spec path
+      // deciding the outcome. When both data sources are present this
+      // per-spec recency join overrides the record-aggregate coloring above
+      // (it resolves "most recent gate results" per spec, per HSI §3);
+      // either way the structural layout and topology are unchanged
+      // (lenses compose).
+      if (lens === 'evaluative') {
+        const gateStatus = gateStatusByNodeId.get(srcId);
+        if (gateStatus) {
+          color = gateStatus === 'pass' ? '#22c55e' : '#ef4444';
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 1.8);
+        }
       }
 
       // Connected highlight
@@ -3996,8 +4303,13 @@
     const dz = Math.abs(cam.zoom - targetCam.zoom);
     const ghostNeedsAnim = hasGhosts && lens !== 'structural' && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
+    // HSI §3 Layer 1: active-agent glow is a continuous ambient pulse — keep
+    // the render loop alive while any glowing node exists. Bounded to nodes
+    // actually on screen (layoutNodeMap) so a glowing node off-canvas or
+    // filtered out does not burn frames.
+    const glowAnimating = activeAgentNodeIds.size > 0 && [...activeAgentNodeIds].some((id) => layoutNodeMap.has(id));
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning || glowAnimating) {
       needsAnim = false;
       // Re-frame directly rather than via scheduleAnim(): animScheduled must
       // stay true across the frame boundary (a frame is still pending), and
@@ -4292,6 +4604,24 @@
 
     const hit = hitTest(e.clientX, e.clientY);
     if (hit) {
+      // HSI §3 Layer 2: clicking a node's ▶ trace badge starts replay of the
+      // captured request flow (Evaluative lens + particle playback) instead
+      // of selecting the node.
+      if (hit.node?.id && nodeSpanStats.has(hit.node.id) && !e.shiftKey) {
+        const sln = layoutNodeMap.get(hit.id);
+        if (sln) {
+          const s = worldToScreen(sln.x, sln.y);
+          const rect = canvasEl.getBoundingClientRect();
+          const sx = e.clientX - rect.left;
+          const sy = e.clientY - rect.top;
+          const icon = playIconRect(s, sln.w * cam.zoom, sln.h * cam.zoom);
+          const dist = Math.sqrt((sx - icon.cx) ** 2 + (sy - icon.cy) ** 2);
+          if (dist <= icon.r) {
+            startTracePlayback();
+            return;
+          }
+        }
+      }
       // Shift+Click: multi-select for concept creation
       if (e.shiftKey) {
         const newSet = new Set(multiSelectedIds);
@@ -5275,12 +5605,29 @@
     ['High flow', 'hsl(0,70%,45%)'],
     ['OK span', '#60a5fa'],
     ['Error span', '#ef4444'],
+    ['Coverage ok', '#22c55e'],
+    ['Coverage partial', '#eab308'],
+    ['Coverage low', '#ef4444'],
+    ['Gate pass', '#22c55e'],
+    ['Gate fail', '#ef4444'],
+    ['Approved', '#22c55e'],
+    ['Pending', '#eab308'],
+    ['Rejected', '#ef4444'],
+    // Record-aggregate gate entries only while the per-spec join above has
+    // no data — the two families describe the same gate outcomes, and the
+    // per-spec recency join's entries subsume the aggregate ones.
+    ...(hasGateEdges && gateStatusByNodeId.size === 0
+      ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']]
+      : []),
   ] : [
     ['Has spec', '#22c55e'],
     ['Suggested', '#eab308'],
     ['No spec', '#ef4444'],
     ['Calls', '#60a5fa'],
     ['Implements', '#34d399'],
+    // HSI §3 Layer 1 liveness legends — only when the indicators are live
+    ...(activeAgentNodeIds.size > 0 ? [['Agent active', '#38bdf8']] : []),
+    ...(recentChanges.size > 0 ? [['Recent change', '#fbbf24']] : []),
   ]);
 </script>
 
@@ -5559,6 +5906,19 @@
                   <span class="insight-risk">Risk: complex + undertested</span>
                 {/if}
               </div>
+            {/if}
+            {#if lens === 'evaluative'}
+              {@const evalDeco = evaluativeDecorationsByNodeId.get(tooltipNode.id)}
+              {#if evalDeco?.gate || evalDeco?.approval}
+                <div class="tooltip-insight">
+                  {#if evalDeco?.gate}
+                    <span class={evalDeco.gate.status === 'pass' ? 'insight-ok' : 'insight-warn'}>Gates: {evalDeco.gate.status === 'pass' ? 'passed' : 'failed'} (most recent run)</span>
+                  {/if}
+                  {#if evalDeco?.approval}
+                    <span class={evalDeco.approval.status === 'approved' ? 'insight-ok' : evalDeco.approval.status === 'pending' ? 'insight-note' : 'insight-warn'}>Spec approval: {evalDeco.approval.label}</span>
+                  {/if}
+                </div>
+              {/if}
             {/if}
             {#if nodeSpanStats.get(tooltipNode.id)}
               {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
