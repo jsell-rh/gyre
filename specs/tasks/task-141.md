@@ -3,7 +3,7 @@ title: "Implement repo-defined persona push detection and approval reset"
 spec_ref: "platform-model.md §2 Repo-Defined Personas"
 depends_on:
   - task-140
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §Repo-Defined Personas"
 commits: ["7ffe72535721289c39b3ffca17d9c422439ab61c"]
