@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced", "4bdcd763e99293ec3252bf367beb219e35127922", "2faf26af2c4ca2fa00052be4fd9cf5429677c837"]
 ---
 
 ## Spec Excerpt
@@ -123,29 +123,55 @@ paths, Postgres search_index PK reconciliation).
   indexing). The pure decision logic (`pk_upgrade_sql`) is unit-tested
   without a live PG instance.
 
+### Rebase onto upstream main (merge repair)
+
+Rebased onto upstream `fefde2946` (merge commit `4bdcd763e`, semantic
+fixes in `2faf26af2`): kept task-202's `search_code_index` job registration
+and spawn alongside upstream's `secret_rotation_check`,
+`meta_spec_conformance_sweep`, and `log_compression` jobs; merged
+`test_state_inner` to the widened 7-param signature (storage, search,
+secrets, kv) preserving the search-sync decorator wrapping; implemented the
+new upstream `AuditRepository::compress_details_before` on
+`IndexingAuditRepository` by delegating to the inner repo (storage
+maintenance, not an entity write); and dropped the two task-077
+`evaluate_attestation_abac` inert-enforcement exemption pins because
+upstream's task-095 repair genuinely fixed those sites (verified in the
+merged `merge_processor.rs`: the decision is bound and Deny fails the
+queue entry), so no exemption remains. Post-merge validation (evidence in
+`/tmp/stage/review-evidence/task-202-rebase-merge.txt`): workspace-wide
+`cargo check --all-targets`, `check-arch.sh`, `check-migration-versions.sh`,
+and `check-inert-enforcement.sh` all pass; focused suites re-run green —
+`search_indexer` 6, `api::tasks` 7, `api::spawn` 38, `api::merge_requests`
+33, `merge_processor` 67, `api::orchestrator` 6, `--test search_wiring` 1,
+`gyre-adapters postgres::search` 5 and `search` 18.
+
 ### Test evidence
 
-Verified at branch head `3dc6cdcc` (evidence in
-`/tmp/stage/review-evidence/task-202-repair-round3.txt`):
+Originally verified at `3dc6cdcc` (evidence in
+`/tmp/stage/review-evidence/task-202-repair-round3.txt`); re-verified after
+the upstream rebase at `2faf26af2` (evidence in
+`/tmp/stage/review-evidence/task-202-rebase-merge.txt`):
 `cargo test -p gyre-server --lib search_indexer` — 6 passed, including
 `full_reindex_rebuilds_all_entity_types_from_real_storage`, which seeds all
 10 entity types plus a poisoned stale doc against a real SQLite FTS5
 backend, asserts the true count, idempotency, stale-doc removal, and
 per-type retrieval including spec-by-body-content and commit-by-message.
-`cargo test -p gyre-server --lib api::tasks` — 7 passed, including the new
+`cargo test -p gyre-server --lib api::tasks` — 7 passed, including the
 regression test `task_transition_activity_event_is_workspace_scoped`, which
 drives the real HTTP router against a real SQLite FTS5 backend and asserts
 the write-path-indexed activity event is findable via the workspace filter
 with populated workspace/repo facets; verified to FAIL (0 results) with the
 scope fix reverted.
-`cargo test -p gyre-server --lib api::spawn` (34), `api::merge_requests`
-(21), `merge_processor` (49), `orchestrator` (10) — all passed.
-`cargo test -p gyre-adapters --lib postgres::search` — 5 passed (new
-`pk_upgrade_sql` decision tests); `--lib search` — 18 passed.
-`bash scripts/check-arch.sh` and all other `scripts/check-*.sh` gates
-passed (the two pre-existing task-077 F5 exemption pins were re-pinned
-1457/1479 → 1467/1489 — same sites, moved by line insertions, no new
-exemptions). `cargo clippy` on the changed crates: 0 errors from these
+`cargo test -p gyre-server --lib api::spawn` (38), `api::merge_requests`
+(33), `merge_processor` (67), `api::orchestrator` (6), and
+`--test search_wiring` (1) — all passed post-merge.
+`cargo test -p gyre-adapters --lib postgres::search` — 5 passed (`pk_upgrade_sql`
+decision tests); `--lib search` — 18 passed.
+`bash scripts/check-arch.sh`, `check-migration-versions.sh`, and
+`check-inert-enforcement.sh` passed; the two pre-existing task-077 F5
+exemption entries are gone entirely — upstream's task-095 repair fixed the
+underlying discard sites for real, so the exemptions file needs no
+task-202 pins. `cargo clippy` on the changed crates: 0 errors from these
 changes.
 
 Full-workspace `cargo test --all`, all-target Clippy, and GitHub CI are
