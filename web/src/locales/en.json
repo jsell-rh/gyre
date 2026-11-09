@@ -169,6 +169,9 @@
     "no_active_agents": "No active agents in this repo.",
     "task_label": "Task: {id}",
     "budget_label": "Budget: {pct}%",
+    "main_health_green": "main: green",
+    "main_health_red": "main: broken",
+    "main_health_unknown": "main: no gates",
     "clone_url_copied": "Clone URL copied!",
     "copy_clone_url": "Copy clone URL to clipboard",
     "agent_count_click": "{label} — click to view",
@@ -493,6 +496,8 @@
     "adjust_metaspec": "Adjust Meta-spec",
     "increase_limit": "Increase Limit",
     "increase_trust": "Increase Trust",
+    "trust_increased": "Trust level increased",
+    "trust_increase_failed": "Could not update trust level — please try again.",
     "view_code": "View Code",
     "update_spec": "Update Spec",
     "accept": "Accept",
@@ -968,8 +973,10 @@
     "system_title": "System Explorer",
     "architecture_title": "Architecture",
     "system_subtitle": "Realized architecture — navigate the living knowledge graph",
+    "arch_subtabs_label": "Architecture sub-tabs",
     "sub_tabs": {
       "architecture": "Architecture",
+      "graph": "Graph",
       "briefing": "Briefing",
       "code": "Code"
     },
@@ -1007,7 +1014,8 @@
     "spec_editor_cancel": "Cancel",
     "spec_editor_predicting": "Predicting graph impact…",
     "spec_editor_predict_error": "Prediction failed: {error}",
-    "spec_editor_no_changes": "No structural changes predicted."
+    "spec_editor_no_changes": "No structural changes predicted.",
+    "large_graph_warning": "Large graph ({count} nodes) — viewport culling and zoom-level detail are active; pan/zoom may be slower than usual."
   },
   "detail_panel": {
     "title": "Title",
@@ -1454,19 +1462,52 @@
       "cancel": "Cancel"
     }
   },
+  "secrets_panel": {
+    "hint": "Secret values are write-only: they are set once and never displayed or returned by the API.",
+    "add": "Add secret",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "Saving\u2026",
+    "save_failed": "Failed to save secret: {error}",
+    "rotate_failed": "Failed to rotate secret: {error}",
+    "delete_failed": "Failed to delete secret: {error}",
+    "loading": "Loading secrets\u2026",
+    "empty": "No secrets in this scope.",
+    "value_label": "Value",
+    "value_hidden_label": "Value hidden",
+    "new_value_label": "New value",
+    "expires_label": "Expires (unix epoch)",
+    "col_name": "Name",
+    "col_type": "Type",
+    "col_created": "Created",
+    "col_expires": "Expires",
+    "col_last_rotated": "Last rotated",
+    "col_status": "Status",
+    "col_actions": "Actions",
+    "rotate": "Rotate",
+    "rotate_confirm": "Rotate",
+    "delete": "Delete",
+    "delete_confirm": "Delete this secret?",
+    "delete_yes": "Delete"
+  },
   "workspace_settings": {
     "page_title": "{name} Settings",
     "page_title_fallback": "Workspace Settings",
     "back_label": "Back to workspace home",
     "tabs": {
       "general": "General",
-      "trust": "Trust & Policies",
+      "trust": "Trust Level",
+      "policies": "Policies",
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
+      "repos": "Repos",
+      "secrets": "Secrets",
       "audit": "Audit"
+
     },
     "tab_bar_label": "Workspace settings sections",
+    "secrets_need_entity": "A workspace must be loaded before managing its secrets.",
     "general": {
       "title": "General",
       "workspace_name": "Workspace Name",
@@ -1480,7 +1521,7 @@
       "save": "Save"
     },
     "trust": {
-      "title": "Trust & Policies",
+      "title": "Trust Level",
       "trust_level_title": "Trust Level",
       "trust_level_desc": "Controls how autonomously agents operate in this workspace.",
       "trust_level_label": "Trust level",
@@ -1495,9 +1536,13 @@
       "saving": "Saving…",
       "saved": "Saved ✓",
       "save_trust_level": "Save Trust Level",
-      "abac_title": "ABAC Policies",
-      "abac_loading": "Loading policies…",
-      "abac_empty": "No ABAC policies configured for this workspace.",
+      "implied_title": "Policies implied by {level}",
+      "implied_desc": "Read-only summary of the trust: policies this preset creates (or would create if you switch and save).",
+      "implied_none": "No trust: policies — this level relies on built-in policies only.",
+      "implied_custom": "Custom trust — manage policies directly in the Policies tab.",
+      "will_add": "Will add",
+      "will_remove": "Will remove",
+      "view_all_policies": "View all policies →",
       "abac_delete_failed": "Failed to delete policy: {error}",
       "drift_title": "Meta-Spec Drift Policy",
       "drift_desc": "Controls how the workspace responds when agents produce code under outdated meta-spec versions.",
@@ -1508,6 +1553,20 @@
       "drift_tolerance_label": "Drift tolerance (versions behind)",
       "drift_tolerance_hint": "Allow agents to be this many versions behind before triggering warn/block.",
       "save_drift_policy": "Save Drift Policy"
+    },
+    "policies": {
+      "title": "Policies",
+      "loading": "Loading policies…",
+      "empty": "No ABAC policies configured for this workspace.",
+      "banner_preset": "Trust level: {level} — policies are preset-managed. Switch to Custom to edit.",
+      "banner_custom": "Custom trust — full policy editor enabled.",
+      "change_trust": "← Change trust level",
+      "group_builtin": "Built-in policies",
+      "group_trust": "Trust preset policies",
+      "group_user": "User-created policies",
+      "from_badge": "From: {level}",
+      "immutable_tooltip": "This policy cannot be removed or overridden.",
+      "preset_managed_tooltip": "Preset-managed by the trust level — switch to Custom to edit."
     },
     "teams": {
       "title": "Teams",
@@ -1535,6 +1594,24 @@
       "save": "Save",
       "invalid_number": "Enter a valid non-negative number.",
       "save_failed": "Failed to save budget."
+    },
+    "repos": {
+      "desc": "Repositories in this workspace — list, create, and import.",
+      "new_btn": "+ New",
+      "import_btn": "Import",
+      "name_placeholder": "Repository name",
+      "desc_placeholder": "Description (optional)",
+      "url_placeholder": "https://example.com/repo.git",
+      "create_btn": "Create",
+      "creating": "Creating\u2026",
+      "import_go_btn": "Import",
+      "importing": "Importing\u2026",
+      "loading": "Loading repositories\u2026",
+      "empty": "No repositories yet. Create one or import an existing mirror.",
+      "col_name": "Name",
+      "col_status": "Status",
+      "col_default_branch": "Default Branch",
+      "col_mirror": "Mirror URL"
     },
     "compute": {
       "title": "Compute Targets",
@@ -1568,6 +1645,8 @@
       "users": "Users",
       "compute": "Compute Targets",
       "budget": "Budget",
+      "secrets": "Secrets",
+      "workspaces": "Workspaces",
       "audit": "Audit",
       "health": "Health",
       "jobs": "Jobs"
@@ -1607,6 +1686,24 @@
       "col_allocated": "Allocated",
       "col_used": "Used",
       "col_usage_pct": "Usage %"
+    },
+    "workspaces": {
+      "title": "Workspaces",
+      "desc": "All workspaces in this tenant — create, manage, and open them.",
+      "new_btn": "+ New Workspace",
+      "name_label": "Name",
+      "name_placeholder": "e.g. Payments",
+      "desc_label": "Description",
+      "desc_placeholder": "Optional description",
+      "create_btn": "Create",
+      "creating": "Creating\u2026",
+      "loading": "Loading workspaces\u2026",
+      "empty": "No workspaces yet.",
+      "col_name": "Name",
+      "col_slug": "Slug",
+      "col_trust": "Trust Level",
+      "col_created": "Created",
+      "open_btn": "Open"
     },
     "audit": {
       "title": "Audit",
@@ -1660,7 +1757,9 @@
     "error_load_budget": "Failed to load budget summary",
     "error_load_audit": "Failed to load audit log",
     "error_load_health": "Failed to load health status",
-    "error_load_jobs": "Failed to load jobs"
+    "error_load_jobs": "Failed to load jobs",
+    "error_load_workspaces": "Failed to load workspaces",
+    "error_create_workspace": "Failed to create workspace"
   },
   "common": {
     "cancel": "Cancel",
@@ -1764,5 +1863,29 @@
   },
   "presence": {
     "active_users": "Active users in this workspace"
+  },
+  "generated_view": {
+    "title": "Generated Views",
+    "welcome_title": "Ask for a view",
+    "welcome_desc": "Describe what you want to see — the LLM builds the view. Flow questions animate real traces when trace data exists.",
+    "input_placeholder": "e.g. How does authentication work?",
+    "refine_placeholder": "Refine the current view — e.g. show just the middleware chain",
+    "refine_hint": "refining current view",
+    "refine_hint_title": "Follow-up questions refine the current view",
+    "status_thinking": "Generating view…",
+    "status_ready": "Ready",
+    "status_error": "Error",
+    "save_view": "Save this view",
+    "saved_label": "Saved",
+    "saved": "View saved to workspace",
+    "save_failed": "Failed to save view",
+    "untitled": "Generated view",
+    "error_occurred": "Something went wrong generating the view. Please try again.",
+    "rate_limited": "Too many generated views — please wait a minute and try again.",
+    "invalid_previous": "The previous view is no longer valid. Start a new question.",
+    "no_workspace": "No workspace selected — open a workspace first.",
+    "suggestion_structure": "How is the codebase structured?",
+    "suggestion_flow": "How does a request flow through the system?",
+    "suggestion_auth": "How does authentication work?"
   }
 }
