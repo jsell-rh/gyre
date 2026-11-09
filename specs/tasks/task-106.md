@@ -2,11 +2,11 @@
 title: "Implement automatic jj rebase on target branch movement"
 spec_ref: "source-control.md §4. Automatic Rebasing"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["f8be8730c81540598867316d46588b6e78cd265d", "6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["f8be8730c81540598867316d46588b6e78cd265d", "6227b6e17e65659f805383fb9f528e49e310a0f3", "bb1099a10325fd4f58f63aed0b26c70ac295ce44", "bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688", "27b946cbc248753aba46c842ad970bb28ca55759"]
 ---
 
 ## Spec Excerpt
@@ -75,6 +75,39 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 Automatic jj rebase on target branch movement (source-control.md §4).
 Core behavior shipped in rounds 1–5; later rounds were review, CI,
 verification-gate, base-merge, and completion-path repairs.
+
+### CI repair round (R23, commit `27b946cbc`)
+
+Repaired the e2e CI failure at PR head `5a4318e9` (E2E run
+42586542960): GitHub's `ubuntu-latest` now resolves to ubuntu26.04,
+and the locked Playwright 1.58.2 has no `ubuntu26.04-x64` entry in its
+browser registry — `npx playwright install --with-deps chromium`
+fails with "ERROR: Playwright does not support chromium on
+ubuntu26.04-x64". The e2e job is the only workflow job that installs
+Playwright (all ci.yml jobs passed on the same image), so the fix pins
+that one job's `runs-on` to `ubuntu-24.04`, a platform present in
+1.58.2's registry. No product, test, or toolchain change — zero risk
+to visual snapshots or assertion strength.
+
+Evidence (logs in `/tmp/stage/review-evidence/task-106-r23/`):
+- Root cause at source level: 1.58.2's
+  `lib/server/registry/index.js` resolves the download path via
+  `paths[hostPlatform] || paths["<unknown>"]` and throws exactly the
+  logged error when empty; its supported-distro list is
+  ubuntu 18.04–24.04 only.
+- On an ubuntu24.04 host (this sandbox's OS = the pinned image's
+  platform), `playwright install --dry-run chromium` with 1.58.2
+  resolves valid download URLs (EXIT 0), and chromium-1208 — 1.58.2's
+  pinned revision, preinstalled here — launches and renders (a
+  `--no-zygote --disable-gpu --single-process` workaround was needed
+  only for this container's seccomp limits; plain launch is blocked
+  by "Operation not permitted" in chromium's zygote sandbox — an
+  infrastructure restriction for remote verification, not a code
+  defect).
+- Alternative rejected: upgrading Playwright to 1.65.0 (latest; uses
+  distro-agnostic `linux64` builds) would also fix the download, but
+  it is a toolchain upgrade requiring e2e revalidation and is not
+  needed to close this finding.
 
 ### Base-merge verification repair round (R22, commit `f8be8730c`)
 
