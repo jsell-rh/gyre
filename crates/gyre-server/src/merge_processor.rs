@@ -7330,20 +7330,35 @@ mod tests {
 
         run_once(&state).await.unwrap();
 
-        // The entry must have Failed: HEAD blob is {head_blob}, MR references
-        // the stale SHA. list_queue excludes terminal entries.
-        let queued = state.merge_queue.list_queue().await.unwrap();
+        // The stale entry must have reached the exact terminal status Failed.
+        // Absence from list_queue() alone cannot prove this — Merged is also
+        // terminal and leaves the queue identically, so a regression that
+        // silently merges the stale MR would pass an absence assertion
+        // (finding dcf03cee mutation probe).
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("stale entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Failed,
+            "stale spec_ref must block the merge with a Failed entry"
+        );
+        let err = entry_after
+            .error_message
+            .as_deref()
+            .expect("stale-spec failure carries a reason");
         assert!(
-            queued.iter().all(|e| e.id != entry.id),
-            "stale spec_ref must block the merge (entry Failed), got queued entries: {:?}",
-            queued
-                .iter()
-                .map(|e| (e.id.to_string(), format!("{:?}", e.status)))
-                .collect::<Vec<_>>()
+            err.contains("requires current spec"),
+            "failure reason must be the stale-spec policy, got: {err}"
         );
 
-        // Control: an MR referencing the CURRENT blob SHA must not be failed
-        // by this policy (it proceeds past the spec check).
+        // Control: an MR referencing the CURRENT blob SHA must proceed past
+        // the spec check and complete the merge (Merged, not merely
+        // not-Failed — the git-ops double always succeeds, so only the
+        // stale-spec policy could hold this entry back).
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-current-spec"),
             repo.id.clone(),
@@ -7366,9 +7381,9 @@ mod tests {
             .await
             .unwrap()
             .expect("entry survives processing");
-        assert_ne!(
+        assert_eq!(
             entry2_after.status,
-            MergeQueueEntryStatus::Failed,
+            MergeQueueEntryStatus::Merged,
             "current spec_ref must not be blocked by require_current_spec (error: {:?})",
             entry2_after.error_message
         );
