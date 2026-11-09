@@ -1361,6 +1361,14 @@ pub async fn complete_agent(
                 super::analytics::record_task_status_changed(&state, &task, &pre_transition_status)
                     .await;
             }
+
+            // meta-spec-reconciliation.md §7 auto_merge: when the workspace's
+            // rollout policy sets auto_merge, a reconciliation MR merges
+            // automatically once its gates pass — enqueue it into the merge
+            // queue here (gate passage is still required; the merge processor
+            // merges only after gates pass). Default (auto_merge: false)
+            // leaves the MR for a human/agent-triggered enqueue.
+            crate::reconciliation::maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
         }
     }
 

@@ -1063,19 +1063,17 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
             }
             // meta-spec-reconciliation.md §11: ReconciliationCompleted /
             // MetaSpecDriftResolved fire when the last open reconciliation /
-            // drift-review task for a workspace reaches terminal status.
+            // drift-review task for a workspace reaches terminal status. The
+            // shared hook also advances a §7 rolling rollout (next batch)
+            // before the completion check.
             if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled)
                 && task.labels.iter().any(|l| {
                     l == crate::reconciliation::RECONCILIATION_LABEL
                         || l == crate::reconciliation::DRIFT_REVIEW_LABEL
                 })
             {
-                crate::reconciliation::maybe_emit_reconciliation_completed(
-                    state,
-                    &task.workspace_id,
-                )
-                .await;
-                crate::reconciliation::maybe_emit_drift_resolved(state, &task.workspace_id).await;
+                crate::reconciliation::on_reconciliation_task_terminal(state, &task.workspace_id)
+                    .await;
             }
             tool_result(format!("Updated task {id_str}"))
         }
