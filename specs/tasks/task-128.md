@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2", "8d5494e942495e37544806afdec8f1b93009c08b"]
 ---
 
 ## Spec Excerpt
@@ -137,17 +137,23 @@ Number, Bool} plus `Null` as the value-side placeholder for `Exists`.
 built-in/trust-preset policy sets.
 
 Attribute model (`policy_engine.rs` `AttributeContext` + `abac_middleware.rs`
-extraction): a flat typed attribute bag (Single/List/Number/Bool) with
-insert-only JWT-claim merging under `subject.` (claims cannot override
-extractor-resolved identity facts). Per spec source column: subject
-`type`/`id`/`global_role`/`tenant_id` from the auth context; `persona`/
-`stack_hash`/`attestation_level`/`repo_scope` from agent JWT claims
+extraction): a flat typed attribute bag (Single/List/Number/Bool). Raw
+JWT-claim merging into the live context is ALLOWLISTED to the four
+agent-claim names (persona, stack_hash, attestation_level, repo_scope —
+`merge_agent_jwt_claims`) and gated on `subject.type == agent`; the
+generic insert-only `merge_jwt_claims` remains for the dry-run evaluation
+API only (caller-supplied hypothetical attributes, no live access
+decision). Per spec source column: subject `type`/`id`/`global_role`/
+`tenant_id` from the auth context; `persona`/`stack_hash`/
+`attestation_level`/`repo_scope` from agent JWT claims, agent subjects only
 (`wl_stack_hash`→`stack_hash` normalization); `workspace_ids`/`team_ids`/
-`workspace_role` from the membership/team stores; resource
-`id`/`workspace_id`/`repo_id` from the request path; entity-lookup resource
-attributes (`resource.tenant_id`, `owner`, `team`, `approval_status`,
-`visibility`) from real store lookups per resource type (spec ledger,
-personas, tasks, agents, MRs, teams; scope chain repo→workspace→tenant);
+`workspace_role` from the membership/team stores — never claim-definable;
+resource `id`/`workspace_id`/`repo_id` from the request path;
+entity-lookup resource attributes (`resource.tenant_id`, `owner`,
+`approval_status`) from real store lookups per resource type (spec ledger,
+personas, tasks, agents, MRs, teams; scope chain repo→workspace→tenant) —
+`resource.team` and `resource.visibility` are unpopulated (no entity type
+carries those fields yet; conditions on them fail closed meanwhile);
 `env.ip` from the socket peer (CWE-348, never forwarded headers);
 `env.budget_remaining` from the real budget system; `env.main_health` from
 the real merge-queue pause state; `env.time`/`action`/`resource.type`
@@ -174,7 +180,7 @@ incl. its `$resource.repo_id` reference, `spec_example_persona_management`,
 `spec_example_viewer_no_spawn`, `spec_example_gate_approved_persona`,
 `spec_example_default_deny`).
 
-### Review-repair round (commit d779f1e89)
+### Review-repair round 1 (commit d779f1e89)
 
 Repaired the three round-1 review findings:
 
@@ -200,55 +206,96 @@ Repaired the three round-1 review findings:
   `specs/coverage/system/abac-policy-engine.md` flipped to `implemented`
   with evidence notes; SUMMARY.md regenerated.
 
-### Test evidence (run at merge head 95fdd661d, after the rebase repair)
+### Review-repair round 2 (commit 8d5494e94)
+
+Repaired the two round-2 review findings:
+
+- **Code (claim spoofing)** — membership-sourced subject attributes
+  (`workspace_role`, `workspace_ids`, `team_ids`) were spoofable via raw
+  JWT claims on requests whose membership block does not overwrite them
+  (membership-less caller, unaddressed workspace, repo-parented route):
+  `merge_jwt_claims` (insert-only) ran before membership extraction, and
+  the membership block only overwrites `subject.workspace_role` when the
+  request addresses a workspace the caller belongs to. A verified JWT's
+  claim CONTENT is caller-chosen, so a human token carrying
+  `{"workspace_role": "Admin"}` defined the attribute and satisfied
+  membership-keyed Allow policies (reproduced end-to-end by the reviewer:
+  200 OK on POST /api/v1/repos/repo-1/specs/assist), and evaded Denies
+  keyed on the attribute. Same class: `persona`/`attestation_level` were
+  merged/normalized from claims for HUMAN subjects although §Attributes
+  sources them from the "Agent OIDC claim". Fix: raw-claim merging into
+  the live context is now allowlisted to the four agent-claim names
+  (`merge_agent_jwt_claims`: persona, stack_hash, attestation_level,
+  repo_scope) and gated on `subject.type == agent`; the generic
+  insert-only merge remains for the dry-run evaluation API only, where
+  the caller explicitly supplies hypothetical attributes and no live
+  access decision is made.
+- **Process (coverage honesty)** — coverage row 3 (§Attributes)
+  overstated the entity-lookup extraction: no code path sets
+  `resource.team` or `resource.visibility` (no entity type carries those
+  fields). The evidence note now scopes the claim to the attributes
+  actually populated (tenant_id, owner, approval_status) and records
+  team/visibility as unpopulated pending entity fields, per the
+  no-fake-completion rule; row 2's claim-merge wording updated to the
+  allowlist semantics.
+
+Killing tests demanded by the review, all mutation-verified (transcripts
+under `/tmp/stage/review-evidence/`):
+
+- `workspace_role_claim_cannot_spoof_membership_attribute` — a
+  membership-less ReadOnly user with a test-signed JWT carrying
+  `workspace_role: Admin` must NOT satisfy a workspace_role-keyed Allow
+  on the repo-parented specs/assist route (against the pre-fix merge the
+  request got 200; now builtin-default-deny 403).
+- `human_persona_claim_cannot_define_agent_attribute` — a human token's
+  `persona`/`attestation_level` claims must not satisfy an
+  agent-claim-keyed Allow (200 pre-fix, 403 now).
+- `viewer_with_admin_claim_still_trips_notin_deny` — a real workspace
+  Viewer whose token carries `workspace_role: Admin` still trips the
+  persona-management-style `NotIn [Owner, Admin]` deny on a
+  workspace-addressed route (kills a post-extraction overwrite merge:
+  that mutant flips the extracted Viewer role to Admin and grants the
+  write).
+- `merge_agent_jwt_claims_allowlisted_to_agent_claim_names` and
+  `merge_agent_jwt_claims_never_overrides_existing_attributes` (unit
+  level): only the four agent-claim names merge; membership-sourced and
+  identity names are never claim-definable; pre-set values stand.
+
+### Test evidence (run at head 8d5494e94, after the round-2 repair)
 
 - Mutation probes (transcripts under `/tmp/stage/review-evidence/`):
-  removing the repos-prefix guard fails 2 of the 3 new middleware tests;
-  removing child-param precedence as well (full round-1 behavior) fails all
-  3; the fail-open `resolve_dynamic_value` mutant is killed by the new
-  policy-engine killing case (previously survived the entire suite).
-- `cargo test -p gyre-server --lib` — **1513 passed / 0 failed** (includes
-  `abac_middleware` 28, `policy_engine` 34, `auth` incl. the base's
-  `minted_jwt_carries_unique_jti`; the five §Policy Example tests,
-  the membership/entity-lookup attribute tests, and the three new
-  round-1 tests run end-to-end through live tower oneshot requests with
-  non-vacuous controls).
-- `cargo test -p gyre-domain -p gyre-common -p gyre-ports -p gyre-adapters
-  --lib` — 116 + 436 + 8 + 387 passed / 0 failed / 12 ignored.
+  restoring the pre-fix ungated raw-claim merge fails both round-2
+  killing tests (200-instead-of-403); a post-extraction overwrite merge
+  fails the NotIn-deny guard; earlier probes still hold (repos-prefix
+  guard removal fails the round-1 middleware tests; the fail-open
+  `resolve_dynamic_value` mutant is killed by the round-1 killing case).
+- `cargo test -p gyre-server --lib` — **1516 passed / 0 failed**
+  (includes `abac_middleware` 32, `policy_engine` 34; the five §Policy
+  Example tests, the membership/entity-lookup attribute tests, and the
+  round-1/round-2 tests run end-to-end through live tower oneshot
+  requests with non-vacuous controls).
 - All mechanically-enforced repo invariant scripts pass at this head,
   including `check-abac-route-registry` (duplicate count 17 = frozen
-  baseline), `check-arch`, `check-task-commit-attribution`,
-  `check-mem-port-contracts`, `check-fabricated-scope-defaults`
-  (3 entries = frozen count after taking the base's task-103 fix), and
-  the security-pattern checks. The additional heuristic checks that
-  fail here fail identically at both merge parents (verified in
-  worktrees at fefde294 and 97c78554c) — pre-existing on both sides,
-  several via mawk-vs-gawk awk syntax errors in this sandbox — none
-  introduced by the merge. Repo-wide conflict-marker scan clean.
+  baseline; the specs/assist route pattern hoisted into
+  `REPOS_SPECS_ASSIST_ROUTE`), `check-arch`, `check-mem-port-contracts`,
+  `check-fabricated-scope-defaults`, `check-forged-scope-fields`,
+  `check-forwarded-header-trust`, `check-inert-enforcement`, and the
+  other security-pattern checks.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
 verification/publication gates.
 
-### Rebase-repair round (merge commit 95fdd661d)
+### Earlier repair rounds
 
-Merged base fefde294 (task-089 Explorer Generated Views + task-103
-secrets lineage) into the branch and resolved the semantic fallout:
-
-- `scripts/fabricated-scope-defaults-exemptions.txt` (the one textual
-  conflict): took the base side — the auth.rs JWT `claims.tenant_id`
-  fallback site the branch still exempted was fixed in task-103's repair
-  round (the "absent claim = default tenant" contract is now the serde
-  schema default `default_tenant_claim` on `JwtClaims`, and "default" is
-  the real bootstrapped Tenant row), so the stale entry is removed;
-  the file matches `FROZEN_EXEMPTION_COUNT=3` and
-  `check-fabricated-scope-defaults.sh` passes.
-- `auth.rs` (semantic conflict the auto-merge missed): task-128's
-  `mint_scoped` (worker repo-scope ABAC attributes) constructs
-  `AgentJwtClaims`, which the base extended with a `jti` field;
-  `mint_scoped` now sets `jti: uuid::Uuid::new_v4()` per mint, matching
-  `mint`/`mint_orchestrator` and the `minted_jwt_carries_unique_jti`
-  contract. Caught by `cargo build`, fixed, full focused suites re-run
-  green.
-- All auto-merged task-128 surfaces (`abac_middleware.rs`, `spawn.rs`,
-  `mcp.rs`, `mem.rs`, `stale_agents.rs`) compile and pass their tests
-  unchanged; no task-128 behavior was altered by the merge.
+- **Round 1 (d779f1e89):** `extract_path_attributes` no longer leaks the
+  parent repo id as `resource.id` on repos-parented child routes
+  (`{resource_type}_id` child params name the addressed entity; route
+  patterns hoisted into consts to hold the frozen duplicate count);
+  `dynamic_reference_unresolvable_fails_closed` gained the
+  `subject.type NotEquals $resource.missing` killing case; coverage rows
+  2-7 flipped to `implemented` with evidence.
+- **Rebase (95fdd661d):** merged base fefde294 (task-089 + task-103);
+  took the base's task-103 fix for the JWT `claims.tenant_id`
+  fabricated-scope exemption; `mint_scoped` sets the base's new `jti`
+  field per mint (`minted_jwt_carries_unique_jti` contract holds); no
+  task-128 behavior altered by the merge.
