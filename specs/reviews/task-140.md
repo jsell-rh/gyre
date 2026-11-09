@@ -109,3 +109,79 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+---
+
+## R4 Review (independent, assigned candidate 2992e44c8e5b1cb5886e1ed32687a54ee4111bb9, base fefde2946f3a0af1f212588f54591516fee0f7b2)
+
+Full base→candidate diff reviewed (22 files, +750/−580). No material findings.
+
+### Diff scope audit
+
+- Persona seeding: domain `BUILTIN_PERSONA_DEFS` + `builtin_personas()`
+  (workspace.rs), server `seed_builtin_personas[_for_tenant]` (lib.rs:1572/1588),
+  startup wiring (main.rs:62, after `bootstrap_default_tenant` and
+  `seed_builtin_meta_specs`), tenant-create hook (tenants.rs:80), admin demo-seed
+  hook (admin.rs:561), SQLite adapter round-trip tests, CLI bootstrap
+  consolidation to the domain defs (re-export; the deleted private
+  `bootstrap/personas/*.md` copies verified byte-identical to `specs/personas/*.md`
+  at base, so the consolidation is prompt-content-neutral).
+- Out-of-task but documented repairs, each verified benign: rate-limit clock
+  injection (production `RateLimiter::new` still uses the real wall clock;
+  `try_acquire` semantics unchanged; only tests inject clocks) and the e2e.yml
+  runner pin to ubuntu-24.04 (workflow-only; the locked playwright-core@1.58.2
+  registry — installed via npm ci in this sandbox — has ubuntu24.04 entries and
+  zero ubuntu26 entries, matching the recorded CI failure 42555036473).
+- No scripts/, exemptions, web/dist, or unrelated-task changes in the diff.
+
+### Spec conformance (platform-model.md §2)
+
+- Exactly the four spec-table personas, Tenant scope, `Approved` +
+  approved_by "system" + approved_at, version 1, prompts embedded via
+  `include_str!` from `specs/personas/<slug>.md` (missing file = compile
+  failure). `repo-orchestrator.md` present.
+- content_hash via the pre-existing `Persona::refresh_content_hash()`
+  (SHA-256 of system_prompt + capabilities) — the entity's established contract
+  (coverage row 9), consistent with `update_persona`; correct choice over a
+  prompt-only hash convention.
+- Idempotency/no-overwrite: check-before-insert keyed on
+  `find_by_slug_and_scope(slug, Tenant(tenant_id))`; proven against real SQLite
+  rows (`slug_scope_lookup_supports_idempotent_reseed`), which the mem-only
+  tests cannot catch.
+- All tenant-creation sites seed: tenants.rs:76→80, admin.rs:529→561, and the
+  startup default-tenant bootstrap is covered by the startup
+  enumerate-all-tenants seeding. No route additions, so no ABAC registry impact.
+
+### Probes run (this sandbox, /tmp/stage/bin/cargo)
+
+- `cargo test -p gyre-domain --lib builtin` → 2 passed.
+- `cargo test -p gyre-server --lib seed_builtin_personas` → 3 passed;
+  `create_tenant_seeds` → 1 passed (real-router POST /tenants + persona list,
+  asserts "Approved" in HTTP JSON); `rate_limit` → 18 passed.
+- `cargo test -p gyre-adapters --lib persona` → 2 passed (real SQLite rows).
+- `cargo test -p gyre-cli --bin gyre bootstrap` → 15 passed (incl. the
+  pointer-equality single-source-of-truth test).
+- `rustfmt --check` on all six changed Rust files → clean.
+- Gates: check-arch, check-task-commit-attribution, check-mem-port-contracts,
+  check-in-memory-state-stores, check-scope-literal-defaults,
+  check-fabricated-scope-defaults → all pass.
+- Evidence logs under /tmp/stage/review-evidence/ (this attempt's sandbox).
+
+Test-strength check: every new test asserts observable post-conditions through
+real entry points (domain constructor, seed fns, real SQLite rows, the axum
+router). Removing the seed call, the approval stamp, the no-overwrite check, or
+the scope stamp each fails at least one test — no self-confirming tests found.
+
+### Non-material notes
+
+- The coverage row 13 line references drifted slightly after the main rebase
+  (main.rs:55 vs actual 62, admin.rs:507 vs actual 561); substantive claims all
+  verified against the candidate tree.
+- The task file's Shipped narrative names commits (151cf7d2, fcb712c5, …) that
+  are dangling after checkpoint recovery — the product surface actually landed
+  via b0f24a748, which is the frontmatter's recorded commit, and the
+  attribution gate passes. Narrative-only drift, no review-scoping impact.
+
+## R4 Verdict
+
+Approved — no findings. All acceptance criteria met with real implementations.
