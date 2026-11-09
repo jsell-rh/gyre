@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["c7e74aa50d9a175b7727b7d79350121c29d1baec", "2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2"]
+commits: ["c7e74aa50d9a175b7727b7d79350121c29d1baec", "2d54e1d93022730f9c10ec9003c622587cf4d110", "b27d3787d950babde1dfc9469ea2dce4a028ecb0", "30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "fc2da8ab3711a571abfbc4901ae01fc00047fb80", "72f61cbdc55fab1c8a593b2961db695e0804dcd2", "59d31f8d8e25b2b2eb0cb52f7675fff45073e71a"]
 ---
 
 ## Spec Excerpt
@@ -391,3 +391,40 @@ combined filter: 91).
 Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP); host
 checklist unchanged: e2e `spec_approval_auto_invalidated_on_spec_change`,
 `cargo test --all`, full `npm test`, GitHub CI on the exact head.
+
+### Round 8 (review repair: weak regression test, finding dcf03cee)
+
+Repaired review finding dcf03cee in 59d31f8d8. The finding's mutation
+probe showed `require_current_spec_blocks_stale_spec_ref`
+(merge_processor.rs) stayed green under the exact regression its own doc
+comment documents — reverting `resolve_spec_blob_sha` back to
+`resolve_blob_sha` (merge_processor.rs:1380) left the stale-spec MR MERGED,
+because the test only asserted the entry's absence from `list_queue()`,
+which the Merged terminal state satisfies exactly like Failed. Per the task
+contract that test was not proof. The repair is test-only; no production
+behavior changed:
+
+- **Primary assertion**: the stale entry's terminal status is now asserted
+  to be exactly `Failed` via `merge_queue.find_by_id`, with
+  `error_message` required to contain `requires current spec` — the exact
+  remedy the finding prescribes.
+- **Control assertion**: the current-SHA entry is now asserted to reach
+  exactly `Merged` (not merely not-Failed). The test harness's
+  `ConfigurableGitOps` double always succeeds at `merge_branches`, so only
+  the stale-spec policy could hold this entry back — Merged positively
+  proves the policy does not block current refs.
+
+Mutation verification on this exact tree (evidence:
+`/tmp/stage/review-evidence/task-138-r8-mutation-probe.log`): applying the
+finding's one-line sed swap and recompiling now FAILS the test with
+`assertion left == right failed: stale spec_ref must block the merge with
+a Failed entry / left: Merged / right: Failed`; reverting the mutation
+restores the pass (1/1). `cargo fmt --all -- --check` exit 0 (the change
+introduced no formatting drift); full `merge_processor` suite 68/68 —
+identical to the round-5 baseline for the same filter (evidence:
+`/tmp/stage/review-evidence/task-138-r8-merge-processor-suite.log`).
+
+Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP —
+`/tmp/stage/capabilities.json`); host checklist unchanged: e2e
+`spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
+`npm test`, GitHub CI on the exact head.
