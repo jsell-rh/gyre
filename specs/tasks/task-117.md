@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "e28d79994b27aec96bc50e87c5bb0287937bb147"]
 ---
 
 ## Spec Excerpt
@@ -124,14 +124,16 @@ review-repair commits `1fc4470b`, `d404a439`, and `e5b481de`
 from merged sources), the round-4 base merge `a2bdf9a2`, the
 round-5 base merge `d9e7785`, the round-6 base merge
 `4ef962e48`, the round-7 base merge `37a8193cf`, the
-round-8 clippy repair `5482ae4f1`, and the round-9 SSH
-name-validation repair `c6b520a1d` carry the work
+round-8 clippy repair `5482ae4f1`, the round-9 SSH
+name-validation repair `c6b520a1d`, and the round-10 base merge
+`e28d79994` carry the work
 below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
 rounds 4–6 in `round4/`, `round5-merge-repair/`, and
 `round6-merge-repair/`; round 7 in `round7-merge-repair/`; round 8
 in `round8-clippy-repair/`; round 9 in
-`round9-ssh-name-orphan/`).
+`round9-ssh-name-orphan/`; round 10 in
+`round10-merge-repair/`).
 
 ### Behavior
 
@@ -362,6 +364,25 @@ agent-name validation orphaned state):
   shape (fails on "rejected spawn must not create an agent",
   transcript in `round9-ssh-name-orphan/mutation-check.log`).
 
+Round 10 (`e28d79994`, rebase repair — base merge `774737638`,
+task-177 rendering + task-099/140 process/spec-approval upstream):
+
+- **Rebase repair only, no behavior change to task-117 semantics.**
+  The single content conflict (`api/spawn.rs`) was the recurring
+  monitor-loop shape: HEAD routes every spawn arm through
+  `register_spawned_agent` (task-117 backend-aware lifecycle),
+  while the base still carried per-arm inline registry inserts +
+  exit monitors whose only semantic addition was
+  `revoke_agent_task_secrets` on process exit (Platform Model §7,
+  task-098). Resolution keeps HEAD's `register_spawned_agent`
+  calls in all three conflicted arms (container, kubernetes,
+  auto-detected container) and folds the base's secret revocation
+  into the shared `monitor_spawned_agent_exit` Active→Idle block,
+  so exit bookkeeping now covers every backend uniformly
+  (the base only did it for container/SSH/local arms). All other
+  files auto-merged; `web/dist` kept as auto-merged (executor
+  restores dist from the assignment base).
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -444,5 +465,22 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   `check-rustfmt-diff.py HEAD^1` / `check-clippy-diff.py HEAD^1` ->
   "changed lines clean"; `cargo test -p gyre-server --lib
   compute_target` -> **24 passed, 0 failed**.
+- Round 10 (`e28d79994`, merge repair): `cargo check -p gyre-server
+  --all-targets` -> exit 0; `cargo test -p gyre-server --lib` ->
+  **1537 passed, 0 failed** (includes base's task-099/140 additions;
+  `api::spawn` -> **47 passed** with the merged secret-revocation
+  tests); `compute_target` -> **24 passed, 0 failed**;
+  `api::admin` -> **36 passed, 0 failed**; `secret` -> **36 passed,
+  0 failed**; `cargo test -p gyre-adapters compute --lib` -> **39
+  passed, 0 failed** (4 ignored); web vitest `WorkspaceSettings.test.js`
+  -> **72 passed**; `cargo fmt --check` -> exit 0;
+  `check-clippy-diff.py` / `check-rustfmt-diff.py` against the task
+  assignment base `774737638` -> "changed lines clean" (17 Rust
+  files); arch, abac-route-registry, abac-exempt-handlers,
+  forged-scope-fields, inert-enforcement, scope-literal-defaults,
+  fabricated-scope-defaults, mem-port-contracts,
+  in-memory-state-stores, migration-versions,
+  task-commit-attribution gates -> exit 0 (log in
+  `round10-merge-repair/evidence.log`).
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
