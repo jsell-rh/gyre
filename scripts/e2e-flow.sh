@@ -1499,14 +1499,13 @@ ok "Activity log: $(echo "$ACTIVITY" | jq 'length // 0') events"
 USER=$(api_get "${API}/users/me" 2>/dev/null) || USER="{}"
 ok "User profile: $(echo "$USER" | jq -r '.username // .global_role // "retrieved"')"
 
-USER_AGENTS=$(api_get "${API}/users/me/agents" 2>/dev/null) || USER_AGENTS="[]"
-ok "My agents: $(echo "$USER_AGENTS" | jq 'length // 0')"
-
-USER_TASKS=$(api_get "${API}/users/me/tasks" 2>/dev/null) || USER_TASKS="[]"
-ok "My tasks: $(echo "$USER_TASKS" | jq 'length // 0')"
-
-USER_MRS=$(api_get "${API}/users/me/mrs" 2>/dev/null) || USER_MRS="[]"
-ok "My MRs: $(echo "$USER_MRS" | jq 'length // 0')"
+# HSI §12 "What the Profile Is NOT": no per-user My Agents/Tasks/MRs surface.
+for MY_STUFF in agents tasks mrs; do
+  MY_STUFF_CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "${API}/users/me/${MY_STUFF}")
+  [ "$MY_STUFF_CODE" = "404" ] \
+    || fail "GET /users/me/${MY_STUFF} returned ${MY_STUFF_CODE}, expected 404 (HSI §12 removed surface)"
+  ok "My ${MY_STUFF} surface removed: HTTP 404"
+done
 
 # Token management
 TOKEN_CREATE=$(api_post "${API}/users/me/tokens" "{\"name\":\"e2e-test-token\",\"scopes\":[\"read\"]}" 2>/dev/null) || TOKEN_CREATE=""
