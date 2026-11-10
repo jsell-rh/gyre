@@ -118,8 +118,19 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 2 — an admin requested to impersonate this user; the body
+    /// carries the approval code the user must submit to consent
+    /// (identity-security.md §Impersonation).
+    ImpersonationRequest,
+    /// Priority 1 — an admin began impersonating this user
+    /// (identity-security.md §Impersonation).
+    ImpersonationAlert,
     /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
     SecretExpiring,
+    /// Priority 2 — a repo-defined persona file changed on push and its
+    /// approval was reset to Pending (platform-model.md §2 Repo-Defined
+    /// Personas). Sent to the persona owner.
+    PersonaChangePendingApproval,
 }
 
 impl NotificationType {
@@ -163,7 +174,10 @@ impl NotificationType {
             Self::AtomicGroupFailure => "AtomicGroupFailure",
             Self::SpecConflict => "SpecConflict",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::ImpersonationRequest => "ImpersonationRequest",
+            Self::ImpersonationAlert => "ImpersonationAlert",
             Self::SecretExpiring => "SecretExpiring",
+            Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
         }
     }
 
@@ -212,7 +226,10 @@ impl NotificationType {
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
             "SpecConflict" => Some(Self::SpecConflict),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "ImpersonationRequest" => Some(Self::ImpersonationRequest),
+            "ImpersonationAlert" => Some(Self::ImpersonationAlert),
             "SecretExpiring" => Some(Self::SecretExpiring),
+            "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             _ => None,
         }
     }
@@ -270,7 +287,10 @@ impl NotificationType {
             Self::AtomicGroupFailure => 3,
             Self::SpecConflict => 2,
             Self::MergeQueueEscalation => 1,
+            Self::ImpersonationRequest => 2,
+            Self::ImpersonationAlert => 1,
             Self::SecretExpiring => 7,
+            Self::PersonaChangePendingApproval => 2,
         }
     }
 }
@@ -539,6 +559,10 @@ mod tests {
             NotificationType::SecretExpiring.default_priority_rank(),
             7
         );
+        assert_eq!(
+            NotificationType::PersonaChangePendingApproval.default_priority_rank(),
+            2
+        );
     }
 
     #[test]
@@ -580,6 +604,7 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MergeQueueEscalation,
             NotificationType::SecretExpiring,
+            NotificationType::PersonaChangePendingApproval,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
