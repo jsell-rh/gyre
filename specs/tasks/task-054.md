@@ -5,7 +5,9 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-054.md
 coverage_sections: []
-commits: []
+commits: 
+  - d7940e857
+  - ed36c1b68
 ---
 
 ## Spec Excerpt
@@ -76,24 +78,25 @@ real HTTP endpoint over a live TCP listener against the `ConversationRepository`
   `Authorization`, asserts 401 from the `AuthenticatedAgent` extractor at the system boundary.
 
 The test file was delivered into this branch's lineage by `d7940e857` (PR #627 squash) and
-adapted to the fallible `seed_builtin_policies` API by checkpoint `ed36c1b68`; the task record
-previously pointed at `6e752e6d`, a SHA from a checkout not in this repository's history, which
-has been replaced with the real lineage SHAs above so review scoping resolves.
-
-### Test evidence
-
-Focused probe on this branch (output retained under `/tmp/stage/review-evidence/`):
-
-- `cargo test -p gyre-server --test conversation_integration` → **3 passed; 0 failed**
-  (`task-054-conversation-integration.log`).
-- Mutation A (handler metadata-miss branch returned 200 instead of 404):
-  `get_conversation_nonexistent_returns_404` FAILED — the 404 assertion bites
-  (`task-054-mutation-a-404-broken.log`).
-- Mutation B (response body tampered with a trailing byte):
-  `get_conversation_returns_decompressed_blob` FAILED — the body assertion bites
-  (`task-054-mutation-b-body-tampered.log`).
-- Handler restored to pristine; suite green again (`task-054-pristine-green.log`).
+adapted to the fallible `seed_builtin_policies` API by checkpoint `ed36c1b68`; the assigned
+contract previously pointed at `6e752e6d`, a SHA from a checkout not in this repository's
+history, which has been replaced with the real lineage SHAs above so review scoping resolves.
 
 No production code was changed by this assignment — the handler, route registration
 (`lib.rs`, `/api/v1/conversations/:sha`), and port wiring were already complete at the
 assignment base; this record reconciles the task's commit attribution and progress state.
+
+### Test evidence
+
+Focused probe re-run on this branch at the restored-contract head (output retained under
+`/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --test conversation_integration` → **3 passed; 0 failed**
+  (`task-054-conversation-integration-green.log`).
+- Prior rounds additionally mutation-tested the suite: forcing the handler's metadata-miss
+  branch to 200 made the 404 test fail, and tampering the response body with a trailing byte
+  made the blob test fail — both assertions bite (logs retained in the pipeline attempt
+  artifacts).
+
+The assignment base merge (`33cd786c2`, task-107 Sigstore work) was included in the probe
+head; the suite is green against the merged tree.
