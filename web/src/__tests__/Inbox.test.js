@@ -67,6 +67,7 @@ vi.mock('../lib/api.js', () => ({
     approveSpec: vi.fn().mockResolvedValue({}),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
@@ -241,6 +242,33 @@ describe('Inbox', () => {
     });
   });
 
+  it('trust_suggestion: Increase Trust updates the workspace trust level and resolves', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-trust',
+        notification_type: 'trust_suggestion',
+        priority: 8,
+        title: 'Consider increasing trust level',
+        body: JSON.stringify({
+          gate_failures: 0,
+          mr_reverts: 0,
+          period_days: 30,
+          current_level: 'Guided',
+          suggested_level: 'Autonomous',
+        }),
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Consider increasing trust level/ });
+    await fireEvent.click(header);
+    const increaseBtn = await findByText('Increase Trust');
+    await fireEvent.click(increaseBtn);
+    await waitFor(() => {
+      expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', { trust_level: 'Autonomous' });
+      expect(api.resolveNotification).toHaveBeenCalledWith('notif-trust');
+    });
+  });
+
   it('calls approveSpec when Approve is clicked', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -358,6 +386,40 @@ describe('Inbox', () => {
     expect(removeCell.textContent).toContain('old server line');
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
+  });
+
+  // HSI §1.5 scope rows: workspace filter is server-side (?workspace_id=);
+  // repo filter is client-side on n.repo_id — notifications with repo_id NULL
+  // (trust suggestions, meta-spec drift) must stay invisible at repo scope.
+  describe('scope filtering (HSI §1.5)', () => {
+    it('passes workspace_id to the server at workspace scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalledWith({ workspace_id: 'ws-1' }));
+    });
+
+    it('fetches unfiltered at tenant scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { scope: 'tenant' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalled());
+      expect(api.myNotifications).toHaveBeenCalledWith({});
+    });
+
+    it('repo scope shows only notifications with matching repo_id', async () => {
+      api.myNotifications.mockResolvedValue([
+        makeNotification({ id: 'n-repo', repo_id: 'repo-1' }),
+        makeNotification({ id: 'n-other', repo_id: 'repo-2' }),
+        makeNotification({ id: 'n-ws', repo_id: null, notification_type: 'trust_suggestion', title: 'Consider increasing trust' }),
+      ]);
+      const { container } = render(Inbox, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      // The repo-scoped card renders; the other-repo and workspace-only cards do not.
+      await waitFor(() => expect(container.querySelectorAll('.inbox-card').length).toBe(1));
+      expect(container.textContent).toContain('Agent needs clarification');
+      expect(container.textContent).not.toContain('Consider increasing trust');
+      // Exactly one card body (one visible notification).
+      const cards = container.querySelectorAll('.inbox-card');
+      expect(cards.length).toBe(1);
+    });
   });
 
   it('renders spec assertion failure card with View Code / Update Spec actions (system-explorer §9)', async () => {

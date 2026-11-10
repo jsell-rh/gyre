@@ -189,9 +189,14 @@ const options = {
   "top_types_by_fields": ["Space (8 fields)", "AgentRecord (12 fields)", "Task (7 fields)"],
   "top_functions_by_calls": ["lifecycleErr.Error (28)", "NewKnowledgeSpace (8)", "NewServer (7)"],
   "modules": ["domain", "coordinator", "db.sqlite", "ports"],
-  "test_coverage": { "test_functions": 45, "reachable_from_tests": 180, "unreachable": 85 }
+  "test_coverage": { "test_functions": 45, "reachable_from_tests": 180, "unreachable": 85 },
+  "call_graph": { "call_edges_pass1": 4, "call_edges_pass2": 125, "call_graph_complete": true }
 }
 ```
+
+The `call_graph` member reports call graph completeness (lsp-call-graph.md §7–8):
+per-pass `Calls`-edge counts (Pass 1 syntax vs Pass 2 semantic, distinguished by the
+Pass 2 metadata tag) and whether Pass 2 has completed for the current graph state.
 
 **`graph_query_dryrun`** — takes a view query JSON, resolves it against the graph, returns the preview:
 ```json

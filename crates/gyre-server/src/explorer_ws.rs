@@ -129,6 +129,10 @@ impl ExplorerSessionRegistry {
 
     /// Register a new session for `user`, evicting (signalling) the oldest
     /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
+    ///
+    /// A `max` of 0 is treated as 1: the registering session itself is always
+    /// admitted (with a literal 0 the eviction loop would `remove(0)` from an
+    /// empty slot list and panic the connection handler on every connect).
     pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
         let session_id = self
             .next_session_id
@@ -137,7 +141,7 @@ impl ExplorerSessionRegistry {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let slots = sessions.entry(user.to_string()).or_default();
         // Evict oldest sessions if at the limit.
-        while slots.len() >= max {
+        while slots.len() >= max.max(1) {
             let evicted = slots.remove(0);
             info!(
                 user = %user,
@@ -162,6 +166,17 @@ impl ExplorerSessionRegistry {
                 sessions.remove(user);
             }
         }
+    }
+
+    /// Number of live sessions for `user` (tests).
+    #[cfg(test)]
+    fn live_count(&self, user: &str) -> usize {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(user)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 }
 
@@ -781,6 +796,13 @@ async fn handle_explorer_session(
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
 
+                // Whether a user Message arrived while the agent was running.
+                // Such a message cannot be processed (the session is busy and the
+                // minimum message interval cannot have elapsed), so it must be
+                // answered with the rate-limit error once the run finishes —
+                // never silently dropped.
+                let mut message_during_run = false;
+
                 // Run the agent loop with conversation history, while
                 // concurrently listening for Cancel messages on the WebSocket.
                 // This allows the user to cancel a slow query mid-flight.
@@ -834,8 +856,17 @@ async fn handle_explorer_session(
                                                 debug!(user = %auth.agent_id, "Queuing message during agent run");
                                                 queued_messages.push(client_msg);
                                             }
+                                            ExplorerClientMessage::Message { .. } => {
+                                                // A user message arrived while the
+                                                // previous one was still being processed.
+                                                // The sender is borrowed by the agent
+                                                // run, so remember it and reply with the
+                                                // rate-limit error after the run completes.
+                                                debug!(user = %auth.agent_id, "Message received during agent run");
+                                                message_during_run = true;
+                                            }
                                             _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
+                                                // Other message types ignored during agent run
                                             }
                                         }
                                     }
@@ -858,6 +889,20 @@ async fn handle_explorer_session(
                     && cache_time.elapsed() > std::time::Duration::from_secs(30)
                 {
                     cache_time = std::time::Instant::now();
+                }
+
+                // A user message arrived while this run was in flight. It was
+                // not processed (and must not trigger a back-to-back agent run),
+                // so answer it with the same rate-limit error the main-loop
+                // check produces. Without this, the message would silently
+                // vanish — the client would never learn it was dropped.
+                if message_during_run {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Please wait before sending another message.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serialize_msg(&err).unwrap_or_default()))
+                        .await;
                 }
 
                 match agent_result {
@@ -1831,6 +1876,11 @@ async fn run_explorer_agent_sdk(
     // Capped at MAX_REFINEMENT_TURNS (3); when the cap is reached (or the
     // warnings are resolved) the best version is sent to the frontend anyway.
     let mut refinement_count = 0usize;
+    // Spec §11: best version across refinement rounds — fewest actionable
+    // warnings. A regressed refinement never replaces a better earlier
+    // attempt; the best one is what the frontend receives when the cap is
+    // reached. Tuples: (actionable warning count, query JSON, assistant text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
     let mut current_question = user_question.to_string();
     loop {
         let (assistant_text, view_query) = run_sdk_subprocess_once(
@@ -1878,6 +1928,16 @@ async fn run_explorer_agent_sdk(
         match check_result {
             Some(dr) => {
                 let actionable = actionable_dry_run_warnings(&dr, &query_json);
+                // Update the best-version tracker: strictly fewer actionable
+                // warnings wins; ties keep the earlier attempt.
+                let warning_count = actionable.len();
+                let better_than_best = best_view_query
+                    .as_ref()
+                    .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                if better_than_best {
+                    best_view_query =
+                        Some((warning_count, query_json.clone(), assistant_text.clone()));
+                }
                 if actionable.is_empty() || refinement_count >= MAX_REFINEMENT_TURNS {
                     if !actionable.is_empty() {
                         // Spec §11: cap reached — send the best version anyway.
@@ -1887,14 +1947,22 @@ async fn run_explorer_agent_sdk(
                             "Explorer SDK self-check cap reached; sending best version"
                         );
                     }
+                    // Spec §11: send the BEST version — when the cap is reached
+                    // with warnings outstanding, an earlier attempt with fewer
+                    // warnings wins over the current (possibly regressed) one.
+                    // On the clean path the current query IS the best.
+                    let (send_query, send_text) = match &best_view_query {
+                        Some((_count, q, t)) => (q.clone(), t.clone()),
+                        None => (query_json.clone(), assistant_text.clone()),
+                    };
                     // Forward the finalized view query to the frontend, with the
                     // agent's preceding text as the explanation.
                     let view_msg = ExplorerServerMessage::ViewQuery {
-                        query: query_json.clone(),
-                        explanation: if assistant_text.is_empty() {
+                        query: send_query,
+                        explanation: if send_text.is_empty() {
                             None
                         } else {
-                            Some(assistant_text.clone())
+                            Some(send_text)
                         },
                     };
                     sender
@@ -2897,13 +2965,41 @@ async fn run_explorer_agent(
             .iter()
             .map(|(k, v)| format!("{}: {}", k, v))
             .collect();
+        // lsp-call-graph.md §8 (LLM Integration): tell the agent whether the
+        // call graph is complete so it knows when blast-radius, coupling, and
+        // dead-code questions can be answered confidently from `calls` edges.
+        let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+            state.kv_store.as_ref(),
+            &gyre_common::Id::new(repo_id),
+            nodes,
+        )
+        .await;
+        let pass2_call_edges = edges
+            .iter()
+            .filter(|e| gyre_common::call_graph::is_pass2_calls_edge(e))
+            .count();
+        let call_graph_note = if call_graph_complete {
+            format!(
+                "Call graph: COMPLETE — Pass 2 (semantic) extraction has finished, {pass2_call_edges} \
+                 resolved call edges. You can confidently answer blast-radius (\"what breaks if I \
+                 change X?\"), coupling (incoming/outgoing calls per module), and dead-code \
+                 (zero incoming calls, excluding RoutesTo entry points) questions from `calls` edges."
+            )
+        } else {
+            "Call graph: INCOMPLETE — Pass 2 (semantic) extraction has not completed for the \
+             current graph; `calls` edges are partial (syntax-only). Blast-radius and coupling \
+             answers may underreport: qualify them accordingly and prefer structural edges \
+             (implements, contains, governed_by) where possible."
+                .to_string()
+        };
         system_prompt.push_str(&format!(
-            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}",
+            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}\n{}",
             repo_id,
             nodes.len(),
             edges.len(),
             type_str.join(", "),
             edge_str.join(", "),
+            call_graph_note,
         ));
     }
     let tools = explorer_tool_definitions();
@@ -3057,6 +3153,12 @@ async fn run_explorer_agent(
     let mut refinement_count = 0;
     let mut tool_turn_count = 0;
     let mut view_query_sent = false;
+    // Spec §11 Self-Check Loop: track the best view query across refinement
+    // turns — the attempt with the fewest actionable dry-run warnings. If a
+    // later refinement regresses, this earlier version is what the frontend
+    // receives when the refinement cap is reached ("send the best version
+    // anyway"). Tuples: (actionable warning count, query JSON, clean text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
         // Send keepalive ping if the interval has elapsed (prevents
@@ -3163,6 +3265,17 @@ async fn run_explorer_agent(
                     // clutter do.
                     let actionable_warnings: Vec<&String> =
                         actionable_dry_run_warnings(dr, &query_json);
+                    // Update the best-version tracker: a query replaces the
+                    // incumbent only when it has strictly fewer actionable
+                    // warnings (ties keep the earlier attempt).
+                    let warning_count = actionable_warnings.len();
+                    let better_than_best = best_view_query
+                        .as_ref()
+                        .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                    if better_than_best {
+                        best_view_query =
+                            Some((warning_count, query_json.clone(), clean_text.clone()));
+                    }
                     if !actionable_warnings.is_empty() && refinement_count < MAX_REFINEMENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
@@ -3202,8 +3315,18 @@ async fn run_explorer_agent(
                     }
                 }
 
+                // Spec §11: send the BEST version. When the refinement cap
+                // is reached with warnings still outstanding, an earlier
+                // attempt with fewer warnings wins over the current (possibly
+                // regressed) one. On the clean path the current query IS the
+                // best (zero actionable warnings), so this is a no-op there.
+                let (send_query, send_text) = match &best_view_query {
+                    Some((_count, q, t)) => (q.clone(), t.clone()),
+                    None => (query_json.clone(), clean_text.clone()),
+                };
+
                 // Send finalized text done before view_query to avoid race
-                if !clean_text.is_empty() {
+                if !clean_text.is_empty() || !send_text.is_empty() {
                     let done_msg = ExplorerServerMessage::Text {
                         content: String::new(),
                         done: true,
@@ -3221,13 +3344,13 @@ async fn run_explorer_agent(
 
                 // Send the view query to the frontend, with the LLM's preceding
                 // text as explanation so the UI can show what the visualization reveals.
-                let explanation_text = if clean_text.is_empty() {
+                let explanation_text = if send_text.is_empty() {
                     None
                 } else {
-                    Some(clean_text.clone())
+                    Some(send_text.clone())
                 };
                 let view_msg = ExplorerServerMessage::ViewQuery {
-                    query: query_json.clone(),
+                    query: send_query,
                     explanation: explanation_text,
                 };
                 view_query_sent = true;
@@ -3387,23 +3510,43 @@ async fn execute_tool(
     nodes: &[gyre_common::graph::GraphNode],
     edges: &[gyre_common::graph::GraphEdge],
     selected_node_id: Option<&str>,
-    _state: &AppState,
+    state: &AppState,
 ) -> String {
     match tool_call.name.as_str() {
         "graph_summary" => {
-            let summary =
-                gyre_domain::view_query_resolver::compute_graph_summary(repo_id, nodes, edges);
+            // lsp-call-graph.md §8: completeness comes from the durable Pass 2
+            // marker so the agent knows whether call data is trustworthy.
+            let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+                state.kv_store.as_ref(),
+                &gyre_common::Id::new(repo_id),
+                nodes,
+            )
+            .await;
+            let summary = gyre_domain::view_query_resolver::compute_graph_summary(
+                repo_id,
+                nodes,
+                edges,
+                call_graph_complete,
+            );
             serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("Error: {e}"))
         }
         "graph_query_dryrun" => {
             let query_value = tool_call.input.get("query").cloned().unwrap_or_default();
             match serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_value) {
                 Ok(query) => {
-                    let result = gyre_domain::view_query_resolver::dry_run(
+                    let call_graph_complete =
+                        crate::graph_extraction::call_graph_complete_for_repo(
+                            state.kv_store.as_ref(),
+                            &gyre_common::Id::new(repo_id),
+                            nodes,
+                        )
+                        .await;
+                    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
                         &query,
                         nodes,
                         edges,
                         selected_node_id,
+                        Some(call_graph_complete),
                     );
                     serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -3651,8 +3794,8 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
 ## Available Tools
-- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, and risk indicators.
-- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Always validate queries before sending.
+- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, risk indicators, and call_graph metrics (call_edges_pass1, call_edges_pass2, call_graph_complete — whether semantic call extraction has completed).
+- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Warns "Call graph incomplete — blast radius may be underreported" when the query traverses calls edges before semantic extraction completes. Always validate queries before sending.
 - graph_nodes: Query graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with details.
 - graph_edges: Query graph edges by source/target node ID or edge type. Returns up to 100 edges.
 - node_provenance: Returns creation and modification history for a specific node, including commit SHAs, authors, and timestamps. Use this to answer questions about who created/modified code and when.
@@ -3674,6 +3817,7 @@ __WORKFLOW_STEP_1__
 - Never invent node names — always verify via graph_nodes or search first
 - When explaining structure, cite the specific edge types connecting nodes
 - If you're unsure whether a node exists, search for it before referencing it
+- Check graph_summary's call_graph.call_graph_complete (and the Call graph note in the repo context) before answering call-dependent questions: blast radius ("what breaks if I change X?" — follow implements to implementors, then calls to all callers, then governed_by to affected specs), coupling (incoming/outgoing calls per module), and dead code (functions with zero incoming calls, excluding RoutesTo entry points). When the call graph is incomplete, qualify blast-radius/coupling answers as partial.
 - For provenance questions (who created/modified what, when), use node_provenance to get creation and modification history
 
 ## View Query Grammar
@@ -4023,6 +4167,26 @@ This shows all callers of TaskPort."#;
         assert!(prompt.contains("Scope"), "missing Scope");
         assert!(prompt.contains("Emphasis"), "missing Emphasis");
         assert!(prompt.contains("ALWAYS dry-run"), "missing ALWAYS dry-run");
+    }
+
+    /// task-076 (lsp-call-graph.md §8): the explorer system prompt must
+    /// reference call graph availability so the agent knows when
+    /// blast-radius / coupling / dead-code questions are answerable.
+    #[test]
+    fn test_system_prompt_references_call_graph_availability() {
+        let prompt = build_system_prompt();
+        assert!(
+            prompt.contains("call_graph_complete"),
+            "prompt must point at graph_summary's call_graph.call_graph_complete field"
+        );
+        assert!(
+            prompt.contains("blast radius"),
+            "prompt must explain blast-radius use of the call graph"
+        );
+        assert!(
+            prompt.contains("Call graph incomplete"),
+            "prompt must document the dry-run incompleteness warning"
+        );
     }
 
     #[test]
@@ -4757,5 +4921,106 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
+    }
+
+    // ── ExplorerSessionRegistry ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_registry_evicts_oldest_beyond_cap() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Fill up to the cap: sessions 0, 1, 2.
+        let (id0, _s0) = registry.register(user, 3);
+        let (id1, _s1) = registry.register(user, 3);
+        let (id2, _s2) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+
+        // 4th registration evicts the oldest (id0) and signals its shutdown.
+        let (_id3, _s3) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+        // The evicted session's Notify fires once; a permit is stored, so a
+        // later await on the evicted session's notify resolves immediately.
+        tokio::time::timeout(std::time::Duration::from_secs(1), _s0.notified())
+            .await
+            .expect("evicted session must be signalled");
+        // Live sessions are NOT signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "session 1 must not be signalled"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s2.notified())
+                .await
+                .is_err(),
+            "session 2 must not be signalled"
+        );
+        let _ = (id0, id1, id2);
+    }
+
+    #[tokio::test]
+    async fn session_registry_unregister_frees_slot_and_is_idempotent() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        let (id0, _s0) = registry.register(user, 2);
+        let (_id1, _s1) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Unregistering an unknown ID is a no-op.
+        registry.unregister(user, 999);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Release one slot; a new session now fits without eviction.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 1);
+        let (_id2, s2) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+        // The previously-live session (id1) must not have been signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "live session must not be signalled after an unregister+register"
+        );
+
+        // Double unregister is idempotent.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 2);
+        let _ = s2;
+    }
+
+    #[test]
+    fn session_registry_is_per_instance_not_process_global() {
+        // Two independent registries (one per AppState / test server) must not
+        // evict each other's sessions: this is the regression the integration
+        // binary caught (all 7 tests share the `default:system` user; a
+        // process-global map evicted live sessions across servers).
+        let reg_a = ExplorerSessionRegistry::new();
+        let reg_b = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Both registries fill to the cap concurrently.
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+
+        assert_eq!(reg_a.live_count(user), 3, "registry A keeps its sessions");
+        assert_eq!(reg_b.live_count(user), 3, "registry B keeps its sessions");
+    }
+
+    #[tokio::test]
+    async fn session_registry_zero_cap_admits_registering_session() {
+        // A 0 cap (misconfiguration) must not panic or spin: the registering
+        // session itself is admitted.
+        let registry = ExplorerSessionRegistry::new();
+        let (id, _s) = registry.register("t:a", 0);
+        assert_eq!(registry.live_count("t:a"), 1);
+        assert_eq!(id, 0);
     }
 }

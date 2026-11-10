@@ -711,6 +711,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
 
         let hex_id = hex::encode(&pub_key);

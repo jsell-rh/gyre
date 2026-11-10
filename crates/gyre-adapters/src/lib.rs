@@ -9,6 +9,7 @@
 //! Domain logic MUST NOT import this crate.
 
 pub mod call_graph;
+pub mod call_graph_rust;
 pub mod compute;
 pub mod git2_ops;
 pub mod jj_ops;

@@ -15,6 +15,8 @@ use tracing::{info, instrument};
 
 use crate::AppState;
 
+use crate::auth::AuthenticatedAgent;
+
 use super::error::ApiError;
 use super::{new_id, now_secs};
 
@@ -39,6 +41,11 @@ pub struct ListMrsQuery {
     pub status: Option<String>,
     pub repository_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Optional cap on the number of MRs returned. When set, the response
+    /// contains the most recently created MRs, newest first. Sorting here
+    /// (rather than in adapters) keeps the cap deterministic for every
+    /// backend regardless of their list ordering.
+    pub per_page: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -735,7 +742,7 @@ pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = if let Some(ws_id) = params.workspace_id {
+    let mut mrs = if let Some(ws_id) = params.workspace_id {
         state
             .merge_requests
             .list_by_workspace(&Id::new(ws_id))
@@ -750,6 +757,13 @@ pub async fn list_mrs(
             _ => state.merge_requests.list().await?,
         }
     };
+    // per_page caps the response to the most recently created MRs, newest
+    // first. Sort + truncate before the per-MR enrichment below so dropped
+    // MRs cost no extra queries either.
+    if let Some(cap) = params.per_page {
+        mrs.sort_by_key(|mr| std::cmp::Reverse(mr.created_at));
+        mrs.truncate(cap);
+    }
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     // Enrich with task_id from agent worktree tracking (best-effort).
     for resp in &mut results {
@@ -764,16 +778,57 @@ pub async fn list_mrs(
     Ok(Json(results))
 }
 
+/// Query parameters for `GET /api/v1/workspaces/:workspace_id/merge-requests`
+/// (HSI §3 Generated Views MR ID discovery: `?has_trace=true&limit=10`).
+#[derive(Deserialize)]
+pub struct WorkspaceMrListQuery {
+    /// Only return MRs that have captured gate traces. Requires per-MR trace
+    /// lookups, so it also implies most-recent-first ordering.
+    pub has_trace: Option<bool>,
+    /// Cap the number of results (most recent first when set).
+    pub limit: Option<usize>,
+}
+
 /// GET /api/v1/workspaces/:workspace_id/merge-requests — list MRs scoped to a workspace.
 /// Primary access pattern per api-conventions.md §1.1.
+/// Optional query params (HSI §3): `has_trace=true` filters to MRs with
+/// captured gate traces; `limit=N` returns the N most recent.
 pub async fn list_workspace_mrs(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
+    Query(params): Query<WorkspaceMrListQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = state
+    let mut mrs = state
         .merge_requests
         .list_by_workspace(&Id::new(workspace_id))
         .await?;
+
+    if params.has_trace.is_some() || params.limit.is_some() {
+        // "Recent MRs" ordering: newest updated first.
+        mrs.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+    }
+    if params.has_trace == Some(true) {
+        // Keep only MRs with a captured trace (get_by_mr is the same lookup
+        // GET /merge-requests/:id/trace serves, so "has trace" cannot drift
+        // from what the trace endpoint would return).
+        let mut traced = Vec::with_capacity(mrs.len());
+        for mr in mrs {
+            if state
+                .traces
+                .get_by_mr(&mr.id)
+                .await
+                .map(|t| t.is_some())
+                .unwrap_or(false)
+            {
+                traced.push(mr);
+            }
+        }
+        mrs = traced;
+    }
+    if let Some(limit) = params.limit {
+        mrs.truncate(limit);
+    }
+
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     for resp in &mut results {
         if let Some(ref agent_id) = resp.author_agent_id {
@@ -816,9 +871,10 @@ pub async fn get_mr(
     Ok(Json(resp))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, new_status = %req.status))]
+#[instrument(skip(state, req, auth), fields(mr_id = %id, new_status = %req.status))]
 pub async fn transition_mr_status(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<MrResponse>, ApiError> {
@@ -828,6 +884,32 @@ pub async fn transition_mr_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let new_status = parse_mr_status(&req.status)?;
+    // TASK-077 (HSI §2): `Approved` is the human-approval escape from the
+    // Supervised trust gate — the merge processor holds a merge when ABAC
+    // denies system subjects (`trust:require-human-mr-review`) unless
+    // `mr.status == Approved`. An agent setting its own MR to Approved would
+    // self-satisfy that escape and render the Deny inert. Mirror the
+    // `builtin:require-human-spec-approval` semantics (deny non-user
+    // subjects): the Agent role may not set `approved`. Role-based check
+    // matches abac_middleware's subject.type derivation.
+    if matches!(new_status, MrStatus::Approved)
+        && auth.roles.contains(&gyre_domain::UserRole::Agent)
+    {
+        // task-104: this is a live role check (the code above calls it one),
+        // so the rejection must be audited as RbacDenied. The required
+        // subject is any non-Agent (human) role.
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "non-Agent",
+            "PUT /api/v1/merge-requests/:id/status",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "MR approval requires a human — agents may not set status 'approved' (supervised trust)"
+                .to_string(),
+        ));
+    }
     let is_merge = matches!(new_status, MrStatus::Merged);
     let is_close = matches!(new_status, MrStatus::Closed);
     mr.transition_status(new_status)
@@ -1133,6 +1215,7 @@ pub async fn get_attestation(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_domain::MergeRequest;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1202,6 +1285,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1217,13 +1301,13 @@ mod tests {
     async fn mr_status_transition_invalid() {
         let app = app();
         let (app, id) = create_test_mr(app, "Invalid trans").await;
-
         let body = serde_json::json!({ "status": "merged" });
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1265,6 +1349,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1284,6 +1369,65 @@ mod tests {
         );
     }
 
+    /// TASK-077 (HSI §2, review R2-F5): the merge processor's human-approval
+    /// escape (`mr.status == Approved`) must only be satisfiable by a human.
+    /// An Agent-role caller setting its own MR to "approved" would
+    /// self-satisfy the Supervised trust gate (`trust:require-human-mr-review`
+    /// Denies system merges; the processor holds on Deny). The endpoint must
+    /// reject agent callers with 403 and leave the MR Open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_cannot_approve_mr_status_supervised_escape() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_mr(app, "Self-approve attempt").await;
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "self-approving-agent",
+                "preferred_username": "self-approving-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Agent role must not set MR status 'approved' — it is the \
+             human-approval escape from the supervised trust gate"
+        );
+
+        // The MR must remain Open (no partial application).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "open");
+    }
+
     #[tokio::test]
     async fn list_mrs_by_repository() {
         let app = app();
@@ -1301,6 +1445,51 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_mrs_per_page_keeps_newest() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, oldest) = create_test_mr(app, "oldest").await;
+        let (app, middle) = create_test_mr(app, "middle").await;
+        let (app, newest) = create_test_mr(app, "newest").await;
+        // Pin distinct creation times: rapid API creates can share a second,
+        // which would make "newest first" ambiguous.
+        for (id, ts) in [
+            (oldest.clone(), 1_000u64),
+            (middle.clone(), 2_000),
+            (newest.clone(), 3_000),
+        ] {
+            let mut mr = state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(&id))
+                .await
+                .unwrap()
+                .expect("created MR must be retrievable");
+            mr.created_at = ts;
+            state.merge_requests.update(&mr).await.unwrap();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1&per_page=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "per_page caps the MR list");
+        let ids: Vec<&str> = arr.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec![newest.as_str(), middle.as_str()],
+            "per_page keeps the most recently created MRs, newest first"
+        );
     }
 
     #[tokio::test]
@@ -1958,6 +2147,7 @@ mod tests {
                         .method("PUT")
                         .uri(format!("/api/v1/merge-requests/{mr_a_id}/status"))
                         .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
                 )
@@ -2220,5 +2410,84 @@ mod tests {
             deps.is_empty(),
             "candidate contained in default branch must be skipped: {deps:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_workspace_mrs_filters_by_trace_and_limits() {
+        // HSI §3 MR ID discovery: `?has_trace=true` returns only MRs with
+        // captured gate traces (newest first); `limit=N` caps the result.
+        let state = test_state();
+        let ws = gyre_common::Id::new("ws-list");
+        let mut mrs = Vec::new();
+        for (id, title, updated_at) in [
+            ("mr-a", "Older traced", 100u64),
+            ("mr-b", "Newer traced", 200),
+            ("mr-c", "Newest untraced", 300),
+        ] {
+            let mut mr = MergeRequest::new(
+                gyre_common::Id::new(id),
+                gyre_common::Id::new("repo-list"),
+                title,
+                "feat/x",
+                "main",
+                updated_at,
+            );
+            mr.workspace_id = ws.clone();
+            mr.updated_at = updated_at;
+            state.merge_requests.create(&mr).await.unwrap();
+            mrs.push(id);
+        }
+        let _ = mrs;
+        for mr_id in ["mr-a", "mr-b"] {
+            let trace = gyre_common::GateTrace {
+                id: gyre_common::Id::new(format!("trace-{mr_id}")),
+                mr_id: gyre_common::Id::new(mr_id),
+                gate_run_id: gyre_common::Id::new("gr-list"),
+                commit_sha: "abc".to_string(),
+                spans: vec![],
+                captured_at: 1,
+            };
+            state.traces.store(&trace).await.unwrap();
+        }
+
+        let app = crate::api::api_router().with_state(state);
+
+        async fn ids(app: Router, uri: &str) -> Vec<String> {
+            let resp = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+            let json = body_json(resp).await;
+            json.as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        // No params: all three, repository order (unfiltered).
+        let all = ids(app.clone(), "/api/v1/workspaces/ws-list/merge-requests").await;
+        assert_eq!(all.len(), 3, "unfiltered list returns all MRs");
+
+        // has_trace=true: only traced MRs, newest first.
+        let traced = ids(
+            app.clone(),
+            "/api/v1/workspaces/ws-list/merge-requests?has_trace=true",
+        )
+        .await;
+        assert_eq!(traced, vec!["mr-b", "mr-a"], "traced only, newest first");
+
+        // has_trace=true&limit=1: the single most recent traced MR.
+        let capped = ids(
+            app.clone(),
+            "/api/v1/workspaces/ws-list/merge-requests?has_trace=true&limit=1",
+        )
+        .await;
+        assert_eq!(capped, vec!["mr-b"]);
+
+        // limit alone: most recent MRs of the unfiltered set.
+        let limited = ids(app, "/api/v1/workspaces/ws-list/merge-requests?limit=2").await;
+        assert_eq!(limited, vec!["mr-c", "mr-b"], "newest first, capped at 2");
     }
 }
