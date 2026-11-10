@@ -2,7 +2,7 @@
 title: "Implement compute target model"
 spec_ref: "agent-runtime.md §3 Compute Target Model"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-runtime.md §3. Compute Target Model"
   - "agent-runtime.md §Abstraction"
