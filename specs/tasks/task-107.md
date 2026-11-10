@@ -2,7 +2,7 @@
 title: "Integrate Sigstore/Fulcio for keyless commit signing"
 spec_ref: "identity-security.md §Layer 3: Sigstore/Fulcio"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
