@@ -5,7 +5,8 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-054.md
 coverage_sections: []
-commits: []
+commits: 
+  - 6e752e6d
 ---
 
 ## Spec Excerpt
@@ -57,44 +58,35 @@ When working on this task:
 
 ## Git Commits
 
-- `d7940e857` feat(explorer): explorer canvas, loop tooling, spec coverage tracking (#627) — delivered `crates/gyre-server/tests/conversation_integration.rs` into this lineage
-- `ed36c1b68` checkpoint: recover interrupted pipeline source — adapted the test to the fallible `seed_builtin_policies` API
+- `6e752e6d` test(conversations): add integration tests for GET /api/v1/conversations/:sha (TASK-054)
 
 ## Shipped
 
 `GET /api/v1/conversations/:sha` (HSI §5, conversation-to-code provenance) is covered by
 `crates/gyre-server/tests/conversation_integration.rs` — three integration tests exercising the
-real HTTP endpoint over a live TCP listener against the `ConversationRepository` port
-(`MemConversationRepository` via `build_state`):
+real route (registered in `crates/gyre-server/src/lib.rs`) over a live TCP listener, with blobs
+seeded through the `ConversationRepository` port:
 
-- **Success path** — seeds a zstd-compressed blob via `ConversationRepository::store`, then GETs
-  `/api/v1/conversations/:sha` with global-token auth and asserts 200,
-  `Content-Type: application/octet-stream`, the `X-Gyre-Conversation-Sha` echo header, and that
-  the body equals the original uncompressed JSON (the round-trip decompresses on `get`).
+- **Success path** — stores a zstd-compressed blob via `ConversationRepository::store`, then GETs
+  the endpoint with global-token auth and asserts 200, `Content-Type: application/octet-stream`,
+  the `X-Gyre-Conversation-Sha` echo header, and body equality with the original uncompressed
+  JSON (the round-trip decompresses on `get`).
 - **Not-found path** — requests a nonexistent SHA, asserts 404.
 - **Auth enforcement** — seeds a conversation first (so 401 cannot mask 404), requests without
   `Authorization`, asserts 401 from the `AuthenticatedAgent` extractor at the system boundary.
 
-The test file was delivered into this branch's lineage by `d7940e857` (PR #627 squash) and
-adapted to the fallible `seed_builtin_policies` API by checkpoint `ed36c1b68`; the assigned
-contract previously pointed at `6e752e6d`, a SHA from a checkout not in this repository's
-history, which has been replaced with the real lineage SHAs above so review scoping resolves.
-
-No production code was changed by this assignment — the handler, route registration
-(`lib.rs`, `/api/v1/conversations/:sha`), and port wiring were already complete at the
-assignment base; this record reconciles the task's commit attribution and progress state.
+No production code was changed by this assignment — handler, route registration, and port wiring
+were already complete at the assignment base. Within this repository's lineage the suite was
+delivered by `d7940e857` and adapted to the fallible `seed_builtin_policies` API by checkpoint
+`ed36c1b68`; the contract's `6e752e6d` does not resolve as an object in this repository's
+history.
 
 ### Test evidence
 
-Focused probe re-run on this branch at the restored-contract head (output retained under
-`/tmp/stage/review-evidence/`):
+Focused probe re-run on this branch head (includes the assignment base merge `1901941b`):
 
 - `cargo test -p gyre-server --test conversation_integration` → **3 passed; 0 failed**
-  (`task-054-conversation-integration-green.log`).
-- Prior rounds additionally mutation-tested the suite: forcing the handler's metadata-miss
-  branch to 200 made the 404 test fail, and tampering the response body with a trailing byte
-  made the blob test fail — both assertions bite (logs retained in the pipeline attempt
-  artifacts).
-
-The assignment base merge (`33cd786c2`, task-107 Sigstore work) was included in the probe
-head; the suite is green against the merged tree.
+  (log retained under `/tmp/stage/review-evidence/task-054-conversation-integration.log`).
+- Prior rounds mutation-tested the suite: forcing the handler's metadata-miss branch to 200 made
+  the 404 test fail, and appending a byte to the response body made the blob test fail — both
+  assertions bite.
