@@ -2,7 +2,7 @@
 title: "Explorer scope views — tenant workspace cards, workspace graph, repo architecture"
 spec_ref: "ui-layout.md §5"
 depends_on: [task-170]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §5. Explorer at Each Scope"
   - "ui-layout.md §Tenant Scope — Workspace Cards"
