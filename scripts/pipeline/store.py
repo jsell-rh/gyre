@@ -10,7 +10,7 @@ import sqlite3
 import time
 import uuid
 
-STAGES = ('triage', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
+STAGES = ('triage', 'assess', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
 
 
 class StaleClaim(RuntimeError):
@@ -57,6 +57,20 @@ class Store:
               kind TEXT NOT NULL, detail TEXT NOT NULL, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS work_events ON events(work,kind);
+            CREATE TABLE IF NOT EXISTS task_history(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL,
+              generation TEXT NOT NULL, body TEXT NOT NULL, data TEXT NOT NULL, at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS history_task ON task_history(task,id);
+            CREATE TRIGGER IF NOT EXISTS archive_contract BEFORE UPDATE ON tasks
+              WHEN OLD.generation<>NEW.generation OR
+                   json_extract(OLD.data,'$.delivered') IS NOT json_extract(NEW.data,'$.delivered')
+              BEGIN INSERT INTO task_history(task,generation,body,data,at)
+                VALUES(OLD.name,OLD.generation,OLD.body,OLD.data,unixepoch()); END;
+            CREATE TRIGGER IF NOT EXISTS history_no_update BEFORE UPDATE ON task_history
+              BEGIN SELECT RAISE(ABORT,'task history is immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS history_no_delete BEFORE DELETE ON task_history
+              BEGIN SELECT RAISE(ABORT,'task history is immutable'); END;
+
         ''')
         (self.directory / 'pipeline.sqlite3').chmod(0o600)
         # Serialize additive migration with other dispatcher/worker starts.
@@ -84,9 +98,12 @@ class Store:
         self.db.execute('INSERT INTO events(task,work,kind,detail,at) VALUES(?,?,?,?,?)',
                         (task, work, kind, json.dumps(detail), time.time()))
 
-    def put_task(self, name, generation, body, data):
+    def put_task(self, name, generation, body, data, expected=None):
         with self.transaction():
-            old = self.db.execute('SELECT generation FROM tasks WHERE name=?', (name,)).fetchone()
+            old = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
+            if expected is not None and (not old or old['generation'] != expected['generation']
+                    or old['body'] != expected['body'] or json.loads(old['data']) != expected['data']):
+                return False  # A stage completed while catalog inputs were being read.
             self.db.execute('''INSERT INTO tasks VALUES(?,?,?,?,?) ON CONFLICT(name)
                 DO UPDATE SET generation=excluded.generation,body=excluded.body,
                 data=excluded.data,updated=excluded.updated''',
@@ -151,7 +168,7 @@ class Store:
             active = self.db.execute("SELECT count(*) FROM work WHERE stage=? AND state='claimed'", (stage,)).fetchone()[0]
             if active >= concurrency:
                 return None
-            compute = stage in ('triage', 'implement', 'review', 'verify') and capacity is not None
+            compute = stage in ('triage', 'assess', 'implement', 'review', 'verify') and capacity is not None
             if compute and not self.admission_available(stage,capacity):
                 return None
             rows = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -166,7 +183,7 @@ class Store:
             from .priority import sort_key, task_priority, PriorityError
             rows=sorted((dict(row) for row in rows),key=lambda row:sort_key(self,row,now))
             def valid_priority(row):
-                if row['stage'] not in ('triage','implement','review','verify'):
+                if row['stage'] not in ('triage','assess','implement','review','verify'):
                     return True
                 try:
                     task_priority(self,self.task(row['task']))
@@ -231,7 +248,7 @@ class Store:
         return min(self.setting('verification_slots',1),max(0,capacity-1))
 
     def admission_available(self, stage, capacity=None):
-        if stage not in ('triage','implement','review','verify'):
+        if stage not in ('triage','assess','implement','review','verify'):
             return True
         capacity=self.setting('slots',8) if capacity is None else capacity
         if self.compute_used() >= capacity:
@@ -343,6 +360,10 @@ class Store:
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
+            if (updates or {}).get('delivered'):
+                saved = self.task(row['task'])
+                self.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,?)',
+                    (saved['name'],saved['generation'],saved['body'],json.dumps(saved['data']),time.time()))
             self.event('completed', result, row['task'], ident)
 
     def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
