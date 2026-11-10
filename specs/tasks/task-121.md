@@ -3,12 +3,12 @@ title: "Implement workspace membership model, ownership transfer, and repo acces
 spec_ref: "user-management.md §Workspace Membership"
 depends_on:
   - task-120
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
   - "user-management.md §Repo Access"
-commits: ["93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -90,61 +90,3 @@ Per-repo overrides can restrict (but not expand) access beyond workspace role.
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Workspace Membership through §Repo Access. Existing membership endpoints: grep for `invite_member\|list_members` in `gyre-server/src/api/`. Workspace domain: `gyre-domain/src/workspace.rs`. Member role change: grep for `members/:user_id` in `gyre-server/src/api/mod.rs`. Notification creation: grep for `NotificationType` in `gyre-common/`. Background jobs: grep for `tokio::spawn` in `gyre-server/src/main.rs` or `lib.rs`.
-
-## Shipped
-
-Workspace membership, ownership transfer/reclamation, and repo access are implemented end-to-end,
-plus this review-repair round closing all five findings from the independent review of the
-candidate (user-management.md §Workspace Membership, §Ownership Transfer & Reclamation,
-§Repo Access).
-
-### Behavior (feature)
-
-- `WorkspaceMembership` (gyre-domain) carries id, user_id, workspace_id, role, invited_by,
-  accepted_at, created_at (plus an `accepted` invite flag); `WorkspaceRole` is
-  Owner/Admin/Developer/Viewer with a privilege rank used for restrict-only override
-  composition.
-- Membership management (`POST/GET/PUT/DELETE /api/v1/workspaces/:id/members...`) is restricted
-  to Owner, workspace Admin, or Tenant Admin; inviting an existing member is a 409. The last
-  Owner cannot be removed or downgraded; ownership transfer via the role-change PUT is
-  audit-logged and clears ownerless tracking.
-- Ownerless tracking: when the last active Owner leaves, every TenantAdmin of the tenant is
-  notified (`WorkspaceOwnerless`, priority rank 2) inline and via the daily
-  `orphaned_workspace_check` job (deduplicated); after `GYRE_ORPHANED_WORKSPACE_DAYS`
-  (default 30) the workspace is flagged in `GET /api/v1/admin/orphaned-workspaces`.
-- Repo access: `RepoPermission` sets per role follow the spec table; `RepoAccessOverride`
-  (port + SQLite/Postgres adapters + migration) stores per-repo restrictions; the effective
-  role is the more restrictive of workspace role and override (restrict-only). git_http
-  read/write paths enforce the effective permission set via `authorize_repo_access`.
-
-### Behavior (this repair round)
-
-- `subject.workspace_role` is now resolved for repo-addressed routes
-  (`/api/v1/repos/:id/...`) by loading the repo's workspace before policy evaluation, so the
-  builtin `repo-access-override-management` policy is live on the override routes: a workspace
-  Owner/Admin member with a plain global role can manage per-repo overrides through the
-  production router (previously default-denied 403 before the handler ran — dead policy).
-- `load_repo_scoped` is fail-closed on an unresolvable workspace scope: a dangling
-  repo→workspace reference or a failed lookup is NotFound, never a pass-through of the tenant
-  gate.
-- `create_workspace` seeds the creator's active Owner membership (same-tenant user
-  principals), and ownerless tracking fires only on owner departure (evidence: an Owner
-  membership row, which survives user deletion). Never-owned workspaces (system/agent-operated)
-  are no longer flagged orphaned or generate TenantAdmin notification noise.
-
-### Test evidence
-
-Focused runs (`/tmp/stage/bin/cargo`, summary under /tmp/stage/review-evidence/):
-`api::repo_access` 7/7 — now through the production pipeline (api_router + abac_middleware +
-seeded builtin policies) with workspace-member API keys, including the regression test that
-fails (403) when the repo-addressed workspace-role resolution is disabled; non-Admin members
-denied 403 by ABAC; dangling-scope fail-closed. `workspace_ownership` 8/8 (incl. new
-never-owned test). `api::workspaces::tests` 20/20 (incl. creator-Owner seeding).
-`api::users::tests` 23/23 (membership test now runs the production ABAC path and asserts the
-Allow decision, proving the 403 is the handler's). `git_http::` 61/61 (incl. new
-`repo_access_enforced_on_git_transport_for_user_principals`: Developer fetch/push 200, Viewer
-fetch 200 / push 403, non-member 403, Developer-restricted-to-Viewer push 403 — with user API
-keys, not the system token). `abac_middleware` 14/14. Full gyre-server lib suite 1727/1727.
-Mechanical guards PASS: arch, ABAC route registry, ABAC exempt handlers, inert enforcement,
-mem port contracts, task commit attribution; `cargo fmt --all -- --check` clean. Full
-workspace suites, all-target Clippy, and GitHub CI are owned by the verification stage.

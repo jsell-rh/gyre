@@ -1,0 +1,42 @@
+# Review — task-121 (workspace membership model, ownership transfer, repo access)
+
+Spec: `specs/system/user-management.md` §Workspace Membership, §Ownership Transfer & Reclamation, §Repo Access.
+Candidate under review: `6d77eeb09` (base `8729385d`); repair-round commit `93c4017c` closes the five findings of the prior independent review (durable findings, attempt `895e1556`).
+Verdict: **approved** — all five prior findings are repaired with production code and kill-the-bug tests; no new material defects found. Advisory notes below are non-blocking.
+
+## Probes run (evidence: /tmp/stage/review-evidence/)
+
+- `cargo test -p gyre-domain` → **471/471** (incl. `repo_access` 8/8: spec permission table per role, restrict-only override composition, expansion rejection).
+- 18 mechanical guards → **all PASS** (arch, abac-route-registry, abac-exempt-handlers, mcp-write-tools, mem-port-contracts, migration-versions, dead-message-kinds, inert-enforcement, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, migration-sql-portability).
+- `cargo check -p gyre-server --lib --tests` → **0 errors** (all new `#[cfg(test)]` modules, including the production-ABAC-pipeline harnesses, type-check). One cosmetic warning: unused `NotificationPriority` import in `workspace_ownership.rs:31` (lib target; tests use it via `super::*`).
+- `cargo test -p gyre-server` — **blocked by the executor wrapper** (gyre-server codegen exceeds the review sandbox's 4 GiB budget). Server suites recorded as verifier-required probes in `/tmp/stage/review-evidence/verifier-required.md`: workspace_ownership, api::repo_access, api::users, api::workspaces, git transport repo-access test, abac_middleware, and `cargo test --all` (acceptance criterion 9).
+- `check-task-commit-attribution.sh` fails **only against the harness-reset working tree** (the stage resets `specs/tasks/task-121.md` to base, emptying `commits:`); the candidate commit's frontmatter contains all three flagged task-labeled SHAs (93c4017c, 337447e3, 467e577f) — verified via `git show HEAD:specs/tasks/task-121.md`.
+
+## Prior-round findings — repair verification
+
+1. **Dead `builtin-repo-access-override-management` policy on repo-addressed routes** — FIXED. The middleware now resolves `subject.workspace_role` for `/api/v1/repos/:id/...` by loading the repo → its `workspace_id` → the caller's membership before policy evaluation; unresolvable scope yields no attribute (fail-closed). The committed test `workspace_admin_manages_overrides_through_production_abac` runs the production pipeline (api_router + abac layer + seeded builtin policies) with a workspace-Admin-member API key whose global role is plain Developer, asserts the 201, **and** asserts the recorded Allow decision's `matched_policy` is exactly `builtin-repo-access-override-management` — so a regression to a dead policy fails the test even if some other path could return 201.
+2. **Tests bypassing ABAC / system-token auth** — FIXED. api::repo_access and the api::users membership-authorization test now run the production pipeline with user API keys; the users test asserts the recorded ABAC decision is Allow, proving the 403 comes from the handler's membership check. New git-transport test authenticates Developer/Viewer/non-member users (not the system token).
+3. **`load_repo_scoped` fail-open on unresolvable workspace scope** — FIXED: missing row or lookup error is NotFound, never pass-through; regression test `dangling_workspace_scope_is_fail_closed`.
+4. **Never-owned workspaces flagged orphaned / notification noise** — FIXED: `create_workspace` seeds the creator's accepted Owner membership (same-tenant user principals), and ownerless tracking requires departure evidence (an Owner membership row). Tests: creator seeding, `never_owned_workspace_is_not_tracked_or_notified`.
+5. **No committed git-transport repo-access test** — FIXED: `repo_access_enforced_on_git_transport_for_user_principals` (Developer fetch/push 200, Viewer fetch 200 / push 403, non-member 403, Developer-restricted-to-Viewer push 403).
+
+## Acceptance criteria
+
+- Membership entity matches the spec struct (plus the `accepted` flag the §Workspace Invitation Flow requires) — yes (`gyre-domain/src/workspace_membership.rs`).
+- WorkspaceRole Owner/Admin/Developer/Viewer — yes, with privilege rank + `most_restrictive` for restrict-only composition.
+- Last-Owner protection — enforced on **both** DELETE (remove) and PUT (downgrade) via `count_active_owners_excluding` (a lingering Owner membership whose user record is gone is not an active Owner); 409 with transfer guidance; membership untouched on rejection (tested).
+- Ownership transfer via PUT (incl. the spec-named `.../members/{user_id}/role` alias, same handler, registered in the ABAC resolver with the `transfer_ownership` action) — audit-logged as `workspace_ownership_transferred` with previous/new role and caller-supplied reason (tested via audit query).
+- TenantAdmin notification on ownerless transition — `WorkspaceOwnerless` (priority rank 2) to every TenantAdmin of the workspace's tenant only, deduplicated across job re-runs; triggered inline on SCIM user deletion and by the daily `orphaned_workspace_check` job (registered in jobs.rs).
+- Orphaned detection — `ownerless_since` kv record + `GYRE_ORPHANED_WORKSPACE_DAYS` (default 30) threshold surfaced at `GET /api/v1/admin/orphaned-workspaces` (admin resource → `builtin-admin-only-deny` keeps it platform-Admin/TenantAdmin-only).
+- Repo permissions per spec table — `WorkspaceRole::repo_permissions()`; Owner full incl. manage budget, Admin without budget, Developer read/write/create-MR/create-task/spawn, Viewer read-only (domain tests assert each row).
+- Per-repo overrides restrict-only — `RepoAccessOverride::validate` rejects a cap more privileged than the workspace role (400, tested); effective role = `most_restrictive(workspace, override)` so even a stored expansion override cannot grant; enforced on the git transport and in the effective-access view; override persistence is durable (SQLite + PG adapters + portable migration 000060, mem adapter guards the port contract in code; `workspace_memberships` also moved to the `store!` wiring so DB deployments no longer lose memberships on restart).
+- `cargo test --all` — delegated to the verifier (wrapper restriction); domain suite + all guards + `cargo check --lib --tests` pass here.
+
+## Advisory notes (non-blocking)
+
+- **Pending memberships are treated as active by every enforcement point** (`find_by_user_and_workspace` does not filter `accepted`): an invited-but-not-accepted user already has the full capabilities of their assigned role (git transport, member management, ABAC `subject.workspace_role`, last-owner counting). This is consistent with today's platform (no accept/decline endpoint exists; §Workspace Invitation Flow is task-110's deliverable), but when task-110 ships accept/decline it must add `accepted` filtering at these call sites or a declined/pending membership will keep granting access.
+- **`builtin-workspace-member-management` covers `transfer_ownership`/`delete` but not `write`** (invite = POST → `write` on `workspace_member`): a workspace Owner/Admin member whose *global* role is ReadOnly is ABAC-denied on invite (the common cases — global Developer members and TenantAdmins — pass). Corner case; the handler check is correct either way.
+- **REST repo-content endpoints (`GET /repos/:id/branches|commits|diff`, `PUT /repos/:id`) remain tenant + global-role gated**, not membership gated — the pre-existing platform baseline this diff deliberately did not change; the §Repo Access table is enforced on the git smart-HTTP transport (the clone/fetch/push data plane) and the new override endpoints. If §Repo Access is later extended to the REST surface, that is follow-up scope.
+- Cosmetic: unused `NotificationPriority` import (`workspace_ownership.rs:31`, lib target warning only).
+
+Test-inflation check: none found. The new tests drive the real router through the production ABAC pipeline with user principals, assert side effects in real stores (audit events, policy decisions with matched-policy ids, membership rows, kv records, notifications), and include regression tests designed to fail if each repaired defect recurs.
