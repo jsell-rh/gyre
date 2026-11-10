@@ -57,6 +57,24 @@ pub async fn admin_health(
     }))
 }
 
+// ── Orphaned Workspaces (user-management.md §Ownership Transfer & Reclamation) ─
+
+/// GET /api/v1/admin/orphaned-workspaces — workspaces with no active Owner
+/// for at least the configured period (`GYRE_ORPHANED_WORKSPACE_DAYS`,
+/// default 30 days). This is the admin dashboard "orphaned" flag.
+pub async fn admin_orphaned_workspaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let threshold_days = crate::workspace_ownership::orphaned_threshold_days();
+    let orphaned = crate::workspace_ownership::orphaned_workspaces_with(&state, threshold_days)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({
+        "threshold_days": threshold_days,
+        "workspaces": orphaned,
+    })))
+}
+
 // ── Background Jobs ───────────────────────────────────────────────────────────
 
 #[derive(Serialize)]

@@ -1,7 +1,7 @@
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceRole {
     Owner,
     Admin,
@@ -27,6 +27,35 @@ impl WorkspaceRole {
             "Viewer" | "viewer" => Some(WorkspaceRole::Viewer),
             _ => None,
         }
+    }
+
+    /// Privilege rank used to compare roles (user-management.md §Repo
+    /// Access: per-repo overrides can restrict but never expand access, so
+    /// the effective role is the lower-ranked of the workspace role and the
+    /// override).
+    pub fn rank(&self) -> u8 {
+        match self {
+            WorkspaceRole::Owner => 3,
+            WorkspaceRole::Admin => 2,
+            WorkspaceRole::Developer => 1,
+            WorkspaceRole::Viewer => 0,
+        }
+    }
+
+    /// The more restrictive of two roles (lower rank wins).
+    pub fn most_restrictive(a: WorkspaceRole, b: WorkspaceRole) -> WorkspaceRole {
+        if a.rank() <= b.rank() {
+            a
+        } else {
+            b
+        }
+    }
+
+    /// Whether this role may manage workspace membership (invite, role
+    /// change, removal) per user-management.md §Workspace Membership
+    /// (Admin: "Manage members"; Owner: full workspace control).
+    pub fn can_manage_members(&self) -> bool {
+        matches!(self, WorkspaceRole::Owner | WorkspaceRole::Admin)
     }
 }
 

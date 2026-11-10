@@ -127,16 +127,113 @@ async fn resolve_repo_by_slug(
         })
 }
 
-/// Resolve to just the filesystem path (convenience wrapper).
-async fn resolve_repo_path_by_slug(
+// ---------------------------------------------------------------------------
+// Repo access enforcement (user-management.md §Repo Access)
+// ---------------------------------------------------------------------------
+
+/// Enforce repo access for a user principal: repo access is inherited from
+/// workspace membership (per the §Repo Access table) and per-repo overrides
+/// can restrict but not expand it.
+///
+/// - The system principal (bootstrap token) is allowed.
+/// - Agent tokens and other principals without a user identity are allowed:
+/// agents are scoped to their repos at spawn time and their pushes run
+/// through the gate chain; membership is a human-authorization concept.
+/// - Global TenantAdmins are allowed (tenant-wide administration).
+/// - Every other user principal MUST hold a membership in the repo's
+/// workspace whose effective role (workspace role capped by any per-repo
+/// override) carries `perm`; otherwise 403 with an `RbacDenied` audit event.
+async fn authorize_repo_access(
     state: &Arc<AppState>,
-    auth: &crate::auth::AuthenticatedAgent,
-    workspace_slug: &str,
-    repo_name: &str,
-) -> Result<String, Response> {
-    resolve_repo_by_slug(state, auth, workspace_slug, repo_name)
+    auth: &AuthenticatedAgent,
+    repo: &gyre_domain::Repository,
+    perm: gyre_domain::RepoPermission,
+) -> Result<(), Response> {
+    if auth.is_system_principal() || auth.user_id.is_none() {
+        return Ok(());
+    }
+    if auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Ok(());
+    }
+    let Some(user_id) = &auth.user_id else {
+        return Ok(());
+    };
+
+    let denial = |reason: String, effective: Option<gyre_domain::WorkspaceRole>| -> Response {
+        warn!(
+            user_id = %user_id,
+            repo_id = %repo.id,
+            permission = perm.as_str(),
+            "git http 403: repo access denied ({reason})"
+        );
+        // RbacDenied audit event (observability.md §Audit Event Types):
+        // the membership/override check rejected the operation.
+        let event = AuditEvent::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            AuditEventType::RbacDenied,
+            Some(Id::new(auth.agent_id.clone())),
+            Some(user_id.clone()),
+            None,
+            Some(repo.workspace_id.clone()),
+            Some(repo.id.clone()),
+            "repo".to_string(),
+            Some(repo.id.to_string()),
+            AuditOutcome::Blocked,
+            serde_json::json!({
+                "permission": perm.as_str(),
+                "reason": reason,
+                "effective_role": effective.map(|r| r.as_str()),
+            }),
+            None,
+            None,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            if let Err(e) = state.audit.record(&event).await {
+                error!("failed to record RbacDenied audit event: {e}");
+            }
+        });
+        (StatusCode::FORBIDDEN, format!("repo access denied: {reason}")).into_response()
+    };
+
+    let membership = match state
+        .workspace_memberships
+        .find_by_user_and_workspace(user_id, &repo.workspace_id)
         .await
-        .map(|r| r.path)
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err(denial("no workspace membership".to_string(), None));
+        }
+        Err(e) => return Err(git_err(format!("db error: {e}"))),
+    };
+
+    // Per-repo override caps the workspace role (restrict-only).
+    let override_role = match state
+        .repo_access_overrides
+        .find_by_repo_and_user(&repo.id, user_id)
+        .await
+    {
+        Ok(o) => o.map(|o| o.restricted_role),
+        Err(e) => return Err(git_err(format!("db error: {e}"))),
+    };
+    let effective = gyre_domain::effective_repo_role(membership.role, override_role);
+
+    if !effective.has_repo_permission(perm) {
+        return Err(denial(
+            format!(
+                "effective role {} lacks the {} permission",
+                effective.as_str(),
+                perm.as_str()
+            ),
+            Some(effective),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +273,21 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    // Repo access enforcement (user-management.md §Repo Access): fetching
+    // (upload-pack) needs Read, pushing (receive-pack) needs Write.
+    let needed_perm = if service == "git-upload-pack" {
+        gyre_domain::RepoPermission::Read
+    } else {
+        gyre_domain::RepoPermission::Write
+    };
+    let repo = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(resp) = authorize_repo_access(&state, &auth, &repo, needed_perm).await {
+        return resp;
+    }
+    let repo_path = repo.path.clone();
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -406,6 +513,13 @@ pub async fn git_upload_pack(
         Ok(r) => r,
         Err(r) => return r,
     };
+    // Repo access enforcement: clone/fetch needs Read
+    // (user-management.md §Repo Access).
+    if let Err(resp) = authorize_repo_access(&state, &auth, &repo, gyre_domain::RepoPermission::Read)
+        .await
+    {
+        return resp;
+    }
     let repo_path = repo.path.clone();
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
@@ -461,6 +575,14 @@ pub async fn git_receive_pack(
         )
             .into_response();
     }
+    // Repo access enforcement: pushing needs Write
+    // (user-management.md §Repo Access).
+    if let Err(resp) =
+        authorize_repo_access(&state, &auth, &resolved, gyre_domain::RepoPermission::Write).await
+    {
+        return resp;
+    }
+
     let repo_id = resolved.id.to_string();
     let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;

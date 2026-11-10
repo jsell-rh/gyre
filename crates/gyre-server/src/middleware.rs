@@ -296,6 +296,7 @@ mod tests {
             personas: base.personas.clone(),
             policies: base.policies.clone(),
             workspace_memberships: base.workspace_memberships.clone(),
+            repo_access_overrides: base.repo_access_overrides.clone(),
             teams: base.teams.clone(),
             notifications: base.notifications.clone(),
             graph_store: base.graph_store.clone(),

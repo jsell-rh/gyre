@@ -74,6 +74,10 @@ pub enum NotificationType {
     /// approval was reset to Pending (platform-model.md §2 Repo-Defined
     /// Personas). Sent to the persona owner.
     PersonaChangePendingApproval,
+    /// Priority 2 — a workspace has no active Owner and the tenant admin
+    /// must reassign ownership (user-management.md §Ownership Transfer &
+    /// Reclamation). Sent to every TenantAdmin of the workspace's tenant.
+    WorkspaceOwnerless,
 }
 
 impl NotificationType {
@@ -106,6 +110,7 @@ impl NotificationType {
             Self::ImpersonationAlert => "ImpersonationAlert",
             Self::SecretExpiring => "SecretExpiring",
             Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
+            Self::WorkspaceOwnerless => "WorkspaceOwnerless",
         }
     }
 
@@ -138,6 +143,7 @@ impl NotificationType {
             "ImpersonationAlert" => Some(Self::ImpersonationAlert),
             "SecretExpiring" => Some(Self::SecretExpiring),
             "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
+            "WorkspaceOwnerless" => Some(Self::WorkspaceOwnerless),
             _ => None,
         }
     }
@@ -171,6 +177,7 @@ impl NotificationType {
             Self::ImpersonationAlert => 1,
             Self::SecretExpiring => 7,
             Self::PersonaChangePendingApproval => 2,
+            Self::WorkspaceOwnerless => 2,
         }
     }
 }

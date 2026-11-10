@@ -40,6 +40,7 @@ pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
+pub mod repo_access;
 pub mod review;
 pub mod rollout_policy;
 pub mod saved_view;
@@ -129,3 +130,4 @@ pub use user_profile::{
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};
 pub use workspace_membership::WorkspaceMembershipRepository;
+pub use repo_access::RepoAccessOverrideRepository;

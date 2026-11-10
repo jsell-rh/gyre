@@ -358,6 +358,7 @@ pub struct MembershipResponse {
     pub workspace_id: String,
     pub role: String,
     pub accepted: bool,
+    pub accepted_at: Option<u64>,
     pub created_at: u64,
 }
 
@@ -369,6 +370,7 @@ impl From<WorkspaceMembership> for MembershipResponse {
             workspace_id: m.workspace_id.to_string(),
             role: m.role.as_str().to_string(),
             accepted: m.accepted,
+            accepted_at: m.accepted_at,
             created_at: m.created_at,
         }
     }
@@ -380,6 +382,90 @@ pub struct InviteMemberRequest {
     pub role: String,
 }
 
+/// Load a workspace and enforce the caller's tenant scope on it
+/// (user-management.md §Workspace Membership: tenants are hard isolation
+/// boundaries — cross-tenant sharing is not supported).
+///
+/// The system principal (bootstrap token) bypasses the tenant match, mirroring
+/// `resolve_repo_by_slug` in git_http.rs: it is the principal that created the
+/// tenant/workspace hierarchy in the first place.
+async fn load_workspace_scoped(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<gyre_domain::Workspace, ApiError> {
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if !auth.is_system_principal() && ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "cross-tenant workspace access denied".to_string(),
+        ));
+    }
+    Ok(ws)
+}
+
+/// Whether the caller may manage membership of this workspace: the system
+/// principal, a global TenantAdmin, or a workspace Owner/Admin member
+/// (user-management.md §Workspace Membership — "Manage members" is an
+/// Owner/Admin capability; §Ownership Transfer & Reclamation lets the
+/// TenantAdmin reassign ownership).
+async fn can_manage_membership(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ws: &gyre_domain::Workspace,
+) -> Result<bool, ApiError> {
+    if auth.is_system_principal() || auth.roles.contains(&UserRole::Admin) {
+        return Ok(true);
+    }
+    // A TenantAdmin's authority comes from their stored global role; JWT
+    // role claims can lag a demotion, so the stored record is authoritative
+    // when resolvable.
+    if let Some(uid) = &auth.user_id {
+        if let Ok(Some(user)) = state.users.find_by_id(uid).await {
+            if user.global_role == gyre_domain::GlobalRole::TenantAdmin {
+                return Ok(true);
+            }
+        }
+    }
+    let Some(uid) = &auth.user_id else {
+        return Ok(false);
+    };
+    Ok(state
+        .workspace_memberships
+        .find_by_user_and_workspace(uid, &ws.id)
+        .await?
+        .map(|m| m.role.can_manage_members())
+        .unwrap_or(false))
+}
+
+/// Count active Owner memberships of a workspace, optionally excluding one
+/// user (the member being removed/downgraded). An Owner membership is
+/// active when its user record still exists — a deactivated/removed user's
+/// lingering membership is not an active Owner.
+async fn count_active_owners_excluding(
+    state: &AppState,
+    workspace_id: &Id,
+    exclude_user: Option<&Id>,
+) -> Result<usize, ApiError> {
+    let members = state.workspace_memberships.list_by_workspace(workspace_id).await?;
+    let mut owners = 0usize;
+    for m in &members {
+        if m.role != WorkspaceRole::Owner {
+            continue;
+        }
+        if Some(&m.user_id) == exclude_user {
+            continue;
+        }
+        if let Ok(Some(_)) = state.users.find_by_id(&m.user_id).await {
+            owners += 1;
+        }
+    }
+    Ok(owners)
+}
+
 pub async fn invite_member(
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
@@ -389,10 +475,47 @@ pub async fn invite_member(
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
 
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "workspace membership can only be granted by an Owner, Admin, or TenantAdmin"
+                .to_string(),
+        ));
+    }
+
     let caller_id = Id::new(auth.agent_id.clone());
-    let ws_id = Id::new(workspace_id);
+    let ws_id = ws.id.clone();
     let user_id = Id::new(req.user_id);
     let now = now_secs();
+
+    // Cross-tenant sharing is not supported (user-management.md §Workspace
+    // Membership): the invitee must already exist in the workspace's tenant.
+    let invitee = state
+        .users
+        .find_by_id(&user_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "user {user_id} does not exist in this tenant; users must exist before being \\
+                 invited to a workspace"
+            ))
+        })?;
+    if invitee.tenant_id.as_ref() != Some(&ws.tenant_id) {
+        return Err(ApiError::Forbidden(
+            "cross-tenant workspace sharing is not supported".to_string(),
+        ));
+    }
+
+    if state
+        .workspace_memberships
+        .find_by_user_and_workspace(&user_id, &ws_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(format!(
+            "user {user_id} is already a member of workspace {workspace_id}"
+        )));
+    }
 
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
@@ -425,13 +548,14 @@ pub async fn invite_member(
 }
 
 pub async fn list_members(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
     let members = state
         .workspace_memberships
-        .list_by_workspace(&ws_id)
+        .list_by_workspace(&ws.id)
         .await?;
     let items: Vec<MembershipResponse> = members.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({"members": items})))
@@ -440,41 +564,174 @@ pub async fn list_members(
 #[derive(Deserialize)]
 pub struct UpdateMemberRoleRequest {
     pub role: String,
+    /// Optional reason recorded in the audit trail. Required semantics per
+    /// user-management.md §Ownership Transfer & Reclamation: the transfer is
+    /// audit-logged with the previous owner and reason.
+    pub reason: Option<String>,
 }
 
+/// Record a workspace membership audit event (observability.md §Audit Event
+/// Schema; event-specific data in `detail`).
+async fn emit_membership_audit(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ws: &gyre_domain::Workspace,
+    event_type: &str,
+    detail: serde_json::Value,
+) {
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom(event_type.to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        Some(ws.id.clone()),
+        None,
+        "workspace_member".to_string(),
+        Some(ws.id.to_string()),
+        AuditOutcome::Success,
+        detail,
+        None,
+        None,
+        now_secs(),
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            workspace_id = %ws.id,
+            event_type,
+            "membership audit event recording failed: {e}"
+        );
+    }
+}
+
+/// PUT /api/v1/workspaces/:id/members/:user_id — change a member's role,
+/// including ownership transfer and TenantAdmin reassignment
+/// (user-management.md §Ownership Transfer & Reclamation).
 pub async fn update_member_role(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMemberRoleRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let role = WorkspaceRole::parse_role(&req.role)
+    let new_role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "member roles can only be changed by a workspace Owner, Admin, or TenantAdmin"
+                .to_string(),
+        ));
+    }
     let uid = Id::new(user_id);
     let membership = state
         .workspace_memberships
-        .find_by_user_and_workspace(&uid, &ws_id)
+        .find_by_user_and_workspace(&uid, &ws.id)
         .await?
-        .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+        .ok_or_else(|| ApiError::NotFound("Membership not found".to_string()))?;
+
+    // Last-Owner protection (user-management.md §Ownership Transfer &
+    // Reclamation: "Cannot remove last Owner"; a voluntary transfer must
+    // designate a new Owner before downgrading).
+    if membership.role == WorkspaceRole::Owner && new_role != WorkspaceRole::Owner {
+        let others = count_active_owners_excluding(&state, &ws.id, Some(&uid)).await?;
+        if others == 0 {
+            return Err(ApiError::Conflict(
+                "cannot downgrade the last Owner of a workspace; designate a new Owner first \
+                 (PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role with {\"role\": \"Owner\"})"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let previous_role = membership.role;
     state
         .workspace_memberships
-        .update_role(&membership.id, role)
+        .update_role(&membership.id, new_role)
         .await?;
+
+    // Audit trail. An ownership transfer (either direction involving the
+    // Owner role) is logged with the previous owner and the reason
+    // (user-management.md §Ownership Transfer & Reclamation).
+    let involves_owner = previous_role == WorkspaceRole::Owner || new_role == WorkspaceRole::Owner;
+    let event_type = if involves_owner {
+        "workspace_ownership_transferred"
+    } else {
+        "workspace_member_role_changed"
+    };
+    let detail = serde_json::json!({
+        "workspace_id": ws.id.to_string(),
+        "target_user_id": uid.to_string(),
+        "previous_role": previous_role.as_str(),
+        "new_role": new_role.as_str(),
+        "previous_owner": if previous_role == WorkspaceRole::Owner {
+            serde_json::json!(uid.to_string())
+        } else {
+            serde_json::Value::Null
+        },
+        "reason": req.reason,
+        "actor": auth.agent_id,
+    });
+    emit_membership_audit(&state, &auth, &ws, event_type, detail).await;
+
+    // Ownership (re)assignment reclaims an ownerless/orphaned workspace:
+    // clear the tracking record so it stops being flagged immediately.
+    if new_role == WorkspaceRole::Owner {
+        crate::workspace_ownership::clear_ownerless(&state, &ws.id).await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// DELETE /api/v1/workspaces/:id/members/:user_id — remove a member.
 pub async fn remove_member(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "members can only be removed by a workspace Owner, Admin, or TenantAdmin"
+                .to_string(),
+        ));
+    }
     let uid = Id::new(user_id);
     let membership = state
         .workspace_memberships
-        .find_by_user_and_workspace(&uid, &ws_id)
+        .find_by_user_and_workspace(&uid, &ws.id)
         .await?
-        .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+        .ok_or_else(|| ApiError::NotFound("Membership not found".to_string()))?;
+
+    // Last-Owner protection: "Cannot remove themselves as Owner if they're
+    // the last Owner" (user-management.md §Ownership Transfer & Reclamation).
+    if membership.role == WorkspaceRole::Owner {
+        let others = count_active_owners_excluding(&state, &ws.id, Some(&uid)).await?;
+        if others == 0 {
+            return Err(ApiError::Conflict(
+                "cannot remove the last Owner of a workspace; designate a new Owner first \
+                 (PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role with {\"role\": \"Owner\"})"
+                    .to_string(),
+            ));
+        }
+    }
+
     state.workspace_memberships.delete(&membership.id).await?;
+
+    emit_membership_audit(
+        &state,
+        &auth,
+        &ws,
+        "workspace_member_removed",
+        serde_json::json!({
+            "workspace_id": ws.id.to_string(),
+            "removed_user_id": uid.to_string(),
+            "removed_role": membership.role.as_str(),
+            "actor": auth.agent_id,
+        }),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

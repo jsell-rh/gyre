@@ -37,6 +37,7 @@ pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
 pub mod repository;
+pub mod repo_access;
 pub mod review;
 pub mod rust_extractor;
 pub mod spec_approval;
@@ -128,3 +129,6 @@ pub use workspace::{
     Workspace, BUILTIN_PERSONA_DEFS,
 };
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
+pub use repo_access::{
+    effective_repo_permissions, effective_repo_role, RepoAccessOverride, RepoPermission,
+};
