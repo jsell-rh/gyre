@@ -2859,6 +2859,7 @@ mod tests {
         // Keycloak-style JWT: Admin role (passes middleware for "generate"),
         // raw claims (subject for the per-repo policy check).
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "admin-no-repo-scope",
             "preferred_username": "admin-no-repo-scope",
             "realm_access": { "roles": ["admin"] }

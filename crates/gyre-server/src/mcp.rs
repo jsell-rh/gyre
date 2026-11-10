@@ -3855,6 +3855,7 @@ mod tests {
                 "scope": "agent",
                 "task_id": "task-1"
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3867,6 +3868,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3882,6 +3884,7 @@ mod tests {
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -5530,6 +5533,7 @@ mod tests {
             roles: vec![UserRole::Agent],
             tenant_id: "default".to_string(),
             jwt_claims: Some(claims),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         }
@@ -5725,6 +5729,7 @@ mod tests {
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };

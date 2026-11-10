@@ -598,3 +598,49 @@ python3 scripts/prove-remote-verification.py --candidate HEAD
 This creates isolated proof state, uses one gateway sandbox, runs real gates,
 and cleans its temporary verified branch. It does not mark a product task
 delivered, publish a PR, or alter production slots.
+
+## Requirement inputs, shipped history, and change assessment
+
+`specs/task-spec-inputs.json` binds each task's `spec_ref` to explicit stable
+section IDs. A definition selects an exact Markdown heading breadcrumb (ATX,
+ignoring fenced code), or declares `document: true` when the entire document is
+intentionally required. Section subtrees inherit their ancestor introductions,
+not sibling sections. `shared` lists additional global inputs; GOAL and the
+normative task text are always included. Scheduling dependencies remain claim
+preconditions rather than coding requirements. Maintain selectors in the same PR
+as a heading rename; never silently retarget an ID or broaden a missing binding.
+New task references need an explicit registry binding. Missing/ambiguous references
+appear as `needs-triage` and cannot dispatch implementation.
+
+A scoped contract change fences old claims and discovers `assess` work. This is
+an independent, read-only Fullsend assignment through OpenShell, sharing the
+normal claim/admission/cleanup budget. Its structured report names the exact
+source and requirement fingerprint. Concrete gaps become durable
+`requirements_gap` findings for implementation. A no-gap decision must also pass
+the normal full deterministic verification in a 4 GiB remote sandbox before
+currentness is restored. Ambiguous evidence or failed checks require attention;
+they never silently close a task or request a speculative code rewrite.
+
+`task_history` preserves append-only contract/delivery snapshots. The cockpit
+counts historically confirmed shipments separately from current requirement
+satisfaction and shows assessment/triage conditions. Reassessment never invents
+a new shipped merge. Imported completion retains its original evidence level.
+
+Installing the fingerprint format alone preserves existing execution epochs,
+claims, candidates and receipts. For old whole-document invalidations, preview
+and then apply the guarded recovery plan:
+
+```bash
+PYTHONPATH=scripts /usr/bin/python3 -m pipeline.requirement_migration \
+  --state .gyre-pipeline --checkout .gyre-pipeline/source
+# Repeat with --apply after inspecting the plan.
+```
+
+Recovery verifies a recorded succeeded merge against main ancestry and its exact
+historical contract generation, then compares old/current scoped inputs. Only
+proven equivalent inputs restore currentness mechanically. Unproven or changed
+inputs go to assessment. The migration skips active claims and unrelated repair
+findings, rechecks its entire planned state transactionally, and retains all
+candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
+select completed speculative repairs whose recorded catalog source was that
+specific invalidation; it does not select arbitrary historical changes.

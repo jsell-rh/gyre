@@ -82,6 +82,19 @@ class FullsendContracts(FullsendFixture):
         self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
 
+    def test_assessment_is_registered_with_fullsend_and_has_a_read_only_guard(self):
+        self.store.finish(self.work,self.claim['token'],{})
+        work=self.store.enqueue('assess','task-9999','g',{'base':self.base,'candidate':self.base,'requirements':'fp'})
+        self.claim=self.store.claim('assess','assessor');self.execution=Execution(self.store,self.claim)
+        cfg,repo,_=self.prepare()
+        config=(cfg/'config.yaml').read_text()
+        self.assertIn('name: assess\n    source: harness/assess.yaml',config)
+        harness=json.loads((cfg/'harness/assess.yaml').read_text())
+        self.assertEqual(harness['role'],'review')
+        self.assertEqual(harness['agent'],'agents/assess.md')
+        self.assertTrue((cfg/'agents/assess.md').is_file())
+        self.assertTrue((self.execution.directory/'bundle/review-before.json').is_file())
+
     def interrupted_review(self, source_edit=False, wrong_candidate=False):
         import io
         self.store.finish(self.work,self.claim['token'],{})
