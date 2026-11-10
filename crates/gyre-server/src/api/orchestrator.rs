@@ -752,9 +752,20 @@ pub async fn spawn_repo_orchestrator(
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
     // G6: ABAC enforcement - repo access required to spawn its orchestrator.
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/orchestrator/spawn",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
 
     // Tenant containment: load the repo, resolve its workspace, compare the
     // workspace's tenant against the caller's.
