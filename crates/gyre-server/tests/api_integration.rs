@@ -1671,6 +1671,19 @@ async fn orchestrator_spawn_denied_across_tenants() {
     );
     ctx.state.workspaces.create(&ws).await.unwrap();
 
+    // Seed the built-in personas in BOTH tenants (bootstrap step 5): the
+    // spawn path resolves the orchestrator persona fail-closed, so the
+    // own-tenant positive control below needs an approved persona in the
+    // caller's scope chain — and seeding the foreign tenant too proves the
+    // 403 below comes from tenant containment, not from a missing persona.
+    gyre_server::seed_builtin_personas_for_tenant(
+        &ctx.state,
+        &gyre_common::Id::new("tenant-foreign"),
+    )
+    .await;
+    gyre_server::seed_builtin_personas_for_tenant(&ctx.state, &gyre_common::Id::new("default"))
+        .await;
+
     let resp = ctx
         .post(
             "/api/v1/workspaces/ws-foreign/orchestrator/spawn",

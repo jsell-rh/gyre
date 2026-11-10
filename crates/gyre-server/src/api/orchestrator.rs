@@ -623,9 +623,15 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 ///
 /// Per-handler authorization: the workspace's tenant must match the
 /// caller's tenant (the route runs without middleware ABAC, so this is the
-/// only cross-tenant containment). The global system token (agent_id
-/// "system") bypasses — its tenant is the bootstrap principal, not a
-/// tenant scope (see auth.rs `system_principal_tenant`).
+/// only cross-tenant containment) — for EVERY caller, including the
+/// global system token. Unlike the repo-tier spawn route below, no
+/// bootstrap flow spawns a workspace orchestrator (platform-model.md §8
+/// step 8 spawns the repo orchestrator only), so no operational path
+/// needs the global token to cross tenants here: containment must hold
+/// for every caller or this registry-exempt route could mint a
+/// workspace-scoped orchestrator JWT for a tenant the caller does not
+/// belong to (task-093 F2, pinned by the
+/// `orchestrator_spawn_denied_across_tenants` regression test).
 pub async fn spawn_workspace_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -633,14 +639,16 @@ pub async fn spawn_workspace_orchestrator(
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
     // Tenant containment: load the workspace, compare its tenant against
-    // the caller's resolved tenant.
+    // the caller's resolved tenant. No system-principal bypass: the global
+    // token's tenant is the bootstrap principal ("default"), and no
+    // documented flow spawns a workspace orchestrator outside it.
     let ws_id = Id::new(workspace_id.clone());
     let workspace = state
         .workspaces
         .find_by_id(&ws_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
-    if !auth.is_system_principal() && auth.tenant_id != workspace.tenant_id.to_string() {
+    if auth.tenant_id != workspace.tenant_id.to_string() {
         return Err(ApiError::Forbidden(
             "workspace does not belong to the caller's tenant".to_string(),
         ));
@@ -747,7 +755,12 @@ pub(crate) async fn spawn_repo_orchestrator_core(
 /// containment: it returns Ok when no per-repo policies are stored and
 /// bypasses for global tokens / API keys. The global system token
 /// (agent_id "system") bypasses the tenant comparison — its tenant is the
-/// bootstrap principal, not a tenant scope.
+/// bootstrap principal, not a tenant scope, and the documented dev-mode
+/// bootstrap (`gyre bootstrap --dev`, docs/cli.md) authenticates this
+/// route's step-8 repo-orchestrator spawn with that static token against
+/// the freshly created "dev" tenant. (The workspace-tier spawn route above
+/// has NO bypass: no bootstrap flow spawns a workspace orchestrator, so
+/// its containment holds for every caller.)
 pub async fn spawn_repo_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
