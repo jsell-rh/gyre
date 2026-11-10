@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, Notification, NotificationPriority, NotificationType};
 use gyre_domain::{Workspace, WorkspaceRole};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -182,7 +182,8 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
             })
             .to_string(),
         );
-        notif.entity_ref = Some(ws.id.to_string());
+        // `Notification::new` already set `source` to the workspace entity
+        // (entity_type "workspace", entity_id = ws.id) — no extra ref needed.
 
         match state.notifications.create(&notif).await {
             Ok(()) => {
@@ -483,9 +484,10 @@ mod tests {
                 .is_empty(),
             "TenantAdmins of other tenants must not be notified"
         );
-        // The notification is priority 2 (needs human action).
+        // The notification is priority rank 2 (needs human action).
         let n = &ownerless_notifications(&state, "admin1", "ws1").await[0];
-        assert_eq!(n.priority, 2);
+        assert_eq!(n.priority_rank, 2);
+        assert_eq!(n.priority, NotificationPriority::Urgent);
     }
 
     #[tokio::test]

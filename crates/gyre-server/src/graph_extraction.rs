@@ -684,8 +684,9 @@ pub async fn check_divergence(
             now_i64,
         );
         notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_ref.to_string());
-        notif.repo_id = Some(repo_id.as_str().to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = spec_ref.to_string();
+        notif.source.repo_id = Some(Id::new(repo_id.as_str().to_string()));
 
         if let Err(e) = ports.notification_repo.create(&notif).await {
             warn!(
@@ -1405,9 +1406,10 @@ async fn check_spec_assertions_on_push(
                 now,
             );
             notif.body = Some(body.clone());
-            notif.repo_id = Some(repo_id.as_str().to_string());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.repo_id = Some(Id::new(repo_id.as_str().to_string()));
             // Link to the failing spec so Inbox actions can open it.
-            notif.entity_ref = Some(first_spec_path.clone());
+            notif.source.entity_id = first_spec_path.clone();
 
             if let Err(e) = ports.notification_repo.create(&notif).await {
                 warn!(
@@ -2339,14 +2341,17 @@ mod tests {
         assert_eq!(dev_notifs.len(), 1, "developer must be notified");
         let n = &dev_notifs[0];
         assert_eq!(n.notification_type, NotificationType::SpecAssertionFailure);
-        assert_eq!(n.priority, 9);
-        assert_eq!(n.repo_id.as_deref(), Some("repo-assert-notif"));
+        assert_eq!(n.priority_rank, 9);
+        assert_eq!(
+            n.source.repo_id.as_ref().map(|r| r.as_str()),
+            Some("repo-assert-notif")
+        );
         let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["failures"][0]["spec_path"], "system/architecture.md");
         assert_eq!(body["repo_id"], "repo-assert-notif");
         // §9: the notification links to the failing spec so the Inbox
         // "Update Spec" action can open it.
-        assert_eq!(n.entity_ref.as_deref(), Some("system/architecture.md"));
+        assert_eq!(n.source.entity_id.as_str(), "system/architecture.md");
         assert_eq!(body["spec_path"], "system/architecture.md");
 
         // The Viewer is outside the notify set.

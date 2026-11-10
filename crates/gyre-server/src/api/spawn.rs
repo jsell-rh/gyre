@@ -2096,6 +2096,8 @@ pub async fn complete_agent(
             Some(body_json),
             Some(mr.id.to_string()),
             Some(mr.repository_id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -2229,15 +2231,28 @@ pub async fn fail_agent(
     // revoke them alongside the teardown bookkeeping (review F2).
     crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
-    // Notify the spawning user that the agent failed (HSI §2).
+    // Notify the spawning user that the agent failed (user-management.md
+    // §Notification Entity: AgentFailed — High, needs attention soon).
+    // Genuine escalations (agent asking for a human) keep AgentEscalation.
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
+        crate::notifications::notify_rich(
             state.as_ref(),
             agent.workspace_id.clone(),
             Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentEscalation,
+            gyre_common::NotificationType::AgentFailed,
             format!("Agent '{}' failed and needs attention", agent.name),
             "default",
+            Some(
+                serde_json::json!({
+                    "agent_id": agent.id.as_str(),
+                    "agent_name": agent.name,
+                })
+                .to_string(),
+            ),
+            Some(agent.id.to_string()),
+            agent.repo_id.as_ref().map(|r| r.to_string()),
+            "agent",
+            None,
         )
         .await;
     }
