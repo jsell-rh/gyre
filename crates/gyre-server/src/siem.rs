@@ -164,6 +164,18 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::ContainerCrashed => 7,
         gyre_domain::AuditEventType::ContainerOom => 8,
         gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
+        // Source control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::GitPushAccepted => 3,
+        gyre_domain::AuditEventType::GitPushRejected => 5,
+        gyre_domain::AuditEventType::GitClone => 3,
+        gyre_domain::AuditEventType::SpecChanged => 4,
+        // Access control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::AuthSuccess => 3,
+        gyre_domain::AuditEventType::AuthFailure => 6,
+        gyre_domain::AuditEventType::AbacDenied => 5,
+        gyre_domain::AuditEventType::RbacDenied => 5,
+        gyre_domain::AuditEventType::ImpersonationStarted => 7,
+        gyre_domain::AuditEventType::ImpersonationEnded => 7,
         // Agent lifecycle events (observability.md §Audit Event Types):
         // admin interventions rank highest, detector-marked deaths next,
         // routine lifecycle signals stay informational.
@@ -422,6 +434,42 @@ mod tests {
         let event = make_event("e1", AuditEventType::ProcessExec);
         let msg = format_cef(&event);
         assert!(msg.contains("|7|"));
+    }
+
+    #[test]
+    fn cef_severity_source_control_and_access_control_events() {
+        // observability.md §Audit Event Types severity mapping (task-104):
+        // AuthFailure 6, AbacDenied/RbacDenied/GitPushRejected 5,
+        // AuthSuccess/GitPushAccepted/GitClone 3, ImpersonationStarted/
+        // ImpersonationEnded 7, SpecChanged 4.
+        let cases = [
+            (AuditEventType::AuthFailure, 6),
+            (AuditEventType::AbacDenied, 5),
+            (AuditEventType::RbacDenied, 5),
+            (AuditEventType::GitPushRejected, 5),
+            (AuditEventType::AuthSuccess, 3),
+            (AuditEventType::GitPushAccepted, 3),
+            (AuditEventType::GitClone, 3),
+            (AuditEventType::ImpersonationStarted, 7),
+            (AuditEventType::ImpersonationEnded, 7),
+            (AuditEventType::SpecChanged, 4),
+        ];
+        for (event_type, expected) in &cases {
+            let event = make_event("e1", event_type.clone());
+            let msg = format_cef(&event);
+            // Severity is the 7th CEF header field (index 6):
+            // CEF:0|Vendor|Product|Version|Signature|Name|<severity>|ext
+            let header = msg.split('|').collect::<Vec<_>>();
+            assert!(header.len() >= 8, "CEF header must have 8 fields");
+            assert_eq!(
+                header[6],
+                expected.to_string(),
+                "wrong CEF severity for {}: expected {}, got {}",
+                event_type.as_str(),
+                expected,
+                header[7]
+            );
+        }
     }
 
     #[test]
