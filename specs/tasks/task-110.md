@@ -100,18 +100,29 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**Repair round 12 (requirements changed): merge the new base
-`3d87a1507` into the retained task-110 checkpoint, merge commit
-`bc4bc1090`.** The base carries the task-108/109/174 surface
-(admin impersonation, spec-lifecycle configuration, explorer view
-updates). The merge auto-resolved everywhere except one conflict in
-`crates/gyre-server/src/api/mod.rs`: both sides had inserted a new
-module declaration at the same alphabetical position (`invitations`
-from task-110, `impersonation` from the base). Resolution keeps both
-modules; the full route registrations, ABAC registry entries, and
-lib.rs pre-auth magic-link router for both surfaces were verified
-present at the merged head. No product behavior of the invitation
-flow changed.
+**Repair round 13 (requirements changed): merge the new base
+`33cd786c2` into the retained task-110 checkpoint, merge commit
+`fcd66acf3` (parents `c5c927604` + `33cd786c2`).** The base carries
+the task-107/123/152/153 surface (Sigstore/Fulcio keyless commit
+signing, notification entity rework with structured
+`NotificationSource`, graph narrative, search facets). Two conflicts
+resolved: `mem.rs` (both sides appended new repository sections at
+the same location — kept the task-110 invitation repositories AND
+the base's `MemCommitSignatureRepository`) and
+`warn-continue-creation-exemptions.txt` (both sides had removed the
+same entries; merged the comments). Two base-driven repairs landed
+inside the merge commit: (1) the task-110 dedupe migration
+`2026-11-08-000059_invitation_pending_unique` was renumbered to
+`...-000061_...` — it collided with the base's
+`2026-11-08-000059_notification_entity_source` under Diesel version
+`20261108000059`, which would have silently dropped the base's
+migration on fresh databases (`check-migration-versions.sh` now
+green); (2) the workspace-invite handler's redundant
+`notif.entity_ref` assignment was removed because the base's
+notification rework replaced that field with `NotificationSource`,
+and `Notification::new` already sources workspace invitations at
+the workspace itself. No product behavior of the invitation flow
+changed.
 
 ### Shipped behavior (carried from prior rounds, re-verified at this head)
 
@@ -139,23 +150,22 @@ flow changed.
   `transition_status` claim as accept, so a racing accept is never
   overwritten; expired tokens are rejected on accept (409 → Expired).
 
-### Test evidence (this head, merge commit `bc4bc1090`)
+### Test evidence (this head, merge commit `fcd66acf3`)
 
 - `cargo test -p gyre-server --lib api::invitations` — 26 passed / 0
   failed (lifecycle, TenantAdmin guard, cross-tenant 403, token
   CSPRNG+hash, cap, decline, expiry, SSO-link, username collisions).
-- `cargo test -p gyre-server --lib impersonation` — 15 passed / 0
-  failed (merged-in base surface, conflict-adjacent).
-- `cargo test -p gyre-server --lib spec_lifecycle` — 9 passed / 0
-  failed (merged-in base surface).
+- `cargo test -p gyre-server --lib notification` — 37 passed / 0
+  failed; `commit_signature` — 9 passed / 0 (base surfaces
+  re-validated against the merged `mem.rs`).
 - `cargo test -p gyre-adapters invitation` — 5 passed / 0 failed
-  (roundtrips, pending-scope unique index, raced-duplicate dedupe,
-  transition_status source-status guard).
-- `cargo test -p gyre-server --lib` — 1657 passed / 0 failed
+  (roundtrips, pending-scope unique index, raced-duplicate dedupe
+  under the renumbered 000061 migration, transition_status
+  source-status guard).
+- `cargo test -p gyre-server --lib` — 1735 passed / 0 failed
   (merge-validation: task-110 invitations coexist with the base's
-  impersonation/spec-lifecycle route additions).
-- `cargo test -p gyre-adapters` — 420 passed / 0 failed;
-  `gyre-domain` 452, `gyre-common` 120, `gyre-cli` 150 — all green.
+  commit-signature/notification/narrative/search surfaces).
+- `cargo test -p gyre-adapters` — 446 passed / 0 failed (6 ignored).
 - `cargo check --workspace --all-targets` — exit 0.
 - Mechanical guards all green: migration versions, ABAC route
   registry, ABAC-exempt handlers, arch, mem port contracts, MCP write
@@ -165,6 +175,6 @@ flow changed.
   migration SQL portability, forged scope fields, task commit
   attribution.
 - Evidence retained at
-  `/tmp/stage/review-evidence/task-110-rebase-round12.md`.
+  `/tmp/stage/review-evidence/task-110-rebase-round13.md`.
 - web/dist untouched (executor restores from assignment base; remote
   rebuild owns publication).
