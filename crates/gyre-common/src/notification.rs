@@ -61,6 +61,13 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 2 — an admin requested to impersonate this user; the body
+    /// carries the approval code the user must submit to consent
+    /// (identity-security.md §Impersonation).
+    ImpersonationRequest,
+    /// Priority 1 — an admin began impersonating this user
+    /// (identity-security.md §Impersonation).
+    ImpersonationAlert,
     /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
     SecretExpiring,
     /// Priority 2 — a repo-defined persona file changed on push and its
@@ -95,6 +102,8 @@ impl NotificationType {
             Self::SpecConflict => "SpecConflict",
             Self::MrReverted => "MrReverted",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::ImpersonationRequest => "ImpersonationRequest",
+            Self::ImpersonationAlert => "ImpersonationAlert",
             Self::SecretExpiring => "SecretExpiring",
             Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
         }
@@ -125,6 +134,8 @@ impl NotificationType {
             "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "ImpersonationRequest" => Some(Self::ImpersonationRequest),
+            "ImpersonationAlert" => Some(Self::ImpersonationAlert),
             "SecretExpiring" => Some(Self::SecretExpiring),
             "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             _ => None,
@@ -156,6 +167,8 @@ impl NotificationType {
             Self::SpecConflict => 2,
             Self::MrReverted => 2,
             Self::MergeQueueEscalation => 1,
+            Self::ImpersonationRequest => 2,
+            Self::ImpersonationAlert => 1,
             Self::SecretExpiring => 7,
             Self::PersonaChangePendingApproval => 2,
         }
