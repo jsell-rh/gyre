@@ -1246,7 +1246,10 @@ mod tests {
             .list_for_user(&Id::new("reviewer"), None, None, None, None, 50, 0)
             .await
             .unwrap();
-        assert!(all.is_empty(), "no owner and no Admins/Owners → no notification");
+        assert!(
+            all.is_empty(),
+            "no owner and no Admins/Owners → no notification"
+        );
     }
 
     #[tokio::test]
