@@ -173,7 +173,8 @@ async fn evaluate_workspace(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(ws.id.to_string());
+        notif.source.entity_type = "workspace".to_string();
+        notif.source.entity_id = ws.id.to_string();
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(
@@ -396,9 +397,12 @@ mod tests {
         assert_eq!(notifs.len(), 1, "expected exactly one TrustSuggestion");
 
         let n = &notifs[0];
-        assert_eq!(n.priority, 8);
+        assert_eq!(n.priority_rank, 8);
         assert_eq!(n.title, "Consider increasing trust level");
-        assert_eq!(n.repo_id, None, "workspace-level suggestion has no repo_id");
+        assert_eq!(
+            n.source.repo_id, None,
+            "workspace-level suggestion has no repo_id"
+        );
         assert!(n.is_active());
 
         let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();

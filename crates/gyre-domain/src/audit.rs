@@ -22,6 +22,20 @@ pub enum AuditEventType {
     GateOverride,
     /// A meta-spec (persona/principle/standard) version was published.
     MetaSpecPublish,
+    // Source control events (observability.md §Audit Event Types)
+    GitPushAccepted,
+    GitPushRejected,
+    GitClone,
+    SpecChanged,
+    // Access control events (observability.md §Audit Event Types)
+    AuthSuccess,
+    AuthFailure,
+    AbacDenied,
+    RbacDenied,
+    // Impersonation lifecycle (identity-security.md §Impersonation,
+    // observability.md §Audit Event Types)
+    ImpersonationStarted,
+    ImpersonationEnded,
     // Agent lifecycle events (observability.md §Audit Event Types)
     AgentSpawned,
     AgentCompleted,
@@ -48,6 +62,16 @@ impl AuditEventType {
             Self::TrustChange => "trust_change".to_string(),
             Self::GateOverride => "gate_override".to_string(),
             Self::MetaSpecPublish => "meta_spec_publish".to_string(),
+            Self::GitPushAccepted => "git_push_accepted".to_string(),
+            Self::GitPushRejected => "git_push_rejected".to_string(),
+            Self::GitClone => "git_clone".to_string(),
+            Self::SpecChanged => "spec_changed".to_string(),
+            Self::AuthSuccess => "auth_success".to_string(),
+            Self::AuthFailure => "auth_failure".to_string(),
+            Self::AbacDenied => "abac_denied".to_string(),
+            Self::RbacDenied => "rbac_denied".to_string(),
+            Self::ImpersonationStarted => "impersonation_started".to_string(),
+            Self::ImpersonationEnded => "impersonation_ended".to_string(),
             Self::AgentSpawned => "agent_spawned".to_string(),
             Self::AgentCompleted => "agent_completed".to_string(),
             Self::AgentKilled => "agent_killed".to_string(),
@@ -74,6 +98,16 @@ impl AuditEventType {
             "trust_change" => Self::TrustChange,
             "gate_override" => Self::GateOverride,
             "meta_spec_publish" => Self::MetaSpecPublish,
+            "git_push_accepted" => Self::GitPushAccepted,
+            "git_push_rejected" => Self::GitPushRejected,
+            "git_clone" => Self::GitClone,
+            "spec_changed" => Self::SpecChanged,
+            "auth_success" => Self::AuthSuccess,
+            "auth_failure" => Self::AuthFailure,
+            "abac_denied" => Self::AbacDenied,
+            "rbac_denied" => Self::RbacDenied,
+            "impersonation_started" => Self::ImpersonationStarted,
+            "impersonation_ended" => Self::ImpersonationEnded,
             "agent_spawned" => Self::AgentSpawned,
             "agent_completed" => Self::AgentCompleted,
             "agent_killed" => Self::AgentKilled,
@@ -197,6 +231,16 @@ mod tests {
             AuditEventType::TrustChange,
             AuditEventType::GateOverride,
             AuditEventType::MetaSpecPublish,
+            AuditEventType::GitPushAccepted,
+            AuditEventType::GitPushRejected,
+            AuditEventType::GitClone,
+            AuditEventType::SpecChanged,
+            AuditEventType::AuthSuccess,
+            AuditEventType::AuthFailure,
+            AuditEventType::AbacDenied,
+            AuditEventType::RbacDenied,
+            AuditEventType::ImpersonationStarted,
+            AuditEventType::ImpersonationEnded,
             AuditEventType::AgentSpawned,
             AuditEventType::AgentCompleted,
             AuditEventType::AgentKilled,
@@ -216,6 +260,31 @@ mod tests {
                 !matches!(AuditEventType::from_str(s), AuditEventType::Custom(_)),
                 "{s} must parse to its named variant, not Custom"
             );
+        }
+    }
+
+    #[test]
+    fn source_control_and_access_control_event_types_roundtrip() {
+        // observability.md §Audit Event Types: the 4 source control and 6
+        // access control event types must round-trip through as_str/from_str.
+        let types = [
+            (AuditEventType::GitPushAccepted, "git_push_accepted"),
+            (AuditEventType::GitPushRejected, "git_push_rejected"),
+            (AuditEventType::GitClone, "git_clone"),
+            (AuditEventType::SpecChanged, "spec_changed"),
+            (AuditEventType::AuthSuccess, "auth_success"),
+            (AuditEventType::AuthFailure, "auth_failure"),
+            (AuditEventType::AbacDenied, "abac_denied"),
+            (AuditEventType::RbacDenied, "rbac_denied"),
+            (
+                AuditEventType::ImpersonationStarted,
+                "impersonation_started",
+            ),
+            (AuditEventType::ImpersonationEnded, "impersonation_ended"),
+        ];
+        for (t, expected_str) in &types {
+            assert_eq!(t.as_str(), *expected_str);
+            assert_eq!(AuditEventType::from_str(expected_str), *t);
         }
     }
 

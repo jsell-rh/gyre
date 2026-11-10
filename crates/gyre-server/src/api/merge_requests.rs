@@ -894,6 +894,16 @@ pub async fn transition_mr_status(
     if matches!(new_status, MrStatus::Approved)
         && auth.roles.contains(&gyre_domain::UserRole::Agent)
     {
+        // task-104: this is a live role check (the code above calls it one),
+        // so the rejection must be audited as RbacDenied. The required
+        // subject is any non-Agent (human) role.
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "non-Agent",
+            "PUT /api/v1/merge-requests/:id/status",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "MR approval requires a human — agents may not set status 'approved' (supervised trust)"
                 .to_string(),

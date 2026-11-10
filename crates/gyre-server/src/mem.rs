@@ -194,6 +194,12 @@ pub struct ConfigurableGitOps {
     /// When true, `revert_commit` returns a Conflict — the R4-F1
     /// conflict path must be testable without a real git repo.
     pub revert_conflicts: bool,
+    /// Shared flag consulted by `diff`: when set, `diff` reports one
+    /// changed file (task-106 R19 F2 — lets a test observe, through the
+    /// MR's diff_stats, whether the jj git export ran BEFORE the stats
+    /// were computed; the flag is flipped by the jj double's export side
+    /// effect at the exact call point).
+    pub diff_change_when: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
@@ -204,6 +210,7 @@ impl Default for ConfigurableGitOps {
             revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
             revert_fails: false,
             revert_conflicts: false,
+            diff_change_when: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -241,9 +248,13 @@ impl GitOpsPort for ConfigurableGitOps {
     }
 
     async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        let changed = usize::from(
+            self.diff_change_when
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
         Ok(DiffResult {
-            files_changed: 0,
-            insertions: 0,
+            files_changed: changed,
+            insertions: changed,
             deletions: 0,
             patches: vec![],
         })
@@ -409,7 +420,198 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
+    async fn jj_bookmark_set(&self, _repo_path: &str, _name: &str, _change_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_rebase(
+        &self,
+        _workspace_path: &str,
+        _revision: &str,
+        _destination: &str,
+    ) -> Result<gyre_ports::JjRebaseOutcome> {
+        Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count: 0 })
+    }
+
+    async fn jj_main_checkout_init(
+        &self,
+        _main_checkout_path: &str,
+        _git_repo_path: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_workspace_add(
+        &self,
+        _main_checkout_path: &str,
+        _workspace_path: &str,
+        _name: &str,
+        _revision: &str,
+        _description: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_workspace_forget(&self, _main_checkout_path: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_git_export(&self, _workspace_path: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Configurable jj double for tests: records every call and replays a
+/// programmed rebase outcome. `parking_lot` Mutex — never held across await.
+#[cfg(test)]
+#[derive(Default)]
+pub struct ConfigurableJjOps {
+    pub rebase_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Programmed outcome replayed by `jj_rebase`. The failure variant is
+    /// stored as a message (`anyhow::Error` is not `Clone`) and turned
+    /// into an error at replay time.
+    pub rebase_outcome: parking_lot::Mutex<Option<Result<gyre_ports::JjRebaseOutcome, String>>>,
+    pub workspace_forget_calls: parking_lot::Mutex<Vec<String>>,
+    pub workspace_add_calls: parking_lot::Mutex<Vec<String>>,
+    /// The `-r <revision>` argument per `jj_workspace_add` call (F9: the
+    /// spawn branch handed to jj provisioning).
+    pub workspace_add_revisions: parking_lot::Mutex<Vec<String>>,
+    /// `"{main_checkout_path}:{git_repo_path}"` per call.
+    pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
+    /// When true, `jj_main_checkout_init` fails — lets tests exercise
+    /// the spawn flow's plain-git worktree fallback.
+    pub main_checkout_init_fails: parking_lot::Mutex<bool>,
+    pub git_export_calls: parking_lot::Mutex<Vec<String>>,
+    /// `jj_bookmark_set` calls as `(repo_path, name, change_id)` in order
+    /// (task-106 R19 F1: the completion path must SET the imported
+    /// bookmark, not create).
+    pub bookmark_set_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// `jj_bookmark_create` calls as `(repo_path, name, change_id)` in
+    /// order — recorded so tests can pin that the completion path never
+    /// regresses to create (task-106 R19 F1).
+    pub bookmark_create_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Synchronous side effect run inside `jj_git_export` before it
+    /// returns (task-106 R19 F2: lets tests make the export's effect on
+    /// git-visible state observable at the exact call point, so
+    /// export-before-stats ordering is provable with doubles).
+    pub git_export_effect: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl JjOpsPort for ConfigurableJjOps {
+    async fn jj_init(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
+        Ok("cfg-change-id".to_string())
+    }
+
+    async fn jj_describe(
+        &self,
+        _repo_path: &str,
+        _change_id: &str,
+        _description: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_log(&self, _repo_path: &str, _limit: usize) -> Result<Vec<JjChange>> {
+        Ok(vec![])
+    }
+
+    async fn jj_squash(&self, _repo_path: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_create_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
+        Ok(())
+    }
+
+    async fn jj_bookmark_set(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_set_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
+        Ok(())
+    }
+
+    async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_rebase(
+        &self,
+        workspace_path: &str,
+        revision: &str,
+        destination: &str,
+    ) -> Result<gyre_ports::JjRebaseOutcome> {
+        self.rebase_calls.lock().push((
+            workspace_path.to_string(),
+            revision.to_string(),
+            destination.to_string(),
+        ));
+        match self.rebase_outcome.lock().clone() {
+            Some(Ok(outcome)) => Ok(outcome),
+            Some(Err(msg)) => Err(anyhow::anyhow!(msg)),
+            None => Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count: 0 }),
+        }
+    }
+
+    async fn jj_main_checkout_init(
+        &self,
+        main_checkout_path: &str,
+        git_repo_path: &str,
+    ) -> Result<()> {
+        self.main_checkout_init_calls
+            .lock()
+            .push(format!("{main_checkout_path}:{git_repo_path}"));
+        if *self.main_checkout_init_fails.lock() {
+            return Err(anyhow::anyhow!("programmed jj main checkout init failure"));
+        }
+        Ok(())
+    }
+
+    async fn jj_workspace_add(
+        &self,
+        _main_checkout_path: &str,
+        workspace_path: &str,
+        name: &str,
+        _revision: &str,
+        _description: &str,
+    ) -> Result<()> {
+        self.workspace_add_calls
+            .lock()
+            .push(format!("{name}:{workspace_path}"));
+        self.workspace_add_revisions
+            .lock()
+            .push(_revision.to_string());
+        Ok(())
+    }
+
+    async fn jj_workspace_forget(&self, _main_checkout_path: &str, name: &str) -> Result<()> {
+        self.workspace_forget_calls.lock().push(name.to_string());
+        Ok(())
+    }
+
+    async fn jj_git_export(&self, workspace_path: &str) -> Result<()> {
+        if let Some(effect) = self.git_export_effect.lock().as_ref() {
+            effect();
+        }
+        self.git_export_calls
+            .lock()
+            .push(workspace_path.to_string());
         Ok(())
     }
 }
@@ -1785,6 +1987,16 @@ impl MemWorkspaceRepository {
         }
     }
 
+    /// Set the workspace store (builder over `with_policy_store`): lets a
+    /// paired `MemComputeTargetRepository` share this repo's workspace map.
+    pub fn with_workspace_store(
+        mut self,
+        workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+    ) -> Self {
+        self.store = workspaces;
+        self
+    }
+
     /// Test hook: cause subsequent `apply_trust_transition` calls to fail.
     /// Only used by `#[cfg(test)]` wiring (`shared_workspace_policy_pair`),
     /// so gated to test builds to avoid dead-code warnings in the lib.
@@ -2314,16 +2526,16 @@ impl NotificationRepository for MemNotificationRepository {
             .filter(|n| {
                 n.user_id == *user_id
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
-                    && min_priority.is_none_or(|min| n.priority >= min)
-                    && max_priority.is_none_or(|max| n.priority <= max)
+                    && min_priority.is_none_or(|min| n.priority_rank >= min)
+                    && max_priority.is_none_or(|max| n.priority_rank <= max)
                     && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
                     && !exclude_types.contains(&n.notification_type.as_str())
             })
             .cloned()
             .collect();
         items.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
+            a.priority_rank
+                .cmp(&b.priority_rank)
                 .then(b.created_at.cmp(&a.created_at))
         });
         Ok(items
@@ -2355,6 +2567,21 @@ impl NotificationRepository for MemNotificationRepository {
         for n in self.store.lock().await.iter_mut() {
             if n.id == *id && n.user_id == *user_id {
                 n.resolved_at = Some(now);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for n in self.store.lock().await.iter_mut() {
+            if n.id == *id && n.user_id == *user_id {
+                n.read = read;
+                n.read_at = if read { Some(now) } else { None };
                 break;
             }
         }
@@ -2410,6 +2637,25 @@ impl NotificationRepository for MemNotificationRepository {
         }))
     }
 
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> Result<bool> {
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.source.entity_id == entity_ref
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+                && n.created_at >= since
+        }))
+    }
+
     async fn delete_older_than(
         &self,
         read_cutoff_secs: u64,
@@ -2417,9 +2663,10 @@ impl NotificationRepository for MemNotificationRepository {
     ) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        // "Read" = the human resolved or dismissed it (business-continuity.md §5).
+        // "Read" = the human resolved it, dismissed it, or marked it read in
+        // the UI (business-continuity.md §5 + user-management.md read state).
         store.retain(|n| {
-            let read = n.resolved_at.is_some() || n.dismissed_at.is_some();
+            let read = n.read || n.resolved_at.is_some() || n.dismissed_at.is_some();
             let cutoff = if read {
                 read_cutoff_secs
             } else {
@@ -2775,6 +3022,32 @@ impl gyre_ports::PushGateRepository for MemPushGateRepository {
     }
     async fn set_for_repo(&self, repo_id: &str, gates: Vec<String>) -> Result<()> {
         self.store.lock().await.insert(repo_id.to_string(), gates);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecLifecycleRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecLifecycleConfig>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
+    async fn get_for_repo(&self, repo_id: &str) -> Result<gyre_domain::SpecLifecycleConfig> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn set_for_repo(
+        &self,
+        repo_id: &str,
+        config: gyre_domain::SpecLifecycleConfig,
+    ) -> Result<()> {
+        self.store.lock().await.insert(repo_id.to_string(), config);
         Ok(())
     }
 }
@@ -3643,8 +3916,35 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Build an AppState with a custom JjOpsPort for tests that need to
+/// control/observe jj behavior (e.g., programmed rebase outcomes).
+#[cfg(test)]
+pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.jj_ops = jj_ops;
+    state
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3653,15 +3953,31 @@ pub fn test_state() -> Arc<crate::AppState> {
 pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         Some(storage),
         None,
         None,
     )
+}
+
+/// Build a test AppState with custom JjOpsPort and GitOpsPort — used by
+/// tests that drive the spawn path with a real git adapter and an
+/// observing jj double (e.g. F9: branch creation before jj provisioning).
+#[cfg(test)]
+pub fn test_state_with_jj_and_git_ops(
+    jj_ops: Arc<dyn gyre_ports::JjOpsPort>,
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None);
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.jj_ops = jj_ops;
+    state
 }
 
 /// Build a test AppState with a custom `SecretRepository` — used to exercise
@@ -3671,11 +3987,12 @@ pub fn test_state_with_storage(
 pub fn test_state_with_secrets(
     secrets: Arc<dyn gyre_ports::SecretRepository>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         None,
         Some(secrets),
         None,
@@ -3687,11 +4004,12 @@ pub fn test_state_with_secrets(
 /// must abort, not overwrite, when the stored state cannot be read).
 #[cfg(test)]
 pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         None,
         None,
         Some(kv),
@@ -3702,8 +4020,16 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
 /// used to exercise the `update_workspace`/`create_workspace` 409 error path.
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(true);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a test AppState whose policy repo fails every `create`, used to
@@ -3713,11 +4039,14 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
     policies.fail_creates();
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     test_state_inner(
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        ws_store,
         None,
         None,
         None,
@@ -3732,45 +4061,57 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
     policies.fail_lists();
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     test_state_inner(
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        ws_store,
         None,
         None,
         None,
     )
 }
 
+/// The paired workspace + policy repositories (and the shared workspace
+/// store behind them) returned by `shared_workspace_policy_pair`. A named
+/// alias keeps the tuple's use sites readable and under clippy's
+/// `type_complexity` threshold.
+#[cfg(test)]
+type SharedWorkspacePolicyPair = (
+    Arc<dyn WorkspaceRepository>,
+    Arc<dyn gyre_ports::PolicyRepository>,
+    Arc<Mutex<HashMap<String, Workspace>>>,
+);
+
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
-/// trust transition (simulating a DB rollback).
+/// trust transition (simulating a DB rollback). Also returns the shared
+/// workspace store so the compute-target repo can pair with it (real
+/// `has_workspace_references` in tests).
 #[cfg(test)]
-fn shared_workspace_policy_pair(
-    fail_trust: bool,
-) -> (
-    Arc<dyn WorkspaceRepository>,
-    Arc<dyn gyre_ports::PolicyRepository>,
-) {
+fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     if fail_trust {
         workspaces.fail_trust_transitions();
     }
-    (Arc::new(workspaces), policies)
+    (Arc::new(workspaces), policies, ws_store)
 }
 
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None)
 }
-
 /// Shared builder for all in-memory test states. Callers supply the git ops
 /// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
 /// `secrets` overrides the default in-memory SecretRepository when given.
@@ -3779,6 +4120,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
     kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
@@ -3790,6 +4132,9 @@ fn test_state_inner(
     let mem_audit = Arc::new(MemAuditRepository::default());
     let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
     let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
+    // Shared binding store: the meta-spec delete guard must see bindings
+    // written through `meta_spec_bindings` (same wiring as lib.rs).
+    let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -3832,10 +4177,12 @@ fn test_state_inner(
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
+        spawned_backends: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(crate::log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
+        spec_lifecycle_configs: Arc::new(MemSpecLifecycleRepository::default()),
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(MemPushGateRepository::default()),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
@@ -3874,9 +4221,8 @@ fn test_state_inner(
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
-        meta_specs: Arc::new(MemMetaSpecRepository::default()),
-        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
-        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
@@ -3887,8 +4233,13 @@ fn test_state_inner(
             });
             tx
         },
-        agent_inbox_max: 1000,
-        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        meta_specs: Arc::new(MemMetaSpecRepository::with_binding_store(Arc::clone(
+            &meta_spec_binding_store,
+        ))),
+        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::with_store(Arc::clone(
+            &meta_spec_binding_store,
+        ))),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),
@@ -3898,6 +4249,7 @@ fn test_state_inner(
         ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        ws_connection_users: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         traces: Arc::new(MemTraceRepository::default()),
         otlp_config: crate::otlp_receiver::OtlpServerConfig {
             enabled: false,
@@ -3907,7 +4259,7 @@ fn test_state_inner(
         conversations: Arc::new(MemConversationRepository::default()),
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
-        compute_targets: Arc::new(MemComputeTargetRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::with_workspace_store(ws_store)),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
@@ -3917,6 +4269,7 @@ fn test_state_inner(
             &mem_spec_ledger,
         )),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
+        orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
@@ -4488,9 +4841,35 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
 
 // ── In-memory ComputeTargetRepository ────────────────────────────────────────
 
-#[derive(Default)]
 pub struct MemComputeTargetRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::ComputeTargetEntity>>>,
+    /// Workspace store shared with the paired `MemWorkspaceRepository` so
+    /// `has_workspace_references` performs a real scan instead of a
+    /// hardcoded false (agent-runtime.md §3: DELETE must fail with 409
+    /// when workspaces reference the target). Defaults to an independent
+    /// empty store, so standalone use (no pairing) behaves like before.
+    workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+}
+
+impl Default for MemComputeTargetRepository {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl MemComputeTargetRepository {
+    /// Construct a compute-target repo that shares the workspace store of a
+    /// paired `MemWorkspaceRepository`, giving `has_workspace_references`
+    /// real cross-repo visibility.
+    pub fn with_workspace_store(workspaces: Arc<Mutex<HashMap<String, Workspace>>>) -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces,
+        }
+    }
 }
 
 #[async_trait]
@@ -4552,11 +4931,16 @@ impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
             .cloned())
     }
 
-    async fn has_workspace_references(&self, _id: &Id) -> Result<bool> {
-        // The in-memory adapter does not share state with MemWorkspaceRepository,
-        // so this always returns false in tests. The 409 Conflict path is covered
-        // by the SQLite adapter integration tests.
-        Ok(false)
+    async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
+        // Real scan of the shared workspace store (same contract as the
+        // SQLite adapter's join). Unpaired standalone use sees an empty
+        // workspace set, which is the honest result for that mode.
+        Ok(self
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .any(|ws| ws.compute_target_id.as_ref() == Some(id)))
     }
 }
 
@@ -4608,6 +4992,27 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
 pub struct MemMetaSpecRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpec>>>,
     versions: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecVersion>>>,
+    /// Binding rows, shared with `MemMetaSpecBindingRepository` when both are
+    /// wired through `with_binding_store`/`with_store`. Mirrors the
+    /// `mem_policy_store` pattern: `delete` must enforce the port contract
+    /// ("Returns an error if bindings reference it") against the same rows
+    /// the binding repo writes — separate default stores would make the
+    /// guard blind to production bindings. In DB mode both ports are
+    /// implemented by one storage struct, so only the mem mode needs this.
+    bindings: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+}
+
+impl MemMetaSpecRepository {
+    /// Construct with a binding store shared with the binding repository
+    /// (see `MemMetaSpecBindingRepository::with_store`).
+    pub fn with_binding_store(
+        bindings: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+    ) -> Self {
+        Self {
+            bindings,
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -4687,6 +5092,23 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
+        // Port contract (MetaSpecRepository::delete): "Returns an error if
+        // bindings reference it." The SQLite/Postgres adapters enforce this
+        // with a foreign-key count; the mem adapter guards in code against
+        // the shared binding store. Error text mirrors the SQLite adapter.
+        let referencing = self
+            .bindings
+            .read()
+            .await
+            .iter()
+            .filter(|b| &b.meta_spec_id == id)
+            .count();
+        if referencing > 0 {
+            let id_str = id.as_str();
+            anyhow::bail!(
+                "cannot delete meta_spec '{id_str}': {referencing} binding(s) reference it"
+            );
+        }
         self.store.write().await.retain(|m| &m.id != id);
         Ok(())
     }
@@ -5020,6 +5442,15 @@ pub struct MemMetaSpecBindingRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
 }
 
+impl MemMetaSpecBindingRepository {
+    /// Construct with an externally owned store so rows written here are
+    /// visible to a `MemMetaSpecRepository` sharing the same Arc (pair via
+    /// `MemMetaSpecRepository::with_binding_store`).
+    pub fn with_store(store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>) -> Self {
+        Self { store }
+    }
+}
+
 #[async_trait]
 impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
     async fn create(&self, binding: &gyre_domain::MetaSpecBinding) -> Result<()> {
@@ -5038,6 +5469,10 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
             .collect())
     }
 
+    async fn list_all(&self) -> Result<Vec<gyre_domain::MetaSpecBinding>> {
+        Ok(self.store.read().await.clone())
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.write().await.retain(|b| &b.id != id);
         Ok(())
@@ -5050,6 +5485,81 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
             .await
             .iter()
             .any(|b| &b.meta_spec_id == meta_spec_id))
+    }
+}
+
+/// Port-contract test for the mem meta-spec delete guard: `delete` must
+/// fail when bindings reference the meta-spec (mirrors the SQLite adapter's
+/// `delete_with_binding_fails`), and the guard must see bindings written
+/// through the shared binding store — the wiring `lib.rs` production state
+/// and `test_state` both use.
+#[cfg(test)]
+mod meta_spec_binding_contract_tests {
+    use super::*;
+    use gyre_ports::{MetaSpecBindingRepository, MetaSpecRepository};
+
+    fn sample_meta_spec(id: &str) -> gyre_domain::MetaSpec {
+        gyre_domain::MetaSpec {
+            id: Id::new(id),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Standard,
+            name: "mem-guard-std".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "You are a diligent worker.".to_string(),
+            version: 1,
+            content_hash: "hash-v1".to_string(),
+            required: false,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_content_hash: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_fails_when_binding_references_meta_spec() {
+        let binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let ms_repo = MemMetaSpecRepository::with_binding_store(Arc::clone(&binding_store));
+        let binding_repo = MemMetaSpecBindingRepository::with_store(binding_store);
+
+        let ms = sample_meta_spec("ms-guarded");
+        ms_repo.create(&ms).await.unwrap();
+
+        // No bindings yet → delete succeeds.
+        ms_repo.delete(&ms.id).await.unwrap();
+        assert!(
+            ms_repo.get_by_id(&ms.id).await.unwrap().is_none(),
+            "delete must remove the meta-spec when no bindings reference it"
+        );
+
+        // Re-create, bind, then delete → error, row retained.
+        ms_repo.create(&ms).await.unwrap();
+        binding_repo
+            .create(&gyre_domain::MetaSpecBinding {
+                id: Id::new("bind-1"),
+                spec_id: "system/guard.md".to_string(),
+                meta_spec_id: ms.id.clone(),
+                pinned_version: 1,
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        let err = ms_repo.delete(&ms.id).await;
+        assert!(
+            err.is_err(),
+            "delete must fail while a binding references the meta-spec (port contract)"
+        );
+        assert!(
+            err.unwrap_err().to_string().contains("binding"),
+            "error must name the binding constraint"
+        );
+        assert!(
+            ms_repo.get_by_id(&ms.id).await.unwrap().is_some(),
+            "failed delete must retain the meta-spec row"
+        );
     }
 }
 

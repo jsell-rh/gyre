@@ -61,6 +61,7 @@ diesel::table! {
         tenant_id -> Text,
         workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,
@@ -381,6 +382,10 @@ diesel::table! {
         body -> Nullable<Text>,
         entity_ref -> Nullable<Text>,
         repo_id -> Nullable<Text>,
+        entity_type -> Nullable<Text>,
+        action_url -> Nullable<Text>,
+        read -> Integer,
+        read_at -> Nullable<BigInt>,
         resolved_at -> Nullable<BigInt>,
         dismissed_at -> Nullable<BigInt>,
         created_at -> BigInt,
@@ -523,6 +528,13 @@ diesel::table! {
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
         enforce_manifest -> Integer,
+    }
+}
+
+diesel::table! {
+    spec_lifecycle_configs (repo_id) {
+        repo_id -> Text,
+        config -> Text,
     }
 }
 
@@ -731,6 +743,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     gate_results,
     repo_push_gates,
     spec_policies,
+    spec_lifecycle_configs,
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,

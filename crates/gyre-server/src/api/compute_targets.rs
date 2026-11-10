@@ -95,6 +95,8 @@ pub async fn create_compute_target(
     Json(req): Json<CreateComputeTargetRequest>,
 ) -> Result<(StatusCode, Json<ComputeTargetResponse>), ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/compute-targets")
+            .await;
         return Err(ApiError::Forbidden(
             "compute target management requires Admin role".to_string(),
         ));
@@ -147,6 +149,8 @@ pub async fn update_compute_target(
     Json(req): Json<UpdateComputeTargetRequest>,
 ) -> Result<Json<ComputeTargetResponse>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "PUT /api/v1/compute-targets/:id")
+            .await;
         return Err(ApiError::Forbidden(
             "compute target management requires Admin role".to_string(),
         ));
@@ -181,6 +185,13 @@ pub async fn delete_compute_target(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "DELETE /api/v1/compute-targets/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "compute target management requires Admin role".to_string(),
         ));
@@ -451,5 +462,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_compute_target_referenced_by_workspace_conflicts() {
+        // agent-runtime.md §3 API: DELETE "fails if workspaces reference it".
+        // The guard must hold in in-memory mode too (mem repos share a
+        // workspace store), not only under SQLite. A dangling reference
+        // would leave every agent spawn in that workspace falling through
+        // the fallback chain silently.
+        let app = app();
+        // Create target.
+        let body = serde_json::json!({ "name": "in-use", "target_type": "Container" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let ct_id = created["id"].as_str().unwrap().to_string();
+
+        // Create workspace and bind it to the target.
+        let ws_body = serde_json::json!({ "name": "Bound Ws", "slug": "bound-ws" });
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws = body_json(ws_resp).await;
+        let ws_id = ws["id"].as_str().unwrap().to_string();
+        let bind = serde_json::json!({ "compute_target_id": ct_id });
+        let bind_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&bind).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bind_resp.status(), StatusCode::OK);
+
+        // DELETE must 409 — the workspace references it.
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/compute-targets/{ct_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::CONFLICT);
+
+        // Target must still exist after the rejected delete.
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/compute-targets/{ct_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
     }
 }

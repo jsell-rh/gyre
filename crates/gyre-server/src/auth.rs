@@ -22,7 +22,7 @@ use axum::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use gyre_common::Id;
-use gyre_domain::{User, UserRole};
+use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome, User, UserRole};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{collections::HashMap, sync::Arc};
@@ -316,6 +316,110 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
+    /// Mint an impersonation JWT (identity-security.md §Impersonation).
+    ///
+    /// `sub` is the **target** user (so permissions match theirs) while
+    /// `impersonator_id` always names the acting admin. Short TTL enforced
+    /// at validation time with zero leeway (both mint and validate use the
+    /// same server clock, so no skew allowance is needed).
+    pub fn mint_impersonation(
+        &self,
+        target_user_id: &str,
+        impersonator_id: &str,
+        session_id: &str,
+        tenant_id: &str,
+        issuer: &str,
+        ttl_secs: u64,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = ImpersonationJwtClaims {
+            sub: target_user_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "impersonation".to_string(),
+            impersonating: true,
+            impersonator_id: impersonator_id.to_string(),
+            target_user_id: target_user_id.to_string(),
+            session_id: session_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Validate an impersonation JWT, returning its claims on success.
+    ///
+    /// Zero leeway on `exp`: the TTL is the hard impersonation budget.
+    /// Returns `Err` for any token that is not a valid impersonation JWT
+    /// (including agent JWTs, which lack the `impersonating` claim —
+    /// callers use the claim to decide whether the token applies to this
+    /// path at all; see `validate_impersonation_opt`).
+    pub fn validate_impersonation(
+        &self,
+        token: &str,
+        expected_issuer: &str,
+    ) -> Result<ImpersonationJwtClaims, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&[expected_issuer]);
+        validation.validate_aud = false;
+        // Self-minted token, same clock: expiry is exact, no skew allowance.
+        validation.leeway = 0;
+        jsonwebtoken::decode::<ImpersonationJwtClaims>(token, &self.decoding_key, &validation)
+            .map(|td| td.claims)
+            .map_err(|e| format!("impersonation JWT validation: {e}"))
+    }
+
+    /// Validate a token as an impersonation JWT, returning `None` when the
+    /// token is well-formed and signature-valid but is NOT an impersonation
+    /// token (no `impersonating: true` claim) so the caller can fall through
+    /// to the next link of the auth chain.
+    pub fn validate_impersonation_opt(
+        &self,
+        token: &str,
+        expected_issuer: &str,
+    ) -> Option<ImpersonationJwtClaims> {
+        let claims = self.validate_impersonation(token, expected_issuer).ok()?;
+        if claims.impersonating {
+            Some(claims)
+        } else {
+            None
+        }
+    }
+}
+
+/// Claims embedded in impersonation JWTs minted by Gyre
+/// (identity-security.md §Impersonation).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImpersonationJwtClaims {
+    /// Subject — the **target** (impersonated) user's id. Permissions are
+    /// resolved against the target; attribution always uses
+    /// `impersonator_id`.
+    pub sub: String,
+    /// Issuer — the server's base URL.
+    pub iss: String,
+    /// Issued-at (Unix epoch seconds).
+    pub iat: u64,
+    /// Expiry (Unix epoch seconds). Short-lived by design.
+    pub exp: u64,
+    /// Always "impersonation" for impersonation JWTs.
+    pub scope: String,
+    /// Always true on impersonation JWTs; distinguishes them from agent JWTs.
+    pub impersonating: bool,
+    /// User id of the admin acting as the target.
+    pub impersonator_id: String,
+    /// User id of the impersonated user (mirrors `sub`).
+    pub target_user_id: String,
+    /// Impersonation session id — the revocation key. Ending the session
+    /// invalidates the token before `exp`.
+    pub session_id: String,
+    /// Tenant scope resolved at approval time.
+    pub tenant_id: String,
 }
 
 // -- Security helpers ---------------------------------------------------------
@@ -330,6 +434,25 @@ pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
 pub(crate) fn hash_api_key(key: &str) -> String {
     let result = sha2::Sha256::digest(key.as_bytes());
     result.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Impersonation context attached to an `AuthenticatedAgent` resolved from
+/// an impersonation JWT (identity-security.md §Impersonation).
+///
+/// The principal (`agent_id` / `user_id` / `roles`) is the **target** user so
+/// permissions match theirs, while `impersonator_id` names the admin who is
+/// actually acting. Every audit record written for the request must be
+/// attributed to the impersonator.
+#[derive(Debug, Clone)]
+pub struct ImpersonationContext {
+    /// User id of the admin who requested the impersonation.
+    pub impersonator_id: Id,
+    /// Display name of the impersonator (for audit attribution strings).
+    pub impersonator_name: String,
+    /// User id of the impersonated (target) user — equals `user_id`.
+    pub target_user_id: Id,
+    /// Impersonation session id (kv `impersonation_sessions` key).
+    pub session_id: String,
 }
 
 /// Tenant scope for server-originated principals: the global token, spawned
@@ -370,6 +493,120 @@ pub struct AuthenticatedAgent {
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
+    /// Present when the caller authenticated with an impersonation JWT:
+    /// the principal is the target user, this field names the acting admin.
+    /// Identity-security.md §Impersonation requires every action taken with
+    /// this token to be attributed to the impersonator in the audit trail.
+    pub impersonation: Option<ImpersonationContext>,
+}
+
+// -- Auth audit events (task-104: observability.md §Audit Event Types) --------
+
+/// Request-extension marker deduplicating AuthSuccess emission.
+///
+/// A single request may validate the bearer token multiple times (ABAC
+/// middleware extractor + handler extractor); the token was *accepted* once.
+/// The first validation records the event and inserts this marker into the
+/// request extensions so subsequent extractions in the same request skip
+/// emission.
+#[derive(Clone, Copy)]
+struct AuthAuditMark;
+
+/// Record an `AuthSuccess` audit event (observability.md §Audit Event Types:
+/// valid token accepted). `token_kind` is one of global / agent_jwt /
+/// uuid_token / api_key / user_jwt / federated_jwt.
+async fn record_auth_success(
+    state: &AppState,
+    token_kind: &str,
+    agent_id: Option<&str>,
+    user_id: Option<&Id>,
+    source_ip: Option<String>,
+    user_agent: Option<String>,
+) {
+    let agent = agent_id
+        .filter(|s| !s.is_empty())
+        .map(|s| Id::new(s.to_string()));
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::AuthSuccess,
+        agent,
+        user_id.cloned(),
+        None,
+        None,
+        None,
+        "auth".to_string(),
+        None,
+        AuditOutcome::Success,
+        serde_json::json!({
+            "token_kind": token_kind,
+            "agent_id": agent_id,
+        }),
+        source_ip,
+        user_agent,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Record an `AuthFailure` audit event (observability.md §Audit Event Types:
+/// invalid or revoked token). `token_kind` names the rejected credential
+/// kind when it can be determined ("unknown" otherwise).
+async fn record_auth_failure(
+    state: &AppState,
+    token_kind: &str,
+    rejection_reason: &str,
+    source_ip: Option<String>,
+    user_agent: Option<String>,
+) {
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::AuthFailure,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "auth".to_string(),
+        None,
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "token_kind": token_kind,
+            "rejection_reason": rejection_reason,
+        }),
+        source_ip,
+        user_agent,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Best-effort forensic attributes for auth events: the socket peer address
+/// (CWE-348 — never a caller-controlled forwarded header) and User-Agent.
+fn request_forensic_parts(parts: &Parts) -> (Option<String>, Option<String>) {
+    let source_ip = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip().to_string());
+    let user_agent = parts
+        .headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    (source_ip, user_agent)
+}
+
+/// Record an `AuthFailure` audit event on behalf of the global auth
+/// middleware (`require_auth_middleware` in lib.rs), which rejects tokens
+/// before any extractor — and thus before the extractor's own emission
+/// points — runs.
+pub(crate) async fn record_auth_failure_for_middleware(
+    state: &AppState,
+    token_kind: &str,
+    rejection_reason: &str,
+    source_ip: Option<String>,
+    user_agent: Option<String>,
+) {
+    record_auth_failure(state, token_kind, rejection_reason, source_ip, user_agent).await;
 }
 
 impl AuthenticatedAgent {
@@ -539,6 +776,42 @@ async fn refresh_jwks(
 
 // -- Auth extractor -----------------------------------------------------------
 
+/// Identity-security.md §Impersonation: attribute every authenticated call
+/// made under an impersonation token at the auth-resolution layer. This is
+/// the shared choke point for surfaces that authenticate via the
+/// `AuthenticatedAgent` extractor WITHOUT the ABAC middleware (git smart
+/// HTTP, MCP, conversations, explorer, ws-ticket) — the middleware-covered
+/// `/api/v1` routes are recorded by `abac_middleware` instead (with the
+/// policy outcome for evaluated routes), and mark the request first so
+/// this never double-counts the same call.
+fn record_impersonated_extraction(
+    parts: &mut Parts,
+    state: &Arc<AppState>,
+    auth: &AuthenticatedAgent,
+    surface: &'static str,
+) {
+    use crate::impersonation::ImpersonationActionRecorded;
+    if parts
+        .extensions
+        .get::<ImpersonationActionRecorded>()
+        .is_some()
+    {
+        return; // already attributed for this request
+    }
+    let Some(imp) = auth.impersonation.clone() else {
+        return;
+    };
+    parts.extensions.insert(ImpersonationActionRecorded);
+    crate::impersonation::spawn_record_impersonated_action(
+        state,
+        &imp,
+        parts.method.as_str(),
+        parts.uri.path(),
+        true,
+        surface,
+    );
+}
+
 #[axum::async_trait]
 impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
     type Rejection = Response;
@@ -556,6 +829,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .map(|p| &p[7..])
         }) {
             if let Some(auth) = state.ws_tickets.consume(ticket) {
+                record_impersonated_extraction(parts, state, &auth, "ws-ticket");
                 return Ok(auth);
             }
             return Err((StatusCode::UNAUTHORIZED, "Invalid or expired ticket").into_response());
@@ -586,8 +860,28 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
             .or(query_token)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
 
+        // task-104: audit AuthSuccess exactly once per request even when the
+        // token is validated by both the ABAC middleware and the handler
+        // extractor. The marker travels in the request extensions.
+        let auth_already_audited = parts.extensions.get::<AuthAuditMark>().is_some();
+        if !auth_already_audited {
+            parts.extensions.insert(AuthAuditMark);
+        }
+        let (forensic_ip, forensic_ua) = request_forensic_parts(parts);
+
         // 1. Global auth token (dev / system usage). Use constant-time compare.
         if tokens_equal(token, &state.auth_token) {
+            if !auth_already_audited {
+                record_auth_success(
+                    state,
+                    "global",
+                    Some("system"),
+                    None,
+                    forensic_ip,
+                    forensic_ua,
+                )
+                .await;
+            }
             return Ok(AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
@@ -595,7 +889,34 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 tenant_id: system_principal_tenant(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
+                impersonation: None,
             });
+        }
+
+        // 1.5. Impersonation JWT (identity-security.md §Impersonation).
+        //     Cryptographically validated EdDSA token minted at approval
+        //     time; the session record must still be active, so ending a
+        //     session revokes its token before `exp`. Non-impersonation
+        //     tokens fall through to the next link of the chain.
+        if token.starts_with("ey") {
+            if let Some(claims) = state
+                .agent_signing_key
+                .validate_impersonation_opt(token, &state.base_url)
+            {
+                return match crate::impersonation::resolve_impersonation_auth(&claims, state).await
+                {
+                    Some(mut auth) => {
+                        auth.deprecated_token_auth = deprecated_token_auth;
+                        record_impersonated_extraction(parts, state, &auth, "per-handler");
+                        Ok(auth)
+                    }
+                    None => Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Impersonation session is not active",
+                    )
+                        .into_response()),
+                };
+            }
         }
 
         // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
@@ -616,6 +937,14 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                         Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
                         Err(e) => {
                             tracing::debug!("Agent JWT validation failed: {e}");
+                            record_auth_failure(
+                                state,
+                                "agent_jwt",
+                                "invalid or expired agent token",
+                                forensic_ip,
+                                forensic_ua,
+                            )
+                            .await;
                             return Err((
                                 StatusCode::UNAUTHORIZED,
                                 "Invalid or expired agent token",
@@ -626,6 +955,22 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 } else {
                     None // Legacy UUID token — no JWT claims for ABAC.
                 };
+                let token_kind = if token.starts_with("ey") {
+                    "agent_jwt"
+                } else {
+                    "uuid_token"
+                };
+                if !auth_already_audited {
+                    record_auth_success(
+                        state,
+                        token_kind,
+                        Some(agent_id.as_str()),
+                        None,
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                }
                 return Ok(AuthenticatedAgent {
                     agent_id,
                     user_id: None,
@@ -633,6 +978,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     tenant_id: system_principal_tenant(),
                     jwt_claims,
                     deprecated_token_auth,
+                    impersonation: None,
                 });
             }
         }
@@ -645,6 +991,14 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
             match state.agent_signing_key.validate(token, &state.base_url) {
                 Ok(_) => {
                     // Valid signature but not in HashMap — token was revoked.
+                    record_auth_failure(
+                        state,
+                        "agent_jwt",
+                        "agent token has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
                     return Err(
                         (StatusCode::UNAUTHORIZED, "Agent token has been revoked").into_response()
                     );
@@ -671,6 +1025,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             "API-key auth for user without tenant binding; rejecting. \
                              Re-provision the user via POST /api/v1/users with tenant_id."
                         );
+                        // task-104: AuthFailure audit event — the token is
+                        // rejected because its user has no tenant binding.
+                        record_auth_failure(
+                            state,
+                            "api_key",
+                            "user has no tenant binding; re-provision via POST /api/v1/users",
+                            forensic_ip,
+                            forensic_ua,
+                        )
+                        .await;
                         return Err((
                             StatusCode::FORBIDDEN,
                             "user has no tenant binding; re-provision via POST /api/v1/users",
@@ -678,6 +1042,17 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             .into_response());
                     }
                 };
+                if !auth_already_audited {
+                    record_auth_success(
+                        state,
+                        "api_key",
+                        Some(user.display_name.as_str()),
+                        Some(&user.id),
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                }
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
@@ -685,6 +1060,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     tenant_id,
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
+                    impersonation: None,
                 });
             }
         }
@@ -693,6 +1069,17 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if let Some(jwt_cfg) = &state.jwt_config {
             if let Ok(mut auth) = validate_jwt(token, jwt_cfg, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                if !auth_already_audited {
+                    record_auth_success(
+                        state,
+                        "user_jwt",
+                        Some(auth.agent_id.as_str()),
+                        auth.user_id.as_ref(),
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                }
                 return Ok(auth);
             }
         }
@@ -701,10 +1088,30 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if token.starts_with("ey") {
             if let Some(mut auth) = validate_federated_jwt(token, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                if !auth_already_audited {
+                    record_auth_success(
+                        state,
+                        "federated_jwt",
+                        Some(auth.agent_id.as_str()),
+                        auth.user_id.as_ref(),
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                }
                 return Ok(auth);
             }
         }
 
+        // No auth method accepted the token. Classify best-effort: an "ey"
+        // prefix means a JWT-shaped credential was rejected; anything else
+        // is an unknown credential kind.
+        let token_kind = if token.starts_with("ey") {
+            "agent_jwt"
+        } else {
+            "unknown"
+        };
+        record_auth_failure(state, token_kind, "invalid token", forensic_ip, forensic_ua).await;
         Err((StatusCode::UNAUTHORIZED, "Invalid token").into_response())
     }
 }
@@ -719,6 +1126,7 @@ pub async fn authenticate_token(
 ) -> Result<AuthenticatedAgent, &'static str> {
     // 1. Global auth token.
     if tokens_equal(token, &state.auth_token) {
+        record_auth_success(state, "global", Some("system"), None, None, None).await;
         return Ok(AuthenticatedAgent {
             agent_id: "system".to_string(),
             user_id: None,
@@ -726,7 +1134,21 @@ pub async fn authenticate_token(
             tenant_id: system_principal_tenant(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         });
+    }
+
+    // 1.5. Impersonation JWT (identity-security.md §Impersonation).
+    if token.starts_with("ey") {
+        if let Some(claims) = state
+            .agent_signing_key
+            .validate_impersonation_opt(token, &state.base_url)
+        {
+            return match crate::impersonation::resolve_impersonation_auth(&claims, state).await {
+                Some(auth) => Ok(auth),
+                None => Err("Impersonation session is not active"),
+            };
+        }
     }
 
     // 2. Per-agent tokens.
@@ -744,11 +1166,27 @@ pub async fn authenticate_token(
             let jwt_claims = if token.starts_with("ey") {
                 match state.agent_signing_key.validate(token, &state.base_url) {
                     Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
-                    Err(_) => return Err("Invalid or expired agent token"),
+                    Err(_) => {
+                        record_auth_failure(
+                            state,
+                            "agent_jwt",
+                            "invalid or expired agent token",
+                            None,
+                            None,
+                        )
+                        .await;
+                        return Err("Invalid or expired agent token");
+                    }
                 }
             } else {
                 None
             };
+            let token_kind = if token.starts_with("ey") {
+                "agent_jwt"
+            } else {
+                "uuid_token"
+            };
+            record_auth_success(state, token_kind, Some(agent_id.as_str()), None, None, None).await;
             return Ok(AuthenticatedAgent {
                 agent_id,
                 user_id: None,
@@ -756,6 +1194,7 @@ pub async fn authenticate_token(
                 tenant_id: system_principal_tenant(),
                 jwt_claims,
                 deprecated_token_auth: false,
+                impersonation: None,
             });
         }
     }
@@ -767,6 +1206,14 @@ pub async fn authenticate_token(
             .validate(token, &state.base_url)
             .is_ok()
     {
+        record_auth_failure(
+            state,
+            "agent_jwt",
+            "agent token has been revoked",
+            None,
+            None,
+        )
+        .await;
         return Err("Agent token has been revoked");
     }
 
@@ -783,9 +1230,28 @@ pub async fn authenticate_token(
                         username = %user.username,
                         "API-key auth for user without tenant binding; rejecting"
                     );
+                    // task-104: AuthFailure audit event — the token is
+                    // rejected because its user has no tenant binding.
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "user has no tenant binding; re-provision via POST /api/v1/users",
+                        None,
+                        None,
+                    )
+                    .await;
                     return Err("user has no tenant binding; re-provision via POST /api/v1/users");
                 }
             };
+            record_auth_success(
+                state,
+                "api_key",
+                Some(user.display_name.as_str()),
+                Some(&user.id),
+                None,
+                None,
+            )
+            .await;
             return Ok(AuthenticatedAgent {
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
@@ -793,6 +1259,7 @@ pub async fn authenticate_token(
                 tenant_id,
                 jwt_claims: None,
                 deprecated_token_auth: false,
+                impersonation: None,
             });
         }
     }
@@ -800,6 +1267,15 @@ pub async fn authenticate_token(
     // 4. Keycloak JWT.
     if let Some(jwt_cfg) = &state.jwt_config {
         if let Ok(auth) = validate_jwt(token, jwt_cfg, state).await {
+            record_auth_success(
+                state,
+                "user_jwt",
+                Some(auth.agent_id.as_str()),
+                auth.user_id.as_ref(),
+                None,
+                None,
+            )
+            .await;
             return Ok(auth);
         }
     }
@@ -807,10 +1283,25 @@ pub async fn authenticate_token(
     // 5. Federated JWT.
     if token.starts_with("ey") {
         if let Some(auth) = validate_federated_jwt(token, state).await {
+            record_auth_success(
+                state,
+                "federated_jwt",
+                Some(auth.agent_id.as_str()),
+                auth.user_id.as_ref(),
+                None,
+                None,
+            )
+            .await;
             return Ok(auth);
         }
     }
 
+    let token_kind = if token.starts_with("ey") {
+        "agent_jwt"
+    } else {
+        "unknown"
+    };
+    record_auth_failure(state, token_kind, "invalid token", None, None).await;
     Err("Invalid token")
 }
 
@@ -930,6 +1421,7 @@ async fn validate_jwt(
         tenant_id,
         jwt_claims: raw_claims,
         deprecated_token_auth: false,
+        impersonation: None,
     })
 }
 
@@ -1262,6 +1754,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         tenant_id: system_principal_tenant(),
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
+        impersonation: None,
     })
 }
 
@@ -1460,6 +1953,66 @@ mod tests {
     use super::{system_principal_tenant, test_helpers::*, AuthenticatedAgent, WsTicketStore};
     use gyre_domain::UserRole;
 
+    #[test]
+    fn impersonation_jwt_round_trip_and_expiry() {
+        let key = super::AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+
+        let token = key
+            .mint_impersonation("target-1", "admin-1", "sess-1", "default", issuer, 900)
+            .unwrap();
+        let claims = key
+            .validate_impersonation_opt(&token, issuer)
+            .expect("fresh impersonation JWT must validate");
+        assert!(claims.impersonating);
+        assert_eq!(claims.sub, "target-1");
+        assert_eq!(claims.impersonator_id, "admin-1");
+        assert_eq!(claims.target_user_id, "target-1");
+        assert_eq!(claims.session_id, "sess-1");
+        assert_eq!(claims.scope, "impersonation");
+
+        // Wrong issuer rejected.
+        assert!(key
+            .validate_impersonation_opt(&token, "http://evil.example")
+            .is_none());
+
+        // A token whose `exp` is in the past is rejected with zero leeway
+        // (auto-expiry is exact — mint and validate share the server clock).
+        let backdated = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let claims = super::ImpersonationJwtClaims {
+                sub: "target-1".to_string(),
+                iss: issuer.to_string(),
+                iat: now - 3600,
+                exp: now - 1,
+                scope: "impersonation".to_string(),
+                impersonating: true,
+                impersonator_id: "admin-1".to_string(),
+                target_user_id: "target-1".to_string(),
+                session_id: "sess-1".to_string(),
+                tenant_id: "default".to_string(),
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.kid = Some(key.kid.clone());
+            jsonwebtoken::encode(&header, &claims, &key.encoding_key).unwrap()
+        };
+        assert!(
+            key.validate_impersonation_opt(&backdated, issuer).is_none(),
+            "expired impersonation JWT must be rejected (leeway 0)"
+        );
+
+        // Agent JWTs are NOT impersonation tokens (no `impersonating`
+        // claim) — validate_impersonation_opt must return None so the auth
+        // chain falls through to the agent-token path.
+        let agent_jwt = key
+            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .unwrap();
+        assert!(key.validate_impersonation_opt(&agent_jwt, issuer).is_none());
+    }
+
     async fn authenticated_handler(
         AuthenticatedAgent { agent_id, .. }: AuthenticatedAgent,
     ) -> String {
@@ -1523,6 +2076,135 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -- task-104: AuthSuccess / AuthFailure audit events ---------------------
+
+    async fn audit_events_of(
+        state: &crate::AppState,
+        event_type: &str,
+    ) -> Vec<gyre_domain::AuditEvent> {
+        gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                event_type: Some(event_type.to_string()),
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn auth_success_audit_event_recorded_for_global_token() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let events = audit_events_of(&state, "auth_success").await;
+        assert_eq!(events.len(), 1, "exactly one auth_success event");
+        let e = &events[0];
+        assert_eq!(e.detail["token_kind"], "global");
+        assert_eq!(e.detail["agent_id"], "system");
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "system");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Success);
+        assert_eq!(e.resource_type, "auth");
+    }
+
+    #[tokio::test]
+    async fn auth_success_audit_event_recorded_once_per_request() {
+        // The full stack validates the token in the ABAC middleware AND in
+        // the handler extractor; the AuthAuditMark extension must dedupe the
+        // AuthSuccess emission to exactly one event per request.
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/events")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let events = audit_events_of(&state, "auth_success").await;
+        assert_eq!(
+            events.len(),
+            1,
+            "AuthSuccess must be recorded exactly once per request, got {}",
+            events.len()
+        );
+        assert_eq!(events[0].detail["token_kind"], "global");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_audit_event_recorded_for_invalid_token() {
+        // Rejection at the global auth middleware (extractors never run).
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/events")
+                    .header("Authorization", "Bearer bad-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let events = audit_events_of(&state, "auth_failure").await;
+        assert_eq!(events.len(), 1, "exactly one auth_failure event");
+        let e = &events[0];
+        assert_eq!(e.detail["token_kind"], "unknown");
+        assert_eq!(e.detail["rejection_reason"], "invalid token");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Failure);
+        assert!(e.agent_id.is_none(), "rejected caller has no identity");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_audit_event_recorded_for_revoked_agent_jwt() {
+        // A cryptographically valid agent JWT that is no longer in
+        // agent_tokens is revoked: signature validates but lookup fails.
+        let state = test_state();
+        let token = state
+            .agent_signing_key
+            .mint("agent-gone", "task-1", "system", &state.base_url, 3600)
+            .expect("mint must succeed");
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let events = audit_events_of(&state, "auth_failure").await;
+        assert_eq!(events.len(), 1, "exactly one auth_failure event");
+        let e = &events[0];
+        assert_eq!(e.detail["token_kind"], "agent_jwt");
+        assert_eq!(e.detail["rejection_reason"], "agent token has been revoked");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Failure);
     }
 
     #[tokio::test]
@@ -2180,6 +2862,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_failure_audit_event_recorded_for_api_key_user_without_tenant_binding() {
+        // task-099 F1 + task-104: the fail-closed API-key rejection (user
+        // has no tenant binding) must be visible in the audit trail as an
+        // AuthFailure event naming the credential kind and the reason.
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        let state = test_state();
+        let user = User::new(Id::new("u3"), "ext-3", "orphan-audited", 1000);
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_orphan_audited_key";
+        state
+            .api_keys
+            .create(
+                &super::hash_api_key(raw_key),
+                &user.id,
+                "orphan-audited-key",
+            )
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let events = audit_events_of(&state, "auth_failure").await;
+        assert_eq!(events.len(), 1, "exactly one auth_failure event");
+        let e = &events[0];
+        assert_eq!(e.detail["token_kind"], "api_key");
+        assert_eq!(
+            e.detail["rejection_reason"],
+            "user has no tenant binding; re-provision via POST /api/v1/users"
+        );
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Failure);
+        assert!(e.agent_id.is_none(), "rejected caller has no identity");
+    }
+
+    #[tokio::test]
     async fn backward_compat_global_token_still_works_with_jwt_enabled() {
         let resp = app_with_jwt()
             .oneshot(
@@ -2229,6 +2959,52 @@ mod tests {
     }
 
     // -- Tenant resolution tests ----------------------------------------------
+
+    #[tokio::test]
+    async fn mint_with_workload_roundtrips_wl_image_hash_claim() {
+        // agent-runtime.md §3 (Nix-Based Image Build): the image hash is
+        // recorded in workload attestation via the `wl_image_hash` JWT
+        // claim. The spawn flow resolves the image digest before minting
+        // (the token must pre-exist the process) and passes it here — this
+        // test proves the claim survives real EdDSA sign → verify with the
+        // digest intact, so a verifier can reconstruct workload identity
+        // from the token alone.
+        let key = crate::auth::AgentSigningKey::generate();
+        let issuer = "https://gyre.example.com";
+
+        let token = key
+            .mint_with_workload(
+                "agt-img-1",
+                "task-9",
+                "orchestrator-1",
+                issuer,
+                3600,
+                Some(4242),
+                Some("worker-host".to_string()),
+                Some("container".to_string()),
+                Some("stackhash123".to_string()),
+                Some("abc123def".to_string()),
+                Some("sha256:9f2a7c1e".to_string()),
+            )
+            .expect("mint_with_workload must succeed");
+
+        let claims = key
+            .validate(&token, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:9f2a7c1e"));
+        assert_eq!(claims.wl_pid, Some(4242));
+        assert_eq!(claims.wl_hostname.as_deref(), Some("worker-host"));
+        assert_eq!(claims.wl_container_id.as_deref(), Some("abc123def"));
+
+        // The no-workload mint must leave the claim absent, not defaulted.
+        let bare = key
+            .mint("agt-img-2", "task-9", "orchestrator-1", issuer, 3600)
+            .expect("mint must succeed");
+        let bare_claims = key
+            .validate(&bare, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(bare_claims.wl_image_hash, None);
+    }
 
     #[tokio::test]
     async fn jwt_tenant_id_extracted_from_claim() {
@@ -2815,6 +3591,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let ticket = store.issue(auth);
         assert!(!ticket.is_empty());
@@ -2844,6 +3621,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let ticket = store.issue(auth);
         // Ticket is a UUID, not a Bearer token or API key
@@ -2867,6 +3645,7 @@ mod tests {
             tenant_id: system_principal_tenant(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(global_token.is_system_principal());
 
@@ -2878,6 +3657,7 @@ mod tests {
             tenant_id: "t-2".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!spoofed.is_system_principal());
 
@@ -2889,6 +3669,7 @@ mod tests {
             tenant_id: "t-1".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!ordinary.is_system_principal());
     }

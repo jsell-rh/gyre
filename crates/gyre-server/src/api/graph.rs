@@ -6,7 +6,7 @@
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
-//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view by name pattern
+//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -183,10 +183,23 @@ pub struct DeltaResponse {
     pub spec_ref: Option<String>,
     pub agent_id: Option<String>,
     pub delta_json: String,
+    /// Template narrative grounded in the delta plus repo graph context
+    /// (realized-model.md §6). Empty when the delta has no renderable facts.
+    pub narrative: String,
 }
 
-impl From<ArchitecturalDelta> for DeltaResponse {
-    fn from(d: ArchitecturalDelta) -> Self {
+impl DeltaResponse {
+    /// Build a delta response with a grounded template narrative.
+    ///
+    /// `grounding` is the live graph index for the delta's repo;
+    /// `attribution` is the resolved provenance label (see `delta_attribution`).
+    fn from_delta(
+        d: ArchitecturalDelta,
+        grounding: &gyre_domain::narrative::NarrativeGrounding,
+        attribution: Option<&str>,
+    ) -> Self {
+        let narrative =
+            gyre_domain::narrative::generate_template_narrative(&d, grounding, attribution);
         Self {
             id: d.id.to_string(),
             repo_id: d.repo_id.to_string(),
@@ -195,6 +208,7 @@ impl From<ArchitecturalDelta> for DeltaResponse {
             spec_ref: d.spec_ref,
             agent_id: d.agent_id.map(|id| id.to_string()),
             delta_json: d.delta_json,
+            narrative,
         }
     }
 }
@@ -255,7 +269,9 @@ pub struct BriefingResponse {
     pub cross_workspace: Vec<BriefingItem>,
     pub exceptions: Vec<BriefingItem>,
     pub metrics: BriefingMetrics,
-    /// LLM-synthesized narrative (stubbed for now).
+    /// Activity counts plus the graph-grounded architecture narrative
+    /// (realized-model.md §6): LLM-synthesized when an LLM is configured,
+    /// template-rendered otherwise.
     pub summary: String,
     /// Completed agents with their decisions and uncertainties (HSI §4).
     pub completed_agents: Vec<BriefingCompletedAgent>,
@@ -598,107 +614,345 @@ pub async fn get_graph_by_spec(
     }))
 }
 
-/// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
-///
-/// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
-/// contains the `pattern` (case-insensitive substring match). Returns matched
-/// nodes and edges where both source and target are in the matched node set.
-pub async fn assemble_concept_results(
+/// Shared concept-view projection logic used by both REST and MCP handlers
+/// (HSI §11 parity). Resolves the `ConceptView` named `concept_name` from
+/// the repo's `specs/manifest.yaml` (case-insensitive exact match on the
+/// concept name) and returns the union projection of nodes/edges matching
+/// its include patterns. Fails with `NotFound` when the repo has no
+/// manifest, the manifest is unparseable, or no concept with that name is
+/// defined — there is no substring fallback.
+pub async fn assemble_concept_projection(
     state: &AppState,
-    repo_ids: &[String],
-    pattern: &str,
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
 ) -> Result<KnowledgeGraphResponse, ApiError> {
-    let pattern = pattern.to_lowercase();
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
-    let mut matched_node_ids = std::collections::HashSet::new();
+    let concept = resolve_concept_view(repo, concept_name)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "concept '{concept_name}' is not defined in the spec manifest"
+            ))
+        })?;
 
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = state
-            .graph_store
-            .list_nodes(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
 
-        let nodes: Vec<GraphNode> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.name.to_lowercase().contains(&pattern)
-                    || n.qualified_name.to_lowercase().contains(&pattern)
-            })
-            .collect();
-
-        for n in &nodes {
-            matched_node_ids.insert(n.id.to_string());
-        }
-        matched_nodes.extend(nodes);
-    }
-
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_edges = state
-            .graph_store
-            .list_edges(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let edges: Vec<GraphEdge> = all_edges
-            .into_iter()
-            .filter(|e| {
-                matched_node_ids.contains(e.source_id.as_str())
-                    && matched_node_ids.contains(e.target_id.as_str())
-            })
-            .collect();
-
-        matched_edges.extend(edges);
-    }
-
-    let repo_id_label = if repo_ids.len() == 1 {
-        repo_ids[0].clone()
-    } else {
-        "multi-repo".to_string()
-    };
+    let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
 
     Ok(KnowledgeGraphResponse {
-        repo_id: repo_id_label,
+        repo_id: repo.id.to_string(),
         nodes: matched_nodes.into_iter().map(Into::into).collect(),
         edges: matched_edges.into_iter().map(Into::into).collect(),
         warnings: vec![],
     })
 }
 
+/// Workspace-scoped concept-view projection shared by REST and MCP handlers
+/// (HSI §11 parity): each repo in the workspace resolves the named concept
+/// from its own spec manifest; matched nodes/edges are unioned across repos.
+/// A repo lacking the named concept contributes nothing. Unlike the
+/// single-repo variant this never 404s on a missing concept — an empty
+/// union is a valid workspace-wide answer (repos carry their own manifests).
+pub async fn assemble_workspace_concept_projection(
+    state: &AppState,
+    workspace_id: &Id,
+    concept_name: &str,
+) -> Result<KnowledgeGraphResponse, ApiError> {
+    require_workspace(state, &workspace_id.to_string()).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let mut matched_nodes: Vec<GraphNodeResponse> = Vec::new();
+    let mut matched_edges: Vec<GraphEdgeResponse> = Vec::new();
+
+    for repo in &repos {
+        // Repo does not define this concept — contributes nothing.
+        if resolve_concept_view(repo, concept_name).await.is_none() {
+            continue;
+        }
+        let projection = assemble_concept_projection(state, repo, concept_name).await?;
+        matched_nodes.extend(projection.nodes);
+        matched_edges.extend(projection.edges);
+    }
+
+    Ok(KnowledgeGraphResponse {
+        repo_id: if repos.len() == 1 {
+            repos[0].id.to_string()
+        } else {
+            "multi-repo".to_string()
+        },
+        nodes: matched_nodes,
+        edges: matched_edges,
+        warnings: vec![],
+    })
+}
+
+/// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
+/// match on the concept name) from the `concepts:` block of the repo's
+/// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
+/// has no manifest, the manifest is unparseable, or no concept with that
+/// name is defined.
+async fn resolve_concept_view(
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
+) -> Option<gyre_common::graph::ConceptView> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await?;
+    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
+    manifest
+        .concepts
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(concept_name))
+        .map(gyre_common::graph::ConceptView::from)
+}
+
 /// GET /api/v1/repos/{id}/graph/concept/{name}
-/// Returns nodes matching the concept name pattern (case-insensitive substring match).
-///
-/// In the full implementation this would use ConceptView definitions from the spec manifest.
-/// For now, it matches nodes whose `name` or `qualified_name` contains the concept name.
+/// Concept view projection (realized-model.md §4): resolves the named
+/// concept from the repo's spec manifest and returns the union of nodes
+/// matching its include patterns (types/traits/modules/endpoints/specs),
+/// with edges between matched nodes. Returns 404 when the concept is not
+/// defined in the manifest — there is no substring fallback.
 pub async fn get_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_repo(&state, &id).await?;
-    let response = assemble_concept_results(&state, &[id], &concept_name).await?;
-    Ok(Json(response))
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Delegate to the same assembly logic the MCP graph_concept tool uses
+    // (HSI §11 parity).
+    Ok(Json(
+        assemble_concept_projection(&state, &repo, &concept_name).await?,
+    ))
 }
 
-/// GET /api/v1/repos/{id}/graph/timeline
-/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
-pub async fn get_graph_timeline(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<TimelineQuery>,
-) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
-    require_repo(&state, &id).await?;
-    let repo_id = Id::new(&id);
+// ── Narrative generation (realized-model.md §6) ─────────────────────────────
 
-    let deltas = state
+/// Max recent deltas synthesized into the briefing architecture narrative.
+const BRIEFING_NARRATIVE_MAX_DELTAS: usize = 10;
+
+/// Max wait for briefing narrative LLM synthesis before falling back to
+/// template narratives (briefing is a synchronous GET — keep it bounded).
+const NARRATIVE_LLM_TIMEOUT_SECS: u64 = 10;
+
+/// Build narrative grounding for a repo from the live graph.
+async fn load_narrative_grounding(
+    state: &AppState,
+    repo_id: &Id,
+) -> Result<gyre_domain::narrative::NarrativeGrounding, ApiError> {
+    let nodes = state
         .graph_store
-        .list_deltas(&repo_id, q.since, q.until)
+        .list_nodes(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(gyre_domain::narrative::NarrativeGrounding::from_graph(
+        &nodes, &edges,
+    ))
+}
 
-    Ok(Json(deltas.into_iter().map(Into::into).collect()))
+/// Resolve a delta's provenance attribution label from its stored `agent_id`:
+/// `"agent {name}"`, extended with `" under persona {persona}"` when a persona
+/// binding exists. `None` only when the delta records no provenance — never a
+/// fabricated identity. `cache` amortizes lookups across a delta batch.
+async fn delta_attribution(
+    state: &AppState,
+    delta: &ArchitecturalDelta,
+    cache: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<String> {
+    let agent_id = delta.agent_id.as_ref()?;
+    let key = agent_id.to_string();
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    // Prefer the human-readable agent name; fall back to the stored id, which
+    // is real recorded provenance even if the agent row was deleted.
+    let name = state
+        .agents
+        .find_by_id(agent_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|a| a.name)
+        .unwrap_or_else(|| key.clone());
+    let persona = state
+        .kv_store
+        .kv_get("agent_personas", &key)
+        .await
+        .ok()
+        .flatten()
+        .filter(|p| !p.is_empty());
+    let label = match persona {
+        Some(p) => format!("agent {name} under persona {p}"),
+        None => format!("agent {name}"),
+    };
+    let out = Some(label);
+    cache.insert(key, out.clone());
+    out
+}
+
+/// LLM-synthesized architecture narrative (realized-model.md §6) over a set of
+/// grounded delta facts. Falls back to `fallback` (the concatenated template
+/// narratives) when the LLM is unconfigured, errors, times out, or returns an
+/// empty completion — the briefing never regresses below template quality.
+async fn llm_architecture_narrative(
+    state: &AppState,
+    ws_id: &Id,
+    facts: &serde_json::Value,
+    fallback: String,
+) -> String {
+    let Some(factory) = state.llm.as_ref() else {
+        return fallback;
+    };
+    let facts_str = facts.to_string();
+    let template = state
+        .prompt_templates
+        .get_effective(ws_id, "graph-narrative")
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_NARRATIVE.to_string());
+    let system_prompt = template.replace("{{facts}}", &facts_str);
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(state, ws_id, "graph-narrative").await;
+    let port = factory.for_model(&model);
+    match tokio::time::timeout(
+        Duration::from_secs(NARRATIVE_LLM_TIMEOUT_SECS),
+        port.complete(
+            &system_prompt,
+            gyre_domain::narrative::LLM_NARRATIVE_USER_PROMPT,
+            max_tokens,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(text)) if !text.trim().is_empty() => text.trim().to_string(),
+        Ok(Ok(_)) => fallback,
+        Ok(Err(e)) => {
+            tracing::warn!("graph narrative LLM call failed, using template narrative: {e:#}");
+            fallback
+        }
+        Err(_) => {
+            tracing::warn!("graph narrative LLM call timed out, using template narrative");
+            fallback
+        }
+    }
+}
+
+/// Collect grounded facts + template narratives for deltas recorded in a
+/// workspace's repos since `since` (most recent `BRIEFING_NARRATIVE_MAX_DELTAS`
+/// only). Returns `(facts, template_narratives)`; `(None, vec![])` when no
+/// deltas exist in the window. Under a repo filter (HSI §1.5) only the
+/// filtered repo's deltas are collected — the narrative is a repo-derived
+/// briefing section and narrows with the rest.
+async fn collect_architecture_narratives(
+    state: &AppState,
+    ws_id: &Id,
+    since: u64,
+    repo_filter: Option<&str>,
+) -> (Option<serde_json::Value>, Vec<String>) {
+    let repos = match state.repos.list_by_workspace(ws_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("briefing narrative: repo listing failed, skipping: {e:#}");
+            return (None, Vec::new());
+        }
+    };
+    let repos: Vec<_> = repos
+        .into_iter()
+        .filter(|r| repo_filter.is_none_or(|f| r.id.as_str() == f))
+        .collect();
+    let mut recent: Vec<ArchitecturalDelta> = Vec::new();
+    for repo in &repos {
+        if let Ok(ds) = state
+            .graph_store
+            .list_deltas(&repo.id, Some(since), None)
+            .await
+        {
+            recent.extend(ds);
+        }
+    }
+    if recent.is_empty() {
+        return (None, Vec::new());
+    }
+    recent.sort_by_key(|d| std::cmp::Reverse(d.timestamp));
+    recent.truncate(BRIEFING_NARRATIVE_MAX_DELTAS); // slice:ok — Vec<ArchitecturalDelta> length trim, index-typed not string bytes
+
+    // One graph-grounding load per repo touched by the window.
+    let mut groundings: std::collections::HashMap<
+        String,
+        gyre_domain::narrative::NarrativeGrounding,
+    > = std::collections::HashMap::new();
+    for d in &recent {
+        let key = d.repo_id.to_string();
+        // One async load per repo; `Vacant` holds the write slot across the await.
+        if let std::collections::hash_map::Entry::Vacant(slot) = groundings.entry(key) {
+            let g = match load_narrative_grounding(state, &d.repo_id).await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(
+                        "briefing narrative: graph grounding failed for repo {}, \
+                         rendering from delta facts only: {e:?}",
+                        slot.key()
+                    );
+                    gyre_domain::narrative::NarrativeGrounding::default()
+                }
+            };
+            slot.insert(g);
+        }
+    }
+
+    let empty_grounding = gyre_domain::narrative::NarrativeGrounding::default();
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut facts = Vec::new();
+    let mut narratives = Vec::new();
+    for d in &recent {
+        let grounding = groundings
+            .get(&d.repo_id.to_string())
+            .unwrap_or(&empty_grounding);
+        let attribution = delta_attribution(state, d, &mut attribution_cache).await;
+        facts.push(gyre_domain::narrative::build_narrative_facts(
+            d,
+            grounding,
+            attribution.as_deref(),
+        ));
+        let t = gyre_domain::narrative::generate_template_narrative(
+            d,
+            grounding,
+            attribution.as_deref(),
+        );
+        if !t.is_empty() {
+            narratives.push(t);
+        }
+    }
+    (Some(serde_json::Value::Array(facts)), narratives)
 }
 
 /// GET /api/v1/repos/{id}/graph/risks
@@ -709,13 +963,11 @@ pub async fn get_graph_risks(
 ) -> Result<Json<Vec<RiskMetricsResponse>>, ApiError> {
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
-
     let all_nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
-
     let all_edges = state
         .graph_store
         .list_edges(&repo_id, None)
@@ -750,6 +1002,37 @@ pub async fn get_graph_risks(
     Ok(Json(risks))
 }
 
+/// GET /api/v1/repos/{id}/graph/timeline
+/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
+pub async fn get_graph_timeline(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
+    require_repo(&state, &id).await?;
+    let repo_id = Id::new(&id);
+
+    let deltas = state
+        .graph_store
+        .list_deltas(&repo_id, q.since, q.until)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Ground narratives in the repo's live graph (loaded once per request).
+    let grounding = load_narrative_grounding(&state, &repo_id).await?;
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(deltas.len());
+    for d in deltas {
+        let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
+        out.push(DeltaResponse::from_delta(
+            d,
+            &grounding,
+            attribution.as_deref(),
+        ));
+    }
+    Ok(Json(out))
+}
+
 /// GET /api/v1/repos/{id}/graph/diff
 /// Returns the graph diff between two git commit SHAs (?from=&to=).
 ///
@@ -771,11 +1054,24 @@ pub async fn get_graph_diff(
         .await
         .map_err(ApiError::Internal)?;
 
+    // Narratives grounded in the repo's live graph (same grounding as timeline).
+    let grounding = load_narrative_grounding(&state, &repo_id).await?;
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut delta_responses = Vec::with_capacity(deltas.len());
+    for d in deltas {
+        let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
+        delta_responses.push(DeltaResponse::from_delta(
+            d,
+            &grounding,
+            attribution.as_deref(),
+        ));
+    }
+
     Ok(Json(GraphDiffResponse {
         from,
         to,
         message: "full diff requires extraction pipeline; returning all deltas".to_string(),
-        deltas: deltas.into_iter().map(Into::into).collect(),
+        deltas: delta_responses,
     }))
 }
 
@@ -998,14 +1294,15 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
-                && repo_filter.is_none_or(|f| n.repo_id.as_deref() == Some(f))
+                && repo_filter
+                    .is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),
                 description: n.body.clone().unwrap_or_default(),
                 entity_type: "spec_assertion_failure".to_string(),
-                entity_id: n.entity_ref.clone(),
-                spec_path: n.entity_ref.clone(),
+                entity_id: Some(n.source.entity_id.clone()),
+                spec_path: Some(n.source.entity_id.clone()),
                 timestamp: n.created_at as u64,
                 actions: vec![
                     "View Spec".to_string(),
@@ -1177,6 +1474,27 @@ pub async fn assemble_briefing(
         )
     };
 
+    // Architecture narrative (realized-model.md §6): ground the summary in the
+    // workspace's recent graph deltas. LLM synthesis when configured; the
+    // concatenated template narratives are the quality floor (fallback on
+    // unconfigured/error/timeout/empty completion).
+    let summary = {
+        let (facts, template_narratives) =
+            collect_architecture_narratives(state, &ws_id, since, repo_filter).await;
+        match facts {
+            Some(facts) => {
+                let fallback = template_narratives.join(" ");
+                let narrative = llm_architecture_narrative(state, &ws_id, &facts, fallback).await;
+                if narrative.is_empty() {
+                    summary
+                } else {
+                    format!("{summary}. Architecture: {narrative}")
+                }
+            }
+            None => summary,
+        }
+    };
+
     Ok(BriefingResponse {
         workspace_id: workspace_id.to_string(),
         since,
@@ -1328,9 +1646,20 @@ pub async fn briefing_ask(
     // caller's JWT claims before accepting the request-body repo scope —
     // same pattern as spawn/jj/orchestrator handlers.
     if let Some(rid) = &req.repo_id {
-        crate::abac::check_repo_abac(&state, rid, &caller)
-            .await
-            .map_err(ApiError::Forbidden)?;
+        if let Err(reason) = crate::abac::check_repo_abac(&state, rid, &caller).await {
+            // task-104: AbacDenied audit event — per-handler repo-level ABAC
+            // denial outside the ABAC middleware.
+            crate::abac_middleware::record_abac_denied(
+                &state,
+                &caller,
+                "repo",
+                "generate",
+                None,
+                "POST /api/v1/workspaces/:id/briefing/ask",
+            )
+            .await;
+            return Err(ApiError::Forbidden(reason));
+        }
     }
 
     // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
@@ -1556,27 +1885,19 @@ pub async fn link_node_to_spec(
 }
 
 /// GET /workspaces/{id}/graph/concept/{name}
-/// Workspace-scoped concept search — filters nodes across all repos in the workspace
-/// by case-insensitive substring match on `name` or `qualified_name`.
-///
-/// This avoids downloading the full workspace graph for concept queries.
+/// Workspace-scoped concept view projection (realized-model.md §4): each
+/// repo in the workspace resolves the named concept from its own spec
+/// manifest; matched nodes/edges are unioned across repos. A repo lacking
+/// the named concept contributes nothing.
 pub async fn get_workspace_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_workspace(&state, &id).await?;
-
-    let repo_ids: Vec<String> = state
-        .repos
-        .list_by_workspace(&Id::new(&id))
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| r.id.to_string())
-        .collect();
-
-    let response = assemble_concept_results(&state, &repo_ids, &concept_name).await?;
-    Ok(Json(response))
+    // Delegate to the same assembly logic the MCP workspace_graph_concept
+    // tool uses (HSI §11 parity).
+    Ok(Json(
+        assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
+    ))
 }
 
 /// Request body for structural prediction.
@@ -3158,6 +3479,461 @@ mod tests {
         assert!(
             briefing.exceptions.is_empty(),
             "old MR reverts should be filtered out"
+        );
+    }
+
+    // ── Concept view projection (realized-model.md §4) ─────────────────────
+
+    /// Create a real (non-bare) git repo at a tempdir with the given
+    /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+    fn init_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.dev"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::create_dir_all(repo_path.join("specs")).unwrap();
+        std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "seed manifest"]);
+        let path_str = repo_path.to_str().unwrap().to_string();
+        (tmp, path_str)
+    }
+
+    const AUTH_CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+      - modules: ["*::auth*"]
+      - endpoints: ["/api/v1/auth/*"]
+      - specs: ["identity-security.md"]
+"#;
+
+    /// Seed the graph store with an authentication-flavored node set.
+    /// Returns (auth-matching node names, unrelated node name).
+    async fn seed_concept_graph(state: &Arc<AppState>, repo_id: &str) {
+        let auth_type = _new_node(repo_id, "JwtAuthProvider", NodeType::Type);
+        let unrelated_type = _new_node(repo_id, "Invoice", NodeType::Type);
+        let auth_module = {
+            let mut m = _new_node(repo_id, "auth", NodeType::Module);
+            m.qualified_name = "gyre_domain::auth::tokens".to_string();
+            m
+        };
+        let auth_endpoint = {
+            let mut e = _new_node(repo_id, "login", NodeType::Endpoint);
+            e.qualified_name = "api::v1::auth::login".to_string();
+            e
+        };
+        let governed = {
+            let mut g = _new_node(repo_id, "TokenStore", NodeType::Type);
+            g.spec_path = Some("specs/system/identity-security.md".to_string());
+            g
+        };
+        for n in [
+            auth_type.clone(),
+            unrelated_type.clone(),
+            auth_module.clone(),
+            auth_endpoint.clone(),
+            governed.clone(),
+        ] {
+            state.graph_store.create_node(n).await.unwrap();
+        }
+        // Endpoint route path in edge metadata (extractor convention).
+        let mut route_edge = _new_edge(
+            repo_id,
+            &auth_endpoint.id,
+            &auth_type.id,
+            EdgeType::RoutesTo,
+        );
+        route_edge.metadata = Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
+        state.graph_store.create_edge(route_edge).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_returns_manifest_projection_not_substring() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // Point the repo at the real git checkout so the manifest resolves.
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Concept-matching nodes.
+        assert!(names.contains(&"JwtAuthProvider"), "type glob: {names:?}");
+        assert!(names.contains(&"auth"), "module glob: {names:?}");
+        assert!(names.contains(&"login"), "endpoint glob: {names:?}");
+        assert!(names.contains(&"TokenStore"), "spec-governed: {names:?}");
+        // The unrelated node must be excluded. Discriminating assertion
+        // against substring regression: every included node must satisfy a
+        // concept include rule, and exactly the 4 seeded concept nodes do.
+        assert!(
+            !names.contains(&"Invoice"),
+            "unrelated node must be excluded: {names:?}"
+        );
+        assert_eq!(
+            json["nodes"].as_array().unwrap().len(),
+            4,
+            "exactly the 4 concept-matching nodes: {names:?}"
+        );
+
+        // Edge between matched endpoint and matched type is included.
+        assert_eq!(json["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_undefined_concept_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        // "auth" is a substring of the concept name but not a defined
+        // concept — must 404, not fall back to substring matching.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concept/auth"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        drop(tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_repo_without_manifest_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_graph_concept_unions_manifest_projections() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // repo-1 gets a real manifest checkout + concept nodes.
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+        seed_concept_graph(&state, "repo-1").await;
+
+        // repo-2 in the same workspace lacks the concept in its manifest —
+        // contributes nothing.
+        let no_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(no_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+        // A node that WOULD match the concept patterns — must not appear
+        // because repo-2's manifest doesn't define the concept.
+        let mut extra = _new_node("repo-2", "JwtAuthProvider", NodeType::Type);
+        extra.qualified_name = "other::JwtAuthProvider".to_string();
+        state.graph_store.create_node(extra).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Only repo-1's concept nodes — repo-2's JwtAuthProvider must be
+        // absent (its manifest does not define the concept). repo_id fields
+        // distinguish the two repos' identically-named nodes.
+        let repo_ids: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["repo_id"].as_str().unwrap())
+            .collect();
+        assert!(
+            !repo_ids.contains(&"repo-2"),
+            "repo without the concept must contribute nothing: {names:?} {repo_ids:?}"
+        );
+        assert_eq!(names.len(), 4, "only repo-1's projection: {names:?}");
+        drop(tmp);
+        drop(tmp2);
+    }
+
+    // ── Graph narrative generation (realized-model.md §6) ───────────────
+
+    /// Seed repo-1 graph: `billing::search` module containing `VectorIndex`
+    /// (spec-linked), implementing `FullTextPort`. Returns the added node's
+    /// delta_json entry.
+    async fn seed_narrative_graph(state: &Arc<AppState>) -> String {
+        let module = _new_node("repo-1", "search", NodeType::Module);
+        let module_qn = module.qualified_name.clone();
+        let mut ty = _new_node("repo-1", "VectorIndex", NodeType::Type);
+        ty.qualified_name = format!("{module_qn}::VectorIndex");
+        ty.spec_path = Some("specs/billing/indexing.md".to_string());
+        let trt = _new_node("repo-1", "FullTextPort", NodeType::Trait);
+        for n in [&module, &ty, &trt] {
+            state.graph_store.create_node(n.clone()).await.unwrap();
+        }
+        state
+            .graph_store
+            .create_edge(_new_edge("repo-1", &module.id, &ty.id, EdgeType::Contains))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_edge(_new_edge("repo-1", &ty.id, &trt.id, EdgeType::Implements))
+            .await
+            .unwrap();
+        format!(
+            r#"{{"nodes_added":[{{"name":"VectorIndex","node_type":"type","qualified_name":"{}"}}],"edges_added":1}}"#,
+            ty.qualified_name
+        )
+    }
+
+    #[tokio::test]
+    async fn timeline_endpoint_returns_grounded_narrative() {
+        let state = test_state();
+        let (_ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        let delta_json = seed_narrative_graph(&state).await;
+
+        // Provenance: a real agent record plus a persona binding.
+        let agent = gyre_domain::Agent::new(Id::new("agent-narr-1"), "worker-9", 1000);
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_personas", "agent-narr-1", "backend-dev".to_string())
+            .await
+            .unwrap();
+
+        let mut delta = _new_delta("repo-1", "deadbeefcafe", 2000);
+        delta.agent_id = Some(Id::new("agent-narr-1"));
+        delta.delta_json = delta_json;
+        state.graph_store.record_delta(delta).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos/repo-1/graph/timeline")
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let narrative = json[0]["narrative"].as_str().unwrap();
+        assert!(
+            narrative.contains("New type `VectorIndex` added to module `qualified::search`."),
+            "{narrative}"
+        );
+        assert!(
+            narrative.contains("Implements trait `FullTextPort`."),
+            "{narrative}"
+        );
+        assert!(
+            narrative.contains("Governed by spec: specs/billing/indexing.md."),
+            "{narrative}"
+        );
+        assert!(
+            narrative.contains("Produced by agent worker-9 under persona backend-dev."),
+            "{narrative}"
+        );
+        assert!(
+            narrative.contains("1 new relationship established."),
+            "{narrative}"
+        );
+    }
+
+    /// Delta with no graph seeding: template still renders from the delta's
+    /// own qualified names.
+    fn narrative_delta() -> ArchitecturalDelta {
+        let mut delta = _new_delta("repo-1", "abc123", 2000);
+        delta.delta_json =
+            r#"{"nodes_added":[{"name":"VectorIndex","node_type":"type","qualified_name":"billing::search::VectorIndex"}]}"#
+                .to_string();
+        delta
+    }
+
+    #[tokio::test]
+    async fn briefing_summary_falls_back_to_template_narrative_without_llm() {
+        let mut s = (*test_state()).clone();
+        s.llm = None;
+        let state = std::sync::Arc::new(s);
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        state
+            .graph_store
+            .record_delta(narrative_delta())
+            .await
+            .unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.summary.contains("MRs merged"),
+            "{}",
+            briefing.summary
+        );
+        assert!(
+            briefing.summary.contains(
+                "Architecture: New type `VectorIndex` added to module `billing::search`."
+            ),
+            "{}",
+            briefing.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_summary_uses_llm_narrative_when_configured() {
+        // test_state() wires the echo mock: a successful completion equals the
+        // user prompt, which only appears if the LLM path actually ran.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        state
+            .graph_store
+            .record_delta(narrative_delta())
+            .await
+            .unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.summary.contains("MRs merged"),
+            "{}",
+            briefing.summary
+        );
+        assert!(
+            briefing
+                .summary
+                .contains(gyre_domain::narrative::LLM_NARRATIVE_USER_PROMPT),
+            "LLM-synthesized narrative expected in summary: {}",
+            briefing.summary
+        );
+        assert!(
+            !briefing.summary.contains("New type `VectorIndex`"),
+            "template fallback text must not appear when the LLM path succeeds: {}",
+            briefing.summary
         );
     }
 

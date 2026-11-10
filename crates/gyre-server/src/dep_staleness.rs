@@ -155,6 +155,62 @@ where
             updated_edge.status = DependencyStatus::Stale;
             stale_count += 1;
 
+            // Notify the source repo's workspace members who act on
+            // dependencies (user-management.md §Notification Entity:
+            // DependencyStale — Medium, needs attention eventually).
+            // Transition-only, so each edge notifies once per stale event.
+            // Best-effort: the edge status update below is the durable artifact.
+            if let Ok(Some(ws)) = state.workspaces.find_by_id(&Id::new(&workspace_id)).await {
+                let members = state
+                    .workspace_memberships
+                    .list_by_workspace(&Id::new(&workspace_id))
+                    .await
+                    .unwrap_or_default();
+                let source_name = all_repos
+                    .iter()
+                    .find(|r| r.id.as_str() == edge.source_repo_id.as_str())
+                    .map(|r| r.name.as_str())
+                    .unwrap_or(edge.source_repo_id.as_str());
+                let target_name = target_repo
+                    .map(|r| r.name.as_str())
+                    .unwrap_or(edge.target_repo_id.as_str());
+                let title = format!("Dependency stale: {source_name} → {target_name}");
+                let body = serde_json::json!({
+                    "dependency_edge_id": edge.id.as_str(),
+                    "source_repo_id": edge.source_repo_id.as_str(),
+                    "target_repo_id": edge.target_repo_id.as_str(),
+                    "version_pinned": edge.version_pinned,
+                    "target_version_current": target_version,
+                    "version_drift": drift,
+                })
+                .to_string();
+                let tenant_id = ws.tenant_id.to_string();
+                for member in &members {
+                    if !matches!(
+                        member.role,
+                        gyre_domain::WorkspaceRole::Admin
+                            | gyre_domain::WorkspaceRole::Developer
+                            | gyre_domain::WorkspaceRole::Owner
+                    ) {
+                        continue;
+                    }
+                    crate::notifications::notify_rich(
+                        state,
+                        Id::new(&workspace_id),
+                        member.user_id.clone(),
+                        gyre_common::NotificationType::DependencyStale,
+                        &title,
+                        &tenant_id,
+                        Some(body.clone()),
+                        Some(edge.source_repo_id.to_string()),
+                        Some(edge.source_repo_id.to_string()),
+                        "repo",
+                        None,
+                    )
+                    .await;
+                }
+            }
+
             // Create auto-task if policy allows.
             if policy.auto_create_update_tasks {
                 let source_name = all_repos
@@ -661,6 +717,129 @@ mod tests {
         assert_eq!(
             after_cycle2.target_version_current,
             Some("2.0.0".to_string())
+        );
+    }
+
+    /// user-management.md §Notification Entity: a dependency edge newly
+    /// transitioning to Stale notifies the source repo's workspace
+    /// Admins/Developers/Owners (DependencyStale, Medium) exactly once per
+    /// stale event.
+    #[tokio::test]
+    async fn stale_transition_notifies_workspace_members_once() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+
+        let ws = Workspace::new(
+            Id::new("ws-notify"),
+            Id::new("tenant-1"),
+            "notify-ws",
+            "notify-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                Id::new(uid),
+                Id::new("ws-notify"),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        let policy = gyre_domain::DependencyPolicy {
+            stale_dependency_alert_days: 30,
+            auto_create_update_tasks: false,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-notify"), &policy)
+            .await
+            .unwrap();
+
+        create_repo(&state, "repo-nsrc", "repo-nsrc", "ws-notify").await;
+        create_repo(&state, "repo-ntgt", "repo-ntgt", "ws-notify").await;
+
+        let edge = create_edge("repo-nsrc", "repo-ntgt", None, 0);
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Cycle 1: edge goes stale → one DependencyStale notification.
+        run_once(&state).await.unwrap();
+        let admin_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-admin"),
+            Some(&Id::new("ws-notify")),
+            None,
+            None,
+            None,
+            &[],
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(admin_notifs.len(), 1);
+        let n = &admin_notifs[0];
+        assert_eq!(
+            n.notification_type,
+            gyre_common::NotificationType::DependencyStale
+        );
+        assert_eq!(
+            n.priority,
+            gyre_common::NotificationPriority::Medium,
+            "DependencyStale is Medium per user-management.md"
+        );
+        assert_eq!(n.source.entity_type, "repo");
+        assert_eq!(n.source.entity_id, "repo-nsrc");
+        assert_eq!(
+            n.action_url.as_deref(),
+            Some("/workspaces/notify-ws/r/repo-nsrc"),
+            "deep link resolves to the dependent repo"
+        );
+
+        let viewer_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-viewer"),
+            Some(&Id::new("ws-notify")),
+            None,
+            None,
+            None,
+            &[],
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(viewer_notifs.is_empty(), "Viewer is not notified");
+
+        // Cycle 2: edge stays stale (no new transition) → no duplicate.
+        run_once(&state).await.unwrap();
+        let admin_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-admin"),
+            Some(&Id::new("ws-notify")),
+            None,
+            None,
+            None,
+            &[],
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            admin_notifs.len(),
+            1,
+            "no re-notification while the edge stays stale"
         );
     }
 }
