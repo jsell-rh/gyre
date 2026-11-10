@@ -9,21 +9,24 @@
 #   specs.rs spec-rejected notification tenant fallback — FIXED in task-193's
 #   repair round (tenant now resolved from the workspace record; fanout
 #   skipped + logged when unresolvable). Entry removed, count lowered 5→4.
-#   auth.rs JWT claims.tenant_id fallback — FIXED in task-103's repair
-#   round: the documented "absent claim = default tenant" contract is now
-#   the claim's serde schema default (default_tenant_claim on JwtClaims),
-#   not a use-site unwrap_or fallback; the value is a deterministic
-#   function of the verified token, and "default" is the real bootstrapped
-#   Tenant row. Entry removed, count lowered 4→3.
-#   git_http.rs push-event ws_id fallback — FIXED (task-097 F3 skip-and-log
-#   pattern); dead entry dropped in task-095's repair round (7a0bd1db7).
+#   git_http.rs push-event ws_id fallback — FIXED in task-168's repair
+#   round (upstream of the 72ad2a128 merge); dead entry dropped earlier in
+#   task-095's repair round (7a0bd1db7). Entry removed, count lowered 4→3.
+#   auth.rs JWT claims.tenant_id fallback — FIXED independently by task-103
+#   (cead5a881 on its own branch) and task-104's verification repair round:
+#   the documented "absent claim = default tenant" single-tenant IdP
+#   contract is now the claim's serde schema default (default_tenant_claim
+#   on JwtClaims) applied at deserialization, not a use-site unwrap_or
+#   fallback; the value is a deterministic function of the verified token,
+#   and "default" is the real bootstrapped Tenant row. Entry removed,
+#   count lowered 3→2.
 #   gate_executor.rs gate-event ws_id fallback — FIXED in task-134's
 #   gate-executor rewrite: an unresolvable MR now skips the scope-scoped
 #   event emission and logs instead of fabricating a "default" workspace.
-#   The task-134 rebases (fefde294, then task-177's 7747376) combine both
-#   sides' fixes in one tree (task-103's auth.rs fix from the base,
-#   task-134's gate-executor fix from the branch), leaving exactly one
-#   flagged site (verified by running the checker's scan on the merged
-#   tree); entries removed and count lowered 3→1 per the any-growth-fails
-#   freeze principle.
+#   The task-134 rebase onto task-108's b5a872087 (task-103's auth.rs fix
+#   from the base, task-134's gate-executor fix from the branch) combines
+#   both sides' fixes in one tree, leaving exactly one flagged site
+#   (verified by running the checker's scan on the merged tree); entry
+#   removed and count lowered 2→1 per the any-growth-fails freeze
+#   principle.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
