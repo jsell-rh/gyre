@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "0cbd5cecb"]
 ---
 
 ## Spec Excerpt
@@ -154,24 +154,51 @@ without the field, failing the lib-test build with E0063, and
 containment error. Both fixed; `cargo fmt --check -p gyre-server` is clean
 and the focused suites pass (below). No production behavior changed.
 
+### Rebase repair: task-117 compute target model merge (0cbd5cecb)
+
+This round merged assignment base `bd49c78` (task-117 compute target
+model) into the candidate branch. The `spawn.rs` conflict kept both
+sides: task-117's SSH agent-name validation, relocated by the base to
+before any state is written (M19.5-A), runs first, followed by task-150's
+§4.3 persona chain resolution and binding — both reject before the agent
+row, token, worktree, or task assignment are created, preserving the
+handler's compensating-rollback invariant.
+
+The merge also exposed test drift: task-117 added a real Kubernetes
+dispatch arm (`kubectl apply` with a generated Pod manifest), so
+Kubernetes-typed compute targets no longer fall through the container/ssh
+arms to `LocalTarget`. `create_prompt_dump_compute_target` still relied
+on that fall-through executing `config.command` as a local `env | sort`
+script, so `spawn_injects_all_four_system_prompts_with_persona` and
+`spawn_without_persona_injects_prompts_but_no_persona` never observed a
+dump. The helper now uses the same stub-`kubectl` manifest capture double
+as `create_env_dump_compute_target` / `create_meta_prompt_dump_compute_target`
+(real kubernetes dispatch, stub binary at the process boundary), and the
+assertions were upgraded from substring scans of a raw env dump to exact
+name/value pairing on `spec.containers[0].env` via `pod_env_map` — the
+persona assertion is now a full equality on the injected
+`GYRE_PROMPT_PERSONA` value. No production behavior changed; the §4.3
+injection code itself was untouched by the drift.
+
 ### Test evidence
 
 Focused probes (logs under `/tmp/stage/review-evidence/`):
 
 - `cargo test -p gyre-server --lib -- mcp::tests:: api::spawn::tests::
-  api::prompts::` — **151 passed, 0 failed** (this round, log
-  `task150-impersonation-merge-repair-tests.log`; full lib test target
-  compiles), including:
-  `spawn_injects_all_four_system_prompts_with_persona` (env-dump compute
-  target asserts all four `GYRE_PROMPT_*` vars with task title, spec ref,
-  branch, workspace scope), `spawn_without_persona_injects_prompts_but_no_persona`,
+  api::prompts::` — **157 passed, 0 failed** (this round, log
+  `task150-merge-resolution-tests.log`; full lib test target compiles),
+  including:
+  `spawn_injects_all_four_system_prompts_with_persona` (stub-kubectl Pod
+  manifest capture asserts all four `GYRE_PROMPT_*` vars with exact
+  name/value pairing — task title, spec ref, branch, workspace scope),
+  `spawn_without_persona_injects_prompts_but_no_persona`,
   `spawn_persona_slug_fails_closed` (unknown slug 400 "not found in scope
   chain", Pending persona 400, no orphaned agent rows), the four
   `mcp_prompts_*` suites (list shape, all four get handlers, `-32602`
   errors, scope-chain persona resolution, budget/scope constraints),
   `spawn_delivers_meta_spec_prompt_to_agent_env` (task-116 delivery guard)
   and `spawn_omits_meta_spec_set_sha_without_required_meta_specs`
-  (empty-set null case, added this round).
+  (empty-set null case).
 - `docker/gyre-agent` `npm test` — 12/12 pass (cred-proxy + agent-runner)
   (pre-repair round; the repair touches no agent-runner code).
 - Invariant scripts all exit 0: check-arch, check-mcp-write-tools,
