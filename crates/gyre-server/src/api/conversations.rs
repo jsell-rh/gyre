@@ -45,6 +45,17 @@ pub async fn get_conversation(
         if let Err(reason) =
             crate::abac::check_workspace_abac_for_read(&state, workspace_id.as_str(), claims).await
         {
+            // task-104: AbacDenied audit event — per-handler workspace-level
+            // ABAC denial outside the ABAC middleware.
+            crate::abac_middleware::record_abac_denied(
+                &state,
+                &auth,
+                "workspace",
+                "read",
+                None,
+                "GET /api/v1/conversations/:sha",
+            )
+            .await;
             return (StatusCode::FORBIDDEN, reason).into_response();
         }
     }

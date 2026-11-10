@@ -1376,9 +1376,20 @@ pub async fn briefing_ask(
     // caller's JWT claims before accepting the request-body repo scope —
     // same pattern as spawn/jj/orchestrator handlers.
     if let Some(rid) = &req.repo_id {
-        crate::abac::check_repo_abac(&state, rid, &caller)
-            .await
-            .map_err(ApiError::Forbidden)?;
+        if let Err(reason) = crate::abac::check_repo_abac(&state, rid, &caller).await {
+            // task-104: AbacDenied audit event — per-handler repo-level ABAC
+            // denial outside the ABAC middleware.
+            crate::abac_middleware::record_abac_denied(
+                &state,
+                &caller,
+                "repo",
+                "generate",
+                None,
+                "POST /api/v1/workspaces/:id/briefing/ask",
+            )
+            .await;
+            return Err(ApiError::Forbidden(reason));
+        }
     }
 
     // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
