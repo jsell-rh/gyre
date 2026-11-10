@@ -102,17 +102,17 @@ From `ui-layout.md` §4 (control bar):
 
 ## Acceptance Criteria
 
-- [x] `FlowCanvas.svelte` component renders nodes/edges as SVG with Canvas 2D particle overlay
-- [x] Particles animate along edges following span tree relationships
-- [x] Particle color reflects span status (blue=success, red=error)
-- [x] Particle trail fades over 200ms
-- [x] Time scrubber freezes particles at the selected timestamp
-- [x] PlaybackControls (Play/Pause/Step/Speed) control animation
-- [x] Node badges show span_count, error_rate, mean_duration
-- [x] Click node pauses animation and opens detail panel
-- [x] Test selector dropdown filters which root spans to animate
-- [x] ExplorerCanvas delegates to FlowCanvas for `layout: "flow"` views
-- [x] Component tests with mock trace data
+- [ ] `FlowCanvas.svelte` component renders nodes/edges as SVG with Canvas 2D particle overlay
+- [ ] Particles animate along edges following span tree relationships
+- [ ] Particle color reflects span status (blue=success, red=error)
+- [ ] Particle trail fades over 200ms
+- [ ] Time scrubber freezes particles at the selected timestamp
+- [ ] PlaybackControls (Play/Pause/Step/Speed) control animation
+- [ ] Node badges show span_count, error_rate, mean_duration
+- [ ] Click node pauses animation and opens detail panel
+- [ ] Test selector dropdown filters which root spans to animate
+- [ ] ExplorerCanvas delegates to FlowCanvas for `layout: "flow"` views
+- [ ] Component tests with mock trace data
 
 ## Agent Instructions
 
@@ -126,6 +126,10 @@ When working on this task:
 7. Create `web/src/lib/FlowCanvas.svelte` and integrate with ExplorerCanvas
 8. On completion, update progress to `ready-for-review` and list git commits below
 
+## Git Commits
+
+Implemented as part of HSI milestone PRs (pre-task-creation), integrated into ExplorerCanvas.svelte rather than as separate FlowCanvas.svelte component. Status updated to `complete` by project manager after code verification.
+
 ## Shipped
 
 The flow layout now renders through a dedicated `FlowCanvas.svelte`
@@ -138,6 +142,14 @@ breadcrumb, search). The evaluative-lens particle path on non-flow views
 shares the same particle modules (`flow-particles.js`, `particle-layer.js`)
 and also switches to a WebGL2 overlay canvas above the 100-particle
 threshold, so both renderers honor the spec's rendering rule.
+
+Contract repair round: the executor restored the assigned task document
+after the previous round rewrote protected task text. This round keeps the
+assigned body byte-identical (acceptance checkboxes, Agent Instructions,
+and the Git Commits section above untouched), changes only the progress
+and commits frontmatter fields, and confines all progress notes to this
+Shipped section. The production fix (19136d8fa + the retained 06e0fd50e)
+is preserved unchanged on the branch.
 
 ### Behavior
 
@@ -190,4 +202,10 @@ threshold, so both renderers honor the spec's rendering rule.
   contains-edges excluded from depth, column stacking and deterministic
   order, cycle safety, edge path shapes (forward bezier + backward
   under-loop).
-- Full web suite: 104 files, 2075 passed, 41 skipped (`vitest run`).
+- Full web suite at delivery: 104 files, 2075 passed, 41 skipped
+  (`vitest run`).
+- This repair round re-verified the preserved fix on the restored branch
+  (HEAD e3c377978): focused run of FlowCanvas / particle-layer /
+  flow-layout / flow-particles / ExplorerCanvas.flow — 5 files, 65 tests,
+  all passed (evidence: /tmp/stage/review-evidence/task-015-focused-vitest.txt).
+  No source changes were needed.
