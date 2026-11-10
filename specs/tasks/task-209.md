@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,80 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-All three HSI §12 gaps are implemented in production code and re-verified on
-this branch after the requirements-epoch remerge onto base 8729385d3 (branch
-merge 2a8029de3; the base itself only touched pipeline scripts, so the full
-implementation carried over intact). The two task-labeled commits below are
-the surviving product-surface commits from the earlier delivery rounds,
-re-based onto the current base through the pipeline branch merges.
-
-### Behavior shipped
-
-- **Spec amendment (Part 1)** — `specs/system/human-system-interface.md` §12
-  Judgment Ledger carries a concrete Sources table (category → table → human-
-  attribution key → workspace-attribution key), states when each event is
-  written, and pins `?type=` values to `approval|rejection|gate|trust|meta-spec`
-  (exactly the `JudgmentType` wire strings). Approvals attribute via
-  `spec_approvals.approver_id` (canonical user Id); rejections/revocations via
-  `rejected_by`/`revoked_by` (the declining human); `audit_events.user_id` is
-  the human key for gate/trust/meta-spec events (KeyBinding labels and
-  `audit_events.agent_id` are explicitly NOT ledger keys).
-- **Write paths (Part 3)** — `AuditEventType` has `TrustChange`/`GateOverride`/
-  `MetaSpecPublish` variants. Trust transition via `PUT /api/v1/workspaces/:id`
-  writes a `trust_change` audit event attributed to the acting user. A human
-  approval review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_type/from/to); agent-token approvals do
-  not qualify. Meta-spec registry create/update write `meta_spec_publish`
-  events with kind/name/version/content_hash and workspace attribution.
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user`
-  (SQLite + Postgres + mem adapters, in parity) unions `spec_approvals`
-  (approvals + rejections, workspace via LEFT JOIN on `spec_ledger_entries`,
-  real SQL `WHERE` filter — not stamping) with `audit_events` rows of the
-  three judgment event types, sorts reverse-chronologically, and applies
-  limit/offset to the merged stream. `JudgmentType::GateOverride` exists with
-  `as_str() = "gate"`; `from_db_str` accepts `gate`.
-- **Notification filtering** — `get_my_notifications`, the unread-count
-  badge, and the MCP inbox tool all exclude types disabled in
-  `user_notification_preferences`, in the storage query (before pagination);
-  background de-dup scanners are exempt. `PUT .../notification-preferences`
-  rejects unknown `notification_type` values (400).
-- **Auth provider info** — `GET /api/v1/users/me` returns `oidc_issuer` and
-  `last_login_at` (read-only; recorded by the server during OIDC/JWT auth
-  with a debounce so token validation does not write per-request;
-  API-key-only users get `null`); rendered read-only in
-  `web/src/components/UserProfile.svelte`.
-
-### Test evidence (this branch, this round)
-
-- `cargo check --all` — pass (full workspace type-check, 8m18s).
-- `cargo test -p gyre-adapters user_profile` — 11/11 pass (judgment ledger:
-  4-source merge, reverse-chron, workspace filter drops unattributed, type
-  filter selects source, rejection attributed to withdrawer, pagination over
-  merged stream; notification prefs; inbox exclusion for list+count; login
-  debounce; tokens).
-- `cargo test -p gyre-adapters notification` — 7/7 pass.
-- `cd web && npx vitest run src/__tests__/UserProfile.test.js` — 26/26 pass
-  (profile fields incl. auth-provider/last-login rendering, preference
-  toggles).
-- `scripts/check-arch.sh`, `check-migration-versions.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`,
-  `check-task-commit-attribution.sh` — all pass.
-- `scripts/check-tenant-filter.sh` fails in this sandbox at mawk parse time
-  (gawk-only 3-arg `match()`; script unchanged by this task, CI runs it with
-  `|| true`) — environment restriction, not a code defect; recorded for
-  remote verification.
-
-### Verifier must run (gyre-server test compilation deferred per budget)
-
-- `cargo test --all`
-- `cd web && npm test`
-- Focused server tests: `trust_transition_writes_trust_change_audit_event`
-  (workspaces.rs), `human_approval_on_failed_gate_writes_gate_override_event`
-  (merge_requests.rs), `publish_writes_meta_spec_publish_audit_event`
-  (meta_specs.rs), `get_me_returns_recorded_auth_provider_info`,
-  `disabled_preference_excludes_type_from_inbox_and_count` (users.rs), and
-  the `/users/me/judgments` endpoint tests in specs.rs / merge_requests.rs /
-  meta_specs.rs.
