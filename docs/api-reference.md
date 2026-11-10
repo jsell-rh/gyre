@@ -36,7 +36,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
-| `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6) |
+| `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6); optional `?has_trace=true` filters to MRs with captured gate traces and `?limit=N` returns the N most recent — the MR-discovery list the explorer view generator injects into its LLM prompt (HSI §3, task-089) |
 | `POST/GET` | `/api/v1/workspaces/{workspace_id}/messages` | Send a message to all workspace members / list messages; body: `{to: {"agent": "<id>"}\|{"workspace": "<id>"}\|"broadcast", kind, tier?: "directed", payload?}`; `payload` is validated against the kind's schema (message-bus.md §Payload Schemas) — a non-object payload, a missing/null required field, or a schema-known field with the wrong wire type (string/unsigned-integer/number/string-array per the table) is rejected with 400 naming the field; messages are Ed25519-signed at rest (Message Bus Phase 3) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/presence` | Workspace presence — `[{user_id, session_id, view, workspace_id, last_seen}]`; stale entries evicted every 30 s (HSI §7, S1.5) |
 | `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
@@ -50,6 +50,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
+| `POST` | `/api/v1/repos/{id}/sync-specs` | Re-run the spec-ledger sync against the repo's default-branch HEAD (same sync the post-receive hook runs on push); used by `gyre bootstrap` step 6 to initialize the spec registry at first-run. ABAC `repo:write`; handler additionally verifies the repo's workspace tenant matches the caller's tenant. Returns `{registered, head_sha}` (platform-model.md §8) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
@@ -58,7 +59,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
 | `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, reason}` — caller must be original approver or Admin (returns 403 otherwise); revoker identity derived server-side (client must not supply `revoked_by`) (CISO M12.3-A, M12.3) |
-| `GET` | `/api/v1/specs` | List all specs with ledger state — reads `specs/manifest.yaml` + ledger; each entry includes `path`, `title`, `owner`, `sha`, `approval_status`, `drift_status`, `kind?` (M21.1); `?kind=<kind>` filters by spec kind (`meta:persona`, `meta:principle`, `meta:standard`, `meta:process`) (M32) |
+| `GET` | `/api/v1/specs` | List all specs with ledger state — reads `specs/manifest.yaml` + ledger; each entry includes `path`, `title`, `owner`, `sha`, `approval_status`, `drift_status`, `kind?` (M21.1); `?kind=<kind>` filters by spec kind (`meta:persona`, `meta:principle`, `meta:standard`, `meta:process`) (M32); `?workspace_id=<id>` restricts the listing to entries owned by that workspace — directly via `workspace_id` or via the owning repo (ui-navigation §2/§10) |
 | `GET` | `/api/v1/specs/pending` | Specs awaiting approval — ledger entries with `approval_status: Pending` (M21.1) |
 | `GET` | `/api/v1/specs/drifted` | Specs with open drift-review tasks — `drift_status: Drifted` (M21.1) |
 | `GET` | `/api/v1/specs/index` | Auto-generated markdown index of all specs in manifest (M21.1) |
@@ -173,10 +174,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/auth/key-binding` | Bind ephemeral Ed25519 public key to caller's identity; body: `{public_key: base64, user_signature: base64, ttl_secs?}`; server countersigns as timestamp witness; returns `KeyBindingResponse` with `platform_countersign`; TTL capped at 24h (TASK-006, authorization-provenance §2.3) |
 | `DELETE` | `/api/v1/auth/key-binding/:id` | Revoke a specific key binding; `:id` is the hex-encoded Ed25519 public key (64 hex chars); only the binding owner or a tenant admin can revoke; returns 204 on success, 404 if not found, 403 if not authorized; emits `key_binding.revoked` audit event (TASK-047, authorization-provenance §2.3, §7.7) |
 | `DELETE` | `/api/v1/auth/key-bindings` | Revoke all active key bindings for the authenticated user; useful for logout flow; returns 204; emits `key_binding.revoked` for each revoked binding (TASK-047, authorization-provenance §2.3, §7.7) |
+| `POST` | `/api/v1/users` | Create a user (bootstrap: the admin user of a new tenant) and mint an authenticating API key in the same call (platform-model.md §8). **Admin only** (per-handler role check). Body: `{username, tenant_id, roles?}` — `tenant_id` is required and must reference an existing tenant (the user is scoped at creation; the auth extractor fail-closes on unbound users). Response: `{user, api_key: {key, name}}` — `key` is the plaintext `gyre_<uuid>` API key, returned exactly once; only its SHA-256 hash is persisted (task-099) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
-| `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
-| `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
-| `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
 | `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification delivery preferences — per-type channels (email, in-app, webhook), quiet hours, digest frequency (HSI §12) |
 | `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
 | `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
@@ -196,17 +195,20 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/workspaces/{id}/briefing/ask` | SSE Q&A on the workspace briefing — streams LLM-generated answers to a question about recent changes; body: `{question}`; returns `text/event-stream` (S3.2, HSI) |
 | `GET` | `/api/v1/workspaces/{id}/graph/concept/{concept_name}` | Workspace-wide concept search — nodes matching `concept_name` across all repos in the workspace (M30) |
 | `GET/POST` | `/api/v1/workspaces/{id}/explorer-views` | List / create named explorer views (saved graph perspectives); body: `{name, description?, query?, layout?}` (S3.1) |
-| `POST` | `/api/v1/workspaces/{id}/explorer-views/generate` | LLM-generate an explorer view from a natural-language description; body: `{prompt}`; returns a draft `ExplorerView` (S3.1) |
+| `POST` | `/api/v1/workspaces/{id}/explorer-views/generate` | LLM-generate an explorer view (ViewSpec: graph query + layout + explanation) from a natural-language question; body: `{question, repo_id?, previous_spec?}` — `previous_spec` is the prior generated view for refinement turns; returns `text/event-stream` with `partial` and `complete` events (`complete`: `{view_spec, explanation, fallback?}` — invalid LLM output yields `view_spec: null` plus a fallback list view; a `"flow"` layout is only returned when its `trace_source.mr_id` has captured trace data, otherwise it falls back to `"graph"`); the prompt is injected with the workspace's recent MRs with trace data for `trace_source` selection (HSI §3, task-089) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/explorer-views/{view_id}` | Read / update / delete a named explorer view (S3.1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
+| `GET` | `/api/v1/workspaces/{id}/meta-specs/rollout-policy` | Get the workspace's reconciliation rollout policy — `{strategy: immediate\|rolling\|background, max_concurrent_agents, priority: high\|normal\|low, auto_merge}`; returns the spec default (rolling/normal/5/false) if unset (meta-spec-reconciliation §7) |
+| `PUT` | `/api/v1/workspaces/{id}/meta-specs/rollout-policy` | Update the rollout policy; body: `{strategy, max_concurrent_agents?, priority?, auto_merge?}` (omitted fields keep current values); **Admin only**; 400 on unknown strategy/priority or `max_concurrent_agents < 1` (meta-spec-reconciliation §7) |
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
 | `POST` | `/api/v1/workspaces/{id}/meta-specs/preview` | Trigger async preview of a meta-spec change — returns `{preview_id}`; runs reconciliation in background (M32, HSI §1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-specs/preview/{preview_id}` | Poll preview status — `{status: pending\|running\|complete\|failed, result?: {affected_agents, drift_count, sample_diffs}}` (M32, HSI §1) |
-| `POST/GET` | `/api/v1/meta-specs-registry` | Create (**Admin only**) / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; `GET` with `?scope=Workspace&scope_id=` requires membership of that workspace; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
-| `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE) |
+| `POST/GET` | `/api/v1/meta-specs-registry` | Create (**Admin only**) / list DB-backed meta-spec registry entries — `{id, name, kind, scope, scope_id, prompt, version, content_hash, required, approval_status}`; filters `?scope=&scope_id=&kind=&required=`; `GET` with `?scope=Workspace&scope_id=` requires membership of that workspace (agent-runtime §2) |
+| `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE); a content PUT bumps version and archives the prior version (approval-only PUT does not); DELETE returns 409 if spec bindings reference it |
 | `GET` | `/api/v1/meta-specs-registry/{id}/versions` | List all versions of a meta-spec registry entry |
 | `GET` | `/api/v1/meta-specs-registry/{id}/versions/{version}` | Get a specific version snapshot |
+| `GET/PUT` | `/api/v1/specs/{path}/meta-spec-bindings` | List / replace the spec-level meta-spec binding set — PUT body `{bindings: [{meta_spec_id, pinned_version}]}` (declarative replace); pinned version must exist in the meta-spec's history; requires membership in the workspace owning the spec (Developer role or above; agent-runtime §2 Spec-Level Binding; path is URL-encoded) |
 | `POST/GET` | `/api/v1/workspaces/{id}/llm/config` | **Admin only** — Create / list per-workspace LLM function overrides; each entry: `{function_name, model, temperature?, max_tokens?, provider: anthropic\|vertex}` (LLM integration) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/llm/config/{function}` | Get effective config / set override / remove override for a specific LLM function in this workspace (LLM integration) |
 | `POST/GET` | `/api/v1/workspaces/{id}/llm/prompts` | **Admin only** — List / manage per-workspace prompt template overrides for LLM functions (LLM integration) |
@@ -217,9 +219,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
-| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s) (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
-| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task (Admin only) (M11.1) |
+| `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task, revoke agent token (Admin only) (M11.1, task-103) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
@@ -251,6 +253,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
+| `POST` | `/api/v1/secrets` | Create a secret, or update the value of an existing secret with the same `(scope, scope_id, name)` in the tenant — body: `{name, scope: "tenant"\|"workspace"\|"repo"\|"task", scope_id?, secret_type: "static"\|"ephemeral"\|"rotated"\|"derived", value, expires_at?}`; **Admin only** (ABAC `secret` resource + in-handler role check); `scope_id` is validated against the caller's tenant (404 unknown, 403 cross-tenant); the plaintext `value` is accepted here and NEVER returned by any endpoint (values encrypted at rest, AES-256-GCM); returns metadata (platform-model.md §7, task-098) |
+| `GET` | `/api/v1/secrets` | List secret metadata by scope — `?scope=tenant\|workspace\|repo\|task&scope_id=<uuid>` (scope_id required for workspace/repo/task); **Admin only**; returns `[{id, name, scope, scope_id, secret_type, created_by, created_at, expires_at, last_rotated_at, tenant_id}]` — never values (platform-model.md §7, task-098) |
+| `DELETE` | `/api/v1/secrets/{id}` | Delete a secret — **Admin only**; 404 if absent (or in another tenant); 204 on success (platform-model.md §7, task-098) |
+| `POST` | `/api/v1/secrets/{id}/rotate` | Force rotation — body: `{new_value, expires_at?}`; replaces the value and updates `last_rotated_at`; **Admin only**; returns metadata, never the value (platform-model.md §7, task-098) |
 | `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
 | `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins (immutable Deny evaluated first); default-deny (M22.6); **400** on create for reserved name prefixes `trust:` / `builtin:` — server-managed (HSI §2, TASK-077) |
@@ -394,6 +400,13 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 | `container_crashed` | Container exited with non-zero code or was force-killed (M23) |
 | `container_oom` | Container OOM-killed by the kernel (M23) |
 | `container_network_blocked` | Outbound network attempt blocked by `--network=none` (G8, M23) |
+| `agent_spawned` | Agent spawned via `POST /api/v1/agents/spawn` (task-103) |
+| `agent_completed` | Agent completed via `POST /api/v1/agents/{id}/complete` (task-103) |
+| `agent_killed` | Admin force-killed an agent (task-103) |
+| `agent_dead` | Stale agent detector marked an agent Dead (task-103) |
+| `agent_heartbeat` | Agent heartbeat received (task-103) |
+| `agent_token_revoked` | Agent auth token revoked — completion, stop, or admin kill (task-103) |
+| `agent_reassigned` | Admin reassigned an agent's task to another agent (task-103) |
 
 `outcome` is `success` | `failure` | `blocked` (default `success`). Unrecognized
 `event_type` strings are preserved as custom events.
@@ -444,6 +457,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `briefing://` | `briefing://{workspace_id}` | Workspace briefing narrative: completed MRs, in-progress tasks, metrics (HSI §9). Optional `?since=<epoch>` query param. |
 | `notifications://` | `notifications://{workspace_id}` | Inbox notifications for authenticated user (HSI §11). Optional `?min_priority=&max_priority=` query params. |
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
+| `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
+| `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
 
 Example MCP `initialize` call:
 ```json

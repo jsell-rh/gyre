@@ -6,7 +6,7 @@
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
-//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view by name pattern
+//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -228,6 +228,10 @@ pub struct GraphDiffResponse {
 #[derive(Deserialize)]
 pub struct BriefingQuery {
     pub since: Option<u64>,
+    /// Optional repo filter — narrows the briefing to a single repo (HSI §1.5
+    /// repo-scope Briefing row / §9 "Briefing endpoint"). Must belong to the
+    /// path workspace; otherwise 404 (no repo-existence leak).
+    pub repo_id: Option<String>,
 }
 
 /// One completed-agent entry for the Briefing "Completed" section (HSI §4).
@@ -286,6 +290,12 @@ pub struct BriefingMetrics {
 pub struct BriefingAskRequest {
     pub question: String,
     pub history: Option<Vec<HistoryEntry>>,
+    /// Optional repo scope — narrows the Q&A to one repo in the workspace
+    /// (HSI §1.5 repo-scope Briefing row; ui-navigation.md §2 Architecture
+    /// sub-tab Briefing: "add optional `repo_id` field to
+    /// `POST /workspaces/:id/briefing/ask` request body"). Must belong to the
+    /// path workspace; otherwise 404 (no repo-existence leak).
+    pub repo_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -588,107 +598,138 @@ pub async fn get_graph_by_spec(
     }))
 }
 
-/// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
-///
-/// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
-/// contains the `pattern` (case-insensitive substring match). Returns matched
-/// nodes and edges where both source and target are in the matched node set.
-pub async fn assemble_concept_results(
+/// Shared concept-view projection logic used by both REST and MCP handlers
+/// (HSI §11 parity). Resolves the `ConceptView` named `concept_name` from
+/// the repo's `specs/manifest.yaml` (case-insensitive exact match on the
+/// concept name) and returns the union projection of nodes/edges matching
+/// its include patterns. Fails with `NotFound` when the repo has no
+/// manifest, the manifest is unparseable, or no concept with that name is
+/// defined — there is no substring fallback.
+pub async fn assemble_concept_projection(
     state: &AppState,
-    repo_ids: &[String],
-    pattern: &str,
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
 ) -> Result<KnowledgeGraphResponse, ApiError> {
-    let pattern = pattern.to_lowercase();
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
-    let mut matched_node_ids = std::collections::HashSet::new();
+    let concept = resolve_concept_view(repo, concept_name)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "concept '{concept_name}' is not defined in the spec manifest"
+            ))
+        })?;
 
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = state
-            .graph_store
-            .list_nodes(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
 
-        let nodes: Vec<GraphNode> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.name.to_lowercase().contains(&pattern)
-                    || n.qualified_name.to_lowercase().contains(&pattern)
-            })
-            .collect();
-
-        for n in &nodes {
-            matched_node_ids.insert(n.id.to_string());
-        }
-        matched_nodes.extend(nodes);
-    }
-
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_edges = state
-            .graph_store
-            .list_edges(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let edges: Vec<GraphEdge> = all_edges
-            .into_iter()
-            .filter(|e| {
-                matched_node_ids.contains(e.source_id.as_str())
-                    && matched_node_ids.contains(e.target_id.as_str())
-            })
-            .collect();
-
-        matched_edges.extend(edges);
-    }
-
-    let repo_id_label = if repo_ids.len() == 1 {
-        repo_ids[0].clone()
-    } else {
-        "multi-repo".to_string()
-    };
+    let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
 
     Ok(KnowledgeGraphResponse {
-        repo_id: repo_id_label,
+        repo_id: repo.id.to_string(),
         nodes: matched_nodes.into_iter().map(Into::into).collect(),
         edges: matched_edges.into_iter().map(Into::into).collect(),
         warnings: vec![],
     })
 }
 
+/// Workspace-scoped concept-view projection shared by REST and MCP handlers
+/// (HSI §11 parity): each repo in the workspace resolves the named concept
+/// from its own spec manifest; matched nodes/edges are unioned across repos.
+/// A repo lacking the named concept contributes nothing. Unlike the
+/// single-repo variant this never 404s on a missing concept — an empty
+/// union is a valid workspace-wide answer (repos carry their own manifests).
+pub async fn assemble_workspace_concept_projection(
+    state: &AppState,
+    workspace_id: &Id,
+    concept_name: &str,
+) -> Result<KnowledgeGraphResponse, ApiError> {
+    require_workspace(state, &workspace_id.to_string()).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let mut matched_nodes: Vec<GraphNodeResponse> = Vec::new();
+    let mut matched_edges: Vec<GraphEdgeResponse> = Vec::new();
+
+    for repo in &repos {
+        // Repo does not define this concept — contributes nothing.
+        if resolve_concept_view(repo, concept_name).await.is_none() {
+            continue;
+        }
+        let projection = assemble_concept_projection(state, repo, concept_name).await?;
+        matched_nodes.extend(projection.nodes);
+        matched_edges.extend(projection.edges);
+    }
+
+    Ok(KnowledgeGraphResponse {
+        repo_id: if repos.len() == 1 {
+            repos[0].id.to_string()
+        } else {
+            "multi-repo".to_string()
+        },
+        nodes: matched_nodes,
+        edges: matched_edges,
+        warnings: vec![],
+    })
+}
+
+/// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
+/// match on the concept name) from the `concepts:` block of the repo's
+/// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
+/// has no manifest, the manifest is unparseable, or no concept with that
+/// name is defined.
+async fn resolve_concept_view(
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
+) -> Option<gyre_common::graph::ConceptView> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await?;
+    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
+    manifest
+        .concepts
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(concept_name))
+        .map(gyre_common::graph::ConceptView::from)
+}
+
 /// GET /api/v1/repos/{id}/graph/concept/{name}
-/// Returns nodes matching the concept name pattern (case-insensitive substring match).
-///
-/// In the full implementation this would use ConceptView definitions from the spec manifest.
-/// For now, it matches nodes whose `name` or `qualified_name` contains the concept name.
+/// Concept view projection (realized-model.md §4): resolves the named
+/// concept from the repo's spec manifest and returns the union of nodes
+/// matching its include patterns (types/traits/modules/endpoints/specs),
+/// with edges between matched nodes. Returns 404 when the concept is not
+/// defined in the manifest — there is no substring fallback.
 pub async fn get_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_repo(&state, &id).await?;
-    let response = assemble_concept_results(&state, &[id], &concept_name).await?;
-    Ok(Json(response))
-}
-
-/// GET /api/v1/repos/{id}/graph/timeline
-/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
-pub async fn get_graph_timeline(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<TimelineQuery>,
-) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
-    require_repo(&state, &id).await?;
-    let repo_id = Id::new(&id);
-
-    let deltas = state
-        .graph_store
-        .list_deltas(&repo_id, q.since, q.until)
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    Ok(Json(deltas.into_iter().map(Into::into).collect()))
+    // Delegate to the same assembly logic the MCP graph_concept tool uses
+    // (HSI §11 parity).
+    Ok(Json(
+        assemble_concept_projection(&state, &repo, &concept_name).await?,
+    ))
 }
 
 /// GET /api/v1/repos/{id}/graph/risks
@@ -699,13 +740,11 @@ pub async fn get_graph_risks(
 ) -> Result<Json<Vec<RiskMetricsResponse>>, ApiError> {
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
-
     let all_nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
-
     let all_edges = state
         .graph_store
         .list_edges(&repo_id, None)
@@ -738,6 +777,25 @@ pub async fn get_graph_risks(
         .collect();
 
     Ok(Json(risks))
+}
+
+/// GET /api/v1/repos/{id}/graph/timeline
+/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
+pub async fn get_graph_timeline(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
+    require_repo(&state, &id).await?;
+    let repo_id = Id::new(&id);
+
+    let deltas = state
+        .graph_store
+        .list_deltas(&repo_id, q.since, q.until)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(deltas.into_iter().map(Into::into).collect()))
 }
 
 /// GET /api/v1/repos/{id}/graph/diff
@@ -814,11 +872,11 @@ pub async fn get_workspace_graph(
 }
 
 /// Core briefing assembly logic shared by both REST and MCP handlers.
-/// Collects MRs, tasks, completed agents, and builds the summary string.
 pub async fn assemble_briefing(
     state: &AppState,
     workspace_id: &str,
     since: u64,
+    repo_filter: Option<&str>,
 ) -> Result<BriefingResponse, ApiError> {
     // caller-scope:ok — all iterated entities pre-filtered to same workspace via list_by_workspace
     let ws_id = Id::new(workspace_id);
@@ -833,8 +891,22 @@ pub async fn assemble_briefing(
         .await
         .unwrap_or_default();
 
+    // Repo filter (HSI §1.5 repo-scope Briefing): MRs carry repository_id,
+    // tasks carry repo_id. Applied uniformly to every repo-derived section.
+    let repo_match = |mr_repo: &Id, filter: Option<&str>| -> bool {
+        filter.is_none_or(|f| mr_repo.as_str() == f)
+    };
+    let mrs: Vec<_> = all_mrs
+        .iter()
+        .filter(|mr| repo_match(&mr.repository_id, repo_filter))
+        .collect();
+    let tasks: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| repo_match(&t.repo_id, repo_filter))
+        .collect();
+
     // Section: completed — MRs with status Merged updated since `since`.
-    let completed: Vec<BriefingItem> = all_mrs
+    let completed: Vec<BriefingItem> = mrs
         .iter()
         .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
         .map(|mr| BriefingItem {
@@ -853,7 +925,7 @@ pub async fn assemble_briefing(
         .collect();
 
     // Section: in_progress — tasks with status InProgress or Review updated since `since`.
-    let in_progress: Vec<BriefingItem> = all_tasks
+    let in_progress: Vec<BriefingItem> = tasks
         .iter()
         .filter(|t| {
             (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
@@ -895,6 +967,7 @@ pub async fn assemble_briefing(
                         .as_ref()
                         .is_some_and(|tid| !ws_repo_ids.contains(tid))
                     && (link.created_at >= since || link.stale_since.is_some_and(|t| t >= since))
+                    && repo_filter.is_none_or(|f| link.source_repo_id.as_deref() == Some(f))
             })
             .map(|link| BriefingItem {
                 title: format!("Cross-workspace dependency: {}", link.target_path),
@@ -929,7 +1002,7 @@ pub async fn assemble_briefing(
         let mut items = Vec::new();
 
         // 1. Gate failures: failed gate results for workspace MRs since `since`.
-        for mr in all_mrs.iter().filter(|mr| mr.updated_at >= since) {
+        for mr in mrs.iter().filter(|mr| mr.updated_at >= since) {
             let results = state
                 .gate_results
                 .list_by_mr_id(&mr.id.to_string())
@@ -973,6 +1046,7 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
+                && repo_filter.is_none_or(|f| n.repo_id.as_deref() == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),
@@ -991,7 +1065,7 @@ pub async fn assemble_briefing(
         }
 
         // 3. MR reverts: MRs with Reverted status since `since`.
-        for mr in all_mrs
+        for mr in mrs
             .iter()
             .filter(|mr| mr.status == MrStatus::Reverted && mr.updated_at >= since)
         {
@@ -1042,8 +1116,51 @@ pub async fn assemble_briefing(
         .await
         .unwrap_or_default();
 
+    // Repo filter for completed agents: resolve each agent's repo binding.
+    // Agents bound to no repo (workspace orchestrators) are excluded when a
+    // repo filter is set — they are not "for this repo".
+    let agent_repo: Option<std::collections::HashMap<String, String>> = if repo_filter.is_some() {
+        let mut m = std::collections::HashMap::new();
+        for msg in completed_msgs.iter() {
+            let Some(aid) = msg
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent_id"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if m.contains_key(aid) {
+                continue;
+            }
+            if let Ok(Some(agent)) = state.agents.find_by_id(&Id::new(aid)).await {
+                if let Some(rid) = agent.repo_id {
+                    m.insert(aid.to_string(), rid.to_string());
+                }
+            }
+        }
+        Some(m)
+    } else {
+        None
+    };
+
     let completed_agents: Vec<BriefingCompletedAgent> = completed_msgs
         .into_iter()
+        .filter(|msg| {
+            let agent_id = msg
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            match (&agent_id, &agent_repo) {
+                // No filter: include all.
+                (_, None) => true,
+                // Filter set: include only agents bound to the filtered repo.
+                (Some(aid), Some(repos)) => repos.get(aid).map(String::as_str) == repo_filter,
+                (None, Some(_)) => false,
+            }
+        })
         .filter_map(|msg| {
             let payload = msg.payload?;
             let agent_id = payload.get("agent_id")?.as_str()?.to_string();
@@ -1144,6 +1261,7 @@ async fn resolve_since(state: &AppState, user_id: Option<&Id>, workspace_id: &st
 /// Returns the HSI-defined briefing for a workspace (HSI §9).
 /// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
 /// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
+/// `?repo_id=` narrows every section to a single repo (HSI §1.5 repo-scope Briefing).
 pub async fn get_workspace_briefing(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -1152,13 +1270,32 @@ pub async fn get_workspace_briefing(
 ) -> Result<Json<BriefingResponse>, ApiError> {
     require_workspace(&state, &id).await?;
 
+    // Validate repo filter: repo must exist AND belong to the path workspace.
+    let repo_filter = match &q.repo_id {
+        Some(rid) => {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(rid))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("repo {rid} not found")))?;
+            if repo.workspace_id != Id::new(&id) {
+                return Err(ApiError::Forbidden(format!(
+                    "repo {rid} does not belong to workspace {id}"
+                )));
+            }
+            Some(repo.id.to_string())
+        }
+        None => None,
+    };
+
     // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
     let since = q.since.unwrap_or({
         let uid = auth.user_id.clone();
         resolve_since(&state, uid.as_ref(), &id).await
     });
 
-    let briefing = assemble_briefing(&state, &id, since).await?;
+    let briefing = assemble_briefing(&state, &id, since, repo_filter.as_deref()).await?;
     Ok(Json(briefing))
 }
 
@@ -1235,14 +1372,66 @@ pub async fn briefing_ask(
         }
     }
 
+    // Caller-scope guard (G6): evaluate the repo's ABAC policies against the
+    // caller's JWT claims before accepting the request-body repo scope —
+    // same pattern as spawn/jj/orchestrator handlers.
+    if let Some(rid) = &req.repo_id {
+        if let Err(reason) = crate::abac::check_repo_abac(&state, rid, &caller).await {
+            // task-104: AbacDenied audit event — per-handler repo-level ABAC
+            // denial outside the ABAC middleware.
+            crate::abac_middleware::record_abac_denied(
+                &state,
+                &caller,
+                "repo",
+                "generate",
+                None,
+                "POST /api/v1/workspaces/:id/briefing/ask",
+            )
+            .await;
+            return Err(ApiError::Forbidden(reason));
+        }
+    }
+
+    // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
+    // Architecture Briefing sub-tab): same validation as the GET briefing
+    // repo filter — repo must exist AND belong to the path workspace.
+    // Carries (repo id, repo name): the id narrows the assembled briefing
+    // (same filter as GET), the name grounds the LLM in the repo scope.
+    let repo_scope = match &req.repo_id {
+        Some(rid) => {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(rid))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("repo {rid} not found")))?;
+            if repo.workspace_id != Id::new(&id) {
+                return Err(ApiError::Forbidden(format!(
+                    "repo {rid} does not belong to workspace {id}"
+                )));
+            }
+            Some((repo.id.to_string(), repo.name))
+        }
+        None => None,
+    };
+
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
     // ── Grounding (HSI §1327): the LLM gets read-only access to the real
     // briefing data. Resolve `since` with the same logic as the briefing
     // endpoint (last_seen_at > 24h fallback) so Q&A sees the same window.
+    // Grounding (HSI §1327): the LLM gets read-only access to the real
+    // briefing data, narrowed to the repo scope when the request is
+    // repo-scoped (same filter as the GET briefing endpoint).
     let since = resolve_since(&state, caller.user_id.as_ref(), &id).await;
-    let briefing = assemble_briefing(&state, &id, since).await?;
+    let briefing = assemble_briefing(
+        &state,
+        &id,
+        since,
+        repo_scope.as_ref().map(|(rid, _)| rid.as_str()),
+    )
+    .await?;
 
     // Source attribution (HSI §1325): de-duplicated {spec_path, agent_id}
     // entries from briefing items that carry a spec_path and from completed
@@ -1276,6 +1465,13 @@ pub async fn briefing_ask(
             context.push_str(&transcript.join("\n"));
         }
     }
+    // Repo scope: the answer must be about this repo's work, not the whole
+    // workspace (the briefing data above is already repo-filtered).
+    if let Some((_, name)) = &repo_scope {
+        context.push_str(&format!(
+            "\n\nThe user is asking about the repository \"{name}\" only."
+        ));
+    }
 
     let system_prompt = template_content
         .replace("{{workspace_id}}", &id)
@@ -1294,6 +1490,58 @@ pub async fn briefing_ask(
 
     let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
+
+    // Budget tracking (ui-layout.md §3, platform-model.md §Budget Tracking):
+    // the LlmPort does not return actual usage, so estimate — ~4 chars per
+    // token for prompts (input) and the produced text (output).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let estimated_output = full_text.len() / 4;
+    let estimated_tokens = (estimated_input + estimated_output) as f64;
+    let cost_entry = gyre_domain::CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        estimated_tokens,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record briefing/ask cost entry: {e}");
+    }
+
+    // Per-call budget record + workspace/tenant counter increment
+    // (platform-model.md §Budget Tracking). User-initiated query:
+    // agent_id/task_id/repo_id are None.
+    let ws_for_budget = state
+        .workspaces
+        .find_by_id(&workspace_id_obj)
+        .await
+        .ok()
+        .flatten();
+    if let Some(ws) = ws_for_budget {
+        super::budget::record_llm_call_usage(
+            &state,
+            &super::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: estimated_output as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %id,
+            "briefing/ask budget recording skipped: workspace not found"
+        );
+    }
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
@@ -1367,27 +1615,19 @@ pub async fn link_node_to_spec(
 }
 
 /// GET /workspaces/{id}/graph/concept/{name}
-/// Workspace-scoped concept search — filters nodes across all repos in the workspace
-/// by case-insensitive substring match on `name` or `qualified_name`.
-///
-/// This avoids downloading the full workspace graph for concept queries.
+/// Workspace-scoped concept view projection (realized-model.md §4): each
+/// repo in the workspace resolves the named concept from its own spec
+/// manifest; matched nodes/edges are unioned across repos. A repo lacking
+/// the named concept contributes nothing.
 pub async fn get_workspace_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_workspace(&state, &id).await?;
-
-    let repo_ids: Vec<String> = state
-        .repos
-        .list_by_workspace(&Id::new(&id))
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| r.id.to_string())
-        .collect();
-
-    let response = assemble_concept_results(&state, &repo_ids, &concept_name).await?;
-    Ok(Json(response))
+    // Delegate to the same assembly logic the MCP workspace_graph_concept
+    // tool uses (HSI §11 parity).
+    Ok(Json(
+        assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
+    ))
 }
 
 /// Request body for structural prediction.
@@ -2309,6 +2549,248 @@ mod tests {
         );
     }
 
+    // ── Briefing repo-scope guards (HSI §1.5 / task-083) ─────────────────
+
+    /// POST briefing/ask with a repo_id whose repo denies the caller via ABAC
+    /// policy must 403 (G6 caller-scope guard on the request-body repo scope).
+    ///
+    /// The caller is a Keycloak JWT with the Admin role: middleware ABAC
+    /// allows it through (Admin allows all), but it carries jwt_claims, so the
+    /// per-repo policy evaluation in the handler must still apply. Without the
+    /// handler guard, a JWT admin would bypass repo-level ABAC by just naming
+    /// any repo in the body.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn briefing_ask_repo_scope_abac_denied_returns_403() {
+        let state = crate::auth::test_helpers::make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(crate::abac_middleware::seed_builtin_policies(&state))
+                .expect("seed built-in ABAC policies")
+        });
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // ABAC policy on repo-1 requiring a claim the JWT will not have.
+        let policies = vec![crate::abac::AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: std::iter::once(("scope".to_string(), "repo:special".to_string()))
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set(
+                "abac_policies",
+                "repo-1",
+                serde_json::to_string(&policies).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Keycloak-style JWT: Admin role (passes middleware for "generate"),
+        // raw claims (subject for the per-repo policy check).
+        let claims = serde_json::json!({
+            "sub": "admin-no-repo-scope",
+            "preferred_username": "admin-no-repo-scope",
+            "realm_access": { "roles": ["admin"] }
+        });
+        let jwt = crate::auth::test_helpers::sign_test_jwt(&claims, 3600);
+
+        let app = crate::build_router(state);
+        let body = serde_json::json!({"question": "What changed?", "repo_id": "repo-1"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "repo-scoped ask must be denied when the repo's ABAC policies reject the caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_unknown_repo_returns_404() {
+        let app = app();
+
+        let ws_body = serde_json::json!({"name": "ask-unknown-repo-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "What changed?", "repo_id": "no-such-repo"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GET briefing with a valid ?repo_id= renders only that repo's items;
+    /// a repo belonging to a different workspace must 403; unknown 404s.
+    #[tokio::test]
+    async fn briefing_get_repo_filter_scopes_and_validates_at_http_level() {
+        let state = test_state();
+        let (ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+
+        // A second workspace with its own repo (for the cross-workspace 403).
+        let ws2 = gyre_domain::Workspace::new(
+            Id::new("ws-briefing-other"),
+            Id::new("tenant-1"),
+            "briefing-other",
+            "briefing-other",
+            1000,
+        );
+        state.workspaces.create(&ws2).await.unwrap();
+        let foreign_repo = gyre_domain::Repository {
+            id: Id::new("repo-foreign"),
+            workspace_id: Id::new("ws-briefing-other"),
+            name: "foreign-service".to_string(),
+            path: "/repos/foreign-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&foreign_repo).await.unwrap();
+
+        // A merged MR in repo-1 and an in-progress task in repo-1.
+        let mut mr1 = gyre_domain::MergeRequest::new(
+            Id::new("mr-http-r1"),
+            Id::new("repo-1"),
+            "repo-1 merged work",
+            "feat/one",
+            "main",
+            2000,
+        );
+        mr1.workspace_id = Id::new("ws-briefing");
+        mr1.updated_at = 2000;
+        mr1.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr1).await.unwrap();
+
+        let mut task1 = gyre_domain::Task::new(Id::new("task-http-r1"), "repo-1 task", 2000);
+        task1.workspace_id = Id::new("ws-briefing");
+        task1.repo_id = Id::new("repo-1");
+        task1.status = gyre_domain::TaskStatus::InProgress;
+        task1.updated_at = 2000;
+        state.tasks.create(&task1).await.unwrap();
+
+        // A merged MR bound to the foreign repo but stamped with ws-briefing —
+        // must NOT appear under repo-1 (repo binding, not workspace stamp).
+        let mut mr_foreign = gyre_domain::MergeRequest::new(
+            Id::new("mr-http-foreign"),
+            Id::new("repo-foreign"),
+            "foreign repo work",
+            "feat/foreign",
+            "main",
+            2000,
+        );
+        mr_foreign.workspace_id = Id::new("ws-briefing");
+        mr_foreign.updated_at = 2000;
+        mr_foreign.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr_foreign).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Valid repo filter: only repo-1's items render.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id={repo_id}&since=1500"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["completed"].as_array().unwrap().len(),
+            1,
+            "repo-filtered briefing must render only repo-1's merged MR: {json}"
+        );
+        assert_eq!(
+            json["completed"][0]["entity_id"].as_str(),
+            Some("mr-http-r1")
+        );
+        assert_eq!(
+            json["in_progress"].as_array().unwrap().len(),
+            1,
+            "repo-filtered briefing must render only repo-1's task"
+        );
+        assert_eq!(
+            json["in_progress"][0]["entity_id"].as_str(),
+            Some("task-http-r1")
+        );
+
+        // Cross-workspace repo: 403, not rendered data.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id=repo-foreign"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Unknown repo: 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id=no-such-repo"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
 
     /// Helper: create a workspace and repo, returning (workspace_id, repo_id).
@@ -2365,7 +2847,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2411,7 +2893,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2446,7 +2928,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2487,7 +2969,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2527,7 +3009,7 @@ mod tests {
         };
         state.gate_results.save(&gr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2575,7 +3057,7 @@ mod tests {
         };
         state.gate_results.save(&gr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2607,7 +3089,7 @@ mod tests {
         );
         state.notifications.create(&notif).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2644,7 +3126,7 @@ mod tests {
         mr.revert("f".repeat(40).to_string(), 2100).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2666,7 +3148,7 @@ mod tests {
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2716,7 +3198,7 @@ mod tests {
         mr.revert("0".repeat(40).to_string(), 500).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2728,5 +3210,513 @@ mod tests {
             briefing.exceptions.is_empty(),
             "old MR reverts should be filtered out"
         );
+    }
+
+    // ── Concept view projection (realized-model.md §4) ─────────────────────
+
+    /// Create a real (non-bare) git repo at a tempdir with the given
+    /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+    fn init_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.dev"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::create_dir_all(repo_path.join("specs")).unwrap();
+        std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "seed manifest"]);
+        let path_str = repo_path.to_str().unwrap().to_string();
+        (tmp, path_str)
+    }
+
+    const AUTH_CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+      - modules: ["*::auth*"]
+      - endpoints: ["/api/v1/auth/*"]
+      - specs: ["identity-security.md"]
+"#;
+
+    /// Seed the graph store with an authentication-flavored node set.
+    /// Returns (auth-matching node names, unrelated node name).
+    async fn seed_concept_graph(state: &Arc<AppState>, repo_id: &str) {
+        let auth_type = _new_node(repo_id, "JwtAuthProvider", NodeType::Type);
+        let unrelated_type = _new_node(repo_id, "Invoice", NodeType::Type);
+        let auth_module = {
+            let mut m = _new_node(repo_id, "auth", NodeType::Module);
+            m.qualified_name = "gyre_domain::auth::tokens".to_string();
+            m
+        };
+        let auth_endpoint = {
+            let mut e = _new_node(repo_id, "login", NodeType::Endpoint);
+            e.qualified_name = "api::v1::auth::login".to_string();
+            e
+        };
+        let governed = {
+            let mut g = _new_node(repo_id, "TokenStore", NodeType::Type);
+            g.spec_path = Some("specs/system/identity-security.md".to_string());
+            g
+        };
+        for n in [
+            auth_type.clone(),
+            unrelated_type.clone(),
+            auth_module.clone(),
+            auth_endpoint.clone(),
+            governed.clone(),
+        ] {
+            state.graph_store.create_node(n).await.unwrap();
+        }
+        // Endpoint route path in edge metadata (extractor convention).
+        let mut route_edge = _new_edge(
+            repo_id,
+            &auth_endpoint.id,
+            &auth_type.id,
+            EdgeType::RoutesTo,
+        );
+        route_edge.metadata = Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
+        state.graph_store.create_edge(route_edge).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_returns_manifest_projection_not_substring() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // Point the repo at the real git checkout so the manifest resolves.
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Concept-matching nodes.
+        assert!(names.contains(&"JwtAuthProvider"), "type glob: {names:?}");
+        assert!(names.contains(&"auth"), "module glob: {names:?}");
+        assert!(names.contains(&"login"), "endpoint glob: {names:?}");
+        assert!(names.contains(&"TokenStore"), "spec-governed: {names:?}");
+        // The unrelated node must be excluded. Discriminating assertion
+        // against substring regression: every included node must satisfy a
+        // concept include rule, and exactly the 4 seeded concept nodes do.
+        assert!(
+            !names.contains(&"Invoice"),
+            "unrelated node must be excluded: {names:?}"
+        );
+        assert_eq!(
+            json["nodes"].as_array().unwrap().len(),
+            4,
+            "exactly the 4 concept-matching nodes: {names:?}"
+        );
+
+        // Edge between matched endpoint and matched type is included.
+        assert_eq!(json["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_undefined_concept_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        // "auth" is a substring of the concept name but not a defined
+        // concept — must 404, not fall back to substring matching.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concept/auth"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        drop(tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_repo_without_manifest_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_graph_concept_unions_manifest_projections() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // repo-1 gets a real manifest checkout + concept nodes.
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+        seed_concept_graph(&state, "repo-1").await;
+
+        // repo-2 in the same workspace lacks the concept in its manifest —
+        // contributes nothing.
+        let no_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(no_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+        // A node that WOULD match the concept patterns — must not appear
+        // because repo-2's manifest doesn't define the concept.
+        let mut extra = _new_node("repo-2", "JwtAuthProvider", NodeType::Type);
+        extra.qualified_name = "other::JwtAuthProvider".to_string();
+        state.graph_store.create_node(extra).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Only repo-1's concept nodes — repo-2's JwtAuthProvider must be
+        // absent (its manifest does not define the concept). repo_id fields
+        // distinguish the two repos' identically-named nodes.
+        let repo_ids: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["repo_id"].as_str().unwrap())
+            .collect();
+        assert!(
+            !repo_ids.contains(&"repo-2"),
+            "repo without the concept must contribute nothing: {names:?} {repo_ids:?}"
+        );
+        assert_eq!(names.len(), 4, "only repo-1's projection: {names:?}");
+        drop(tmp);
+        drop(tmp2);
+    }
+
+    // ── Repo-scoped briefing (?repo_id= filter, HSI §1.5 / task-083) ──────
+
+    /// Two repos in one workspace: MRs/tasks in both; filter by one repo.
+    #[tokio::test]
+    async fn briefing_repo_filter_narrows_sections_to_that_repo() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Second repo in the same workspace.
+        let repo2 = gyre_domain::Repository {
+            id: Id::new("repo-2"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "payments-service".to_string(),
+            path: "/repos/payments-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo2).await.unwrap();
+
+        // Merged MR in repo-1 (should appear when filtering repo-1, not repo-2).
+        let mut mr1 = gyre_domain::MergeRequest::new(
+            Id::new("mr-r1"),
+            Id::new("repo-1"),
+            "repo-1 merged work",
+            "feat/one",
+            "main",
+            2000,
+        );
+        mr1.workspace_id = Id::new("ws-briefing");
+        mr1.updated_at = 2000;
+        mr1.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr1).await.unwrap();
+
+        // Merged MR in repo-2.
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-r2"),
+            Id::new("repo-2"),
+            "repo-2 merged work",
+            "feat/two",
+            "main",
+            2000,
+        );
+        mr2.workspace_id = Id::new("ws-briefing");
+        mr2.updated_at = 2000;
+        mr2.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr2).await.unwrap();
+
+        // In-progress task in repo-1.
+        let mut t1 = gyre_domain::Task::new(Id::new("task-r1"), "repo-1 in-progress task", 2000);
+        t1.workspace_id = Id::new("ws-briefing");
+        t1.repo_id = Id::new("repo-1");
+        t1.status = gyre_domain::TaskStatus::InProgress;
+        t1.updated_at = 2000;
+        state.tasks.create(&t1).await.unwrap();
+
+        // In-progress task in repo-2.
+        let mut t2 = gyre_domain::Task::new(Id::new("task-r2"), "repo-2 in-progress task", 2000);
+        t2.workspace_id = Id::new("ws-briefing");
+        t2.repo_id = Id::new("repo-2");
+        t2.status = gyre_domain::TaskStatus::InProgress;
+        t2.updated_at = 2000;
+        state.tasks.create(&t2).await.unwrap();
+
+        // Cross-workspace link sourced from repo-1.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-r1".to_string(),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-r2".to_string(),
+                source_path: "system/auth.md".to_string(),
+                source_repo_id: Some("repo-2".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/sso.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/sso.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        // Filtered to repo-1: only repo-1 items appear in every section.
+        let b1 = assemble_briefing(&state, &ws_id, 1500, Some("repo-1"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b1.completed.len(), 1, "only repo-1 merged MR");
+        assert_eq!(b1.completed[0].entity_id.as_deref(), Some("mr-r1"));
+        assert_eq!(b1.in_progress.len(), 1, "only repo-1 task");
+        assert_eq!(b1.in_progress[0].entity_id.as_deref(), Some("task-r1"));
+        assert_eq!(b1.cross_workspace.len(), 1, "only repo-1 sourced link");
+        assert_eq!(b1.cross_workspace[0].entity_id.as_deref(), Some("link-r1"));
+
+        // Filtered to repo-2: only repo-2 items appear.
+        let b2 = assemble_briefing(&state, &ws_id, 1500, Some("repo-2"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b2.completed.len(), 1, "only repo-2 merged MR");
+        assert_eq!(b2.completed[0].entity_id.as_deref(), Some("mr-r2"));
+        assert_eq!(b2.in_progress.len(), 1, "only repo-2 task");
+        assert_eq!(b2.in_progress[0].entity_id.as_deref(), Some("task-r2"));
+        assert_eq!(b2.cross_workspace.len(), 1, "only repo-2 sourced link");
+        assert_eq!(b2.cross_workspace[0].entity_id.as_deref(), Some("link-r2"));
+
+        // No filter: both repos' items appear (workspace scope unchanged).
+        let ball = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(ball.completed.len(), 2);
+        assert_eq!(ball.in_progress.len(), 2);
+        assert_eq!(ball.cross_workspace.len(), 2);
+    }
+
+    /// Completed agents section respects the repo filter via agent.repo_id.
+    #[tokio::test]
+    async fn briefing_repo_filter_completed_agents_by_agent_binding() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Agent bound to repo-1.
+        let mut a1 = gyre_domain::Agent::new(Id::new("agent-r1"), "worker-1", 2000);
+        a1.workspace_id = Id::new("ws-briefing");
+        a1.repo_id = Some(Id::new("repo-1"));
+        state.agents.create(&a1).await.unwrap();
+
+        // Agent bound to repo-2 (repo created inline; workspace-scoped agents
+        // with repo_id None must be excluded under a repo filter).
+        let repo2 = gyre_domain::Repository {
+            id: Id::new("repo-2"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "payments-service".to_string(),
+            path: "/repos/payments-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo2).await.unwrap();
+        let mut a2 = gyre_domain::Agent::new(Id::new("agent-r2"), "worker-2", 2000);
+        a2.workspace_id = Id::new("ws-briefing");
+        a2.repo_id = Some(Id::new("repo-2"));
+        state.agents.create(&a2).await.unwrap();
+
+        // Workspace orchestrator bound to no repo.
+        let mut a3 = gyre_domain::Agent::new(Id::new("agent-ws"), "orchestrator", 2000);
+        a3.workspace_id = Id::new("ws-briefing");
+        a3.repo_id = None;
+        state.agents.create(&a3).await.unwrap();
+
+        // agent_completed messages for all three.
+        let mk_msg = |agent_id: &str, created_at: u64| gyre_common::Message {
+            id: Id::new(format!("msg-{agent_id}")),
+            tenant_id: Id::new("tenant-1"),
+            from: gyre_common::MessageOrigin::Agent(Id::new(agent_id)),
+            workspace_id: Some(Id::new("ws-briefing")),
+            to: gyre_common::Destination::Broadcast,
+            kind: gyre_common::MessageKind::AgentCompleted,
+            payload: Some(serde_json::json!({ "agent_id": agent_id })),
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        for (agent_id, at) in [
+            ("agent-r1", 2_000_000u64),
+            ("agent-r2", 2_000_000),
+            ("agent-ws", 2_000_000),
+        ] {
+            state.messages.store(&mk_msg(agent_id, at)).await.unwrap();
+        }
+
+        // Filtered to repo-1: only agent-r1.
+        let b1 = assemble_briefing(&state, &ws_id, 1500, Some("repo-1"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b1.completed_agents.len(), 1);
+        assert_eq!(b1.completed_agents[0].agent_id, "agent-r1");
+
+        // No filter: all three (workspace scope unchanged).
+        let ball = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(ball.completed_agents.len(), 3);
     }
 }

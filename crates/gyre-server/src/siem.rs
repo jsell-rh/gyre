@@ -164,6 +164,28 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::ContainerCrashed => 7,
         gyre_domain::AuditEventType::ContainerOom => 8,
         gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
+        // Source control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::GitPushAccepted => 3,
+        gyre_domain::AuditEventType::GitPushRejected => 5,
+        gyre_domain::AuditEventType::GitClone => 3,
+        gyre_domain::AuditEventType::SpecChanged => 4,
+        // Access control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::AuthSuccess => 3,
+        gyre_domain::AuditEventType::AuthFailure => 6,
+        gyre_domain::AuditEventType::AbacDenied => 5,
+        gyre_domain::AuditEventType::RbacDenied => 5,
+        gyre_domain::AuditEventType::ImpersonationStarted => 7,
+        gyre_domain::AuditEventType::ImpersonationEnded => 7,
+        // Agent lifecycle events (observability.md §Audit Event Types):
+        // admin interventions rank highest, detector-marked deaths next,
+        // routine lifecycle signals stay informational.
+        gyre_domain::AuditEventType::AgentKilled => 7,
+        gyre_domain::AuditEventType::AgentDead => 6,
+        gyre_domain::AuditEventType::AgentTokenRevoked => 5,
+        gyre_domain::AuditEventType::AgentReassigned => 4,
+        gyre_domain::AuditEventType::AgentSpawned => 3,
+        gyre_domain::AuditEventType::AgentCompleted => 3,
+        gyre_domain::AuditEventType::AgentHeartbeat => 3,
         gyre_domain::AuditEventType::Custom(_) => 3,
     };
     let event_type = event.event_type.as_str();
@@ -415,9 +437,73 @@ mod tests {
     }
 
     #[test]
+    fn cef_severity_source_control_and_access_control_events() {
+        // observability.md §Audit Event Types severity mapping (task-104):
+        // AuthFailure 6, AbacDenied/RbacDenied/GitPushRejected 5,
+        // AuthSuccess/GitPushAccepted/GitClone 3, ImpersonationStarted/
+        // ImpersonationEnded 7, SpecChanged 4.
+        let cases = [
+            (AuditEventType::AuthFailure, 6),
+            (AuditEventType::AbacDenied, 5),
+            (AuditEventType::RbacDenied, 5),
+            (AuditEventType::GitPushRejected, 5),
+            (AuditEventType::AuthSuccess, 3),
+            (AuditEventType::GitPushAccepted, 3),
+            (AuditEventType::GitClone, 3),
+            (AuditEventType::ImpersonationStarted, 7),
+            (AuditEventType::ImpersonationEnded, 7),
+            (AuditEventType::SpecChanged, 4),
+        ];
+        for (event_type, expected) in &cases {
+            let event = make_event("e1", event_type.clone());
+            let msg = format_cef(&event);
+            // Severity is the 7th CEF header field (index 6):
+            // CEF:0|Vendor|Product|Version|Signature|Name|<severity>|ext
+            let header = msg.split('|').collect::<Vec<_>>();
+            assert!(header.len() >= 8, "CEF header must have 8 fields");
+            assert_eq!(
+                header[6],
+                expected.to_string(),
+                "wrong CEF severity for {}: expected {}, got {}",
+                event_type.as_str(),
+                expected,
+                header[7]
+            );
+        }
+    }
+
+    #[test]
     fn cef_escape_pipes() {
         assert_eq!(cef_escape("foo|bar"), "foo\\|bar");
         assert_eq!(cef_escape("a=b"), "a\\=b");
+    }
+
+    #[test]
+    fn cef_agent_lifecycle_severities() {
+        // observability.md §Audit Event Types severity mapping: admin kill 7,
+        // detector-marked death 6, token revocation 5, reassignment 4,
+        // routine lifecycle signals 3.
+        let cases = [
+            (AuditEventType::AgentKilled, 7),
+            (AuditEventType::AgentDead, 6),
+            (AuditEventType::AgentTokenRevoked, 5),
+            (AuditEventType::AgentReassigned, 4),
+            (AuditEventType::AgentSpawned, 3),
+            (AuditEventType::AgentCompleted, 3),
+            (AuditEventType::AgentHeartbeat, 3),
+        ];
+        for (et, want) in cases {
+            let ev = make_event("e1", et.clone());
+            let cef = format_cef(&ev);
+            let severity: u8 = cef
+                .trim_end()
+                .split('|')
+                .nth(6)
+                .unwrap_or_else(|| panic!("malformed CEF: {cef}"))
+                .parse()
+                .unwrap_or_else(|_| panic!("non-numeric severity in CEF: {cef}"));
+            assert_eq!(severity, want, "wrong CEF severity for {et:?}: {cef}");
+        }
     }
 
     #[tokio::test]
@@ -461,5 +547,88 @@ mod tests {
         assert_eq!(TargetType::from_str("syslog"), Some(TargetType::Syslog));
         assert_eq!(TargetType::from_str("webhook"), Some(TargetType::Webhook));
         assert_eq!(TargetType::from_str("unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn forward_cycle_sends_decompressed_detail_for_compressed_events() {
+        // observability.md §Log Retention & Compression: SIEM forwarding
+        // must receive the original detail payload even after the
+        // log-compression job has zstd-compressed the stored row. The
+        // forwarder reads through `since_timestamp`, which decompresses
+        // in the adapter — this test proves the wire payload.
+        use crate::mem::test_state;
+        use tokio::io::AsyncReadExt;
+
+        let state = test_state();
+
+        // Local syslog receiver.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut chunk))
+                    .await
+                {
+                    Ok(Ok(0)) | Err(_) => break,
+                    Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+                    Ok(Err(e)) => panic!("read error: {e}"),
+                }
+            }
+            buf
+        });
+
+        state
+            .siem_store
+            .add(SiemTarget {
+                id: "t1".to_string(),
+                name: "local-syslog".to_string(),
+                target_type: TargetType::Syslog,
+                config: serde_json::json!({
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "format": "json"
+                }),
+                enabled: true,
+            })
+            .await;
+
+        // One event, aged past the 7-day compression threshold, then
+        // compressed by the same port call the job uses.
+        let detail = serde_json::json!({
+            "path": "/etc/shadow",
+            "mode": "read",
+            "pid": 4321
+        });
+        let event = make_event("e-compressed", AuditEventType::FileAccess);
+        let mut event = event;
+        event.detail = detail.clone();
+        event.timestamp = 100;
+        gyre_ports::AuditRepository::record(&*state.audit, &event)
+            .await
+            .unwrap();
+        let stats = gyre_ports::AuditRepository::compress_details_before(&*state.audit, 200, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.compressed, 1,
+            "event must be compressed before forwarding"
+        );
+
+        run_forward_cycle(&state).await.unwrap();
+
+        let received = receiver.await.unwrap();
+        let text = String::from_utf8(received).unwrap();
+        assert!(text.contains("file_access"), "got: {text}");
+        assert!(
+            text.contains("\"path\":\"/etc/shadow\""),
+            "forwarded payload must carry the decompressed detail: {text}"
+        );
+        assert!(text.contains("\"pid\":4321"), "got: {text}");
+
+        // The cursor advanced past the forwarded event.
+        assert!(state.siem_store.last_forwarded_ts().await >= event.timestamp);
     }
 }

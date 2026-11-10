@@ -57,6 +57,9 @@ pub struct AgentResponse {
     /// MR ID created by this agent (enriched at query time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mr_id: Option<String>,
+    /// Persona attached at spawn time (orchestrators; task-099 F2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -84,6 +87,7 @@ impl From<Agent> for AgentResponse {
             completed_at: None,
             spec_path: None,
             mr_id: None,
+            persona_id: a.persona_id.map(|id| id.to_string()),
         }
     }
 }
@@ -277,6 +281,17 @@ pub async fn update_agent_status(
         .transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
+    // Platform Model §7 (task-100 review round-3 F2): a terminal status
+    // transition (Dead/Failed/Stopped — Stopped has no exit transitions)
+    // ends the agent's run, so the task-scoped ephemeral secrets must be
+    // revoked here like the dedicated stop/fail/kill endpoints (teardown;
+    // logs `secret.revoked` per secret).
+    if matches!(
+        agent.status,
+        AgentStatus::Dead | AgentStatus::Failed | AgentStatus::Stopped
+    ) {
+        crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+    }
     state
         .emit_event(
             Some(agent.workspace_id.clone()),
@@ -309,10 +324,16 @@ pub async fn agent_heartbeat(
     // G10: Verify workload attestation liveness on each heartbeat.
     // Checks PID is still alive; stack hash is left empty (stack re-check
     // is only done when agent self-reports via POST /api/v1/agents/{id}/stack).
+    //
+    // The attested PID and liveness result also feed the AgentHeartbeat
+    // audit event (observability.md §Audit Event Types).
+    let mut audited_pid: Option<u32> = None;
+    let mut audited_pid_alive: Option<bool> = None;
     if let Ok(Some(json)) = state.kv_store.kv_get("workload_attestations", &id).await {
         if let Ok(mut att) =
             serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
         {
+            audited_pid = att.pid;
             // M19.4: If a container_id is present, verify container liveness
             // via `docker inspect --format='{{.State.Running}}'` in addition to
             // (or instead of) the PID check.
@@ -345,10 +366,21 @@ pub async fn agent_heartbeat(
                     }
                 }
             } else {
-                att.pid
-                    .map(crate::workload_attestation::pid_is_alive)
-                    .unwrap_or(true) // no PID recorded → assume alive
+                match att.pid {
+                    Some(pid) => {
+                        let alive = crate::workload_attestation::pid_is_alive(pid);
+                        audited_pid_alive = Some(alive);
+                        alive
+                    }
+                    // No PID recorded → assume alive (attestation cannot disprove).
+                    None => true,
+                }
             };
+
+            // Container liveness result feeds the AgentHeartbeat audit event.
+            if att.container_id.is_some() {
+                audited_pid_alive = Some(container_alive);
+            }
 
             let still_ok =
                 crate::workload_attestation::verify_attestation(&mut att, container_alive, "");
@@ -369,6 +401,10 @@ pub async fn agent_heartbeat(
             }
         }
     }
+
+    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    // pid/pid_alive are null when the agent has no workload attestation.
+    crate::agent_audit::emit_heartbeat(&state, &agent, audited_pid, audited_pid_alive).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -475,6 +511,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_agent_status_terminal_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review round-3 F2): PUT
+        // /api/v1/agents/{id}/status with a terminal status (Dead, Failed,
+        // or Stopped — Stopped has no exit transitions) ends the agent's
+        // run and must revoke the task-scoped ephemeral secrets, like the
+        // dedicated stop/fail/kill endpoints. A non-terminal transition
+        // (Active -> Idle) must not revoke.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-status"),
+            Id::new("default"),
+            "Status WS",
+            "status-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Terminal-transition agent and a non-terminal control agent, each
+        // with its own task so the control's secret is independently
+        // observable.
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-status-dead"), "status-dead-agent", now);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        agent.workspace_id = Id::new("ws-status");
+        agent.current_task_id = Some(Id::new("task-status-dead"));
+        state.agents.create(&agent).await.unwrap();
+        let mut control =
+            gyre_domain::Agent::new(Id::new("agent-status-idle"), "status-idle-agent", now);
+        control
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        control.workspace_id = Id::new("ws-status");
+        control.current_task_id = Some(Id::new("task-status-idle"));
+        state.agents.create(&control).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-status-dead",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-status-dead".to_string(),
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-status-idle",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-status-idle".to_string(),
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-status-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-status".to_string(),
+                ),
+                b"v3",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-status-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
+                b"v4",
+            )
+            .await
+            .unwrap();
+
+        // Terminal transition: Dead — the run ends, task secrets revoked.
+        let body = serde_json::json!({ "status": "dead" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/agents/agent-status-dead/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Non-terminal transition: Active -> Idle keeps the secrets.
+        let body = serde_json::json!({ "status": "idle" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/agents/agent-status-idle/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let updated = state
+            .agents
+            .find_by_id(&Id::new("agent-status-dead"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::AgentStatus::Dead);
+        let control_updated = state
+            .agents
+            .find_by_id(&Id::new("agent-status-idle"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(control_updated.status, gyre_domain::AgentStatus::Idle);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-status-dead"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "terminal status transition must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-status-idle"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "non-terminal status transition must keep the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-status-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive the terminal transition"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-status-other"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive the terminal transition"
+        );
+    }
+
+    #[tokio::test]
     async fn update_agent_status_invalid_transition() {
         let app = app();
         let (app, id) = create_test_agent(app, "worker2").await;
@@ -527,6 +768,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_emits_agent_heartbeat_audit_event() {
+        // observability.md §Audit Event Types: each heartbeat must record an
+        // AgentHeartbeat audit event. Without a workload attestation the
+        // pid/pid_alive detail fields are null (unknown), never fabricated.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_agent(app, "hb-audit-agent").await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        assert_eq!(events.len(), 1, "exactly one agent_heartbeat event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some(id.as_str()));
+        assert!(ev.detail["pid"].is_null(), "no attestation → pid unknown");
+        assert!(
+            ev.detail["pid_alive"].is_null(),
+            "no attestation → pid_alive unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_audit_reports_attested_pid_liveness() {
+        // With a workload attestation present, the AgentHeartbeat audit event
+        // must carry the attested PID and its real liveness. A live PID (this
+        // test process) reports true; a dead PID (an exited child) reports
+        // false — proving the value is measured, not hardcoded.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_agent(app, "hb-pid-agent").await;
+
+        // Live PID: this test process itself.
+        let live_pid = std::process::id();
+        let att = crate::workload_attestation::attest_agent(&id, Some(live_pid), "local", "");
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                &id,
+                serde_json::to_string(&att).unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        let ev = events
+            .iter()
+            .find(|e| e.resource_id.as_deref() == Some(id.as_str()))
+            .expect("agent_heartbeat event for hb-pid-agent");
+        assert_eq!(ev.detail["pid"], live_pid);
+        assert_eq!(ev.detail["pid_alive"], true);
+
+        // Dead PID: a child process that has already exited.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let att = crate::workload_attestation::attest_agent(&id, Some(dead_pid), "local", "");
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                &id,
+                serde_json::to_string(&att).unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        let ev = events
+            .iter()
+            .rev()
+            .find(|e| e.resource_id.as_deref() == Some(id.as_str()))
+            .expect("second agent_heartbeat event for hb-pid-agent");
+        assert_eq!(ev.detail["pid"], dead_pid);
+        assert_eq!(ev.detail["pid_alive"], false);
     }
 
     #[tokio::test]

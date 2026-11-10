@@ -80,7 +80,7 @@ pub use dependency::{
     DependencyType, DetectionMethod,
 };
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
-pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 pub use go_extractor::GoExtractor;
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
@@ -89,7 +89,9 @@ pub use merge_request::{
 };
 pub use message_type::MessageType;
 pub use meta_spec::{
-    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
+    MetaSpecVersion, ReconciliationPriority, RolloutPolicy, RolloutStrategy,
+    DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
@@ -119,5 +121,8 @@ pub use user::{
     UserPreferencesPatch, UserRole,
 };
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
-pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
+pub use workspace::{
+    builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
+    Workspace, BUILTIN_PERSONA_DEFS,
+};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

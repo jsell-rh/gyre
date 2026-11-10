@@ -11,7 +11,13 @@ env:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-24.04: the locked Playwright (1.58.2) has no chromium
+    # build or --with-deps registry entry for ubuntu 26.04, which ubuntu-latest
+    # now resolves to — the browser-install step fails before any test runs
+    # ("Playwright does not support chromium on ubuntu26.04-x64", E2E run
+    # 42586542960). Keep this pinned until the lockfile moves to a Playwright
+    # release supporting 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

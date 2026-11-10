@@ -11,9 +11,8 @@
 #
 # See: specs/reviews/task-077.md F5 (the finding that created this check)
 #
-
-# --- task-099 revision round owns these (F2: void validate_persona whose
-# result is discarded; consults state.meta_specs while bootstrap populates
-# state.personas) ---
-crates/gyre-server/src/api/orchestrator.rs:187   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site)
-crates/gyre-server/src/api/orchestrator.rs:283   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site)
+# (No entries: the merge-time ABAC audit-only sites in merge_processor.rs
+# were fixed by the task-077 revision (results bound and branched on), and
+# the void validate_persona sites in api/orchestrator.rs were fixed by the
+# task-099 revision rounds (persona validation is enforced server-side).
+# Both fix sets are present in this tree.)

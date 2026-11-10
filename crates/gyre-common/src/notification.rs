@@ -61,6 +61,12 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
+    SecretExpiring,
+    /// Priority 2 — a repo-defined persona file changed on push and its
+    /// approval was reset to Pending (platform-model.md §2 Repo-Defined
+    /// Personas). Sent to the persona owner.
+    PersonaChangePendingApproval,
 }
 
 impl NotificationType {
@@ -89,6 +95,8 @@ impl NotificationType {
             Self::SpecConflict => "SpecConflict",
             Self::MrReverted => "MrReverted",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::SecretExpiring => "SecretExpiring",
+            Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
         }
     }
 
@@ -117,6 +125,8 @@ impl NotificationType {
             "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "SecretExpiring" => Some(Self::SecretExpiring),
+            "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             _ => None,
         }
     }
@@ -146,6 +156,8 @@ impl NotificationType {
             Self::SpecConflict => 2,
             Self::MrReverted => 2,
             Self::MergeQueueEscalation => 1,
+            Self::SecretExpiring => 7,
+            Self::PersonaChangePendingApproval => 2,
         }
     }
 }
@@ -231,6 +243,11 @@ mod tests {
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
         assert_eq!(NotificationType::MrReverted.default_priority(), 2);
         assert_eq!(NotificationType::MergeQueueEscalation.default_priority(), 1);
+        assert_eq!(NotificationType::SecretExpiring.default_priority(), 7);
+        assert_eq!(
+            NotificationType::PersonaChangePendingApproval.default_priority(),
+            2
+        );
     }
 
     #[test]
@@ -258,6 +275,8 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MrReverted,
             NotificationType::MergeQueueEscalation,
+            NotificationType::SecretExpiring,
+            NotificationType::PersonaChangePendingApproval,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

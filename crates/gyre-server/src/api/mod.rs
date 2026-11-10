@@ -44,6 +44,7 @@ pub mod repos;
 pub mod saved_views;
 pub mod scim;
 pub mod search;
+pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
 pub mod spec_policy;
@@ -78,9 +79,9 @@ use gyre_common::Id;
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
+    get_judgments, get_me, get_my_notifications, get_notification_count,
+    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
+    remove_member, resolve_notification, update_me, update_member_role,
     update_notification_preferences, update_team,
 };
 
@@ -108,6 +109,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
+        .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -668,6 +670,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Rollout policy (meta-spec-reconciliation.md §7)
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+            get(meta_specs::get_rollout_policy).put(meta_specs::put_rollout_policy),
+        )
         // Orchestrator lifecycle (platform-model.md §3, task-093)
         .route(
             "/api/v1/workspaces/:id/orchestrator/spawn",
@@ -713,6 +720,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/presence",
             get(workspaces::get_workspace_presence),
         )
+        // Secrets Admin API (platform-model.md §7, task-098) — Admin only.
+        .route(
+            "/api/v1/secrets",
+            post(secrets::create_secret).get(secrets::list_secrets),
+        )
+        .route("/api/v1/secrets/:id", delete(secrets::delete_secret))
+        .route("/api/v1/secrets/:id/rotate", post(secrets::rotate_secret))
         // LLM prompt templates (Slice 2)
         .route(
             "/api/v1/workspaces/:id/llm/prompts",
@@ -758,6 +772,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs-registry/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
+        // Spec-level meta-spec bindings (agent-runtime spec §2)
+        .route(
+            "/api/v1/specs/:path/meta-spec-bindings",
+            get(meta_specs::get_spec_meta_spec_bindings)
+                .put(meta_specs::put_spec_meta_spec_bindings),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
@@ -795,9 +815,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users", post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
-        .route("/api/v1/users/me/agents", get(get_my_agents))
-        .route("/api/v1/users/me/tasks", get(get_my_tasks))
-        .route("/api/v1/users/me/mrs", get(get_my_mrs))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",

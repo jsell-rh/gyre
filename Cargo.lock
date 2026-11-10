@@ -965,6 +965,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "gyre-common",
+ "gyre-domain",
  "ratatui",
  "reqwest",
  "serde",

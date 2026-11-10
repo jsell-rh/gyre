@@ -3,6 +3,7 @@
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
+pub mod agent_audit;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -23,6 +24,7 @@ pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
+pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
@@ -32,10 +34,12 @@ pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
+pub mod prompt_assembly;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
@@ -66,17 +70,18 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
-    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
+    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
     ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
     GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
-    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -269,8 +274,10 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
-    pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
+    /// cold segment for lines older than the compression age
+    /// (observability.md §Log Retention & Compression).
+    pub agent_logs: Arc<log_compression::AgentLogBuffer>,
     /// Per-agent broadcast channels for live log SSE streaming.
     pub agent_log_tx: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     /// Quality gates per repository (persisted).
@@ -335,6 +342,8 @@ pub struct AppState {
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §Budget Tracking).
+    pub budget_calls: Arc<dyn BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -363,6 +372,8 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
+    pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
@@ -489,6 +500,39 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Resolve the tenant scope for a server-originated message about a
+    /// workspace: the workspace record's tenant. Skips the emission and
+    /// logs when the workspace cannot be resolved (same contract as
+    /// `emit_reconciliation_completed`): a message carrying a fabricated
+    /// tenant re-targets delivery to whatever scope the id happens to
+    /// collide with.
+    async fn message_tenant_id(&self, workspace_id: Option<&Id>) -> Option<Id> {
+        match workspace_id {
+            Some(wid) => match self.workspaces.find_by_id(wid).await {
+                Ok(Some(ws)) => Some(ws.tenant_id),
+                Ok(None) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        "emit: workspace not found; skipping message (cannot resolve tenant scope)"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        error = %e,
+                        "emit: failed to resolve workspace tenant; skipping message"
+                    );
+                    None
+                }
+            },
+            // Broadcast messages have no workspace; server-originated
+            // broadcasts carry the documented default-tenant scope
+            // (message-bus.md auth-context table).
+            None => Some(Id::new(auth::system_principal_tenant())),
+        }
+    }
+
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
     pub async fn emit_event(
@@ -505,9 +549,15 @@ impl AppState {
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
+        // F1: tenant scope resolved from the workspace record, never a
+        // fabricated literal (skip-and-log on unresolvable).
+        let Some(tenant_id) = self.message_tenant_id(workspace_id.as_ref()).await else {
+            return;
+        };
+
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id,
             to,
@@ -537,7 +587,7 @@ impl AppState {
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
     /// Unsigned and not persisted.
-    pub fn emit_telemetry(
+    pub async fn emit_telemetry(
         &self,
         workspace_id: Id,
         kind: MessageKind,
@@ -549,9 +599,15 @@ impl AppState {
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
+
+        // F1: tenant scope resolved from the workspace record.
+        let Some(tenant_id) = self.message_tenant_id(Some(&workspace_id)).await else {
+            return;
+        };
+
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),
@@ -624,6 +680,32 @@ async fn require_auth_middleware(
             {
                 return next.run(req).await;
             }
+            // task-104: AuthFailure audit event (observability.md §Audit
+            // Event Types) — the global gate rejected the presented token;
+            // the extractors never run for this request. Best-effort token
+            // classification: "ey" prefix = JWT-shaped credential.
+            let token_kind = if t.starts_with("ey") {
+                "agent_jwt"
+            } else {
+                "unknown"
+            };
+            let source_ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string());
+            let user_agent = req
+                .headers()
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            auth::record_auth_failure_for_middleware(
+                &state,
+                token_kind,
+                "invalid token",
+                source_ip,
+                user_agent,
+            )
+            .await;
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
@@ -867,6 +949,15 @@ pub fn build_state(
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
 
+    // In pure in-memory mode, the meta-spec and meta-spec-binding repos must
+    // share a single binding store so the delete guard in
+    // `MemMetaSpecRepository` sees the bindings the binding repo writes
+    // (port contract: delete fails when bindings reference the meta-spec).
+    // In DB-backed mode both ports come from the same storage struct, so
+    // this store is unused.
+    let mem_meta_spec_binding_store =
+        Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -931,7 +1022,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
             dyn QualityGateRepository,
@@ -1016,6 +1107,10 @@ pub fn build_state(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
         ),
+        budget_calls: store!(
+            dyn BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
+        ),
         search: store!(
             dyn gyre_ports::SearchPort,
             gyre_adapters::MemSearchAdapter::new()
@@ -1053,15 +1148,21 @@ pub fn build_state(
         },
         meta_specs: store!(
             dyn MetaSpecRepository,
-            mem::MemMetaSpecRepository::default()
+            mem::MemMetaSpecRepository::with_binding_store(Arc::clone(
+                &mem_meta_spec_binding_store
+            ))
         ),
         meta_spec_bindings: store!(
             dyn MetaSpecBindingRepository,
-            mem::MemMetaSpecBindingRepository::default()
+            mem::MemMetaSpecBindingRepository::with_store(Arc::clone(&mem_meta_spec_binding_store))
         ),
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        rollout_policies: store!(
+            dyn RolloutPolicyRepository,
+            mem::MemRolloutPolicyRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: {
@@ -1545,6 +1646,67 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
     tracing::info!("seeded {} built-in meta-specs", seeds.len());
 }
 
+/// Seed the four built-in personas (platform-model.md §2) into every
+/// existing tenant. Idempotent: an existing persona with the same slug at
+/// Tenant scope is never overwritten — the user may have customized it, and
+/// the spec allows workspace/repo-scope overrides to shadow it.
+///
+/// Called at server startup, after migrations and tenant bootstrap.
+pub async fn seed_builtin_personas(state: &Arc<AppState>) {
+    let tenants = match state.tenants.list().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("seed_builtin_personas: failed to list tenants: {e}");
+            return;
+        }
+    };
+    for tenant in &tenants {
+        seed_builtin_personas_for_tenant(state, &tenant.id).await;
+    }
+}
+
+/// Seed the built-in personas for one tenant — the shared tail of startup
+/// seeding and tenant creation (`POST /api/v1/tenants`), so every tenant
+/// gets the spec §2 table the moment it exists. Idempotent per slug+scope.
+pub async fn seed_builtin_personas_for_tenant(state: &Arc<AppState>, tenant_id: &Id) {
+    use gyre_domain::{builtin_personas, PersonaScope};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for persona in builtin_personas(tenant_id, now) {
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        match state
+            .personas
+            .find_by_slug_and_scope(&persona.slug, &scope)
+            .await
+        {
+            Ok(Some(_)) => {} // already exists → idempotent
+            Ok(None) => match state.personas.create(&persona).await {
+                Ok(()) => tracing::debug!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    "Seeded built-in persona"
+                ),
+                Err(e) => tracing::warn!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    err = %e,
+                    "Failed to seed built-in persona"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                slug = %persona.slug,
+                tenant_id = %tenant_id,
+                err = %e,
+                "Error checking built-in persona existence"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1659,6 +1821,173 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// Serialize env-mutating tests: GYRE_REPOS_PATH is process-global and
+    /// parallel test threads race on it.
+    static REPOS_PATH_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// F6 pin: a relative GYRE_REPOS_PATH (e.g. "repos" or "./repos") must
+    /// resolve to an ABSOLUTE path anchored at the process cwd —
+    /// `repos_root` is persisted into `repo.path` rows and handed to jj/git
+    /// child processes, which resolve paths against the COMMAND's cwd, not
+    /// the server's. A relative root silently breaks every child-process
+    /// operation in default deployments.
+    #[test]
+    fn configured_repos_path_makes_relative_config_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        let cwd = std::env::current_dir().unwrap();
+
+        std::env::set_var("GYRE_REPOS_PATH", "repos");
+        let p = configured_repos_path();
+        assert!(
+            p.is_absolute(),
+            "relative GYRE_REPOS_PATH must resolve absolute, got {p:?}"
+        );
+        assert_eq!(p, cwd.join("repos"));
+
+        std::env::set_var("GYRE_REPOS_PATH", "./repos");
+        let p = configured_repos_path();
+        assert_eq!(
+            p,
+            cwd.join("repos"),
+            "'./repos' must normalize to <cwd>/repos"
+        );
+
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// F6 pin (default): with no GYRE_REPOS_PATH configured, the root
+    /// defaults to an absolute <cwd>/repos — never the bare relative
+    /// "./repos" the default deployment used before the fix.
+    #[test]
+    fn configured_repos_path_default_is_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::remove_var("GYRE_REPOS_PATH");
+
+        let p = configured_repos_path();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(p, cwd.join("repos"));
+        assert!(p.is_absolute());
+    }
+
+    /// F6 pin (absolute passthrough): an absolute GYRE_REPOS_PATH must be
+    /// used verbatim.
+    #[test]
+    fn configured_repos_path_absolute_passthrough() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::set_var("GYRE_REPOS_PATH", "/srv/gyre/repos");
+        assert_eq!(
+            configured_repos_path(),
+            std::path::PathBuf::from("/srv/gyre/repos")
+        );
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// platform-model.md §2: startup seeding creates the four built-in
+    /// personas at tenant level, pre-approved, and is idempotent.
+    #[tokio::test]
+    async fn seed_builtin_personas_creates_four_and_is_idempotent() {
+        use gyre_domain::{PersonaApprovalStatus, PersonaScope, Tenant};
+
+        let state = mem::test_state();
+        // Startup seeding enumerates tenants — create one first (the way
+        // migrations/bootstrap would have).
+        let tenant = Tenant::new(Id::new("t-seed"), "Seed Tenant", "seed-tenant", 1);
+        state.tenants.create(&tenant).await.unwrap();
+
+        seed_builtin_personas(&state).await;
+
+        let scope = PersonaScope::Tenant(Id::new("t-seed"));
+        let seeded = state.personas.list_by_scope(&scope).await.unwrap();
+        let mut slugs: Vec<String> = seeded.iter().map(|p| p.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec![
+                "accountability",
+                "repo-orchestrator",
+                "security",
+                "workspace-orchestrator"
+            ],
+            "all four built-in personas must be seeded at tenant scope"
+        );
+        for p in &seeded {
+            assert_eq!(
+                p.approval_status,
+                PersonaApprovalStatus::Approved,
+                "built-in {} must be pre-approved",
+                p.slug
+            );
+            assert_eq!(p.approved_by.as_deref(), Some("system"));
+            assert_eq!(p.version, 1);
+        }
+
+        // Second run (server restart): no duplicates.
+        seed_builtin_personas(&state).await;
+        let after = state.personas.list_by_scope(&scope).await.unwrap();
+        assert_eq!(after.len(), 4, "re-seeding must not duplicate personas");
+    }
+
+    /// Task plan: "If the persona already exists, do not overwrite" — a
+    /// customized persona survives re-seeding untouched.
+    #[tokio::test]
+    async fn seed_builtin_personas_preserves_existing() {
+        use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
+
+        let state = mem::test_state();
+        let tenant_id = Id::new("t-custom");
+        // A user-customized security persona already exists at tenant scope.
+        let mut custom = Persona::new(
+            Id::new("custom-sec"),
+            "Custom Security",
+            "security",
+            PersonaScope::Tenant(tenant_id.clone()),
+            "hand-edited prompt",
+            42,
+        );
+        custom.system_prompt = "hand-edited prompt".to_string();
+        state.personas.create(&custom).await.unwrap();
+
+        seed_builtin_personas_for_tenant(&state, &tenant_id).await;
+
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        let personas = state.personas.list_by_scope(&scope).await.unwrap();
+        let sec: Vec<_> = personas.iter().filter(|p| p.slug == "security").collect();
+        assert_eq!(sec.len(), 1, "no duplicate security persona");
+        assert_eq!(sec[0].id, Id::new("custom-sec"));
+        assert_eq!(sec[0].system_prompt, "hand-edited prompt");
+        assert_eq!(sec[0].approval_status, PersonaApprovalStatus::Pending);
+        // The other three were seeded around it.
+        assert_eq!(personas.len(), 4);
+    }
+
+    /// Seeding for one tenant never leaks personas into another tenant.
+    #[tokio::test]
+    async fn seed_builtin_personas_scoped_to_own_tenant() {
+        use gyre_domain::PersonaScope;
+
+        let state = mem::test_state();
+        let a = Id::new("t-a");
+        let b = Id::new("t-b");
+        seed_builtin_personas_for_tenant(&state, &a).await;
+        seed_builtin_personas_for_tenant(&state, &b).await;
+
+        let in_a = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(a.clone()))
+            .await
+            .unwrap();
+        let in_b = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(b.clone()))
+            .await
+            .unwrap();
+        assert_eq!(in_a.len(), 4);
+        assert_eq!(in_b.len(), 4);
+        for p in &in_a {
+            assert_eq!(p.scope, PersonaScope::Tenant(a.clone()));
+        }
     }
 
     /// task-197 / hierarchy-enforcement §1 Bootstrap Behavior: startup must

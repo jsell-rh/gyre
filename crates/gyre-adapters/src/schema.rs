@@ -39,6 +39,8 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        // TASK-099 F2: persona attached to this agent (orchestrators).
+        persona_id -> Nullable<Text>,
     }
 }
 
@@ -89,6 +91,7 @@ diesel::table! {
         atomic_group -> Nullable<Text>,
         workspace_id -> Text,
         reverted_at -> Nullable<BigInt>,
+        merge_commit_sha -> Nullable<Text>,
         revert_commit_sha -> Nullable<Text>,
         spec_ref -> Nullable<Text>,
     }
@@ -184,6 +187,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        // TASK-099 F1: tenant binding; nullable for legacy OIDC users
+        // (the auth extractor fail-closes on unbound users).
         username -> Text,
         avatar_url -> Nullable<Text>,
         preferences -> Nullable<Text>,
@@ -259,6 +264,7 @@ diesel::table! {
         resource_id -> Nullable<Text>,
         outcome -> Text,
         detail -> Text,
+        detail_zstd -> Nullable<Binary>,
         source_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
         timestamp -> BigInt,
@@ -425,7 +431,7 @@ diesel::table! {
         spec_sha -> Text,
         approver_id -> Text,
         signature -> Nullable<Text>,
-        approved_at -> BigInt,
+        approved_at -> Nullable<BigInt>,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
         revocation_reason -> Nullable<Text>,
@@ -623,6 +629,14 @@ diesel::table! {
 
 diesel::table! {
     meta_spec_sets (workspace_id) {
+        workspace_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    rollout_policies (workspace_id) {
         workspace_id -> Text,
         json -> Text,
         updated_at -> BigInt,

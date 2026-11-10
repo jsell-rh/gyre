@@ -201,11 +201,18 @@ mod tests {
     }
 
     /// Build router with a very low rate limit for testing.
+    ///
+    /// The limiter's clock is frozen at a fixed unix second: the token bucket
+    /// can never refill mid-test by crossing a wall-clock second boundary, so
+    /// "first request OK, second 429" exhaustion is deterministic.
     fn rate_limited_app(rate: u64) -> Router {
         use crate::AppState;
         let base = test_state();
         let state = Arc::new(AppState {
-            rate_limiter: crate::rate_limit::RateLimiter::new(rate),
+            rate_limiter: crate::rate_limit::RateLimiter::with_clock(
+                rate,
+                Box::new(|| 1_700_000_000),
+            ),
             auth_token: base.auth_token.clone(),
             base_url: base.base_url.clone(),
             repos: base.repos.clone(),
@@ -272,6 +279,7 @@ mod tests {
             spec_links_store: base.spec_links_store.clone(),
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
+            budget_calls: base.budget_calls.clone(),
             search: base.search.clone(),
             tenants: base.tenants.clone(),
             workspaces: base.workspaces.clone(),
@@ -284,6 +292,7 @@ mod tests {
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
+            rollout_policies: base.rollout_policies.clone(),
             messages: base.messages.clone(),
             message_dispatch_tx: base.message_dispatch_tx.clone(),
             agent_inbox_max: base.agent_inbox_max,
