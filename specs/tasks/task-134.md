@@ -91,7 +91,8 @@ behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
 runs and completed across assignments, including the review-F1/F2/F3 repairs,
 the review-round TTL repair `72c5bb03`, the review-repair round `31c35ddb`,
 the rebase onto `fefde294`, the rebase onto task-177's `7747376`, the merge
-onto base `fb1f82e31`, and the `459f51b9` review-repair round, all
+onto base `fb1f82e31`, the `459f51b9` review-repair round, and the merge
+onto base `b5a872087` (task-108 impersonation; merge `4d182e9e8`), all
 described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
@@ -226,14 +227,44 @@ the branch's scoped-token read-only push rejection; `git_http` 49/49
 `gate_executor` 37/37 on the merged tree. Probe output retained in review
 evidence (`repair-459f51b9.txt`).
 
+### Merge onto base `b5a872087` (task-108 impersonation; merge `4d182e9e8`)
+
+The rebase onto task-108's base collided both sides' new
+`AgentSigningKey` methods; two files resolved by combining both sides'
+work (no behavior of either side dropped):
+
+- **`auth.rs`**: the branch's `mint_scoped` (task-134 gate-agent capability
+  tokens) and the base's `mint_impersonation` /
+  `validate_impersonation` / `validate_impersonation_opt` +
+  `ImpersonationJwtClaims` (task-108) coexist — both mint paths carry a
+  unique `jti`, and the scoped-token path is byte-identical to the
+  branch's reviewed form. The auto-merged `abac_middleware.rs` keeps both
+  sides' semantics: the impersonation pre-filter runs before ABAC
+  evaluation (non-impersonation tokens — including scoped gate-agent
+  JWTs, which lack the `impersonating` claim — fall through to the normal
+  chain), the base's hardened `is_system_principal()` bypass, and the
+  branch's scoped-token route allow-list.
+- **`fabricated-scope-defaults-exemptions.txt`**: comment-only conflict;
+  the entry list resolves to the tightest form — exactly 1 flagged site
+  (`speculative_merge.rs:372`) with `FROZEN_EXEMPTION_COUNT=1`. Verified
+  on the merged tree: baseline passes (rc=0) and a temporary growth entry
+  FAILS (rc=1). No migration collision this time
+  (`check-migration-versions.sh` passes; the branch's `000059` renumber
+  held). Probe output retained in review evidence
+  (`merge-b5a872087.txt`).
+
 ### Test evidence
 
-On the current tree (merge `74418dddc` onto base `fb1f82e31`, plus the
-`459f51b9` migration renumber): `cargo test -p gyre-adapters --lib` 396/396
-(including the upsert round-trip and the migration guard tests),
-`task134_review_probe` 7/7, `gate_executor` 37/37 (including both TTL
-regression tests and both e2e review tests), `git_http` 49/49,
-`check-migration-versions.sh` and `check-migration-sql-portability.sh`
-pass, and `check-fabricated-scope-defaults.sh` passes with the count
-enforced at 1. `cargo test --all` and the full mechanical-check suite are
+On the current tree (merge `4d182e9e8` onto base `b5a872087`, which carries
+the earlier `74418dddc`/`fb1f82e31` merge and the `459f51b9` migration
+renumber): `cargo check -p gyre-server` clean; `cargo test -p gyre-server
+--lib` 1629/1629 (including the impersonation suite from the base and the
+`gate_executor` suite — 37/37 — from this branch);
+`task134_review_probe` 7/7; `auth_integration` 21/21; `git_integration`
+17/17; earlier rounds' `cargo test -p gyre-adapters --lib` 396/396
+(including the upsert round-trip and the migration guard tests);
+`check-migration-versions.sh`, `check-migration-sql-portability.sh`,
+`check-arch.sh`, `check-task-commit-attribution.sh`, and
+`check-fabricated-scope-defaults.sh` (count enforced at 1, growth probe
+fails) all pass. `cargo test --all` and the full mechanical-check suite are
 owned by verification and publication.
