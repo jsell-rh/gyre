@@ -79,12 +79,11 @@ use gyre_common::Id;
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members,
-    list_my_sessions, list_teams, list_tokens, list_user_sessions, remove_member,
-    resolve_notification, revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session,
-    revoke_user_session, update_me, update_member_role, update_notification_preferences,
-    update_team,
+    get_judgments, get_me, get_my_notifications, get_notification_count,
+    get_notification_preferences, invite_member, list_members, list_my_sessions, list_teams,
+    list_tokens, list_user_sessions, remove_member, resolve_notification, revoke_all_my_sessions,
+    revoke_all_user_sessions, revoke_my_session, revoke_user_session, update_me,
+    update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -774,6 +773,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs-registry/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
+        // Spec-level meta-spec bindings (agent-runtime spec §2)
+        .route(
+            "/api/v1/specs/:path/meta-spec-bindings",
+            get(meta_specs::get_spec_meta_spec_bindings)
+                .put(meta_specs::put_spec_meta_spec_bindings),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
@@ -811,9 +816,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users", post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
-        .route("/api/v1/users/me/agents", get(get_my_agents))
-        .route("/api/v1/users/me/tasks", get(get_my_tasks))
-        .route("/api/v1/users/me/mrs", get(get_my_mrs))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
