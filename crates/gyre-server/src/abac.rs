@@ -330,6 +330,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -363,6 +364,7 @@ mod tests {
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -394,6 +396,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -426,6 +429,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -476,6 +480,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -506,6 +511,7 @@ mod tests {
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -523,6 +529,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
