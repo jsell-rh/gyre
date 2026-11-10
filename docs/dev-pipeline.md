@@ -668,3 +668,17 @@ revision. Source refresh then retries the guarded migration for deferred tasks
 as their existing claims finish. It does not fence active work or supersede
 unrelated repair findings; once handled, each task's migration marker makes the
 operation a no-op.
+
+A completed, trusted full verification can also prove that a task was already
+implemented upstream. If its exact reviewed candidate changes only that task's
+operational record/review notes, its verified base is an ancestor of main, and
+the normative contract still matches, source reconciliation records
+`resolved: already_upstream`. This creates no fictitious shipped merge. Production
+assets count as real changes. Only redundant read-only verifiers may be retired;
+implementation/review, actual publication, source checkpoints and completed proof
+remain intact, with sandbox retirement handled by the normal cleanup reconciler.
+
+Recovery can explicitly `--reconsider TASK` after an input-binding correction;
+all original ancestry, historical-generation and exact scoped-equivalence checks
+still apply. This supports narrowing a legacy coverage-row reference without
+shipping a formatting-only checkpoint or inventing a new delivery.
