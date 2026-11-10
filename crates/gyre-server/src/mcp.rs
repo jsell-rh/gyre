@@ -970,7 +970,14 @@ async fn handle_spawn_worker(
         loop_config: None,
         conversation_sha: None,
     };
-    match crate::api::spawn::spawn_agent_core(state, req, auth).await {
+    match crate::api::spawn::spawn_agent_core(
+        state,
+        req,
+        auth,
+        "POST /mcp tools/call gyre_spawn_worker",
+    )
+    .await
+    {
         Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),
         Err(e) => tool_error(format!("Failed to spawn worker: {e}")),
     }
@@ -3322,6 +3329,11 @@ pub async fn mcp_handler(
                     | "gyre_spawn_worker"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
+                // observability.md §Audit Event Types: role check rejects
+                // request — record rbac_denied so MCP-surface role denials are
+                // visible to the audit trail and SIEM forwarding.
+                crate::rbac::record_rbac_denied(&state, &auth, "Agent", "POST /mcp tools/call")
+                    .await;
                 return Json(JsonRpcResponse::err(
                     id,
                     PERMISSION_DENIED,
@@ -3736,6 +3748,68 @@ mod tests {
         assert!(has_role_at_least(&[UserRole::Agent], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Developer], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Admin], UserRole::Agent));
+    }
+
+    #[tokio::test]
+    async fn mcp_write_tool_role_denial_records_rbac_denied_audit_event() {
+        // Review repair (task-104 round 10, finding aa4a2beed F1): the
+        // needs_write RBAC gate on MCP tools/call rejected role-insufficient
+        // callers with a JSON-RPC PERMISSION_DENIED while recording no
+        // rbac_denied audit event, so MCP-surface role denials were invisible
+        // to the audit trail and SIEM forwarding. A ReadOnly JWT calling a
+        // write tool must produce exactly one rbac_denied event carrying the
+        // spec'd detail fields (user_id, required_role, actual_role,
+        // endpoint) and outcome Blocked.
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::{AuditQueryFilter, AuditRepository};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::build_router(state.clone());
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": { "title": "must not be created" }
+                }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], PERMISSION_DENIED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("insufficient permissions"));
+
+        let events = AuditRepository::query(
+            &*state.audit,
+            &AuditQueryFilter {
+                event_type: Some("rbac_denied".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1, "one rbac_denied event");
+        let e = &events[0];
+        assert_eq!(e.detail["required_role"], "Agent");
+        assert_eq!(e.detail["actual_role"], "ReadOnly");
+        assert_eq!(e.detail["endpoint"], "POST /mcp tools/call");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
     }
 
     // ── is_agent_jwt detection ─────────────────────────────────────────────────

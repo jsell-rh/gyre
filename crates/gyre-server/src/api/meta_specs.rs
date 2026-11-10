@@ -240,6 +240,13 @@ pub async fn put_meta_spec_set(
     // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
     // bindings would let agents rewrite the rules they operate under (NEW-26).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-spec-set",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace meta-spec-set bindings".to_string(),
         ));
@@ -348,6 +355,13 @@ pub async fn put_rollout_policy(
     // (NEW-26: non-Admin callers, including agents, must not be able to
     // rewrite the rules that govern their own rollout).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-specs/rollout-policy",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace rollout policy".to_string(),
         ));
@@ -497,6 +511,13 @@ pub async fn post_meta_spec_preview(
     let allowed = auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !allowed {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/meta-specs/preview",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "Admin or Developer role required to run meta-spec preview".to_string(),
         ));
@@ -1377,6 +1398,8 @@ pub async fn list_meta_specs_registry(
     // is ABAC-exempt, so the handler is the only authorization surface —
     // any authenticated agent must not enumerate cross-workspace governance.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may list the meta-specs registry".to_string(),
         ));
@@ -1456,6 +1479,8 @@ pub async fn create_meta_spec_registry(
     // surface): creating registry entries defines tenant-wide governance;
     // non-Admin callers must not mint meta-specs.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may create meta-specs registry entries".to_string(),
         ));
@@ -1525,6 +1550,13 @@ pub async fn update_meta_spec_registry(
     // the handler is the authorization surface). Without this gate, any
     // authenticated agent could edit governance prompts and reset approvals.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update meta-specs registry entries".to_string(),
         ));
@@ -1657,6 +1689,13 @@ pub async fn delete_meta_spec_registry(
     // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
     // the handler is the authorization surface).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "DELETE /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete meta-specs registry entries".to_string(),
         ));
