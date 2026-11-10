@@ -15,7 +15,12 @@ if [ "${GYRE_PIPELINE_STAGE:-}" = review ] && [ "$command_name" = cargo ]; then
   done
 fi
 # A worker's build budget is mechanical, including explicit agent -j flags.
-export CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1
+export CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_PROFILE_DEV_INCREMENTAL=false CARGO_PROFILE_TEST_INCREMENTAL=false
+export MALLOC_ARENA_MAX=2
+export RUSTFLAGS='-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--threads=1'
+if [ "$command_name" != cargo ]; then export NODE_OPTIONS=--max-old-space-size=2048; fi
 if [ "$command_name" = cargo ]; then
   bounded=(); skip=0; passthrough=0
   for option in "$@"; do
