@@ -86,9 +86,9 @@ use gyre_common::Id;
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
+    get_judgments, get_me, get_my_notifications, get_notification_count,
+    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
+    remove_member, resolve_notification, update_me, update_member_role,
     update_notification_preferences, update_team,
 };
 
@@ -822,9 +822,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users", post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
-        .route("/api/v1/users/me/agents", get(get_my_agents))
-        .route("/api/v1/users/me/tasks", get(get_my_tasks))
-        .route("/api/v1/users/me/mrs", get(get_my_mrs))
         // My workspace invitations (task-110 repair: the invitee's pending-
         // invitations view, spec §Workspace Invitation Flow steps 3-4)
         .route("/api/v1/users/me/invitations", get(list_my_invitations))
