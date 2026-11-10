@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["1f50d0dc0574a01176f09d052a6812593f4d73ce", "86415e4bbe32a0e16de22cc5d9e08a43442c788d", "147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["1f50d0dc0574a01176f09d052a6812593f4d73ce", "86415e4bbe32a0e16de22cc5d9e08a43442c788d", "147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c", "dac3c7e658395b7b929ad7e69d337d418337aed4"]
 ---
 
 ## Spec Excerpt
@@ -91,39 +91,23 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
 
 ## Shipped
-Rebase repair (merge commit `e0408d527`, onto base `774737638` —
-task-099 bootstrap/persona work + task-177): resolved the three content
-conflicts and adapted the signal chain to the base's changed spawn-core
-contract.
+Rebase repair (merge commit `dac3c7e65`, onto base `b5a872087` —
+task-108 admin impersonation): auto-merge resolved every file except
+one content conflict in `.github/workflows/e2e.yml`, where both sides
+pin the e2e job to ubuntu-24.04. Merged the rationale comments into one
+— kept the base's E2E run-ID evidence (`42586542960`, browser-install
+failure on ubuntu-26.04) and the branch's chromium r1208→r1254
+visual-baseline risk — with `runs-on: ubuntu-24.04` unchanged. No
+source-code conflicts: the signal chain merged cleanly over task-108's
+auth/middleware/spawn changes.
 
-- `.github/workflows/e2e.yml`: both sides pin the e2e job to
-  ubuntu-24.04 (the locked Playwright 1.58.2 cannot install chromium on
-  ubuntu-26.04, which ubuntu-latest now resolves to); kept the task-115
-  rationale comment (registry detail + visual-baseline risk).
-- `api/orchestrator.rs`: both sides appended independent tests at the
-  end of the module — kept BOTH the task-115 stale-detector churn
-  regression and the base's truthful-launch-outcome test with its
-  `launch_with_command` helper.
-- `main.rs`: kept both the base's `seed_builtin_personas` and
-  task-115's `signal_chain` imports (both are called in main).
-- The base's task-099 changed `spawn_workspace_orchestrator_core` /
-  `spawn_repo_orchestrator_core` to take `&Arc<AppState>` and return
-  `(Agent, token, LaunchOutcome)`, and made orchestrator persona
-  resolution fail-closed (approved persona required in the
-  repo/workspace/tenant scope chain). Adapted `signal_chain.rs`
-  (`on_spec_approved`, `scheduler_run_once`, `ensure_workspace_orchestrator`,
-  `run_repo_orchestrator` now thread `&Arc<AppState>` and destructure the
-  3-tuple) and seeded approved orchestrator personas in the affected
-  test states (`chain_state()` and the two specs.rs chain tests),
-  mirroring production's startup `seed_builtin_personas`.
+### Test evidence (head `dac3c7e65`)
 
-### Test evidence (head `e0408d527`)
-
-- `cargo test -p gyre-server --lib` -> **1546 passed, 0 failed**
-  (includes all 19 signal_chain tests, the 12 api::orchestrator tests
-  — both kept conflict tests — and the 3 stale_agents tests).
+- `cargo test -p gyre-server --lib` -> **1636 passed, 0 failed**
+  (includes all 19 signal_chain tests, the api::orchestrator and
+  stale_agents suites, and the base's new impersonation tests).
 - `cargo build --all` -> clean.
-- Evidence: `/tmp/stage/review-evidence/task-115-rebase-7747376.txt`.
+- Evidence: `/tmp/stage/review-evidence/task-115-rebase-b5a872087.txt`.
 - Full workspace suites, architecture checks, all-target Clippy, and
   GitHub CI remain for the verification gate.
 
@@ -148,4 +132,7 @@ chromium build for ubuntu-26.04; an upgrade to 1.65.0 was rejected
 because it would move chromium r1208→r1254 and risk the committed
 visual baselines, which this sandbox cannot revalidate because every
 browser CDN is egress-blocked), and earlier rebase repairs (`88e97e0d`,
-`e4a8e9b8`, `1325137c8` merging base `fefde2946`).
+`e4a8e9b8`, `1325137c8` merging base `fefde2946`), and the rebase onto
+base `774737638` (merge `e0408d527`, task-099 spawn-core/persona
+changes — signal chain adapted to the `&Arc<AppState>` + 3-tuple
+spawn-core contract and fail-closed orchestrator persona resolution).
