@@ -311,7 +311,7 @@
   function mrStatusVariant(s) {
     if (s === 'merged') return 'success';
     if (s === 'open') return 'info';
-    if (s === 'closed') return 'danger';
+    if (s === 'closed' || s === 'reverted') return 'danger';
     return 'muted';
   }
 
@@ -386,8 +386,10 @@
     api.mergeQueue()
       .then(list => {
         if (aborted) return;
-        const all = Array.isArray(list) ? list : [];
-        mergeQueue = all.filter(e => e.repository_id === repoId || e.repo_id === repoId);
+        // Keep ALL entries — the queue API response carries no repo_id, so
+        // repo scoping happens in repoQueueEntries below by joining with the
+        // repo's MRs (already loaded for this tab).
+        mergeQueue = Array.isArray(list) ? list : [];
         mergeQueueLoading = false;
         mergeQueueLoaded = true;
       })
@@ -397,6 +399,65 @@
 
   // Reset merge queue when repo changes
   $effect(() => { if (repo?.id) mergeQueueLoaded = false; });
+
+  // Repo-scoped queue entries: entries whose MR belongs to this repo. The
+  // /merge-queue response has no repository_id field, so the join goes
+  // through repoMrs.
+  let repoQueueEntries = $derived.by(() => {
+    const mrIds = new Set(repoMrs.map(m => m.id));
+    return mergeQueue.filter(e => mrIds.has(e.merge_request_id ?? e.mr_id));
+  });
+
+  // ── Repo health + merge queue pause state (platform-model.md §6 UI) ──
+  // GET /repos/:id/status executes the repo's post-merge gates server-side
+  // (potentially minute-long commands), so it is fetched when the MRs tab —
+  // the repo's source-control surface — is visited, once per repo.
+  let repoHealth = $state(null);
+  let repoHealthLoading = $state(false);
+  let repoHealthLoaded = $state(false);
+  let queueActionBusy = $state(false);
+
+  $effect(() => {
+    if (activeTab !== 'mrs') return;
+    const repoId = repo?.id;
+    if (!repoId || repoHealthLoaded) return;
+    let aborted = false;
+    repoHealthLoading = true;
+    api.repoStatus(repoId)
+      .then(status => {
+        if (aborted) return;
+        repoHealth = status;
+        repoHealthLoading = false;
+        repoHealthLoaded = true;
+      })
+      .catch(() => { if (!aborted) { repoHealth = null; repoHealthLoading = false; repoHealthLoaded = true; } });
+    return () => { aborted = true; };
+  });
+
+  // Reset when repo changes
+  $effect(() => { if (repo?.id) repoHealthLoaded = false; });
+
+  async function toggleQueuePause(pause) {
+    if (!repo?.id || queueActionBusy) return;
+    queueActionBusy = true;
+    try {
+      const status = pause
+        ? await api.pauseRepoQueue(repo.id, 'paused via web UI')
+        : await api.resumeRepoQueue(repo.id);
+      // The pause/resume responses do not re-run gates (main_green: null) —
+      // keep the already-computed health reading, refresh only pause state.
+      repoHealth = {
+        ...repoHealth,
+        queue_paused: status.queue_paused,
+        pause_reason: status.pause_reason ?? null,
+      };
+      toastSuccess(pause ? 'Merge queue paused' : 'Merge queue resumed');
+    } catch (err) {
+      toastError('Failed to update merge queue: ' + (err.message ?? err));
+    } finally {
+      queueActionBusy = false;
+    }
+  }
 
   // ── MR quick actions ──────────────────────────────────────────────────
   let enqueueingMr = $state(null);
@@ -511,6 +572,29 @@
       {#if budgetPct !== null}
         <span class="meta-sep" aria-hidden="true">·</span>
         <span class="budget-display" data-testid="budget-display">{$t('repo_mode.budget_label', { values: { pct: budgetPct } })}</span>
+      {/if}
+
+      <!-- Main branch health (platform-model.md §6 UI: green/red indicator).
+           Loaded when the MRs tab is visited — GET /repos/:id/status runs the
+           repo's post-merge gates server-side, too heavy for every page view. -->
+      {#if repoHealth}
+        <span class="meta-sep" aria-hidden="true">·</span>
+        <span
+          class="main-health-badge main-health-{repoHealth.main_green === true ? 'green' : repoHealth.main_green === false ? 'red' : 'unknown'}"
+          data-testid="main-health-badge"
+          title={repoHealth.main_green === true
+            ? 'Default branch passes post-merge validation'
+            : repoHealth.main_green === false
+              ? 'Default branch fails post-merge validation'
+              : 'No post-merge gates configured for this repo'}
+        >
+          <span class="main-health-dot" aria-hidden="true"></span>
+          {repoHealth.main_green === true
+            ? $t('repo_mode.main_health_green')
+            : repoHealth.main_green === false
+              ? $t('repo_mode.main_health_red')
+              : $t('repo_mode.main_health_unknown')}
+        </span>
       {/if}
 
       <!-- Quick stats -->
@@ -696,15 +780,58 @@
       </div>
     {:else if activeTab === 'mrs'}
       <div class="list-tab">
+        <!-- Main health + merge queue pause state (platform-model.md §6 UI:
+             merge queue shows paused state with reason; queue controls) -->
+        {#if repoHealthLoading}
+          <div class="queue-state-banner" data-testid="queue-state-loading">Checking main branch health…</div>
+        {:else if repoHealth}
+          <div class="queue-state-banner" class:queue-state-banner-paused={repoHealth.queue_paused} data-testid="queue-state-banner">
+            <span
+              class="queue-state-health"
+              data-testid="queue-state-health"
+            >
+              <span class="main-health-dot main-health-dot-{repoHealth.main_green === true ? 'green' : repoHealth.main_green === false ? 'red' : 'unknown'}" aria-hidden="true"></span>
+              {#if repoHealth.main_green === true}
+                Main is green
+              {:else if repoHealth.main_green === false}
+                Main is broken — post-merge validation failing
+              {:else}
+                No post-merge gates configured
+              {/if}
+            </span>
+            {#if repoHealth.queue_paused}
+              <span class="queue-state-paused" role="status" data-testid="queue-paused-reason">
+                Merge queue paused{repoHealth.pause_reason ? ` — ${repoHealth.pause_reason}` : ''}
+              </span>
+              <button
+                class="quick-action-btn"
+                onclick={() => toggleQueuePause(false)}
+                disabled={queueActionBusy}
+                title="Resume the merge queue (merges continue)"
+                data-testid="queue-resume-btn"
+              >{queueActionBusy ? '…' : 'Resume queue'}</button>
+            {:else}
+              <span class="queue-state-running" data-testid="queue-running">Merge queue running</span>
+              <button
+                class="quick-action-btn"
+                onclick={() => toggleQueuePause(true)}
+                disabled={queueActionBusy}
+                title="Pause the merge queue (no merges until resumed)"
+                data-testid="queue-pause-btn"
+              >{queueActionBusy ? '…' : 'Pause queue'}</button>
+            {/if}
+          </div>
+        {/if}
+
         <!-- Merge Queue section -->
-        {#if mergeQueue.length > 0}
+        {#if repoQueueEntries.length > 0}
           <div class="merge-queue-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-              Merge Queue ({mergeQueue.length})
+              Merge Queue ({repoQueueEntries.length})
             </h3>
             <div class="queue-entries">
-              {#each mergeQueue as entry, i}
+              {#each repoQueueEntries as entry, i}
                 {@const mrTitle = repoMrs.find(m => m.id === (entry.merge_request_id ?? entry.mr_id))?.title}
                 <button class="queue-entry" onclick={() => goToEntityDetail?.('mr', entry.merge_request_id ?? entry.mr_id, {})} tabindex="0">
                   <span class="queue-position">#{i + 1}</span>
@@ -1107,6 +1234,82 @@
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
     white-space: nowrap;
+  }
+
+  /* Main branch health badge (platform-model.md §6 UI) */
+  .main-health-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+  }
+
+  .main-health-badge.main-health-green {
+    color: var(--color-success, #22c55e);
+    border-color: color-mix(in srgb, var(--color-success, #22c55e) 40%, var(--color-border));
+    background: color-mix(in srgb, var(--color-success, #22c55e) 8%, transparent);
+  }
+
+  .main-health-badge.main-health-red {
+    color: var(--color-danger, #ef4444);
+    border-color: color-mix(in srgb, var(--color-danger, #ef4444) 40%, var(--color-border));
+    background: color-mix(in srgb, var(--color-danger, #ef4444) 8%, transparent);
+  }
+
+  .main-health-badge.main-health-unknown {
+    color: var(--color-text-secondary);
+  }
+
+  .main-health-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .main-health-dot-green { background: var(--color-success, #22c55e); }
+  .main-health-dot-red { background: var(--color-danger, #ef4444); }
+  .main-health-dot-unknown { background: var(--color-text-muted, #94a3b8); }
+
+  /* Merge queue state banner (platform-model.md §6 UI: paused state + reason) */
+  .queue-state-banner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-info, #60a5fa) 5%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-info, #60a5fa) 25%, var(--color-border));
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+  }
+
+  .queue-state-banner-paused {
+    background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
+    border-color: color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+  }
+
+  .queue-state-health {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .queue-state-paused {
+    color: var(--color-warning);
+    font-weight: 600;
+  }
+
+  .queue-state-running {
+    color: var(--color-text-secondary);
   }
 
   /* Clone URL button (compact) */

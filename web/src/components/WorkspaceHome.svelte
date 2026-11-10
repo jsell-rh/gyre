@@ -25,7 +25,7 @@
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
   import Briefing from './Briefing.svelte';
-  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import ExplorerView from './ExplorerView.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -174,33 +174,25 @@
   let specsStatusFilter = $state('');
 
   // ── Architecture state (ui-navigation.md §2 — collapsed by default) ────
+  // The section body renders the workspace-scoped Explorer (ui-layout.md §5
+  // Workspace Scope — Realized Architecture): repos as nodes, cross-repo
+  // dependencies as edges, C4 Container level. Data loading and error states
+  // live inside ExplorerView.
   let archExpanded = $state(false);
-  let archLoading = $state(false);
-  let archError = $state(null);
-  let archGraph = $state(null); // { nodes: [], edges: [] }
-
-  async function loadArchGraph() {
-    if (!workspace?.id) return;
-    const gen = wsLoadGen;
-    archLoading = true;
-    archError = null;
-    try {
-      const data = await api.workspaceGraph(workspace.id);
-      if (stale(gen)) return;
-      archGraph = data;
-    } catch (e) {
-      if (stale(gen)) return;
-      archError = e.message || 'Failed to load workspace graph';
-      archGraph = { nodes: [], edges: [] };
-    } finally {
-      if (!stale(gen)) archLoading = false;
-    }
-  }
 
   function toggleArch() {
     archExpanded = !archExpanded;
-    if (archExpanded && !archGraph && !archLoading) {
-      loadArchGraph();
+  }
+
+  /** Double-click a repo node in the workspace graph → scope change to repo
+   *  (drill to crate level). Routes through the host shell so the URL and
+   *  breadcrumb update (App.goToRepo → /workspaces/:slug/r/:repo/architecture). */
+  function handleArchEnterRepo(repo) {
+    const full = repos.find((r) => r.id === (repo.id ?? repo.repo_id));
+    if (full) {
+      onSelectRepo?.(full, 'architecture');
+    } else {
+      toastError(`"${repo.name ?? repo.id}" is in another workspace and cannot be opened from here.`);
     }
   }
 
@@ -913,10 +905,22 @@
   let mergeQueueItems = $state([]);
   let mergeQueueGraphNodes = $state([]);
   let mergeQueueView = $state('list');
+  // Repos whose merge queue is paused (platform-model.md §6 UI: "Merge queue
+  // shows paused state with reason"). Populated from GET /repos/:id/status
+  // with gates skipped — pause state display must not execute gate commands.
+  let mergeQueuePausedRepos = $state([]);
+
+  let queuePausedAny = $derived(mergeQueuePausedRepos.length > 0);
+  let queuePauseReasonText = $derived.by(() => {
+    if (mergeQueuePausedRepos.length === 1) return mergeQueuePausedRepos[0].reason ?? 'reason unknown';
+    if (mergeQueuePausedRepos.length > 1) return `${mergeQueuePausedRepos.length} repos' queues paused`;
+    return null;
+  });
 
   async function loadMergeQueue() {
     const gen = wsLoadGen;
     mergeQueueLoading = true;
+    mergeQueuePausedRepos = [];
     try {
       const [all, graph] = await Promise.all([
         api.mergeQueue().catch(() => []),
@@ -966,6 +970,22 @@
         // raw API response order — the sidebar widget shows the top 5 with
         // position badges from array order.
         .sort((a, b) => (a.position ?? a.priority ?? 0) - (b.position ?? b.priority ?? 0));
+
+      // Pause state for the repos with queued entries (best-effort, async —
+      // the banner appears when it arrives). Only repos that actually have
+      // queue entries are queried, and gate execution is skipped.
+      const queuedRepoIds = [...new Set(
+        mergeQueueItems.map(i => i._mr?.repository_id ?? i._mr?.repo_id).filter(Boolean)
+      )];
+      Promise.all(queuedRepoIds.map(id =>
+        Promise.resolve(api.repoStatus?.(id, { withGates: false })).catch(() => null)
+      ))
+        .then(statuses => {
+          if (stale(gen)) return;
+          mergeQueuePausedRepos = statuses
+            .filter(st => st?.queue_paused)
+            .map(st => ({ repo_id: st.repo_id, reason: st.pause_reason ?? null }));
+        });
     } catch {
       if (stale(gen)) return;
       mergeQueueItems = [];
@@ -1120,6 +1140,8 @@
     'enqueued': 'Enqueued for merge',
     'merged': 'Merged',
     'Merged': 'Merged to main',
+    'MrReverted': 'MR reverted',
+    'mr_reverted': 'MR reverted',
     'closed': 'Closed',
     'review_submitted': 'Review submitted',
     'comment_added': 'Comment added',
@@ -1166,7 +1188,7 @@
 
   function activityVariant(event) {
     const t = event.event_type ?? event.event ?? event.type ?? '';
-    if (t.includes('fail') || t.includes('reject')) return 'danger';
+    if (t.includes('fail') || t.includes('reject') || t.includes('revert')) return 'danger';
     if (t.includes('merg') || t.includes('approv') || t.includes('complet') || t.includes('pass')) return 'success';
     if (t.includes('spawn') || t.includes('enqueue') || t.includes('running')) return 'warning';
     return 'info';
@@ -1250,7 +1272,6 @@
     loadBudget();
     loadMergeQueue();
     loadDepHealth();
-    loadArchGraph();
   });
 
   // ── Explorer sidebar click → expand Architecture (HSI §1.3) ───────────
@@ -1259,7 +1280,6 @@
   $effect(() => {
     if (archExpandSignal > 0) {
       archExpanded = true;
-      if (!archGraph && !archLoading) loadArchGraph();
     }
   });
 </script>
@@ -1709,40 +1729,16 @@
             </button>
             {#if archExpanded}
               <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
-                {#if archLoading}
-                  <div class="skeleton-row"></div>
-                  <div class="skeleton-row"></div>
-                {:else if archError}
-                  <div class="error-row" role="alert">
-                    <p class="error-text">{archError}</p>
-                    <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
-                  </div>
-                {:else if archGraph}
-                  <div class="arch-canvas-wrap" data-testid="arch-canvas">
-                    <ExplorerCanvas
-                      nodes={archGraph.nodes ?? []}
-                      edges={archGraph.edges ?? []}
-                      onNodeDetail={(node) => {
-                        // Single-click → detail panel with repo metadata
-                        // (ui-layout.md §5 Workspace Scope: "Click a repo node →
-                        // detail panel shows repo metadata").
-                        if (!node) return;
-                        openDetailPanel?.({ type: 'repo', id: node.repo_id ?? node.id, data: node });
-                      }}
-                      onScopeDrill={(node) => {
-                        // Double-click → drill to next C4 level = repo scope
-                        // (ui-layout.md §3 Drill-Down: scope change, breadcrumb
-                        // updates, URL changes via pushState — App.goToRepo).
-                        const repo = repos.find(r => r.id === node.repo_id);
-                        if (repo) {
-                          onSelectRepo?.(repo, 'architecture');
-                        } else {
-                          toastError(`"${node.name ?? node.id}" is not a repository in this workspace.`);
-                        }
-                      }}
-                    />
-                  </div>
-                {/if}
+                <!-- Workspace-scoped Explorer (ui-layout.md §5): repos as nodes,
+                     cross-repo dependencies as edges, double-click drills to the
+                     repo's crate-level architecture (scope change via the shell). -->
+                <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                  <ExplorerView
+                    embedded={true}
+                    scope={{ type: 'workspace', workspaceId: workspace?.id }}
+                    onEnterRepo={handleArchEnterRepo}
+                  />
+                </div>
               </div>
             {/if}
           </section>
@@ -1885,6 +1881,9 @@
             <div class="sidebar-widget" data-testid="section-merge-queue">
               <div class="sidebar-widget-header">
                 <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
+                {#if queuePausedAny}
+                  <span class="mq-paused-chip" data-testid="mq-paused-chip" title={queuePauseReasonText}>paused</span>
+                {/if}
                 <div class="mq-view-toggle" data-testid="mq-view-toggle">
                   <button
                     class="mq-toggle-btn"
@@ -1906,6 +1905,8 @@
                 <div class="mq-dag-wrapper" data-testid="mq-dag-wrapper">
                   <MergeQueueGraph
                     nodes={mergeQueueGraphNodes}
+                    paused={queuePausedAny}
+                    pauseReason={queuePauseReasonText}
                     onNodeClick={(node) => nav('mr', node.mr_id, { title: node.title })}
                   />
                 </div>
@@ -2381,6 +2382,19 @@
   .mq-view-toggle {
     display: flex;
     gap: 2px;
+  }
+
+  .mq-paused-chip {
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-warning, #eab308);
+    border: 1px solid color-mix(in srgb, var(--color-warning, #eab308) 45%, var(--color-border));
+    background: color-mix(in srgb, var(--color-warning, #eab308) 10%, transparent);
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: help;
   }
 
   .mq-toggle-btn {
@@ -5807,9 +5821,9 @@
   }
 
   .arch-canvas-wrap {
-    height: 320px;
+    height: 460px;
     position: relative;
-    overflow: hidden;
+    overflow: auto;
   }
 
   /* ── Decisions / Action Needed section ────────────────────────────── */

@@ -398,6 +398,25 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register log compression job (observability.md §Log Retention &
+    // Compression) — daily by default, configurable via
+    // GYRE_LOG_COMPRESSION_INTERVAL (seconds).
+    registry
+        .register(
+            JobDefinition {
+                name: crate::log_compression::JOB_NAME.to_string(),
+                description: "Zstd-compresses audit event details and agent log \
+                     lines older than 7 days (observability §Log Retention & Compression)"
+                    .to_string(),
+                interval_secs: crate::log_compression::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
+        )
+        .await;
+
+    // Register spawn budget reset job at midnight UTC
     registry
         .register(
             JobDefinition {
@@ -489,6 +508,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register task_scheduler job (agent-runtime.md §1 Phases 3–4, task-115):
+    // claims Backlog Delegation/Coordination tasks and runs repo orchestrators
+    // under per-repo registry locks. The 30 s loop itself is spawned in main.rs
+    // (signal_chain::spawn_task_scheduler) and records its cycles under this
+    // same name so /healthz liveness and POST /admin/jobs/task_scheduler/run work.
+    registry
+        .register(
+            JobDefinition {
+                name: "task_scheduler".to_string(),
+                description: "Claims Delegation/Coordination tasks and runs repo orchestrators \
+             (agent-runtime.md §1 Phase 3)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::signal_chain::scheduler_run_once(&state).await },
+        )
+        .await;
+
     // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
     registry
         .register(
@@ -502,6 +541,39 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
+    // Register meta_spec_stale_pin_check job (agent-runtime.md §2 Stale Pin
+    // Detection): compares spec-level binding pins against current versions.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_stale_pin_check".to_string(),
+                description: "Detects specs pinning old meta-spec versions and creates priority-6 \
+                     MetaSpecDrift notifications (agent-runtime §2)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+        )
+        .await;
+
+    // Register secret expiry check job (every 5 minutes, platform-model.md §7)
+    registry
+        .register(
+            JobDefinition {
+                name: "secret_rotation_check".to_string(),
+                description: "Creates SecretExpiring notifications for workspace admins \
+                             when secrets expire within 1 hour (platform-model.md §7)"
+                    .to_string(),
+                interval_secs: 300,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::secret_rotation::run_once(&state).await },
         )
         .await;
 
@@ -524,6 +596,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
             },
             |state| async move {
                 crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
+    // Register impersonation expiry job (runs every 30 seconds,
+    // identity-security.md §Impersonation): ends sessions past their TTL
+    // (emitting ImpersonationEnded) and expires stale approval requests.
+    registry
+        .register(
+            JobDefinition {
+                name: "impersonation_expiry".to_string(),
+                description: "Ends impersonation sessions past their TTL and expires \
+                     stale approval requests (identity-security.md §Impersonation)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::impersonation::expire_sessions(&state)
                     .await
                     .map(|_| ())
             },

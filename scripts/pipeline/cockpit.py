@@ -26,12 +26,15 @@ def snapshot(store):
         active = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'claimed' and item['expires'] > time.time()), None)
         retry = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
+        shared_wait = (data.get('repair') or {}).get('shared_environment')
         state = ('merged' if data.get('delivered') else 'resolved' if data.get('resolved') else 'failed' if attention else
                  'running' if active else 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else 'deferred' if retry else
-                 'blocked' if task['name'] in errors or not set(graph[task['name']]) <= delivered else
+                 'blocked' if shared_wait or task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
         condition = priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        if shared_wait and not condition:
+            condition = 'Waiting for shared CI environment repair: ' + data['repair']['prerequisite']
         tasks.append({'name': task['name'], 'title': data.get('title'), 'spec_ref': data.get('spec_ref'),
                       'deps': graph[task['name']], 'state': state, 'stage': active['stage'] if active else None,
                       'progress': data.get('progress'), 'candidate': data.get('candidate'),
@@ -74,7 +77,7 @@ def snapshot(store):
             'running': counts.get('running', 0), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
-            'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0),
+            'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
             'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),

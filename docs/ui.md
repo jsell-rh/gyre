@@ -121,6 +121,12 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 - **Bidirectional nav**: clicking a node with a `spec_path` shows a "Go to spec" button that opens the Specs tab with that spec's detail panel. Spec → Architecture nav is via the Architecture mini canvas in the spec detail.
 - **Sub-tabs: Graph | Briefing** — the Briefing sub-tab is the repo-scoped narrative (same shape as the workspace Briefing section, narrowed server-side via `?repo_id=` on `GET /api/v1/workspaces/:id/briefing` and `POST .../briefing/ask`); deep-linkable via `?subTab=briefing`.
 - `POST /api/v1/repos/{id}/graph/predict` — structural predictions surfaced in canvas and mini canvas.
+- **Default views** (HSI §3, view-selector tabs in the Explorer control bar; Boundary is the default):
+  - **Boundary** — C4 progressive drill-down: Level 1 = the workspace-scope realized-architecture graph (ui-layout.md §5: repos as nodes with type/endpoint count sub-labels from the workspace knowledge graph, cross-repo dependencies as edges, double-click drills to the repo's crate level); Levels 2–4 = the canvas drill-down (packages → modules → code items) with breadcrumb drill-up.
+  - **Spec Realization** — two-panel view: spec list (status badge, linked-node count, task progress) ↔ graph nodes linked via GovernedBy edges / `spec_path`. "Read / Edit Spec" opens the inline spec editor; clicking a node navigates to it in Boundary.
+  - **Change** — architectural deltas since your last visit (`GET /repos/{id}/graph/timeline?since=…`, `since` from the client-cached `X-Gyre-Last-Seen` response header; 24h fallback on first visit). Added (+) / Modified (~) / Removed (−) entries with type, containing module, spec ref, authoring agent; entries navigate to the node in Boundary.
+  - **System Trace** — MR SDLC timeline from `GET /api/v1/merge-requests/{id}/timeline`: MR selector, typed event rows, expandable gate pass/fail, and View Conversation / View Diff / View Attestation inline sections.
+- **Generated views** (HSI §3, task-089): the Explorer chat column has two modes — *Explorer* (the repo-scoped WS agent chat) and *Generated Views* (`GeneratedViewChat.svelte`). The Generated Views mode sends a natural-language question to `POST /api/v1/workspaces/{id}/explorer-views/generate`; the LLM (a read-only query translator) answers with a ViewSpec (graph query + layout + explanation). The view is applied to the ExplorerCanvas immediately, with the LLM's explanation rendered as the canvas query annotation (sidebar annotation). Layout follows question intent: data-movement questions get a `"flow"` layout that replays the `trace_source` MR's captured trace as animated particles on the evaluative lens (server-enforced: no trace data → `"graph"` fallback with an explanatory note); structural questions get `"graph"`/`"hierarchical"`. Each generated view has a **Save this view** button (`POST /api/v1/workspaces/{id}/explorer-views`, preserving query + layout + explanation), and follow-up questions refine the current view (the previous view definition is sent as refinement context).
 
 ### Decisions Tab
 
@@ -145,6 +151,10 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
+| `explorer/SpecRealizationView.svelte` | Explorer default view — spec ↔ realization two-panel (GovernedBy linkage) |
+| `explorer/ChangeView.svelte` | Explorer default view — architectural deltas since last visit |
+| `explorer/SystemTraceView.svelte` | Explorer default view — MR SDLC timeline with gate expansion and conversation/diff/attestation sections |
+| `GeneratedViewChat.svelte` | Explorer chat column, Generated Views mode — natural-language → LLM-generated ViewSpec via the workspace generate endpoint; apply / save / refine generated views (HSI §3) |
 | `ArchPreviewCanvas.svelte` | Architecture mini canvas in spec detail panel |
 | `EditorSplit.svelte` | Side-by-side spec editor + architecture canvas |
 | `DetailPanel.svelte` | Slide-in right panel for entity drill-in |

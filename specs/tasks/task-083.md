@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["bbb7aa61f860f3f4e73b862a2aa35061e87e1c32", "c69d9fd546809cfac5195d7663526f5c24848ea1", "4cef86db1b2fe6c0dc182068ea8c0ed0a789a15b", "af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "4772240df3f290bd094a163705a06cabc125a6a4"]
+commits: ["bbb7aa61f860f3f4e73b862a2aa35061e87e1c32", "c69d9fd546809cfac5195d7663526f5c24848ea1", "4cef86db1b2fe6c0dc182068ea8c0ed0a789a15b", "af4dd137adb2697aea0acb1d939b91efcc4b9b36", "6cf4a22459fa8099e36df4296da9caddd17f8551", "084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "4772240df3f290bd094a163705a06cabc125a6a4", "d4e72e32cd9fad766a2c54973b04d631ab179a3f"]
 ---
 
 ## Authority and Scope
@@ -221,6 +221,17 @@ is claimed here, per section, with the verifying evidence below.
   `check-fabricated-scope-defaults.sh` → OK. `web/dist` restored to HEAD
   after the cargo run's build.rs side-effect; not committed (executor
   owns generated assets).
+- Commit attribution (`d4e72e32`, recorded in this file's `commits:`
+  frontmatter by the task-088 integration round): a downstream task's
+  integration commit whose subject references this task ("fix(task-088):
+  integrate with task-083 canonical navigation") merges this task's base
+  into its candidate and regenerates the 11 explorer visual baselines the
+  merged toolbar (arch sub-tabs + view selector) re-drifted, plus scopes
+  one test's tab queries to the `explorer-view-selector` tablist. The
+  `check-task-commit-attribution.sh` gate requires every task referenced
+  in a product-surface commit subject to list that commit, so it is
+  recorded here for review-scoping visibility; the change itself is
+  documented in task-088's Shipped notes.
 - `web/dist` was not rebuilt or committed here (the executor restores
   generated assets from the assignment base and final integration
   rebuilds them remotely); full suites, all-target Clippy, and exact-head
