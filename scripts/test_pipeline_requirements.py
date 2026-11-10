@@ -289,6 +289,19 @@ class RequirementTests(unittest.TestCase):
         view=cockpit(self.store)['tasks'][0]
         self.assertEqual(view['state'],'needs-triage');self.assertEqual(view['condition'],'Approved specs conflict')
 
+    def test_catalog_bindings_cover_every_declared_coverage_document(self):
+        import re
+        root=Path(__file__).resolve().parents[1]
+        registry=json.loads((root/'specs/task-spec-inputs.json').read_text())
+        from pipeline.catalog import metadata
+        for path in (root/'specs/tasks').glob('task-*.md'):
+            body=path.read_text();front=contract.requirement_parts(body)[0]
+            block=re.search(r'^coverage_sections:[^\n]*(?:\n[ \t]+[^\n]*)*',front,re.M)
+            declared=set(re.findall(r'[\w-]+\.md',block[0])) if block else set()
+            ids=registry['bindings'][metadata(body)['spec_ref']]+registry.get('shared',[])
+            bound={Path(registry['sections'][key]['file']).name for key in ids}
+            self.assertFalse(declared-bound,(path.name,declared-bound))
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])
