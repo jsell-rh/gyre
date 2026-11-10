@@ -205,6 +205,14 @@ class RequirementTests(unittest.TestCase):
         view=cockpit(self.store)['tasks'][0]
         self.assertEqual(view['state'],'failed');self.assertEqual(view['condition'],'A deterministic check failed')
 
+    def test_requirement_reversion_never_reuses_an_old_execution_epoch(self):
+        original=self.spec.read_text();self.sync();first=self.store.task('task-001')['generation']
+        self.spec.write_text(original.replace('Must do one','Must do two'));self.sync()
+        second=self.store.task('task-001')['generation']
+        self.spec.write_text(original);self.sync();third=self.store.task('task-001')['generation']
+        self.assertNotEqual(first,second);self.assertNotEqual(first,third);self.assertNotEqual(second,third)
+        self.sync();self.assertEqual(self.store.task('task-001')['generation'],third)
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])
