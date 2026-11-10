@@ -2,7 +2,7 @@
 title: "Implement search autocomplete and facets endpoints"
 spec_ref: "search.md §API"
 depends_on: [task-201]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
