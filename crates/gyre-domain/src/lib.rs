@@ -30,6 +30,7 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod meta_spec;
+pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;

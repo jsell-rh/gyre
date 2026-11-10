@@ -654,6 +654,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",
