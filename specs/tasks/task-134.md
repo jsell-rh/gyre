@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["a59344eaafbf82d69a23452c0ad5de4c51e1cc60", "531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab"]
+commits: ["a59344eaafbf82d69a23452c0ad5de4c51e1cc60", "531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab", "33a60bc0fb1954f90f46cb73a2a905fc753f3165"]
 ---
 
 ## Spec Excerpt
@@ -91,9 +91,10 @@ behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
 runs and completed across assignments, including the review-F1/F2/F3 repairs,
 the review-round TTL repair `72c5bb03`, the review-repair round `31c35ddb`,
 the rebase onto `fefde294`, the rebase onto task-177's `7747376`, the merge
-onto base `fb1f82e31`, the `459f51b9` review-repair round, and the merge
-onto base `b5a872087` (task-108 impersonation; merge `4d182e9e8`), all
-described below).
+onto base `fb1f82e31`, the `459f51b9` review-repair round, the merge
+onto base `b5a872087` (task-108 impersonation; merge `4d182e9e8`), the
+merge onto base `dbf9edaea` (task-117; merge `3cbf86679`) followed by the
+verification-repair round `33a60bc0f`, all described below).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
@@ -253,18 +254,48 @@ work (no behavior of either side dropped):
   held). Probe output retained in review evidence
   (`merge-b5a872087.txt`).
 
+### Verification-repair round (findings from checks at candidate `34b66fe4`; fix `33a60bc0f`)
+
+Verification of candidate `34b66fe4` (merge `3cbf86679` onto base
+`dbf9edaea`, task-117) failed two mechanical gates. Both are fixed in
+`33a60bc0f`; neither changes runtime behavior:
+
+- **rustfmt (formatting only)**: `check-rustfmt-diff.py` flagged changed
+  lines in `sqlite/quality_gate.rs`, `abac_middleware.rs`, `auth.rs`,
+  `gate_executor.rs`, and `task134_review_probe.rs`. Fixed by running
+  rustfmt on exactly those files; the whole diff was read and is
+  formatting-only (the one string-literal line-continuation re-indent in
+  `gate_executor.rs` preserves content — `\` strips the newline and leading
+  whitespace). `check-rustfmt-diff.py dbf9edaea` now reports changed lines
+  clean (17 files).
+- **Duplicate ABAC resolver paths (22 vs frozen baseline 17)**: the
+  branch's scoped-token allow-list re-listed five merge-request route
+  patterns (`/merge-requests/:id`, `/comments`, `/diff`, `/gates`,
+  `/reviews`) that already exist as literals in the resolver registry;
+  `check-abac-route-registry.sh` freezes repeated path literals because
+  `resolve()` is first-match (a second copy is dead or misleading). Fixed
+  by defining each pattern exactly once as a module const
+  (`MR_DETAIL_ROUTE`, `MR_COMMENTS_ROUTE`, `MR_REVIEWS_ROUTE`,
+  `MR_DIFF_ROUTE`, `MR_GATES_ROUTE`) used by BOTH the resolver registry
+  entries and the new `REVIEWER_ALLOWED_ROUTES` / `VALIDATOR_ALLOWED_ROUTES`
+  arrays, so the registry mapping and the allow-list cannot drift apart.
+  Enforcement is unchanged — same routes allowed/denied per scope,
+  exact-match scope comparison kept — and the check passes with the
+  duplicate count back at the 17 baseline while every registered route
+  still resolves (the const literals still feed the check's registry
+  scan, verified by the passing unregistered-route check).
+
 ### Test evidence
 
-On the current tree (merge `4d182e9e8` onto base `b5a872087`, which carries
-the earlier `74418dddc`/`fb1f82e31` merge and the `459f51b9` migration
-renumber): `cargo check -p gyre-server` clean; `cargo test -p gyre-server
---lib` 1629/1629 (including the impersonation suite from the base and the
-`gate_executor` suite — 37/37 — from this branch);
-`task134_review_probe` 7/7; `auth_integration` 21/21; `git_integration`
-17/17; earlier rounds' `cargo test -p gyre-adapters --lib` 396/396
-(including the upsert round-trip and the migration guard tests);
-`check-migration-versions.sh`, `check-migration-sql-portability.sh`,
-`check-arch.sh`, `check-task-commit-attribution.sh`, and
-`check-fabricated-scope-defaults.sh` (count enforced at 1, growth probe
-fails) all pass. `cargo test --all` and the full mechanical-check suite are
+On the current tree (`33a60bc0f` on merge `3cbf86679` over base
+`dbf9edaea`, which carries the earlier merges and repair rounds above):
+`cargo check -p gyre-server` clean; `gate_executor` suite 37/37;
+`task134_review_probe` 7/7; abac-filtered `gyre-server` lib tests 38/38;
+`gyre-adapters` `save_upsert_updates_all_config_columns` passes;
+`check-rustfmt-diff.py` and `check-clippy-diff.py` clean vs base
+`dbf9edaea` (17 Rust files); `check-abac-route-registry.sh` passes
+(duplicates at the 17 baseline, all routes resolve);
+`check-arch.sh`, `check-migration-versions.sh`,
+`check-fabricated-scope-defaults.sh`, and `check-task-commit-attribution.sh`
+all pass. `cargo test --all` and the full mechanical-check suite are
 owned by verification and publication.
