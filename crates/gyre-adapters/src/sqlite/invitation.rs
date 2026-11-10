@@ -184,7 +184,7 @@ impl TenantInvitationRepository for SqliteStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            // The partial unique index (migration 000059) is the race
+            // The partial unique index (migration 000061) is the race
             // backstop: a concurrent insert that also passed the check
             // above is rejected by the database, and the violation is
             // surfaced as the same port-contract error (task-110 F2).
@@ -411,7 +411,7 @@ impl WorkspaceInvitationRepository for SqliteStorage {
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
             // Same race backstop as the tenant repository: the partial
-            // unique index (migration 000059) arbitrates concurrent
+            // unique index (migration 000061) arbitrates concurrent
             // check-then-insert races and the violation surfaces as the
             // port-contract error (task-110 F2).
             if let Err(e) = diesel::insert_into(workspace_invitations::table)
@@ -791,7 +791,7 @@ mod tests {
 
     /// Task-110 review F2: the "one pending invitation per (tenant, email)"
     /// port contract must be enforced by the DATABASE (partial unique
-    /// index, migration 000059), not only by the adapter's check-then-insert
+    /// index, migration 000061), not only by the adapter's check-then-insert
     /// — two concurrent creates that both pass the check must not both
     /// insert. This test bypasses the repository entirely (raw SQL) so it
     /// fails if the index is missing, and feeds the REAL database errors
@@ -920,14 +920,14 @@ mod tests {
             .unwrap();
     }
 
-    /// Task-110 review F2 safety net: migration 000059 must apply to a
+    /// Task-110 review F2 safety net: migration 000061 must apply to a
     /// database that ALREADY contains raced duplicate Pending rows (the
     /// exact state the check-then-insert gap allowed) without failing at
     /// CREATE UNIQUE INDEX — the superseded duplicates are marked Expired
     /// (audit-preserving terminal state) and only the newest per scope
     /// survives as Pending.
     #[test]
-    fn migration_000059_dedupes_raced_pending_invitations_before_index() {
+    fn migration_000061_dedupes_raced_pending_invitations_before_index() {
         use crate::sqlite::MIGRATIONS;
         use diesel::migration::{MigrationConnection, MigrationSource};
         use diesel::sql_types::{Integer, Text};
@@ -938,15 +938,15 @@ mod tests {
         let path = dir.path().join("test.db");
         let mut conn = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
 
-        // Pre-000059 state: every earlier migration applied.
+        // Pre-000061 state: every earlier migration applied.
         let all = MIGRATIONS.migrations().unwrap();
         let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
-            m.name().version().to_string() != "20261108000059"
+            m.name().version().to_string() != "20261108000061"
         });
         assert_eq!(
             target.len(),
             1,
-            "000059 not found in embedded migrations"
+            "000061 not found in embedded migrations"
         );
         conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();

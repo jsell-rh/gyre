@@ -177,7 +177,7 @@ impl TenantInvitationRepository for PgStorage {
                 created_at: inv.created_at as i64,
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
-            // The partial unique index (migration 000059) is the race
+            // The partial unique index (migration 000061) is the race
             // backstop: a concurrent insert that also passed the check
             // above is rejected by the database, and the violation is
             // surfaced as the same port-contract error (task-110 F2).
@@ -406,7 +406,7 @@ impl WorkspaceInvitationRepository for PgStorage {
                 accepted_at: inv.accepted_at.map(|v| v as i64),
             };
             // Same race backstop as the tenant repository: the partial
-            // unique index (migration 000059) arbitrates concurrent
+            // unique index (migration 000061) arbitrates concurrent
             // check-then-insert races and the violation surfaces as the
             // port-contract error (task-110 F2).
             if let Err(e) = diesel::insert_into(workspace_invitations::table)

@@ -104,8 +104,12 @@ pub struct AgentJwtClaims {
 
 /// Ed25519 key pair used to mint and verify agent JWTs.
 ///
-/// Generated fresh on every server start. The public key is exposed via
-/// `GET /.well-known/jwks.json` so external verifiers can validate tokens.
+/// The key is persisted across server restarts (task-107 F12): local-mode
+/// commit signature records survive restarts in the `CommitSignatureRepository`,
+/// so the forge key that signed them must survive too, or every pre-restart
+/// local-mode record would report `valid:false` (false integrity alarm). The
+/// public key is exposed via `GET /.well-known/jwks.json` so external
+/// verifiers can validate tokens.
 pub struct AgentSigningKey {
     pub encoding_key: jsonwebtoken::EncodingKey,
     pub decoding_key: jsonwebtoken::DecodingKey,
@@ -119,6 +123,21 @@ pub struct AgentSigningKey {
     pub public_key_bytes: Vec<u8>,
 }
 
+/// Derive a stable key id from the public key bytes. The kid must be a pure
+/// function of the key material (not a random UUID) so that a key loaded
+/// from persisted PKCS#8 keeps the kid it had when signature records
+/// stored it in `signing_key_id` — a random kid would make every
+/// load-from-persistence look like a key rotation.
+fn derive_kid(public_key_bytes: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    let hash = digest(&SHA256, public_key_bytes);
+    hash.as_ref()
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 impl AgentSigningKey {
     /// Generate a fresh Ed25519 key pair.
     pub fn generate() -> Self {
@@ -128,12 +147,35 @@ impl AgentSigningKey {
         let rng = SystemRandom::new();
         let pkcs8 =
             Ed25519KeyPair::generate_pkcs8(&rng).expect("Ed25519 key generation must succeed");
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
-            .expect("Ed25519 key pair construction must succeed");
+        Self::from_pkcs8(pkcs8.as_ref()).expect("freshly generated PKCS#8 must be valid")
+    }
+
+    /// Reconstruct the key pair from PKCS#8 DER bytes (e.g. loaded from the
+    /// `GYRE_AGENT_SIGNING_KEY` env var or the persisted server-identity KV
+    /// entry). The derived `kid` is identical to the one the same key
+    /// material had when it was generated, so `signing_key_id` values in
+    /// stored commit-signature records keep matching the active key.
+    ///
+    /// Accepts both PKCS#8 v1 and v2 documents. Every common operator tool
+    /// (`openssl genpkey -algorithm ed25519`, Node's
+    /// `privateKey.export({type:'pkcs8'})`, Python `cryptography`) emits v1,
+    /// which has no embedded public key; ring's strict `from_pkcs8` rejects
+    /// v1 with `VersionNotSupported` and ring's own documentation directs
+    /// v1 callers to `from_pkcs8_maybe_unchecked`. For v1 the public key is
+    /// derived from the private seed (there is no separately-supplied public
+    /// key to distrust — the material is the operator's own key); v2 parsing
+    /// is byte-for-byte identical to `from_pkcs8`, including the embedded
+    /// public-key/seed consistency check, so ring-generated and DB-persisted
+    /// keys are unaffected. `jsonwebtoken`'s EdDSA signing path uses the same
+    /// `from_pkcs8_maybe_unchecked` entry point.
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, String> {
+        use ring::signature::Ed25519KeyPair;
+        let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8)
+            .map_err(|e| format!("invalid Ed25519 PKCS#8 key material: {e:?}"))?;
         use ring::signature::KeyPair as _;
         let pub_key_bytes = key_pair.public_key().as_ref();
 
-        let kid = uuid::Uuid::new_v4().to_string();
+        let kid = derive_kid(pub_key_bytes);
         let x = URL_SAFE_NO_PAD.encode(pub_key_bytes);
 
         let jwks_json = serde_json::json!({
@@ -151,14 +193,22 @@ impl AgentSigningKey {
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
         let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(pub_key_bytes);
 
-        Self {
+        Ok(Self {
             encoding_key,
             decoding_key,
             jwks_json,
             kid,
-            pkcs8_bytes: pkcs8.as_ref().to_vec(),
+            pkcs8_bytes: pkcs8.to_vec(),
             public_key_bytes: pub_key_bytes.to_vec(),
-        }
+        })
+    }
+
+    /// The PKCS#8 DER encoding of this key pair, for persistence across
+    /// restarts. Callers persisting this value are responsible for storing
+    /// it in server-side storage with the same protection as other forge
+    /// secret material.
+    pub fn pkcs8_der(&self) -> &[u8] {
+        &self.pkcs8_bytes
     }
 
     /// Sign arbitrary bytes with the Ed25519 private key.
@@ -166,7 +216,9 @@ impl AgentSigningKey {
     /// Used by the attestation module to sign merge attestation bundles.
     pub fn sign_bytes(&self, data: &[u8]) -> Vec<u8> {
         use ring::signature::Ed25519KeyPair;
-        let key_pair = Ed25519KeyPair::from_pkcs8(&self.pkcs8_bytes)
+        // Same v1-or-v2 tolerance as `from_pkcs8`: `pkcs8_bytes` may hold an
+        // operator-provisioned v1 document (see `GYRE_AGENT_SIGNING_KEY`).
+        let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&self.pkcs8_bytes)
             .expect("stored pkcs8 bytes must remain valid");
         key_pair.sign(data).as_ref().to_vec()
     }
@@ -485,6 +537,10 @@ pub struct AuthenticatedAgent {
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
+    /// The raw bearer token presented by the caller, when auth came from the
+    /// Authorization header. Needed at signing boundaries (task-107): the
+    /// Fulcio flow presents the caller's own validated JWT to the CA.
+    pub bearer_token: Option<String>,
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
@@ -855,6 +911,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                  to avoid token leakage in logs and browser history."
             );
         }
+        let bearer_token = header_token.map(|t| t.to_string());
         let token = header_token
             .or(query_token)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
@@ -887,6 +944,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 roles: vec![UserRole::Admin],
                 tenant_id: system_principal_tenant(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
+                bearer_token,
                 deprecated_token_auth,
                 impersonation: None,
             });
@@ -976,6 +1034,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: vec![UserRole::Agent],
                     tenant_id: system_principal_tenant(),
                     jwt_claims,
+                    bearer_token,
                     deprecated_token_auth,
                     impersonation: None,
                 });
@@ -1058,6 +1117,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: user.roles,
                     tenant_id,
                     jwt_claims: None, // API key — no ABAC evaluation.
+                    bearer_token,
                     deprecated_token_auth,
                     impersonation: None,
                 });
@@ -1068,6 +1128,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if let Some(jwt_cfg) = &state.jwt_config {
             if let Ok(mut auth) = validate_jwt(token, jwt_cfg, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                auth.bearer_token = bearer_token.clone();
                 if !auth_already_audited {
                     record_auth_success(
                         state,
@@ -1087,6 +1148,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if token.starts_with("ey") {
             if let Some(mut auth) = validate_federated_jwt(token, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                auth.bearer_token = bearer_token.clone();
                 if !auth_already_audited {
                     record_auth_success(
                         state,
@@ -1132,6 +1194,7 @@ pub async fn authenticate_token(
             roles: vec![UserRole::Admin],
             tenant_id: system_principal_tenant(),
             jwt_claims: None,
+            bearer_token: Some(token.to_string()),
             deprecated_token_auth: false,
             impersonation: None,
         });
@@ -1192,6 +1255,7 @@ pub async fn authenticate_token(
                 roles: vec![UserRole::Agent],
                 tenant_id: system_principal_tenant(),
                 jwt_claims,
+                bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
                 impersonation: None,
             });
@@ -1257,6 +1321,7 @@ pub async fn authenticate_token(
                 roles: user.roles,
                 tenant_id,
                 jwt_claims: None,
+                bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
                 impersonation: None,
             });
@@ -1404,6 +1469,7 @@ async fn validate_jwt(
         roles: user.roles,
         tenant_id,
         jwt_claims: raw_claims,
+        bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
         impersonation: None,
     })
@@ -1794,6 +1860,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         roles: vec![UserRole::Agent],
         tenant_id: system_principal_tenant(),
         jwt_claims: fed_claims_json,
+        bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
         impersonation: None,
     })
@@ -1985,6 +2052,7 @@ HKWsbrW0tHUPuMuz8Xgvs0yV";
 
 #[cfg(test)]
 mod tests {
+    use super::AgentSigningKey;
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
     use http::{Request, StatusCode};
@@ -2287,6 +2355,7 @@ mod tests {
     #[tokio::test]
     async fn valid_jwt_accepted() {
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "user-sub-001",
             "preferred_username": "alice",
             "email": "alice@example.com",
@@ -2336,7 +2405,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_signature_rejected() {
         // Tamper with the token by altering a byte in the signature.
-        let claims = serde_json::json!({ "sub": "user-sub-003", "preferred_username": "carol" });
+        let claims = serde_json::json!({ "tenant_id": "default", "sub": "user-sub-003", "preferred_username": "carol" });
         let mut token = sign_test_jwt(&claims, 3600);
         // Replace last char to corrupt signature.
         let last = token.pop().unwrap();
@@ -2360,6 +2429,7 @@ mod tests {
         let state = make_test_state_with_jwt();
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "new-user-sub-999",
             "preferred_username": "dave",
             "email": "dave@example.com",
@@ -2410,6 +2480,7 @@ mod tests {
         // stays human-readable, last_login_at is stamped on the first auth.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "derive-sub-1",
             "preferred_username": "Jordan.Sell@example.com",
             "email": "jordan@example.com"
@@ -2458,6 +2529,7 @@ mod tests {
         // changes preferred_username.
         let state = make_test_state_with_jwt();
         let claims1 = serde_json::json!({
+            "tenant_id": "default",
             "sub": "relogin-sub",
             "preferred_username": "alice"
         });
@@ -2487,6 +2559,7 @@ mod tests {
 
         // IdP now reports a different preferred_username for the same sub.
         let claims2 = serde_json::json!({
+            "tenant_id": "default",
             "sub": "relogin-sub",
             "preferred_username": "alice-renamed"
         });
@@ -2534,6 +2607,7 @@ mod tests {
         // falls back to the SSO subject instead of failing the login.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "opaque-sub-42",
             "preferred_username": "!!!"
         });
@@ -2573,6 +2647,7 @@ mod tests {
         // persist what the migration would have repaired.
         let state = make_test_state_with_jwt();
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "auth0|12345",
             "preferred_username": "!!!"
         });
@@ -2622,6 +2697,7 @@ mod tests {
             .with_state(state.clone());
 
         let first_claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "collision-sub-1",
             "preferred_username": "Jordan Sell"
         });
@@ -2642,6 +2718,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let second_claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "collision-sub-2",
             "preferred_username": "Jordan_Sell"
         });
@@ -2716,6 +2793,7 @@ mod tests {
             ("collision-sub-2", "Jordan_Sell"),
         ] {
             let claims = serde_json::json!({
+                "tenant_id": "default",
                 "sub": sub,
                 "preferred_username": preferred
             });
@@ -2800,6 +2878,7 @@ mod tests {
         }
 
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "role-test-sub",
             "preferred_username": "eve",
             "realm_access": { "roles": ["admin", "developer"] }
@@ -3008,6 +3087,52 @@ mod tests {
     // -- Tenant resolution tests ----------------------------------------------
 
     #[tokio::test]
+    async fn mint_with_workload_roundtrips_wl_image_hash_claim() {
+        // agent-runtime.md §3 (Nix-Based Image Build): the image hash is
+        // recorded in workload attestation via the `wl_image_hash` JWT
+        // claim. The spawn flow resolves the image digest before minting
+        // (the token must pre-exist the process) and passes it here — this
+        // test proves the claim survives real EdDSA sign → verify with the
+        // digest intact, so a verifier can reconstruct workload identity
+        // from the token alone.
+        let key = crate::auth::AgentSigningKey::generate();
+        let issuer = "https://gyre.example.com";
+
+        let token = key
+            .mint_with_workload(
+                "agt-img-1",
+                "task-9",
+                "orchestrator-1",
+                issuer,
+                3600,
+                Some(4242),
+                Some("worker-host".to_string()),
+                Some("container".to_string()),
+                Some("stackhash123".to_string()),
+                Some("abc123def".to_string()),
+                Some("sha256:9f2a7c1e".to_string()),
+            )
+            .expect("mint_with_workload must succeed");
+
+        let claims = key
+            .validate(&token, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:9f2a7c1e"));
+        assert_eq!(claims.wl_pid, Some(4242));
+        assert_eq!(claims.wl_hostname.as_deref(), Some("worker-host"));
+        assert_eq!(claims.wl_container_id.as_deref(), Some("abc123def"));
+
+        // The no-workload mint must leave the claim absent, not defaulted.
+        let bare = key
+            .mint("agt-img-2", "task-9", "orchestrator-1", issuer, 3600)
+            .expect("mint must succeed");
+        let bare_claims = key
+            .validate(&bare, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(bare_claims.wl_image_hash, None);
+    }
+
+    #[tokio::test]
     async fn jwt_tenant_id_extracted_from_claim() {
         use super::AuthenticatedAgent;
 
@@ -3055,6 +3180,11 @@ mod tests {
             auth.tenant_id
         }
 
+        // An IdP that does not issue tenant claims is a single-tenant
+        // deployment: the absent claim maps to the bootstrapped "default"
+        // tenant via the claim's serde schema default (a deterministic
+        // function of the verified token — hierarchy-enforcement.md §1,
+        // task-104 verification repair), not a use-site fallback.
         let claims = serde_json::json!({
             "sub": "no-tenant-sub",
             "preferred_username": "henry"
@@ -3765,6 +3895,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3795,6 +3926,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3802,6 +3934,58 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    // ── task-107 F12: key persistence across restarts ─────────────────────
+
+    /// A key reconstructed from persisted PKCS#8 bytes is the same key:
+    /// same kid (so stored `signing_key_id` values keep matching), same
+    /// public key, and signatures made by the original verify under the
+    /// loaded one (and vice versa).
+    #[test]
+    fn from_pkcs8_roundtrips_key_material_and_kid() {
+        let original = AgentSigningKey::generate();
+        let reloaded = AgentSigningKey::from_pkcs8(original.pkcs8_der()).unwrap();
+
+        assert_eq!(
+            original.kid, reloaded.kid,
+            "kid must be derived from key material so reloads keep it stable"
+        );
+        assert_eq!(original.public_key_bytes, reloaded.public_key_bytes);
+        assert_eq!(original.jwks_json, reloaded.jwks_json);
+
+        let message = b"commit-sha-under-test";
+        let sig = original.sign_bytes(message);
+        assert_eq!(sig, reloaded.sign_bytes(message));
+
+        use ring::signature::{self, UnparsedPublicKey};
+        let pk = UnparsedPublicKey::new(&signature::ED25519, &reloaded.public_key_bytes);
+        assert!(
+            pk.verify(message, &sig).is_ok(),
+            "signature by the original key must verify under the reloaded key"
+        );
+    }
+
+    /// Distinct key material must yield distinct kids — otherwise a key
+    /// rotation would be indistinguishable from the same key and the
+    /// `local_mode` kid check would be vacuous.
+    #[test]
+    fn kid_is_distinct_per_key() {
+        let a = AgentSigningKey::generate();
+        let b = AgentSigningKey::generate();
+        assert_ne!(a.kid, b.kid);
+        assert_ne!(a.public_key_bytes, b.public_key_bytes);
+    }
+
+    /// Garbage or wrong-algorithm PKCS#8 must be rejected with an error,
+    /// not accepted as a usable key.
+    #[test]
+    fn from_pkcs8_rejects_invalid_material() {
+        assert!(AgentSigningKey::from_pkcs8(b"").is_err());
+        assert!(AgentSigningKey::from_pkcs8(b"not pkcs8 at all").is_err());
+        // 32 bytes of zeros is a valid length for a raw Ed25519 seed but is
+        // not PKCS#8 DER.
+        assert!(AgentSigningKey::from_pkcs8(&[0u8; 32]).is_err());
     }
 
     #[test]
@@ -3819,6 +4003,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: system_principal_tenant(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3831,6 +4016,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "t-2".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3843,6 +4029,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "t-1".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };

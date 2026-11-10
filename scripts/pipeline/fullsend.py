@@ -14,6 +14,7 @@ import time
 import threading
 
 from .execution import ROOT, Retry, Wait
+from .catalog import helper
 from .diagnostics import DEFAULT_MODEL_TIMEOUT, diagnose
 
 
@@ -108,7 +109,6 @@ def prepare(execution, task, prompt):
     execution.command('git', 'checkout', '--quiet', '-b', branch, seed, cwd=repo)
     if claim['stage'] == 'implement':
         execution.command('git', 'merge', '--no-edit', claim['input']['base'], cwd=repo, check=False)
-        from .catalog import helper
         helper('pipeline-artifacts').restore_generated(repo,claim['input']['base'])
     task_path = repo / 'specs/tasks' / (task['name'] + '.md')
     task_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +122,7 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
@@ -182,9 +182,8 @@ def prepare(execution, task, prompt):
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
                        'sandbox': {'GYRE_PIPELINE_STAGE': stage,
-                                   'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1',
-                                   'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_TEST_DEBUG': '0', 'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target',
-                                   'CARGO_HOME': '/sandbox/workspace/.cargo', 'NPM_CONFIG_CACHE': '/sandbox/workspace/.npm', 'RUSTUP_HOME': '/usr/local/rustup',
+                                   **helper('pipeline-build-env').environment(),
+                                   'NODE_OPTIONS':'--max-old-space-size=768',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
                                    'GYRE_DEV_REAL_NPM': '/usr/bin/npm', 'GYRE_DEV_REAL_NPX': '/usr/bin/npx'}}}

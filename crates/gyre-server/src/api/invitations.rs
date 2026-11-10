@@ -338,7 +338,7 @@ async fn create_tenant_invitation(
     // (tenant, email) is a 409 the caller can act on (revoke or wait for
     // expiry). The repository contract enforces the same invariant —
     // backed by the pending-scope partial unique index (migration
-    // 000059) — as a race backstop, but its anyhow error would surface
+    // 000061) — as a race backstop, but its anyhow error would surface
     // as a 500 here.
     let existing_for_email = state
         .tenant_invitations
@@ -1282,7 +1282,9 @@ pub async fn invite_to_workspace(
         })
         .to_string(),
     );
-    notif.entity_ref = Some(ws_id.to_string());
+    // The constructor sources this notification at the workspace itself
+    // (NotificationSource::workspace), so no extra source assignment is
+    // needed — entity_id is the workspace id.
     let _ = state.notifications.create(&notif).await;
 
     let mut response = WorkspaceInvitationResponse::from(invitation);
@@ -3475,7 +3477,8 @@ mod tests {
             .unwrap();
         let notif = notifs
             .iter()
-            .find(|n| n.entity_ref.as_deref() == Some("ws-inv"))
+            .find(|n| n.source.entity_id == "ws-inv"
+                && n.source.entity_type == "workspace")
             .expect("invitation notification created for the invitee");
         let body: serde_json::Value =
             serde_json::from_str(notif.body.as_deref().unwrap()).unwrap();

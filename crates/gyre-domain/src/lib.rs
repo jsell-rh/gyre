@@ -31,6 +31,7 @@ pub mod merge_request;
 pub mod message_type;
 pub mod invitation;
 pub mod meta_spec;
+pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;

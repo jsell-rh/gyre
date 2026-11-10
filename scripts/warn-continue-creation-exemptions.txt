@@ -12,10 +12,7 @@
 # See: specs/reviews/task-077.md F6 (the finding that created this check)
 #
 # --- unowned; fix opportunistically when touching these files ---
-# spawn.rs:219 interrogation-policy creation — FIXED in task-077's revision
-#   round (create_interrogation_policies_in now fails closed via
-#   map_err(...)?; the agent spawn aborts when a restriction policy cannot
-#   be created). Entry removed.
-# abac_middleware.rs seed_builtin_policies creation — FIXED in the same
-#   round (seeding now returns anyhow::Result and propagates create errors
-#   with map_err(...)?). Entry removed.
+# abac_middleware.rs seed_builtin_policies and spawn.rs interrogation-policy
+# warn-continue sites — FIXED (both now propagate creation errors); entries
+# removed (spawn.rs in task-077's revision round, abac_middleware.rs seeding
+# at the task-107 base-merge onto 72ad2a128).
