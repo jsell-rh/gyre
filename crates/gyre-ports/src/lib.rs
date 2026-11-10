@@ -50,6 +50,7 @@ pub mod spec_approval;
 pub mod spec_approval_event_repo;
 pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
+pub mod spec_lifecycle_repo;
 pub mod spec_policy_repo;
 pub mod storage;
 pub mod task;
@@ -106,13 +107,16 @@ pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
-pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
+pub use search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
 pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
+pub use spec_lifecycle_repo::SpecLifecycleRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;

@@ -285,15 +285,28 @@ pub async fn admin_kill_agent(
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
-    // Kill the actual process if it is running. The PID is captured for the
-    // AgentKilled audit event before the registry entry is consumed.
+    // Kill the actual process/container/Pod if it is running. The backend
+    // recorded at spawn time decides how: a container ID goes to
+    // `docker rm --force`, a Pod name to `kubectl delete pod`, a remote
+    // container over SSH — falling back to LocalTarget (pid kill) only for
+    // agents whose backend is unknown (pre-task-117 records). The PID is
+    // captured for the AgentKilled audit event before the registry entry
+    // is consumed.
     let mut killed_pid: Option<u32> = None;
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
         killed_pid = handle.pid;
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+        let backend = state.spawned_backends.lock().await.remove(&id);
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
                 .await
-        {
+            }
+        };
+        if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
     }

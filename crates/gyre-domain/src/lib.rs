@@ -30,6 +30,7 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod meta_spec;
+pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
@@ -42,6 +43,7 @@ pub mod rust_extractor;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
+pub mod spec_lifecycle_config;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -111,6 +113,7 @@ pub use spec_assertions::{
     SpecAssertionResult, Subject,
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
