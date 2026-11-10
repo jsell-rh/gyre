@@ -2,10 +2,10 @@
 title: "Spec Save Git Write-Through"
 spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing, Save workflow), human-system-interface.md §3 (Explorer: Inline Spec Editing)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-011.md
 coverage_sections: []
-commits: ["3488a06bf40471867a51c08bd899888c66ac8b09"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -65,13 +65,13 @@ The `specs/save` handler (`crates/gyre-server/src/api/specs_assist.rs`) exists b
 
 ## Acceptance Criteria
 
-- [x] `POST /api/v1/repos/:repo_id/specs/save` creates a real `spec-edit/*` branch with the spec content
-- [x] An MR is auto-created targeting the default branch
-- [x] A priority-2 "Spec pending approval" notification is created for workspace members
-- [x] Saving to an existing open spec-edit MR appends a commit instead of creating a new branch
-- [x] `POST /api/v1/repos/:repo_id/prompts/save` commits directly to the default branch
-- [x] Slug generation follows the spec: path → lowercase, `/` → `-`, strip `.md`, append 4-char hash
-- [x] Tests cover all acceptance criteria
+- [ ] `POST /api/v1/repos/:repo_id/specs/save` creates a real `spec-edit/*` branch with the spec content
+- [ ] An MR is auto-created targeting the default branch
+- [ ] A priority-2 "Spec pending approval" notification is created for workspace members
+- [ ] Saving to an existing open spec-edit MR appends a commit instead of creating a new branch
+- [ ] `POST /api/v1/repos/:repo_id/prompts/save` commits directly to the default branch
+- [ ] Slug generation follows the spec: path → lowercase, `/` → `-`, strip `.md`, append 4-char hash
+- [ ] Tests cover all acceptance criteria
 
 ## Agent Instructions
 
@@ -87,62 +87,4 @@ When working on this task:
 
 ## Git Commits
 
-- `3488a06bf` — test(task-011): end-to-end write-through coverage for specs/prompts save
-
-## Shipped
-
-The spec save git write-through is fully implemented in production code on this
-branch (inherited from mainline; review history in `specs/reviews/task-011.md`,
-R2 verdict `complete`), and this round is a contract repair: the executor
-restored the assigned task document, so the completion record is re-applied
-here while preserving the existing production fix unchanged.
-
-### Actual behavior
-
-- `GitOpsPort` exposes `write_file` / `create_branch` / `branch_exists`
-  (`crates/gyre-ports/src/git_ops.rs`), implemented for real in the git2
-  adapter (`crates/gyre-adapters/src/git2_ops.rs`): branch creation resolves
-  `from_ref` to a commit and calls `Repository::branch`; `write_file` writes a
-  blob, rebuilds the tree (nested paths included) via treebuilder, commits with
-  the branch tip as parent, and updates the ref — returning the real commit SHA.
-- `POST /specs/save` (`save_spec` in `crates/gyre-server/src/api/specs_assist.rs`)
-  resolves the repo via `RepositoryPort`, creates `spec-edit/<slug>-<short_uuid>`
-  from the default branch, commits the spec content there, auto-creates an MR
-  targeting the default branch (with `author_agent_id` set), and creates a
-  priority-2 `SpecApprovalRequested` notification whose `entity_id` is the MR
-  ID (Inbox "Approve" linkage). Existing-MR detection matches open MRs by
-  `spec-edit/<slug>-*` branch prefix AND MR author == caller, then appends a
-  commit to the existing branch (HTTP 200, same `branch`/`mr_id`).
-- `POST /prompts/save` commits directly to the default branch — no feature
-  branch, no MR, no approval notification — and returns the real commit SHA.
-- Slug: path → lowercase, `/` → `-`, strip `.md`, plus a 4-hex-char hash of the
-  full original path (collision-safe), per ui-layout.md §3.
-- All four R2 review findings (F1–F4) are fixed in the current code: caller
-  identity filter on existing-MR detection (line 641), `author_agent_id` set
-  on MR creation (line 703), stale "(stubbed)" doc comment removed, and the
-  notification assertion (`entity_id == mr_id`) present in tests.
-
-### Test evidence
-
-- Handler logic (NoopGitOps): tests covering branch naming, MR creation,
-  existing-MR append, priority-2 notification assertion
-  (`save_spec_creates_mr_for_existing_repo` verifies `priority_rank == 2` and
-  `entity_id == mr_id`), prompt save SHA shape, slug format/collision, and the
-  HSI §7 409 conflict path.
-- End-to-end tests (commit `3488a06bf`) inject the real `Git2OpsAdapter` with
-  an on-disk bare repo so the full chain — handler → GitOpsPort → libgit2 —
-  runs: real branch exists with content, default branch untouched by spec
-  saves, re-save appends exactly one commit (verified via `commit_log`) with no
-  second MR/branch, prompt save lands on `main` with the returned SHA equal to
-  the real new tip and no branch/MR created.
-- Adapter layer: 31 git2_ops tests including `write_file` on feature branches,
-  nested paths, overwrite, `create_branch` from existing ref, and
-  `branch_exists`.
-- Probe results this round (exit codes and output retained in
-  `/tmp/stage/review-evidence/task-011/`, re-run at the merged branch head
-  including the task-107 base merge):
-  `cargo test -p gyre-server --lib api::specs_assist` → 24 passed, 0 failed
-  (exit 0); `cargo test -p gyre-adapters --lib git2_ops` → 31 passed, 0 failed
-  (exit 0). The only source delta the base merge introduced in
-  `specs_assist.rs` is a test-fixture `bearer_token: None` field required by
-  the task-107 auth change — no behavioral impact.
+_(none yet)_
