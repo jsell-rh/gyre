@@ -714,6 +714,7 @@ mod tests {
             scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
 
         let hex_id = hex::encode(&pub_key);

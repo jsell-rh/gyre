@@ -18,6 +18,8 @@
 #   use-site unwrap_or fallback; the value is a deterministic function of
 #   the verified token, and "default" is the real bootstrapped Tenant row.
 #   Entry removed (task-099's round-10 had also eliminated it via
-#   system_principal_tenant before the rebase), count lowered to 2.
+#   system_principal_tenant before the rebase; task-104's verification
+#   repair round fixed it independently on its own branch), count
+#   lowered to 2.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
 crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission

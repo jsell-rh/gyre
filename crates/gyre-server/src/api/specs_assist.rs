@@ -1695,6 +1695,7 @@ mod tests {
             scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = SpecSaveRequest {
             spec_path: "specs/system/conflict.md".to_string(),
