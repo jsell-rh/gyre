@@ -119,3 +119,64 @@ view, conflict dialog) and the §1/§7 presence liveness contracts (heartbeat
 legs, departure rebroadcast on all removal paths, session-scoped eviction
 stop, reconnect re-seed). Socket-level end-to-end tests remain for the
 controller's host run — they are environmental here.
+## Round 6 — requirements_changed repair (base `078ec12a` → candidate `1fc0ed038`)
+
+The contract base moved to `078ec12a` (gaining task-123's notification
+taxonomy/priority model — the surface `SpecConflict` notifications ride on).
+The candidate merges the retained task-092 checkpoint `d79734869` onto that
+base (`2c2cbc401`); the checkpoint is an ancestor of the base, so the merged
+tree is the contract itself and the diff base→candidate touches only
+`specs/tasks/task-092.md` (progress/commits bookkeeping). The review job is
+therefore verifying every task-092 behavior holds at this exact head, not
+reviewing new source.
+
+Source verification at `1fc0ed038`:
+
+- `UserPresence.editing_entity` round-trips (`protocol.rs:152`, serde-skipped
+  when `None`); ws.rs derives `user_id` from the verified connection, ignores
+  the client-supplied one, validates `session_id` against the
+  Subscribe-established session, and stores `editing_entity` in `PresenceEntry`.
+- All four presence-removal paths (graceful disconnect `ws.rs:236`,
+  socket-close cleanup `:471`, 5-session cap eviction `:292`, 60s idle sweeper
+  `spawn_presence_eviction` from `main.rs`) rebroadcast departures.
+- `GET /workspaces/:id/presence` returns `user_id`, `session_id`,
+  `editing_entity` (`workspaces.rs:386-425`).
+- `save_spec` optimistic concurrency (`specs_assist.rs:592-625`): `base_sha`
+  vs ledger `current_sha` → 409 with `{current_content, submitted_content,
+  diff, current_sha}`; `SpecConflict` notifications for the caller + every
+  other user editing `spec:<path>` per the presence map, with the full line
+  diff persisted in the notification body (priority rank 2 via task-123's
+  taxonomy); `overwrite: true` bypasses the stale check.
+- Frontend: `ConcurrentEditBanner` (initial fetch, live `UserPresence`/
+  `PresenceEvicted`, reconnect re-seed with sequence guard, self-exclusion by
+  session_id and user_id — `selfUserId` wired from `api.me()` in `App.svelte`
+  to both DetailPanel instances), `SpecConflictDialog` (side-by-side diff,
+  Overwrite/Discard/Copy), `api.specsSave` surfaces 409 as `{conflict}`,
+  `createPresenceHeartbeat` implements all §1 legs, Inbox renders
+  `SpecDiffView` from the persisted `body.diff` (`Inbox.svelte:532-534`).
+
+Probes (this sandbox, evidence in `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --lib specs_assist` — 21/21 ok, including
+  `save_spec_stale_base_sha_returns_409_with_diff`,
+  `save_spec_conflict_notifies_caller_and_concurrent_editor`,
+  `save_spec_overwrite_bypasses_stale_base_sha`.
+- `cargo test -p gyre-server --lib ws::` — 94/94 ok (loopback socket tests
+  pass in this sandbox — the R5 environmental reset is gone), including
+  `ws_session_cap_eviction_rebroadcasts_departure` and
+  `ws_socket_close_rebroadcasts_departure`.
+- Mutation probe (file-isolated, restored, tree clean after): forcing the
+  stale-`base_sha` conflict check to never match makes
+  `save_spec_stale_base_sha_returns_409_with_diff` FAIL (201 vs 409) — the
+  409 test is load-bearing, not self-confirming.
+- `npm ci` + vitest task-092 suites (`ConcurrentEditBanner`,
+  `SpecConflictDialog`, `presence`) — 31/31 ok; banner tests cover negative
+  cases (different spec, self by session, self by user_id) and live
+  arrive/leave/evict/reconnect flows.
+
+Prior findings F1 (selfUserId wiring) and F2 (Inbox diff view) re-verified
+resolved at this head; F3/F4 (heartbeat legs, departure rebroadcast) hold.
+No new findings.
+
+**Verdict: approved.** HSI §7 Conflict Prevention is fully implemented at
+`1fc0ed038` against the changed base.
