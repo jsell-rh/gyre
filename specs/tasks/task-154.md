@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170", "40d1c1cde407929f9338c2274e2a03a40ba542d7"]
 ---
 
 ## Spec Excerpt
