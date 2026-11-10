@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["09d5266952f214c2e38911c4bcd548c4c79c0f68", "f4f32a01a8891b67010600b6af3857c9a4be695d", "accffacfbfd7cab9f6913964c0fe8da7e667748d", "dddcb3a4e4e36417e99cee451670d72ce5e72a45", "4e17ffa5c94b84b1b8c9f2890a94997424932a58", "5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
+commits: ["09d5266952f214c2e38911c4bcd548c4c79c0f68", "f4f32a01a8891b67010600b6af3857c9a4be695d", "accffacfbfd7cab9f6913964c0fe8da7e667748d", "dddcb3a4e4e36417e99cee451670d72ce5e72a45", "4e17ffa5c94b84b1b8c9f2890a94997424932a58", "5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0", "099f08c432e5bd428dbf2d0f36b9f31832ba54c3"]
 ---
 
 ## Spec Excerpt
@@ -89,17 +89,27 @@ Read `specs/system/human-system-interface.md` §9–13 (Trust Gradient) carefull
 
 ## Shipped
 
-### Test-suite repair round - merge-expecting integration tests honor the trust gradient (commit `09d52669`)
+### Requirements-changed re-verification round (commit `099f08c4`)
 
-Review repair (round-23 findings): the F5 merge-time supervised-trust hold correctly holds MRs for human approval on Supervised workspaces, but `e2e_ralph_loop::full_ralph_loop_via_gyre` and `git_integration::merge_queue_auto_merges_mr_and_commit_on_main` created their workspaces without `trust_level` (default Supervised) while still expecting autonomous queue merges, leaving the tree red.
+Repair category `requirements_changed`: the assignment base moved to `078ec12a` (task-123 notification taxonomy unification + tasks 084/085/090/208 landings). The retained source checkpoint `fde1cde5` was merged onto the new base at branch head (merge `3f7cbee3`). Verification result: **main had already absorbed the complete task-077 implementation** — all 14 attributed commits are ancestors of the new base, so the merge resolved to a tree byte-identical to the base (`5f6ae70`). The current contract's acceptance criteria were re-verified present and green on the merged tree:
 
-- Both tests exercise loop/queue mechanics, not the trust gradient, so their workspaces are now created with `trust_level: "Autonomous"` (e2e workspace body; git_integration `create_repo` helper), which seeds no trust hold policies and restores the intended autonomous-merge expectation. No other integration test expects a completed merge (verified by grep over `tests/`); trust-hold behavior itself stays covered by the merge_processor lib suite.
-- A merge of the assignment base `1d9547de` was resolved first (three semantically identical Admin-gate conflicts in `api/meta_specs.rs`, both sides implementing the same authorization; HEAD's comments kept).
+- `TrustLevel` enum (Supervised/Guided/Autonomous/Custom, default Supervised) on the Workspace entity; `trust_level` DB default corrected to `Supervised` (migration `000050`); `immutable` on policies (migration `000028`); `trust_policies_for_level` preset sets; atomic `apply_trust_transition` (single DB transaction, 409 on rollback, ABAC cache invalidated after commit); immutable-Deny-first ABAC evaluation (`policy_engine.rs` Step 1); `builtin:require-human-spec-approval` seeded immutable at priority 999; policy CRUD rejects `trust:`/`builtin:` prefixes (400); `PUT /api/v1/workspaces/:id` accepts `trust_level` and applies the transition; merge-time ABAC enforcement for the merge-processor service identity (`subject.type "system"`, `subject.id "merge-processor"`) with the `mr.status == Approved` human-approval escape.
+- The only repair needed: one inherited rustfmt violation (stray blank line in `crates/gyre-ports/src/notification.rs`, task-123 surface in the new base) removed in commit `099f08c4` so the task's `cargo fmt --all` clean criterion holds. Whitespace-only; no behavior change.
 
-Test evidence (this round): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test e2e_ralph_loop` - 1 passed; `--test git_integration` - 16 passed, 1 pre-existing ignored; `--lib` - 1321 passed, 0 failed (includes all F5/F6/F9 trust-gate tests); `cargo fmt --all -- --check` clean; `check-task-commit-attribution.sh` green with `09d52669` recorded in this file's frontmatter. Evidence: `/tmp/stage/review-evidence/probe-e2e-ralph-loop-fixed.log`, `probe-git-integration-fixed.log`, `probe-full-lib-after-repair.log`.
+### Test evidence (this round, on the merged tree + fmt fix)
+
+- `SKIP_WEB_BUILD=1 cargo build --all` — full workspace compiles.
+- `cargo test -p gyre-domain --lib` — 463 passed, 0 failed.
+- `cargo test -p gyre-server --lib` — 1680 passed, 0 failed (includes all trust-gate, workspaces trust-transition, merge-processor hold, and 409-path tests); re-run of `api::workspaces` after the fmt fix — 19 passed.
+- `cargo test -p gyre-server --test e2e_ralph_loop --test git_integration` — 17 passed, 0 failed.
+- `cargo fmt --all -- --check` — clean.
+- Full web suite (via `node ./node_modules/vitest/vitest.mjs run --no-file-parallelism --maxWorkers=1` after `npm ci`): 99 files, 2010 passed, 41 pre-existing skips, 0 failures. The repo's `check-web-tests.sh` wrapper (`npm test -- --maxWorkers=1`) fails in this sandbox only because npm 11 exports the `--`-separated flag as `npm_config_maxWorkers`, which vitest's cac merges with argv into a duplicate-option error — an invocation artifact, not a code defect; the direct vitest run above is the evidence.
+- Mechanical checks: every check script that runs in this sandbox produced output identical to the new base (compared sorted, base worktree vs HEAD — `probe-check-parity-base-vs-head.log`); no new violations from the merge. The exit-1 failures that exist (cli-spec-parity, dead-components, mcp-wrapper-parity, etc.) are pre-existing on main and owned by other tasks, unchanged by this branch.
+- Infra restriction for remote verification: this sandbox provides mawk only (no gawk, no root to install), so 13 gawk-syntax check scripts (notification-priority, tenant-filter, path-scope-binding, etc.) abort locally with awk syntax errors — exit 2 both on HEAD and on the base worktree. These run in CI on gawk hosts; the identical-to-base tree identity plus this record cover them.
+- Evidence: `/tmp/stage/review-evidence/probe-mechanical-checks.log`, `probe-check-parity-base-vs-head.log`, `probe-integration-current.log`, `probe-web-suite.log`.
 
 ### Feature as shipped (recap; full round history in the pipeline task record)
 
-Trust gradient per HSI SS9-13: `TrustLevel` enum (`Supervised`/`Guided`/`Autonomous`/`Custom`, default Supervised) on the Workspace entity with DB migration; trust preset policy sets (`trust:` prefix, priority 100-199; `trust_policies_for_level`); atomic trust transitions via `PUT /api/v1/workspaces/:id` (single transaction, 409 on rollback, ABAC cache invalidated after commit); `builtin:require-human-spec-approval` seeded immutable at priority 999; immutable-Deny-first ABAC evaluation; policy CRUD rejects `trust:`/`builtin:` prefixes (400); merge-time ABAC enforcement for the merge processor's service identity (F5) with human-approval escape `mr.status == Approved`, selection-loop + single-entry + atomic-group coverage, and fail-closed semantics on policy-store read failures (F9); fail-closed interrogation policy creation (F6); Custom transition directions and field-level generator assertions tested (F7/F8).
+Trust gradient per HSI SS9-13: `TrustLevel` enum on the Workspace entity with DB migrations; trust preset policy sets (`trust:` prefix, priority 100-199); atomic trust transitions via `PUT /api/v1/workspaces/:id`; `builtin:require-human-spec-approval` immutable at priority 999; immutable-Deny-first ABAC evaluation; policy CRUD prefix guard (400); merge-time ABAC enforcement for the merge processor's service identity with human-approval escape, selection-loop + single-entry + atomic-group coverage, and fail-closed semantics on policy-store read failures; fail-closed interrogation policy creation; Custom transition directions and field-level generator assertions tested.
 
 Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication per the assignment.
