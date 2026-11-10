@@ -95,28 +95,22 @@ When working on this task:
 
 ## Git Commits
 
-Original pipeline branch (reviewed through R1–R4, reconciled into mainline
-via PR #627):
-
-- `6d718ba14` — feat(briefing): implement cross_workspace and exceptions sections (TASK-013)
-- `8757a323b` — fix(briefing): address R1 findings — filter direction, actions field, gate timestamp (TASK-013)
-- `5b08d8398` — fix(briefing): address R2 findings — exception type values, cross-workspace timestamp filter (TASK-013)
-- `97dd32144` — fix(briefing): address R3 findings — source_workspace_slug field, stale_since test coverage (TASK-013)
-- `bebc9b986` — review(task-013): R4 — complete, 0 findings (TASK-013)
-
-Mainline carrier (ancestor of the assignment base; recorded in frontmatter
-for review scoping):
-
-- `d7940e857` — feat(explorer): explorer canvas, loop tooling, spec coverage tracking (#627) — carried the reviewed graph.rs briefing implementation (+991 lines), the task file, and the review record into main.
+- `feat(briefing): implement cross_workspace and exceptions sections (TASK-013)`
+- `fix(briefing): address R1 findings — filter direction, actions field, gate timestamp (TASK-013)`
+- `fix(briefing): address R2 findings — exception type values, cross-workspace timestamp filter (TASK-013)`
+- `fix(briefing): address R3 findings — source_workspace_slug field, stale_since test coverage (TASK-013)`
 
 ## Shipped
 
 Complete. HSI §9 Briefing Detail `cross_workspace` and `exceptions`
 sections are implemented in production code in
 `crates/gyre-server/src/api/graph.rs` (`assemble_briefing`), shared by the
-REST route and the MCP briefing resource; no stubs remain. Reviewed through
-four rounds (R1–R3 findings fixed, R4 verdict `complete`, 0 findings — see
-`specs/reviews/task-013.md`).
+REST route and the MCP briefing resource; no stubs remain. The
+implementation was developed on the original pipeline branch, reviewed
+through four rounds (R1–R3 findings fixed, R4 verdict `complete`, 0
+findings — see `specs/reviews/task-013.md`), and reconciled into mainline
+via PR #627 (carried by `d7940e857`, an ancestor of this assignment's
+base), so the assigned base already contains the full production fix.
 
 ### Behavior
 
@@ -139,11 +133,21 @@ four rounds (R1–R3 findings fixed, R4 verdict `complete`, 0 findings — see
 
 ### Test evidence
 
-Focused probe at assignment HEAD `078ec12a5` (branch
-`pipeline/task-013/46b3400f491c4a66a2d12ede5b0f53e8-1`):
+Focused probe at this branch HEAD `95df7622f` (repair round, branch
+`pipeline/task-013/a03ebc5dbe174cd8acf86dc61a6683bd-1`):
 `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib briefing_` —
 **26 passed, 0 failed** (exit 0), including the 10 dedicated TASK-013 unit
 tests (cross-workspace positive/negative, stale_since include/exclude,
 gate failures incl. old-result exclusion, assertion failures, MR reverts,
 empty-sections-as-arrays, since-filtering) and 4 MCP parity tests. Log
-retained at `/tmp/stage/review-evidence/task-013-briefing-tests.log`.
+retained at `/tmp/stage/review-evidence/task-013-briefing-tests-repair.log`.
+
+### Repair round (contract)
+
+The prior checkpoint changed the protected task text (rewrote the Git
+Commits provenance section); the executor restored the assigned task
+document in this checkout. This round preserves the production fix
+untouched (no source changes — the implementation already rides the
+assigned base via the mainline carrier) and restores the progress notes
+under this `## Shipped` heading only, leaving the assigned contract text
+intact.
