@@ -2,13 +2,16 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+use gyre_domain::{
+    AuditEventType, JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken,
+};
 use gyre_ports::{
     JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::SqliteStorage;
+use super::audit::AuditEventRow;
 use crate::schema::{user_notification_preferences, user_tokens};
 
 // ─── User Notification Preferences ──────────────────────────────────────────
@@ -394,37 +397,41 @@ impl JudgmentLedgerRepository for SqliteStorage {
             }
 
             // ── Source 2: audit-carried judgments (gate / trust / meta-spec) ──
+            // Rows are materialized through the shared AuditEventRow read
+            // path (AuditRepository query/since_timestamp use the same one)
+            // so the log-compression job's detail_zstd payload — written
+            // when a row ages past 7 days, blanking `detail` — decompresses
+            // transparently here too. Reading `detail` directly would
+            // surface null details for every older judgment.
             if want_audit {
                 let mut query = audit_events::table
                     .filter(audit_events::user_id.eq(&approver))
                     .filter(audit_events::event_type.eq_any(JUDGMENT_AUDIT_TYPES))
                     .filter(audit_events::timestamp.ge(since_i))
-                    .select((
-                        audit_events::event_type,
-                        audit_events::workspace_id,
-                        audit_events::resource_id,
-                        audit_events::detail,
-                        audit_events::timestamp,
-                    ))
+                    .select(AuditEventRow::as_select())
                     .into_boxed();
                 if let Some(w) = &ws {
                     query = query.filter(audit_events::workspace_id.eq(w));
                 }
-                let rows: Vec<(String, Option<String>, Option<String>, String, i64)> = query
+                let rows: Vec<AuditEventRow> = query
                     .load(&mut *conn)
                     .context("judgment ledger: audit_events")?;
 
-                for (etype, wid, resource_id, detail_raw, ts) in rows {
-                    let detail: serde_json::Value =
-                        serde_json::from_str(&detail_raw).unwrap_or(serde_json::Value::Null);
-                    let jtype = match etype.as_str() {
-                        "gate_override" => JudgmentType::GateOverride,
-                        "trust_change" => JudgmentType::TrustGrant,
+                for row in rows {
+                    let ev = row
+                        .into_event()
+                        .context("judgment ledger: materialize audit event")?;
+                    let jtype = match ev.event_type {
+                        AuditEventType::GateOverride => JudgmentType::GateOverride,
+                        AuditEventType::TrustChange => JudgmentType::TrustGrant,
                         _ => JudgmentType::MetaSpec,
                     };
                     if jt.is_some_and(|f| f != jtype) {
                         continue;
                     }
+                    let detail = ev.detail;
+                    let resource_id = ev.resource_id;
+                    let wid = ev.workspace_id.clone();
                     let str_field = |k: &str| -> Option<String> {
                         detail.get(k).and_then(|v| v.as_str()).map(str::to_string)
                     };
@@ -440,7 +447,7 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         ),
                         JudgmentType::TrustGrant => (
                             str_field("workspace_id")
-                                .or(wid.clone())
+                                .or_else(|| wid.as_ref().map(|w| w.as_str().to_string()))
                                 .unwrap_or_default(),
                             format!(
                                 "trust {} -> {}",
@@ -449,7 +456,9 @@ impl JudgmentLedgerRepository for SqliteStorage {
                             ),
                         ),
                         _ => (
-                            str_field("name").or(resource_id).unwrap_or_default(),
+                            str_field("name")
+                                .or(resource_id.clone())
+                                .unwrap_or_default(),
                             format!(
                                 "{} v{}",
                                 str_field("kind").unwrap_or_default(),
@@ -460,8 +469,8 @@ impl JudgmentLedgerRepository for SqliteStorage {
                     entries.push(JudgmentEntry::new(
                         jtype,
                         entity_ref,
-                        wid.map(Id::new),
-                        ts.max(0) as u64,
+                        wid,
+                        ev.timestamp,
                         Some(entry_detail),
                     ));
                 }
@@ -898,6 +907,58 @@ mod tests {
             u1_entries.is_empty(),
             "withdrawn approval must not surface for the original approver: {u1_entries:?}"
         );
+    }
+
+    /// The log-compression job (observability.md §Log Retention & Compression)
+    /// blanks `audit_events.detail` and moves the payload to `detail_zstd`
+    /// once a row ages past the cutoff. The judgment ledger is a long-horizon
+    /// record, so compressed rows are the norm — it must read through the
+    /// same decompressing materialization as every other audit_events read
+    /// path, not the raw `detail` column (which would surface null details:
+    /// 'trust  -> ', lost gate_type, opaque resource ids).
+    #[tokio::test]
+    async fn judgment_ledger_decompresses_compressed_audit_details() {
+        let (_tmp, s) = setup();
+        seed_judgments(&s).await;
+        // Age every seeded audit event past the cutoff and run the real
+        // compression pass (the same adapter method the background job
+        // calls). 4 rows are eligible: g1/t1/m1 (u1) + g9 (u9).
+        let stats = AuditRepository::compress_details_before(&s, 10_000, 100)
+            .await
+            .unwrap();
+        assert_eq!(stats.compressed, 4, "all seeded audit events compress");
+
+        let entries = JudgmentLedgerRepository::list_for_user(&s, "u1", None, None, None, 50, 0)
+            .await
+            .unwrap();
+        // The audit-carried judgments must surface with their full detail
+        // intact — entity refs come from the decompressed payload, not the
+        // now-blank `detail` column or the opaque resource-id fallback.
+        let gate = entries
+            .iter()
+            .find(|e| e.judgment_type == JudgmentType::GateOverride)
+            .expect("gate override entry survives compression");
+        assert_eq!(gate.entity_ref, "mr-9");
+        assert_eq!(
+            gate.detail.as_deref(),
+            Some("gate test_command overridden: failed -> overridden")
+        );
+        let trust = entries
+            .iter()
+            .find(|e| e.judgment_type == JudgmentType::TrustGrant)
+            .expect("trust change entry survives compression");
+        assert_eq!(trust.entity_ref, "ws1");
+        assert_eq!(trust.detail.as_deref(), Some("trust Supervised -> Guided"));
+        let meta = entries
+            .iter()
+            .find(|e| e.judgment_type == JudgmentType::MetaSpec)
+            .expect("meta-spec entry survives compression");
+        assert_eq!(meta.entity_ref, "orchestrator");
+        assert_eq!(meta.detail.as_deref(), Some("meta:persona v2"));
+        // The spec-approval source is unaffected (different table).
+        assert!(entries
+            .iter()
+            .any(|e| e.judgment_type == JudgmentType::SpecApproval));
     }
 
     #[tokio::test]
