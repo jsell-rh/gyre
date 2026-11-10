@@ -280,7 +280,7 @@ mod tests {
             remote_jwks_cache: base.remote_jwks_cache.clone(),
             trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
             commit_signatures: base.commit_signatures.clone(),
-            sigstore_mode: base.sigstore_mode.clone(),
+            signing_config: base.signing_config.clone(),
             tunnel_store: base.tunnel_store.clone(),
             container_audits: base.container_audits.clone(),
             spec_ledger: base.spec_ledger.clone(),

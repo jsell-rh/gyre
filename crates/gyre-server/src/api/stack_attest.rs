@@ -629,6 +629,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "rogue-agent",
                 "preferred_username": "rogue-agent",
                 "realm_access": { "roles": ["agent"] }
