@@ -2,11 +2,12 @@
 title: "Conversations Endpoint Integration Test"
 spec_ref: "human-system-interface.md §5 (Conversation-to-Code Provenance)"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-054.md
 coverage_sections: []
 commits: 
-  - 6e752e6d
+  - d7940e857
+  - ed36c1b68
 ---
 
 ## Spec Excerpt
@@ -58,4 +59,43 @@ When working on this task:
 
 ## Git Commits
 
-- `6e752e6d` test(conversations): add integration tests for GET /api/v1/conversations/:sha (TASK-054)
+- `d7940e857` feat(explorer): explorer canvas, loop tooling, spec coverage tracking (#627) — delivered `crates/gyre-server/tests/conversation_integration.rs` into this lineage
+- `ed36c1b68` checkpoint: recover interrupted pipeline source — adapted the test to the fallible `seed_builtin_policies` API
+
+## Shipped
+
+`GET /api/v1/conversations/:sha` (HSI §5, conversation-to-code provenance) is covered by
+`crates/gyre-server/tests/conversation_integration.rs` — three integration tests exercising the
+real HTTP endpoint over a live TCP listener against the `ConversationRepository` port
+(`MemConversationRepository` via `build_state`):
+
+- **Success path** — seeds a zstd-compressed blob via `ConversationRepository::store`, then GETs
+  `/api/v1/conversations/:sha` with global-token auth and asserts 200,
+  `Content-Type: application/octet-stream`, the `X-Gyre-Conversation-Sha` echo header, and that
+  the body equals the original uncompressed JSON (the round-trip decompresses on `get`).
+- **Not-found path** — requests a nonexistent SHA, asserts 404.
+- **Auth enforcement** — seeds a conversation first (so 401 cannot mask 404), requests without
+  `Authorization`, asserts 401 from the `AuthenticatedAgent` extractor at the system boundary.
+
+The test file was delivered into this branch's lineage by `d7940e857` (PR #627 squash) and
+adapted to the fallible `seed_builtin_policies` API by checkpoint `ed36c1b68`; the task record
+previously pointed at `6e752e6d`, a SHA from a checkout not in this repository's history, which
+has been replaced with the real lineage SHAs above so review scoping resolves.
+
+### Test evidence
+
+Focused probe on this branch (output retained under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --test conversation_integration` → **3 passed; 0 failed**
+  (`task-054-conversation-integration.log`).
+- Mutation A (handler metadata-miss branch returned 200 instead of 404):
+  `get_conversation_nonexistent_returns_404` FAILED — the 404 assertion bites
+  (`task-054-mutation-a-404-broken.log`).
+- Mutation B (response body tampered with a trailing byte):
+  `get_conversation_returns_decompressed_blob` FAILED — the body assertion bites
+  (`task-054-mutation-b-body-tampered.log`).
+- Handler restored to pristine; suite green again (`task-054-pristine-green.log`).
+
+No production code was changed by this assignment — the handler, route registration
+(`lib.rs`, `/api/v1/conversations/:sha`), and port wiring were already complete at the
+assignment base; this record reconciles the task's commit attribution and progress state.
