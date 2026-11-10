@@ -41,7 +41,6 @@ pub struct RemoteJwksEntry {
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
-
 // -- Gate-agent capability scopes (task-134, agent-gates.md) -------------------
 
 /// OIDC capability granted to an AgentReview gate's reviewer agent: it may
@@ -55,7 +54,6 @@ pub const REVIEW_SUBMIT_SCOPE: &str = "review:submit";
 /// review-submission rights — a validator must not be able to influence
 /// review-based approval surfaces.
 pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
-
 
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 

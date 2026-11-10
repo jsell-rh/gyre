@@ -491,13 +491,15 @@ async fn build_review_agent_context(
     // Persona resolution (nearest-wins). Unresolvable persona = gate failure:
     // the reviewer would judge against criteria nobody defined.
     let slug = persona_slug(persona);
-    let resolved = resolve_review_persona(state, &repo, slug).await.ok_or_else(|| {
-        format!(
-            "review persona '{persona}' (slug '{slug}') not found in scope chain \
+    let resolved = resolve_review_persona(state, &repo, slug)
+        .await
+        .ok_or_else(|| {
+            format!(
+                "review persona '{persona}' (slug '{slug}') not found in scope chain \
              (repo {}, workspace {}, tenant)",
-             repo.id, repo.workspace_id
-        )
-    })?;
+                repo.id, repo.workspace_id
+            )
+        })?;
 
     // MR diff: full patch text, mirroring the MR diff endpoint's
     // source-vs-target computation.
@@ -525,9 +527,8 @@ async fn build_review_agent_context(
             .await
         {
             Ok(Some(bytes)) => Some(
-                String::from_utf8(bytes).map_err(|_| {
-                    format!("spec '{path}' at {sha} is not valid UTF-8")
-                })?,
+                String::from_utf8(bytes)
+                    .map_err(|_| format!("spec '{path}' at {sha} is not valid UTF-8"))?,
             ),
             Ok(None) => {
                 return Err(format!(
@@ -684,7 +685,10 @@ async fn run_review_agent_process(
         .env("GYRE_PERSONA", persona)
         .env("GYRE_PERSONA_SLUG", &ctx.persona_slug)
         .env("GYRE_PERSONA_PROMPT", &ctx.persona_prompt)
-        .env("GYRE_SPEC_CONTENT", ctx.spec_content.as_deref().unwrap_or(""))
+        .env(
+            "GYRE_SPEC_CONTENT",
+            ctx.spec_content.as_deref().unwrap_or(""),
+        )
         .env(
             "GYRE_TASK_DESCRIPTION",
             ctx.task_description.as_deref().unwrap_or(""),
@@ -1728,10 +1732,7 @@ mod tests {
         let (status, output) = run_agent_review_gate(&state, &gate, &mr_id).await;
 
         assert_eq!(status, GateStatus::Failed, "output: {output}");
-        assert!(
-            output.contains("not found"),
-            "output: {output}"
-        );
+        assert!(output.contains("not found"), "output: {output}");
         // No gate token was minted (teardown invariant: fail before mint).
         let gate_tokens: Vec<_> = state
             .kv_store
@@ -1864,10 +1865,7 @@ mod tests {
             check_review_verdict(&state, &gate, &mr_id, &gate_agent_id, "p", "").await;
 
         assert_eq!(status, GateStatus::Failed, "output: {output}");
-        assert!(
-            output.contains("requested changes"),
-            "output: {output}"
-        );
+        assert!(output.contains("requested changes"), "output: {output}");
         assert!(output.contains("criteria X unmet"), "output: {output}");
     }
 
@@ -1888,15 +1886,8 @@ mod tests {
         );
         state.reviews.submit_review(&other).await.unwrap();
 
-        let (status, output) = check_review_verdict(
-            &state,
-            &gate,
-            &mr_id,
-            "gate-review-verdict-3",
-            "p",
-            "",
-        )
-        .await;
+        let (status, output) =
+            check_review_verdict(&state, &gate, &mr_id, "gate-review-verdict-3", "p", "").await;
 
         assert_eq!(status, GateStatus::Failed, "output: {output}");
         assert!(
@@ -2101,9 +2092,10 @@ mod tests {
         gate.persona = Some("personas/slow-reviewer.md".to_string());
         gate.timeout_secs = Some(700); // > the old fixed 360s token TTL
 
-        let ctx = build_review_agent_context(&state, &gate, &mr_id, gate.persona.as_deref().unwrap())
-            .await
-            .expect("review context must build");
+        let ctx =
+            build_review_agent_context(&state, &gate, &mr_id, gate.persona.as_deref().unwrap())
+                .await
+                .expect("review context must build");
 
         let claims = state
             .agent_signing_key
@@ -2173,11 +2165,7 @@ mod tests {
             return false;
         }
         matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                listener.accept()
-            )
-            .await,
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await,
             Ok(Ok(_))
         )
     }
@@ -2208,7 +2196,9 @@ mod tests {
         // store, and evaluation with zero policies is default-deny, so the
         // driver's review POST would 403. main.rs seeds at startup; a test
         // building its own state must do the same (review F1).
-        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .unwrap();
         let (mr_id, _repo_id, spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2217,10 +2207,7 @@ mod tests {
         });
 
         let driver = review_driver_path();
-        let mut gate = make_gate(
-            GateType::AgentReview,
-            Some(format!("{driver} approved")),
-        );
+        let mut gate = make_gate(GateType::AgentReview, Some(format!("{driver} approved")));
         gate.persona = Some("personas/test-reviewer.md".to_string());
 
         let (status, output) = run_agent_review_gate(&state, &gate, &mr_id).await;
@@ -2293,7 +2280,9 @@ mod tests {
         let state = crate::build_state("gyre-test-token", &base_url, None);
         // Same as the approved-path test: seed builtin policies or the
         // driver's review POST default-denies (review F1).
-        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .unwrap();
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2332,7 +2321,9 @@ mod tests {
         use tower::ServiceExt; // oneshot
 
         let state = test_state();
-        crate::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .unwrap();
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
         let app = crate::build_router(state.clone());
 
@@ -2368,9 +2359,7 @@ mod tests {
                     .uri(format!("/api/v1/merge-requests/{}/reviews", mr_id.as_str()))
                     .header("authorization", format!("Bearer {token}"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::to_vec(&body).unwrap(),
-                    ))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
@@ -2390,7 +2379,6 @@ mod tests {
         assert_eq!(reviews.len(), 1, "reviews: {reviews:?}");
         assert_eq!(reviews[0].reviewer_agent_id, gate_agent_id);
     }
-
 
     // ── check_gates_for_mr ───────────────────────────────────────────────────
 

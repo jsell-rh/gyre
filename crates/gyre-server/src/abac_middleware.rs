@@ -37,6 +37,32 @@ use crate::{auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeCon
 // Resource resolver
 // ---------------------------------------------------------------------------
 
+// Merge-request route patterns shared between the resolver registry below
+// and the scoped gate-agent allow-list in `abac_middleware`. Each pattern is
+// defined exactly once so the registry mapping and the allow-list cannot
+// drift apart (scripts/check-abac-route-registry.sh freezes duplicate path
+// literals — a second copy of a pattern would be dead or misleading).
+const MR_DETAIL_ROUTE: &str = "/api/v1/merge-requests/:id";
+const MR_COMMENTS_ROUTE: &str = "/api/v1/merge-requests/:id/comments";
+const MR_REVIEWS_ROUTE: &str = "/api/v1/merge-requests/:id/reviews";
+const MR_DIFF_ROUTE: &str = "/api/v1/merge-requests/:id/diff";
+const MR_GATES_ROUTE: &str = "/api/v1/merge-requests/:id/gates";
+
+/// Routes a `review:submit` gate agent may touch: read MR context, submit
+/// its verdict, read comments and gate state.
+const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
+    MR_DETAIL_ROUTE,
+    MR_REVIEWS_ROUTE,
+    MR_DIFF_ROUTE,
+    MR_COMMENTS_ROUTE,
+    MR_GATES_ROUTE,
+    "/api/v1/version",
+];
+
+/// Routes a `validation:report` gate agent may touch: read-only MR context
+/// for its check and nothing else (its contract is the process exit code).
+const VALIDATOR_ALLOWED_ROUTES: &[&str] = &[MR_DETAIL_ROUTE, MR_DIFF_ROUTE, "/api/v1/version"];
+
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
 pub struct RouteResourceMapping {
@@ -207,29 +233,21 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/tasks/:id/status", "task", Some("write")),
                 // ── Merge Requests ─────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/merge-requests", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id", "merge_request", None),
+                RouteResourceMapping::api(MR_DETAIL_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/status",
                     "merge_request",
                     Some("write"),
                 ),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/comments",
-                    "merge_request",
-                    None,
-                ),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/reviews",
-                    "merge_request",
-                    None,
-                ),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/diff", "merge_request", None),
+                RouteResourceMapping::api(MR_COMMENTS_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MR_REVIEWS_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MR_DIFF_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",
                     None,
                 ),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/gates", "gate", None),
+                RouteResourceMapping::api(MR_GATES_ROUTE, "gate", None),
                 // MR SDLC timeline (S2.5 — HSI §3)
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/timeline",
@@ -1098,26 +1116,14 @@ pub async fn abac_middleware(
         let is_reviewer = scope == crate::auth::REVIEW_SUBMIT_SCOPE;
         let is_validator = scope == crate::auth::VALIDATION_REPORT_SCOPE;
         if is_reviewer || is_validator {
+            // Read-only MR context for validators; reviewers additionally
+            // get review submission, comments, and gate state. No repo/admin
+            // route is reachable, so no policy can widen a single-purpose
+            // gate agent into a general-purpose caller.
             let allowed = if is_reviewer {
-                matches!(
-                    pattern.as_str(),
-                    "/api/v1/merge-requests/:id"
-                        | "/api/v1/merge-requests/:id/reviews"
-                        | "/api/v1/merge-requests/:id/diff"
-                        | "/api/v1/merge-requests/:id/comments"
-                        | "/api/v1/merge-requests/:id/gates"
-                        | "/api/v1/version"
-                )
+                REVIEWER_ALLOWED_ROUTES.contains(&pattern.as_str())
             } else {
-                // Read-only MR context for the check itself; no review
-                // submission, no comment writes (validation contract is
-                // exit-code pass/fail).
-                matches!(
-                    pattern.as_str(),
-                    "/api/v1/merge-requests/:id"
-                        | "/api/v1/merge-requests/:id/diff"
-                        | "/api/v1/version"
-                )
+                VALIDATOR_ALLOWED_ROUTES.contains(&pattern.as_str())
             };
             if !allowed {
                 tracing::warn!(
@@ -1145,11 +1151,7 @@ pub async fn abac_middleware(
                 } else {
                     "validation-scoped token is limited to read-only MR routes"
                 };
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({"error": error})),
-                )
-                    .into_response();
+                return (StatusCode::FORBIDDEN, Json(json!({"error": error}))).into_response();
             }
         }
     }
@@ -1171,7 +1173,6 @@ pub async fn abac_middleware(
     if let Some(claims) = &auth.jwt_claims {
         ctx.merge_jwt_claims(claims);
     }
-
 
     // Load policies and evaluate.
     // Policies are loaded from the shared store on EVERY request — there is

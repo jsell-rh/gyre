@@ -364,7 +364,9 @@ mod tests {
         let mut updated = gate.clone();
         updated.required = false;
         updated.validation_type = Some("accessibility".to_string());
-        QualityGateRepository::save(&storage, &updated).await.unwrap();
+        QualityGateRepository::save(&storage, &updated)
+            .await
+            .unwrap();
 
         let reloaded = QualityGateRepository::find_by_id(&storage, "gate-upsert-1")
             .await

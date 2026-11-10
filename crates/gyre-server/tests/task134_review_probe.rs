@@ -20,7 +20,9 @@ async fn test_state() -> std::sync::Arc<gyre_server::AppState> {
 #[tokio::test]
 async fn scoped_review_token_reviewer_identity_is_bound() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     // Seed an MR.
@@ -39,7 +41,14 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
     let gate_agent_id = "gate-review-probe".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "review:submit")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+        )
         .unwrap();
     state
         .kv_store
@@ -66,7 +75,11 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
         .await
         .unwrap();
 
-    let st = resp.status(); let bd = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap(); let tx = String::from_utf8_lossy(&bd); println!("SUBMIT-RESPONSE status={st} body={tx}"); assert_eq!(st, StatusCode::CREATED, "body: {tx}");
+    let st = resp.status();
+    let bd = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let tx = String::from_utf8_lossy(&bd);
+    println!("SUBMIT-RESPONSE status={st} body={tx}");
+    assert_eq!(st, StatusCode::CREATED, "body: {tx}");
     let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
     assert_eq!(reviews.len(), 1);
     assert_eq!(
@@ -85,13 +98,22 @@ async fn scoped_review_token_denied_outside_allowlist() {
     // route (builtin-agent-scoped-access allows Agent-role reads) — that
     // way the 403 below is attributable to the scoped-token allow-list,
     // not to an empty policy store's default-deny.
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let gate_agent_id = "gate-review-probe-2".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "review:submit")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+        )
         .unwrap();
     state
         .kv_store
@@ -149,7 +171,14 @@ async fn scoped_review_token_cannot_push() {
     let gate_agent_id = "gate-review-probe-3".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "review:submit")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+        )
         .unwrap();
     state
         .kv_store
@@ -196,7 +225,14 @@ async fn revoked_scoped_token_is_rejected() {
     let gate_agent_id = "gate-review-probe-4".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "review:submit")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+        )
         .unwrap();
     state
         .kv_store
@@ -239,7 +275,9 @@ async fn revoked_scoped_token_is_rejected() {
 #[tokio::test]
 async fn validation_scoped_token_cannot_submit_review() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     // Seed an MR.
@@ -257,7 +295,14 @@ async fn validation_scoped_token_cannot_submit_review() {
     let gate_agent_id = "gate-validate-probe".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "validation:report")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "validation:report",
+        )
         .unwrap();
     state
         .kv_store
@@ -304,7 +349,9 @@ async fn validation_scoped_token_cannot_submit_review() {
 #[tokio::test]
 async fn validation_scoped_token_can_read_mr_context() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let mr_id = gyre_common::Id::new("mr-probe-validation-read");
@@ -321,7 +368,14 @@ async fn validation_scoped_token_can_read_mr_context() {
     let gate_agent_id = "gate-validate-probe-read".to_string();
     let token = state
         .agent_signing_key
-        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "validation:report")
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "validation:report",
+        )
         .unwrap();
     state
         .kv_store
@@ -363,7 +417,9 @@ async fn validation_scoped_token_can_read_mr_context() {
 #[tokio::test]
 async fn lookalike_scope_does_not_inherit_review_capability() {
     let state = test_state().await;
-    gyre_server::abac_middleware::seed_builtin_policies(&state).await.unwrap();
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
     let mr_id = gyre_common::Id::new("mr-probe-lookalike");
@@ -381,7 +437,14 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         let agent_id = format!("gate-lookalike-{}", lookalike.replace(':', "-"));
         let token = state
             .agent_signing_key
-            .mint_scoped(&agent_id, "gate-1", "forge", "http://localhost:0", 60, lookalike)
+            .mint_scoped(
+                &agent_id,
+                "gate-1",
+                "forge",
+                "http://localhost:0",
+                60,
+                lookalike,
+            )
             .unwrap();
         state
             .kv_store
