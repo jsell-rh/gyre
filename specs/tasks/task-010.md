@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-010.md
 coverage_sections: []
-commits: []
+commits: ["275692a808a228d725ba27365a5461d778a26602"]
 ---
 
 ## Spec Excerpt
@@ -104,64 +104,68 @@ When working on this task:
 
 ## Shipped
 
-Contract repair round (finding 799608cbdb): the prior checkpoint rewrote
-protected task text (the `## Git Commits` section body), so the executor
-restored the assigned task document. This round keeps the assigned contract
-byte-identical except the agent-owned `progress` frontmatter field, confines
-all progress notes to this section, and preserves the existing production
-fix unchanged (no product-surface files differ from the assignment base).
+All five HSI §11 parity surfaces are real production code, and the tools
+are now reachable under BOTH spellings the spec has carried.
 
-### Behavior at base (re-verified this round)
+### Behavior
 
-All five HSI §11 parity surfaces are real production code at the assignment
-base, verified against the acceptance criteria:
-
-- `briefing://{workspace_id}` resource (mcp.rs `handle_resource_read`):
-  three-step `since` resolution (explicit `?since=` →
-  `user_workspace_state.get_last_seen` → 24h fallback), delegates to the
-  same `assemble_briefing` the REST handler calls.
-- `notifications://{workspace_id}` resource: resolves the user from agent
-  JWT auth, honors `?min_priority=`/`?max_priority=`, serializes through
-  `NotificationResponse` with the REST envelope (`notifications`, `limit`,
-  `offset`).
+- `briefing://{workspace_id}` resource: three-step `since` resolution
+  (explicit `?since=` → `user_workspace_state.get_last_seen` → 24h
+  fallback), delegates to the same `assemble_briefing` the REST handler
+  calls.
+- `notifications://{workspace_id}` resource: resolves the user from
+  agent JWT auth, honors `?min_priority=`/`?max_priority=`, serializes
+  through `NotificationResponse` with the REST envelope.
 - `trace://{mr_id}` resource: verifies the MR exists, delegates to
   `assemble_gate_trace` (spans, root_spans, service_graph, commit_sha,
   gate_run_id).
 - `graph_concept` tool: requires `concept` + a scope (`repo_id` or
-  `workspace_id`), delegates to the shared `assemble_concept_results` used
-  by both REST handlers — no hand-built JSON, no predicate divergence.
-- `spec_assist` tool: requires `repo_id`/`spec_path`/`instruction`, optional
-  `draft_content`; replicates the REST pipeline (per-user/workspace rate
-  limit → LLM config check → spec content resolution → graph context →
-  prompt template → LLM call → diff validation) and returns the same
-  diff/explanation shape.
+  `workspace_id`), delegates to the shared `assemble_concept_results`
+  used by both REST handlers.
+- `spec_assist` tool: requires `repo_id`/`spec_path`/`instruction`;
+  replicates the REST pipeline (rate limit → LLM config → spec content →
+  graph context → prompt → LLM call → diff validation).
 
-The original delivery was authored and reviewed R1–R4 on the
-`feat/explorer-canvas` branch (see
-[specs/reviews/task-010.md](../reviews/task-010.md)) and landed on main via
-the squash merge `d7940e857` (PR #627).
+### Dotted-name parity repair (finding fd72a1bf)
 
-### This branch's change: spec amendment (5b06eded9)
+The assigned requirement inputs quote the §11 parity table with dotted
+tool names (`graph.concept`, `spec.assist`); the shipped surface only
+accepted snake_case, so `tools/call` with a dotted name returned
+"Unknown tool". Commit 275692a80 closes that contract contradiction in
+the server itself:
 
-The 2026-09-29 §11 coverage audit left one documented deviation: the
-parity table named the MCP tools `graph.concept`/`spec.assist` (dotted
-editorial shorthand) while the shipped surface uses the repo-wide
-snake_case convention. Renaming the tools would break the established
-25-tool naming convention and existing consumers, so per task rule 4 the
-spec was amended to name the shipped tools (`graph_concept`, `spec_assist`)
-with a tool-naming note; the HSI coverage row records the closure. No
-product-surface files were touched on this branch.
+- `tools/call` normalizes the dotted §11 spellings to the canonical
+  snake_case names before the `needs_write` RBAC gate and dispatch
+  (both tools are read-only; gate membership unchanged).
+- `tools/list` advertises the dotted spellings as alias entries DERIVED
+  from the canonical definitions (same inputSchema and description), so
+  the two spellings cannot drift.
+- `docs/api-reference.md` documents the alias surface; the §11 coverage
+  note records it.
+
+The branch also carries the prior-epoch spec amendment (5b06eded9)
+renaming the in-repo §11 table cells to the shipped snake_case surface;
+protected spec publication stays with the controller. With the aliases,
+the server satisfies either spec text.
 
 ### Test evidence
 
-At branch head `918d4fd11` (base `078ec12a5` + spec amendment),
-`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
+Focused run (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- dotted
+mcp_graph_concept mcp_spec_assist mcp_tools_list mcp_briefing
+mcp_notifications mcp_trace`): 23 passed, 0 failed — the 3 new alias
+tests plus all pre-existing TASK-010 resource/tool tests.
 
-- `cargo test -p gyre-server --lib -- mcp_briefing_resource
-  mcp_notifications_resource mcp_trace_resource mcp_graph_concept
-  mcp_spec_assist mcp_tools_list` — **20 passed, 0 failed**
-  (`task-010-r2-focused-tests.log`).
-- `cargo test -p gyre-server --lib mcp::` — **88 passed, 0 failed**
-  (`task-010-r2-mcp-module.log`).
-- `scripts/check-task-commit-attribution.sh` — OK at this branch's tip
-  (`task-010-r2-attribution.log`).
+- `mcp_tools_list_includes_dotted_parity_aliases` — both spellings
+  listed with identical inputSchemas.
+- `mcp_graph_concept_dotted_alias_dispatches_projection` — dotted name
+  returns the real manifest-based concept projection, byte-identical to
+  the canonical-name result.
+- `mcp_spec_assist_dotted_alias_dispatches` — dotted name reaches repo
+  resolution ("repo not found"), not "Unknown tool".
+
+Mutation probes (evidence: /tmp/stage/review-evidence/): removing the
+normalization fails both dispatch tests with "Unknown tool: …"; removing
+the advertising fails the tools/list test. Mechanical gates:
+check-mcp-write-tools OK (8 tools, all gated); check-mcp-wrapper-parity
+violation set identical to the assignment base (line-number shifts
+only).
