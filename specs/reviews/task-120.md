@@ -87,3 +87,22 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-11-10) — requirements-changed repair on advanced base `cd752300c`, verdict PASS
+
+Candidate `19f40d9f0` (branch `pipeline/task-120/cd1ac4452f234aef8d24ddcd3e68aaea-1`). The diff from the assigned base is **docs-only**: coverage rows 2/3/11 corrections (`9723bef4e`), task-file Shipped/progress update, and the process commit `19f40d9f0` de-listing superseded checkpoint `7f00472c`. No product source changed — the entire task-120 product surface is contained in the base tree (verified: `git ls-tree cd752300c` and both parents of merge `5a7752631` hold the identical `2026-10-08-000058_user_entity_profile_fields` tree `fa5eae0a`; main integrated the previous candidate), so the round's entire claim is that the retained source still satisfies the current contract. Verified independently:
+
+- **Ancestry:** all eleven `commits:` entries, the de-listed `7f00472c`, and merge repair `75d49d4c8` are ancestors of the candidate head. `check-task-commit-attribution.sh` → OK. `7f00472c`'s product content is duplicated by the listed checkpoint commits (`c76b224d` et al.) and fully contained in the base tree, so its de-listing hides nothing from review scoping.
+- **Spec currency:** task-208's amendment touched only §"My Stuff" Views; §User Entity / §Username vs Display Name / §User Preferences on this base match the task excerpt verbatim. Domain `User`/`UserPreferences`/`UserPreferencesPatch` carry every spec field and variant.
+- **Migration story:** `2026-10-08-000058_user_entity_profile_fields` is the unique holder of Diesel version `20261008000058`; main's `...-000056_spec_assertion_results` (task-180) and `...-000057_spec_approval_attestation` (task-193) confirm the two-step renumber narrative; `2026-11-08-000058_spec_approval_ledger` maps to a distinct version. `check-migration-versions.sh` and `check-migration-sql-portability.sh` → OK.
+- **Probes on this exact head** (evidence in `/tmp/stage/review-evidence/`): `migration_000058_backfills_unique_url_safe_usernames` → 1 passed; `gyre-adapters --lib user` → 21 passed (incl. `username_immutable_on_update`, `username_unique_across_users`); `gyre-server --lib api::users` → 18 passed (incl. `put_me_updates_display_name_and_preferences`, `put_me_rejects_malformed_preferences`); `gyre-server --lib auth` → 71 passed (username derivation, collision suffixing, `last_login_at` stamping, no-rename on re-login); `check-mem-port-contracts.sh` → OK.
+- **Test teeth (mutation probe):** disabling the SQLite `username`-immutability guard in `sqlite/user.rs` makes `username_immutable_on_update` FAIL (exit 101); source restored byte-identically, test green again, working tree clean.
+- **Docs accuracy:** all three coverage-row corrections (000058 + renumber story + renamed regression test; `find_or_create_user` reference; Round-2 PASS status) check out against the tree.
+
+Minor observation, non-blocking: the Shipped narrative says "the twelve product commits in `commits:`" but the process commit's de-listing leaves eleven entries — a one-word staleness introduced by the controller-side process commit after the docs commit, with no effect on any gate or on scoping completeness.
+
+Host-side checks owned by verification: `cargo test --all`, architecture/Clippy gates, GitHub CI on this exact head.
+
+**Verdict: PASS** — the current task-120 contract is genuinely satisfied by the retained source on the advanced base; the docs corrections are accurate.
+
+— Reviewer, 2026-11-10
