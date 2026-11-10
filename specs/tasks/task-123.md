@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["27bfb2a699f9bd6f22085b497726e0d32f8f688a", "deec7953a0c6a6d289d99f8239068ba403c43b06", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "33ae5e39446eac1dc781c81783c9d7780012041f"]
+commits: ["f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
 ---
 
 ## Spec Excerpt
