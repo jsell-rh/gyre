@@ -644,3 +644,16 @@ findings, rechecks its entire planned state transactionally, and retains all
 candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
 select completed speculative repairs whose recorded catalog source was that
 specific invalidation; it does not select arbitrary historical changes.
+
+A no-gap assessment also inspects the retained candidate's actual merge
+contribution. Reviewed source changes proceed through normal verification and
+publication; they are not retired merely because main meets the product contract.
+Ancestor checkpoints and task/review-note-only differences do not manufacture
+new coding work. This preserves useful guard or quality fixes discovered during
+an earlier repair without paying for another implementation round.
+
+Assessment is source inspection only: its build wrapper rejects builds/tests.
+All model stages defer gyre-server code generation to the independent verifier;
+server `cargo check` and explicit smaller-package probes remain available to
+implementation/review. This prevents the large test compiler and model heap from
+competing for the same 4 GiB. The verifier still runs the full required suites.

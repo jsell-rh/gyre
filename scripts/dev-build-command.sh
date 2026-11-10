@@ -6,6 +6,37 @@ case "$command_name" in cargo|npm|npx) ;; *) exit 2;; esac
 key="GYRE_DEV_REAL_${command_name^^}"
 real=${!key:?missing original build command}
 case "${1:-}" in --version|-V|--help|-h|help|metadata|locate-project) exec "$real" "$@";; esac
+# Inspection and large server code generation have separate memory ownership.
+# The verifier runs after the model process exits, in its own 4 GiB sandbox.
+if [ "${GYRE_PIPELINE_STAGE:-}" = assess ]; then
+  echo 'Gyre: assessment inspects source and test definitions. Builds and test execution are deferred to host-controlled verification after the model exits. Record deferred checks; do not bypass this wrapper.' >&2
+  exit 64
+fi
+if [[ "${GYRE_PIPELINE_STAGE:-}" =~ ^(implement|review|triage)$ ]] && [ "$command_name" = cargo ]; then
+  codegen=0; selected=0; server=0; expect_package=0
+  for option in "$@"; do
+    package=''
+    if [ "$expect_package" = 1 ]; then
+      package="$option"; expect_package=0
+    else
+      case "$option" in
+        --) break;;
+        build|test|run|bench|rustc) codegen=1;;
+        -p|--package) expect_package=1;;
+        --package=*) package="${option#--package=}";;
+        -p?*) package="${option#-p}";;
+      esac
+    fi
+    if [ -n "$package" ]; then
+      selected=1
+      if [[ "$package" = *gyre-server* || gyre-server == $package ]]; then server=1; fi
+    fi
+  done
+  if [ "$codegen" = 1 ] && { [ "$selected" = 0 ] || [ "$server" = 1 ]; }; then
+    echo 'Gyre: gyre-server code generation plus the model exceeds 4 GiB. Use cargo check for type checking or a focused smaller -p package. Server builds/tests belong to the independent verifier; record the required probes.' >&2
+    exit 64
+  fi
+fi
 if [ "${GYRE_PIPELINE_STAGE:-}" = review ] && [ "$command_name" = cargo ]; then
   for option in "$@"; do
     case "$option" in --all|--workspace|--all-targets)

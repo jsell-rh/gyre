@@ -4,8 +4,11 @@ requirements, specs, scripts, checks, or coverage. Do not create or merge PRs.
 
 The supplied "Current requirement inputs" and "Exact assignment" are authoritative,
 including changes whose current spec text differs from the source checkout.
-Inspect actual source and tests. Use focused probes as in independent review;
-workspace-wide builds belong to the separate remote verifier. Do not infer a
+Inspect actual source and test definitions. Do not run Cargo/npm/npx builds or
+tests in assessment: the model and server compilation together exceed 4 GiB.
+The wrapper enforces this boundary. Record the tests that must run; host-controlled
+verification executes them after the model process exits. Do not bypass the
+wrapper through absolute tool paths or claim deferred tests passed. Do not infer a
 missing implementation solely from changed prose, progress labels or hashes.
 
 Write /tmp/stage/assessment.json:

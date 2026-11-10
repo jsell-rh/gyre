@@ -223,6 +223,58 @@ class RequirementTests(unittest.TestCase):
         self.assertEqual(task['state'],'merged');self.assertIsNone(task['condition'])
         self.assertEqual(self.store.db.execute('select state from work where id=?',(ident,)).fetchone()[0],'attention')
 
+    def test_no_gap_keeps_unmerged_source_work_on_the_publication_path(self):
+        ex=Mock();ex.claim={'input':{'candidate':'main','base':'main','requirements':'fp'}}
+        ex.directory=Path(self.tmp.name)
+        report={'candidate':'main','requirements':'fp','decision':'still_satisfied','gaps':[],
+                'evidence':[{'requirement':'task','file':'src.rs:1','detail':'Behavior is real'}]}
+        ex.cloud_step.return_value={'valid':True,'task_body':BODY,'assessment':report}
+        task={'name':'task-001','generation':'g','body':BODY,'data':{'candidate':'saved-patch',
+                'review':{'candidate':'saved-patch','approved':True}}}
+        proof={'candidate':'saved-patch','base':'main','paths':['scripts/fix-guard.sh']}
+        with patch('pipeline.stages.prompt',return_value='prompt'),patch('pipeline.stages.checkout'),patch('pipeline.assessment.retained_contribution',return_value=proof),patch('pipeline.verification.run') as verify:
+            result,updates,findings=run(ex,task)
+        verify.assert_not_called()
+        self.assertIsNone(updates['resolved']);self.assertIsNone(updates['delivered'])
+        self.assertNotIn('review',updates)
+        self.assertEqual(updates['assessment']['retained_work'],proof)
+
+    def test_backfill_preserves_approved_source_and_requires_normal_verification(self):
+        from pipeline.assessment import resume_retained
+        self.store.put_task('task-001','g',BODY,{'dependencies':[], 'candidate':'patch','candidate_base':'main',
+            'requirements':{'fingerprint':'fp'},'review':{'candidate':'patch','approved':True},
+            'resolved':{'source':'main'},'assessment':{'decision':'still_satisfied','generation':'g','requirements':'fp'}})
+        task=self.store.task('task-001');proof={'candidate':'patch','base':'main','paths':['scripts/check.sh']}
+        self.assertTrue(resume_retained(self.store,task,proof))
+        self.assertFalse(resume_retained(self.store,task,proof))
+        data=self.store.task('task-001')['data']
+        self.assertIsNone(data['resolved']);self.assertTrue(data['review']['approved'])
+        self.assertEqual(len(discover(self.store,'verify','main')),1)
+        self.assertEqual(len(discover(self.store,'implement','main')),0)
+        self.assertEqual(self.store.db.execute('select count(*) from task_history').fetchone()[0],1)
+
+    def test_retained_contribution_ignores_ancestral_and_document_only_work(self):
+        import subprocess
+        from pipeline.assessment import retained_contribution
+        repo=self.root
+        def git(*args):return subprocess.check_output(['git',*args],cwd=repo,text=True).strip()
+        git('init','-q');git('config','user.name','Test');git('config','user.email','test@example.com')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','base');base=git('rev-parse','HEAD')
+        (repo/'specs/reviews').mkdir();(repo/'specs/reviews/task-001.md').write_text('notes')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','notes');notes=git('rev-parse','HEAD')
+        (repo/'guard.py').write_text('real guard correction')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','guard fix');patch_sha=git('rev-parse','HEAD')
+        ex=Mock()
+        def command(*args,cwd=None,check=True,**kwargs):
+            if args[:2]==('git','fetch'):return subprocess.CompletedProcess(args,0,stdout='')
+            return subprocess.run(args,cwd=cwd,text=True,capture_output=True,check=check)
+        ex.command.side_effect=command
+        self.assertIsNone(retained_contribution(ex,repo,notes,base,'task-001'))
+        self.assertIsNone(retained_contribution(ex,repo,base,notes,'task-001'))
+        proof=retained_contribution(ex,repo,base,patch_sha,'task-001')
+        self.assertEqual(proof['paths'],['guard.py'])
+        self.assertEqual(git('rev-parse','HEAD'),patch_sha)
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])
