@@ -50,3 +50,49 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R3 (independent review, requirements-changed re-verification)
+
+**Reviewer:** Review agent (candidate `78b05f0e`, base `078ec12a`)
+**Date:** 2026-11-10
+
+### Scope and diff
+
+The assignment base moved to `078ec12a`; 13 of the 14 attributed commits are ancestors of the base (the complete task-077 implementation was absorbed into main), so the candidate's incremental diff is: one rustfmt fix (`crates/gyre-ports/src/notification.rs`, blank line) and `specs/tasks/task-077.md` metadata. The review therefore re-verified the full task contract on the candidate tree.
+
+### Acceptance-criteria verification (all met on the candidate tree)
+
+- `TrustLevel` enum (Supervised/Guided/Autonomous/Custom, `#[default] Supervised`) with strict API `parse` and legacy `from_db_str` — `gyre-domain/src/workspace.rs:11`. Note: the enum lives in gyre-domain beside the `Workspace` entity, not gyre-common as the plan text assumed (the plan's own grep hint mis-located the entity); the functional contract is fully met.
+- `Workspace.trust_level` with entity default Supervised; migrations `000024` (trust_level), `000050` (default corrected Guided→Supervised), `000028` (policies.immutable). Single `000050`, no duplicate version.
+- `trust_policies_for_level`: Supervised = one merge-hold Deny (priority 150 in the 100-199 band, actions [merge], resource [mr], condition subject.type == "system", workspace-scoped); Guided/Autonomous/Custom = empty.
+- Atomic transitions: single `conn.transaction` (workspace upsert + `trust:` delete by (name LIKE 'trust:%', scope_id) + policy inserts) in both SQLite and Postgres adapters; mem adapter shares the policy store, guards port contracts in code, and carries the fail hook used by the 409 test.
+- `PUT /api/v1/workspaces/:id`: strict trust_level parse (400 on typo), single `apply_trust_transition` call (no double write), verbatim HSI 409 message, Preset→Custom preserves `trust:` policies, Custom→Preset deletes and reseeds.
+- Immutable-Deny-first evaluation (`policy_engine.rs` Step 1, before priority sort; cannot be overridden by any Allow including p=1000).
+- `builtin:require-human-spec-approval` seeded at startup (immutable, priority 999, Deny approve/spec for subject.type != user) with drift refresh; server refuses to start on seed failure. Route `/api/v1/specs/:path/approve` is ABAC-mapped (resource spec, action approve), so the policy is enforced on the HTTP path.
+- Policy CRUD rejects `trust:`/`builtin:` names on create and update (400); immutable policies reject modification.
+- Merge-time enforcement (F5): `evaluate_merge_abac` builds the merge processor's service identity (subject.type "system", subject.id "merge-processor", action merge, resource mr), filters other workspaces' policies and the pipeline default-deny catch-all, and `supervised_trust_hold` requeues on explicit Deny with the `mr.status == Approved` human escape; policy/workspace store read failures fail CLOSED (F9). The HTTP system-token bypass is by identity (`is_system_principal`), so the merge processor is not covered by it.
+- F6 fixed: `create_interrogation_policies_in` propagates creation errors; the spawn caller rolls back the agent record and token on failure.
+- F7/F8 fixed: Custom-direction tests (Preset→Custom preserves; Custom→preset deletes+reseeds; non-trust user policies survive) and field-level generator assertions present.
+- ABAC cache: no policy-result cache exists (policies are read from the store per request, `abac_middleware.rs` comment); the "invalidate after commit" requirement is satisfied trivially with no intermediate-state window.
+
+### Probes (evidence in `/tmp/stage/review-evidence/`)
+
+- `cargo test -p gyre-domain --lib` — 463 passed, 0 failed.
+- `cargo test -p gyre-server --lib policy` — 79 passed, 0 failed.
+- `cargo test -p gyre-server --lib api::workspaces` — 19 passed, 0 failed.
+- `cargo test -p gyre-server --lib merge_processor` — 84 passed, 0 failed.
+- `cargo test -p gyre-server --test e2e_ralph_loop --test git_integration` — 17 passed, 0 failed.
+- `cargo fmt -p` all six crates — clean (`cargo fmt --all` is wrapper-rejected as workspace-wide; per-crate checks cover every crate; deferred `--all` run recorded for verification).
+- Mutation probe 1: disabling the immutable-Deny-first step makes `immutable_deny_blocks_even_when_high_priority_allow_matches` FAIL (Allow vs Deny) — the test kills the bug. Source restored, tests green again.
+- Mutation probe 2: forcing `supervised_trust_hold` to return None makes three Supervised-hold tests FAIL (MR becomes Merged instead of held) — the F5 enforcement tests kill the bug. Source restored, tests green again, working tree clean at the candidate SHA throughout.
+
+### Non-blocking observations (routed for follow-up; not task defects)
+
+1. User-created policy priority band (200-299) is not validated by the CRUD endpoint; `abac-policy-engine.md` §Built-in policies explicitly permits non-immutable builtins to be overridden by higher-priority custom policies, so this is engine-spec-sanctioned. The hard invariant (spec approval always human) is protected by the immutable flag.
+2. HSI §11's parenthetical "requires Admin workspace role" for `PUT /api/v1/workspaces/:id` is not enforced by the current M34 builtin set (`developer-write-access`, priority 800, Allow on `*`, lets a same-tenant Developer-role user update workspace fields including trust_level). Pre-existing platform authorization posture on the workspace surface, unchanged by this candidate's diff (which contains no production code change) and outside this task's acceptance criteria ("existing endpoint"). Route to the ABAC/authorization surface owner.
+
+### Verdict
+
+approved — all acceptance criteria are met by real, enforced, behavior-tested production code; the prior deferred findings (F5–F8) are verified fixed; the candidate's incremental diff introduces no risk.
