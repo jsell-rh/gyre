@@ -194,6 +194,12 @@ pub struct ConfigurableGitOps {
     /// When true, `revert_commit` returns a Conflict — the R4-F1
     /// conflict path must be testable without a real git repo.
     pub revert_conflicts: bool,
+    /// Shared flag consulted by `diff`: when set, `diff` reports one
+    /// changed file (task-106 R19 F2 — lets a test observe, through the
+    /// MR's diff_stats, whether the jj git export ran BEFORE the stats
+    /// were computed; the flag is flipped by the jj double's export side
+    /// effect at the exact call point).
+    pub diff_change_when: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
@@ -204,6 +210,7 @@ impl Default for ConfigurableGitOps {
             revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
             revert_fails: false,
             revert_conflicts: false,
+            diff_change_when: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -241,9 +248,13 @@ impl GitOpsPort for ConfigurableGitOps {
     }
 
     async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        let changed = usize::from(
+            self.diff_change_when
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
         Ok(DiffResult {
-            files_changed: 0,
-            insertions: 0,
+            files_changed: changed,
+            insertions: changed,
             deletions: 0,
             patches: vec![],
         })
@@ -409,7 +420,198 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
+    async fn jj_bookmark_set(&self, _repo_path: &str, _name: &str, _change_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_rebase(
+        &self,
+        _workspace_path: &str,
+        _revision: &str,
+        _destination: &str,
+    ) -> Result<gyre_ports::JjRebaseOutcome> {
+        Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count: 0 })
+    }
+
+    async fn jj_main_checkout_init(
+        &self,
+        _main_checkout_path: &str,
+        _git_repo_path: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_workspace_add(
+        &self,
+        _main_checkout_path: &str,
+        _workspace_path: &str,
+        _name: &str,
+        _revision: &str,
+        _description: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_workspace_forget(&self, _main_checkout_path: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_git_export(&self, _workspace_path: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Configurable jj double for tests: records every call and replays a
+/// programmed rebase outcome. `parking_lot` Mutex — never held across await.
+#[cfg(test)]
+#[derive(Default)]
+pub struct ConfigurableJjOps {
+    pub rebase_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Programmed outcome replayed by `jj_rebase`. The failure variant is
+    /// stored as a message (`anyhow::Error` is not `Clone`) and turned
+    /// into an error at replay time.
+    pub rebase_outcome: parking_lot::Mutex<Option<Result<gyre_ports::JjRebaseOutcome, String>>>,
+    pub workspace_forget_calls: parking_lot::Mutex<Vec<String>>,
+    pub workspace_add_calls: parking_lot::Mutex<Vec<String>>,
+    /// The `-r <revision>` argument per `jj_workspace_add` call (F9: the
+    /// spawn branch handed to jj provisioning).
+    pub workspace_add_revisions: parking_lot::Mutex<Vec<String>>,
+    /// `"{main_checkout_path}:{git_repo_path}"` per call.
+    pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
+    /// When true, `jj_main_checkout_init` fails — lets tests exercise
+    /// the spawn flow's plain-git worktree fallback.
+    pub main_checkout_init_fails: parking_lot::Mutex<bool>,
+    pub git_export_calls: parking_lot::Mutex<Vec<String>>,
+    /// `jj_bookmark_set` calls as `(repo_path, name, change_id)` in order
+    /// (task-106 R19 F1: the completion path must SET the imported
+    /// bookmark, not create).
+    pub bookmark_set_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// `jj_bookmark_create` calls as `(repo_path, name, change_id)` in
+    /// order — recorded so tests can pin that the completion path never
+    /// regresses to create (task-106 R19 F1).
+    pub bookmark_create_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Synchronous side effect run inside `jj_git_export` before it
+    /// returns (task-106 R19 F2: lets tests make the export's effect on
+    /// git-visible state observable at the exact call point, so
+    /// export-before-stats ordering is provable with doubles).
+    pub git_export_effect: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl JjOpsPort for ConfigurableJjOps {
+    async fn jj_init(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
+        Ok("cfg-change-id".to_string())
+    }
+
+    async fn jj_describe(
+        &self,
+        _repo_path: &str,
+        _change_id: &str,
+        _description: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_log(&self, _repo_path: &str, _limit: usize) -> Result<Vec<JjChange>> {
+        Ok(vec![])
+    }
+
+    async fn jj_squash(&self, _repo_path: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_create_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
+        Ok(())
+    }
+
+    async fn jj_bookmark_set(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.bookmark_set_calls.lock().push((
+            repo_path.to_string(),
+            name.to_string(),
+            change_id.to_string(),
+        ));
+        Ok(())
+    }
+
+    async fn jj_undo(&self, _repo_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn jj_rebase(
+        &self,
+        workspace_path: &str,
+        revision: &str,
+        destination: &str,
+    ) -> Result<gyre_ports::JjRebaseOutcome> {
+        self.rebase_calls.lock().push((
+            workspace_path.to_string(),
+            revision.to_string(),
+            destination.to_string(),
+        ));
+        match self.rebase_outcome.lock().clone() {
+            Some(Ok(outcome)) => Ok(outcome),
+            Some(Err(msg)) => Err(anyhow::anyhow!(msg)),
+            None => Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count: 0 }),
+        }
+    }
+
+    async fn jj_main_checkout_init(
+        &self,
+        main_checkout_path: &str,
+        git_repo_path: &str,
+    ) -> Result<()> {
+        self.main_checkout_init_calls
+            .lock()
+            .push(format!("{main_checkout_path}:{git_repo_path}"));
+        if *self.main_checkout_init_fails.lock() {
+            return Err(anyhow::anyhow!("programmed jj main checkout init failure"));
+        }
+        Ok(())
+    }
+
+    async fn jj_workspace_add(
+        &self,
+        _main_checkout_path: &str,
+        workspace_path: &str,
+        name: &str,
+        _revision: &str,
+        _description: &str,
+    ) -> Result<()> {
+        self.workspace_add_calls
+            .lock()
+            .push(format!("{name}:{workspace_path}"));
+        self.workspace_add_revisions
+            .lock()
+            .push(_revision.to_string());
+        Ok(())
+    }
+
+    async fn jj_workspace_forget(&self, _main_checkout_path: &str, name: &str) -> Result<()> {
+        self.workspace_forget_calls.lock().push(name.to_string());
+        Ok(())
+    }
+
+    async fn jj_git_export(&self, workspace_path: &str) -> Result<()> {
+        if let Some(effect) = self.git_export_effect.lock().as_ref() {
+            effect();
+        }
+        self.git_export_calls
+            .lock()
+            .push(workspace_path.to_string());
         Ok(())
     }
 }
@@ -3588,6 +3790,17 @@ pub fn test_state() -> Arc<crate::AppState> {
     test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
+/// Build an AppState with a custom JjOpsPort for tests that need to
+/// control/observe jj behavior (e.g., programmed rebase outcomes).
+#[cfg(test)]
+pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None);
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.jj_ops = jj_ops;
+    state
+}
+
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
 /// SQLite instance) so infrastructure health probes evaluate real storage.
 #[cfg(test)]
@@ -3603,6 +3816,21 @@ pub fn test_state_with_storage(
         None,
         None,
     )
+}
+
+/// Build a test AppState with custom JjOpsPort and GitOpsPort — used by
+/// tests that drive the spawn path with a real git adapter and an
+/// observing jj double (e.g. F9: branch creation before jj provisioning).
+#[cfg(test)]
+pub fn test_state_with_jj_and_git_ops(
+    jj_ops: Arc<dyn gyre_ports::JjOpsPort>,
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(git_ops, workspaces, policies, None, None, None);
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.jj_ops = jj_ops;
+    state
 }
 
 /// Build a test AppState with a custom `SecretRepository` — used to exercise
