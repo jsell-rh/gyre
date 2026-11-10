@@ -44,7 +44,7 @@ const WORKSPACES = [
 // Read state is resolved_at/dismissed_at (both null = unread), NOT a `read` bool.
 const NOW = Math.floor(Date.now() / 1000);
 const NOTIFICATIONS = [
-  { id: 'n-1', notification_type: 'SpecPendingApproval', title: 'Spec approved', resolved_at: null, dismissed_at: null, created_at: (NOW - 300) },
+  { id: 'n-1', notification_type: 'SpecApprovalRequested', title: 'Spec approved', resolved_at: null, dismissed_at: null, created_at: (NOW - 300) },
   { id: 'n-2', notification_type: 'GateFailure', title: 'Gate crashed', resolved_at: null, dismissed_at: NOW - 100, created_at: (NOW - 7200) },
 ];
 
@@ -226,7 +226,7 @@ describe('UserProfile', () => {
     api.getNotificationPreferences.mockResolvedValue({
       preferences: [
         { notification_type: 'GateFailure', enabled: false },
-        { notification_type: 'BudgetWarning', enabled: true },
+        { notification_type: 'AgentBudgetWarning', enabled: true },
       ],
     });
     const { findByText, container } = r();
@@ -236,6 +236,26 @@ describe('UserProfile', () => {
     const boxes = container.querySelectorAll('.pref-checkbox');
     const gate = [...boxes].find(b => b.getAttribute('aria-label')?.includes('Gate Failures'));
     expect(gate?.checked).toBe(false);
+  });
+
+  it('ignores legacy alias-named prefs rows instead of toggling canonical switches', async () => {
+    // Rows written by older clients may carry parse aliases
+    // ('SpecPendingApproval'/'BudgetWarning'); the canonical toggles must
+    // stay at their default (enabled) rather than keying on a name that
+    // never matches a stored notification.
+    api.getNotificationPreferences.mockResolvedValue({
+      preferences: [
+        { notification_type: 'SpecPendingApproval', enabled: false },
+        { notification_type: 'BudgetWarning', enabled: false },
+      ],
+    });
+    const { findByText, container } = r();
+    const prefsTab = await findByText('Notification Preferences');
+    await fireEvent.click(prefsTab);
+    await findByText('Specs Pending Approval');
+    const boxes = container.querySelectorAll('.pref-checkbox');
+    const specApproval = [...boxes].find(b => b.getAttribute('aria-label')?.includes('Specs Pending Approval'));
+    expect(specApproval?.checked).toBe(true);
   });
 
   it('saves prefs with the server wire format and canonical names', async () => {
@@ -256,6 +276,10 @@ describe('UserProfile', () => {
     // Fabricated names must be gone.
     expect(types).not.toContain('SpecApproval');
     expect(types).not.toContain('MergeRequestMerged');
+    // Legacy parse aliases are not canonical as_str() names — a toggle
+    // keyed on an alias never matches a stored notification.
+    expect(types).not.toContain('SpecPendingApproval');
+    expect(types).not.toContain('BudgetWarning');
     for (const p of arg.preferences) {
       expect(typeof p.enabled).toBe('boolean');
     }

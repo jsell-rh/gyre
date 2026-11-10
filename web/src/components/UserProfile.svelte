@@ -28,10 +28,13 @@
   // Type ids are the canonical `NotificationType::as_str()` names the backend
   // stores in user_notification_preferences.notification_type; PUT rejects
   // any other spelling, and the inbox filter only matches these names.
+  // (Legacy parse aliases like 'SpecPendingApproval'/'BudgetWarning' must
+  // NOT appear here: the inbox exclusion compares raw strings, so an alias
+  // id would be a silently inert toggle.)
   const NOTIF_TYPE_IDS = [
-    'AgentNeedsClarification', 'SpecPendingApproval', 'GateFailure',
+    'AgentNeedsClarification', 'SpecApprovalRequested', 'GateFailure',
     'CrossWorkspaceSpecChange', 'ConflictingInterpretations', 'MetaSpecDrift',
-    'BudgetWarning', 'TrustSuggestion', 'SpecAssertionFailure',
+    'AgentBudgetWarning', 'TrustSuggestion', 'SpecAssertionFailure',
     'AbandonedBranch', 'AgentCompleted', 'AgentEscalation',
     'SuggestedSpecLink', 'SpecRejected', 'ConstraintViolation',
     'CascadeTestTriggered', 'CascadeTestFailed', 'DependencyChainTooDeep',

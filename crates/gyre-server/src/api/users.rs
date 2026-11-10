@@ -1028,23 +1028,26 @@ pub async fn update_notification_preferences(
     Json(req): Json<UpdateNotifPrefsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
-    // Validate canonical type names: a typo here would silently create a
-    // preference that never matches any notification (dead filter).
-    for item in &req.preferences {
-        if NotificationType::parse(&item.notification_type).is_none() {
-            return Err(ApiError::BadRequest(format!(
+    // Normalize to the canonical `NotificationType::as_str()` name before
+    // storing: `parse` accepts legacy aliases (`SpecPendingApproval`,
+    // `BudgetWarning`), but notification rows are persisted with canonical
+    // names and the inbox filter is a raw string comparison — storing an
+    // alias would silently create a preference that never matches any
+    // notification (a dead toggle).
+    let mut prefs: Vec<UserNotificationPreference> = Vec::with_capacity(req.preferences.len());
+    for item in req.preferences {
+        let nt = NotificationType::parse(&item.notification_type).ok_or_else(|| {
+            ApiError::BadRequest(format!(
                 "unknown notification type '{}' (expected canonical name, e.g. \"GateFailure\")",
                 item.notification_type
-            )));
-        }
+            ))
+        })?;
+        prefs.push(UserNotificationPreference::new(
+            user_id.clone(),
+            nt.as_str().to_string(),
+            item.enabled,
+        ));
     }
-    let prefs: Vec<UserNotificationPreference> = req
-        .preferences
-        .into_iter()
-        .map(|item| {
-            UserNotificationPreference::new(user_id.clone(), item.notification_type, item.enabled)
-        })
-        .collect();
     state.user_notification_prefs.upsert_batch(&prefs).await?;
     let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({ "preferences": items })))
@@ -1553,6 +1556,83 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["count"], 1, "badge must not count the disabled type");
+    }
+
+    /// Legacy parse aliases must normalize to the canonical
+    /// `NotificationType::as_str()` name before storing: notification rows
+    /// are persisted with canonical names and the inbox exclusion is a raw
+    /// string comparison, so storing 'SpecPendingApproval' (alias for
+    /// 'SpecApprovalRequested') would be a silently inert toggle.
+    #[tokio::test]
+    async fn preference_alias_normalizes_to_canonical_before_storing() {
+        let state = test_state();
+        seed_notification(
+            &state,
+            NotificationType::SpecApprovalRequested,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+        // Disable via the legacy alias spelling.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"SpecPendingApproval","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // The stored (and echoed) preference carries the canonical name.
+        assert_eq!(
+            json["preferences"][0]["notification_type"],
+            "SpecApprovalRequested",
+            "alias must be normalized before storing: {json:?}"
+        );
+
+        // The canonical-typed notification is excluded from the inbox...
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            0,
+            "alias-named disable must filter the canonical-typed notification: {json:?}"
+        );
+
+        // ...and from the badge count.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
     }
 
     /// HSI §12 auth provider info: a successful OIDC/JWT authentication must
