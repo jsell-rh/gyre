@@ -1,0 +1,32 @@
+# Review — task-168 (Repo lifecycle — archive push rejection, admin repos tab, gate config UI)
+
+Spec: `specs/system/repo-lifecycle.md` §"Admin → Workspace Scope → Repos Tab", §"Gates (Admin → Repo Scope → Gates)", §"API Summary".
+Assignment: base `b5a872087899e8bc4a18092ab56990a26e9ca9af`, candidate `6c0ef4cccfc65878ffd5db049b0f132cbbace706` (merge head `f425d2c60` + process commits).
+Verdict: **approved** — all three coverage sections are enforced by real production code; every acceptance criterion independently probed; mutation probe confirms the push-rejection test gates the real behavior.
+
+## Probes (evidence under /tmp/stage/review-evidence/, tree at candidate `6c0ef4cc`)
+
+- `cargo test -p gyre-server --lib git_http` → **57/57 passed** (includes the three archived-repo tests: ERR pkt-line advertisement, receive-pack 403, upload-pack still served).
+- `cargo test -p gyre-server --test git_integration push_to_archived_repo_rejected` → **1/1 passed** — runs a **real `git push`** against a live server after archiving via `POST /repos/:id/archive`; asserts push fails with "archived" in stderr and that clone still works (read-only, not invisible).
+- **Mutation probe**: both archived checks in `git_http.rs` temporarily disabled (`if false && …`) → integration test **FAILED** with "push to archived repo should be rejected, but it succeeded" (exit 101, `mutation-archived-push.log`); source then restored byte-identical (`cmp` against pre-mutation copy, working tree clean at `6c0ef4cc`). The test is not self-confirming.
+- `cargo test -p gyre-server --lib gates` → **31/31 passed** (gate create/list/update/delete, position ordering, PUT validation).
+- `cd web && npm ci` (exit 0) then `npx vitest run WorkspaceSettings.test.js RepoSettings.test.js` → **137/137 passed**.
+- i18n probe (`i18n-check.js`): every static `$t()` key in `WorkspaceSettings.svelte` and `RepoSettings.svelte` resolves in `en.json` — guards against a repeat of the earlier dropped-locale finding (2956134c).
+- All mechanical invariant scripts pass on the candidate tree (arch, abac-route-registry, migration-versions, migration-sql-portability, mem-port-contracts, inert-enforcement, dead-message-kinds, fabricated-scope-defaults, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, lossy-secret-conversion, scope-literal-defaults, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, forged-scope-fields, mcp-write-tools, task-commit-attribution) — logs under `inv-*.log`.
+
+## Verification per acceptance criterion
+
+- **Archived push rejection (§API Summary)** — `git_info_refs` returns a 200 whose pkt-line stream carries `ERR push rejected: repository is archived` for `service=git-receive-pack` on archived repos (git-smart-HTTP convention so `git push` prints the reason; a bare 403 body is never shown by git); `git_receive_pack` POST keeps a defense-in-depth 403 before the packfile is processed. Both after `resolve_repo_by_slug` (auth-extracted, tenant-scoped). Clone/fetch unaffected. Proven by unit tests + real-git integration test + mutation probe.
+- **Admin workspace Repos tab** — `WorkspaceSettings.svelte` `repos` tab: table of all workspace repos with name, Active/Archived status badge, active-agent count (from `api.agents`, status `active` only), last activity (max of repo/agent/MR timestamps), default branch, mirror URL; "+ New Repo" and "Import Repo" buttons with working creation/mirror forms; repo-name click navigates via the `goToRepo` context (provided by `App.svelte`). All `$t()` keys resolve.
+- **Repo-scope Gates panel** — `RepoSettings.svelte`: gates listed via `GET /repos/:id/gates` (ordered by `(position, created_at)` in all three adapters — SQL both backends and mem store share the ordering contract), per-gate enabled/disabled toggle (`PUT` `required`), "+ Add Gate" with gate-type selector, per-gate config forms (command for test/lint, required approvals, persona for agent review/validation, timeout), drag-to-reorder persisting 1-based positions via `PUT`. Vitest covers toggle/config/reorder API calls including per-type field visibility.
+- **Backend `update_gate`** — PUT route on the pre-existing `/api/v1/repos/:id/gates/:gate_id` pattern: repo-scope guard (`gate.repo_id != repo_id` → 404), per-gate-type field validation (command required and only valid for command gates, persona only for agent gates, etc.), name non-empty, type immutable. Route resolves through the existing ABAC "gate" `RouteResourceMapping`; `method_to_action(PUT)` = "write", so the middleware evaluates the same policy as POST/DELETE. Migration `2026-10-08-000059_gate_position` uses the unique next sequence number and portable `ALTER TABLE … ADD COLUMN position INTEGER NOT NULL DEFAULT 0` (portability check passes).
+- **Base merge integrity (b5a87208, task-108 impersonation)** — `resolve_repo_by_slug` in the candidate is byte-equivalent to the base's new-signature version (verified by diffing the function bodies); the now-dead path-only wrapper was deleted; all four call sites in `git_http.rs` use the full resolver. `cargo check`/tests confirm the merge compiles and behaves.
+- **Execution order** — `gate_executor` and the `list_by_repo_id_and_phase` default both derive from `list_by_repo_id`, which the adapters now order by `(position, created_at)`: "gates execute in order" (spec §3) holds on the execution path, not just the UI.
+
+## Non-blocking observations
+
+- The committed `web/dist/` bundle is base-restored (stale relative to `web/src`) — established as executor/pipeline-owned per prior finding fddd589d; `build.rs` rebuilds it from `web/src` on a default build, and the review guard exempts `web/dist/` from reviewer-source checks. Not a candidate defect.
+- Coverage rows 3/11/19 in `specs/coverage/system/repo-lifecycle.md` remain `task-assigned | task-168` pending the verification/audit stage flip — matches the pipeline convention observed for other completed tasks (e.g. task-089's row).
+- `WorkspaceSettings.test.js` carries two `describe('Repos tab')` blocks (base suite retargeted to `ws-` testids + the task-168 suite). Redundant coverage, harmless.
+
+Test-inflation check: none found. The push-rejection tests assert exact pkt-line framing and real `git push` failure (mutation-killed); gates tests drive the real router with bearer tokens and assert persisted state via fresh list; frontend tests assert API call payloads and per-type field visibility.
