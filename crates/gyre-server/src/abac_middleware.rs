@@ -371,11 +371,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
-                RouteResourceMapping::api(
-                    "/api/v1/admin/orphaned-workspaces",
-                    "admin",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/admin/orphaned-workspaces", "admin", None),
                 // Admin user impersonation (identity-security.md §Impersonation).
                 // Request/end are admin-only (`admin` resource →
                 // builtin-admin-only-deny rejects non-Admin roles); the
@@ -496,6 +492,15 @@ impl ResourceResolver {
                 // Transfer & Reclamation); DELETE keeps "delete".
                 RouteResourceMapping::api_with_method_actions(
                     "/api/v1/workspaces/:id/members/:user_id",
+                    "workspace_member",
+                    &[("PUT", "transfer_ownership")],
+                ),
+                // Spec-named alias route (user-management.md §API:
+                // `PUT .../members/{user_id}/role`) — mirrors the member
+                // route's action resolution so both paths enforce the same
+                // policy evaluation.
+                RouteResourceMapping::api_with_method_actions(
+                    "/api/v1/workspaces/:id/members/:user_id/role",
                     "workspace_member",
                     &[("PUT", "transfer_ownership")],
                 ),
@@ -1176,8 +1181,7 @@ pub async fn abac_middleware(
             // No policy evaluation, but the call is still attributed
             // when made under an impersonation token
             // (identity-security.md §Impersonation).
-            let req =
-                record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
+            let req = record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
             return next.run(req).await;
         }
     };

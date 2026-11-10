@@ -41,8 +41,8 @@ pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
-pub mod repos;
 pub mod repo_access;
+pub mod repos;
 pub mod saved_views;
 pub mod scim;
 pub mod search;
@@ -910,6 +910,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Spec-named alias (user-management.md §Ownership Transfer &
+        // Reclamation and §API: `PUT .../members/{user_id}/role`) for the
+        // M22.8 member path above — same handler, same authorization.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
         )
         // Teams (M22.8)
         .route(

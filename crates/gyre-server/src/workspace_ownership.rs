@@ -80,7 +80,10 @@ pub struct OrphanedWorkspace {
 /// lingering membership is not an active Owner — that is exactly the
 /// ownerless transition this module detects).
 pub async fn has_active_owner(state: &Arc<AppState>, workspace_id: &Id) -> anyhow::Result<bool> {
-    let members = state.workspace_memberships.list_by_workspace(workspace_id).await?;
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await?;
     for m in &members {
         if m.role != WorkspaceRole::Owner {
             continue;
@@ -373,9 +376,7 @@ pub async fn orphaned_workspaces(state: &Arc<AppState>) -> anyhow::Result<Vec<Or
 mod tests {
     use super::*;
     use crate::mem::test_state;
-    use gyre_domain::{
-        GlobalRole, User, Workspace, WorkspaceMembership, WorkspaceRole as Role,
-    };
+    use gyre_domain::{GlobalRole, User, Workspace, WorkspaceMembership, WorkspaceRole as Role};
 
     fn make_workspace(id: &str) -> Workspace {
         Workspace::new(
@@ -388,7 +389,12 @@ mod tests {
     }
 
     fn make_user(id: &str, tenant: &str, global: GlobalRole) -> User {
-        let mut u = User::new(Id::new(id), format!("ext-{id}"), format!("user-{id}"), 1_000_000);
+        let mut u = User::new(
+            Id::new(id),
+            format!("ext-{id}"),
+            format!("user-{id}"),
+            1_000_000,
+        );
         u.tenant_id = Some(Id::new(tenant));
         u.global_role = global;
         u
@@ -466,11 +472,15 @@ mod tests {
             "the workspace's TenantAdmin must be notified"
         );
         assert!(
-            ownerless_notifications(&state, "member1", "ws1").await.is_empty(),
+            ownerless_notifications(&state, "member1", "ws1")
+                .await
+                .is_empty(),
             "plain members are not notified"
         );
         assert!(
-            ownerless_notifications(&state, "admin2", "ws1").await.is_empty(),
+            ownerless_notifications(&state, "admin2", "ws1")
+                .await
+                .is_empty(),
             "TenantAdmins of other tenants must not be notified"
         );
         // The notification is priority 2 (needs human action).
@@ -497,7 +507,10 @@ mod tests {
         run_once(&state).await.unwrap();
 
         assert!(
-            ownerless_record(&state, &Id::new("ws2")).await.unwrap().is_none(),
+            ownerless_record(&state, &Id::new("ws2"))
+                .await
+                .unwrap()
+                .is_none(),
             "a workspace with an active Owner must not be tracked as ownerless"
         );
     }
@@ -527,7 +540,10 @@ mod tests {
 
         run_once(&state).await.unwrap();
         assert!(
-            ownerless_record(&state, &Id::new("ws3")).await.unwrap().is_some(),
+            ownerless_record(&state, &Id::new("ws3"))
+                .await
+                .unwrap()
+                .is_some(),
             "the workspace must be tracked as ownerless"
         );
     }
@@ -603,7 +619,10 @@ mod tests {
 
         // Workspace starts ownerless → tracked.
         run_once(&state).await.unwrap();
-        assert!(ownerless_record(&state, &Id::new("ws6")).await.unwrap().is_some());
+        assert!(ownerless_record(&state, &Id::new("ws6"))
+            .await
+            .unwrap()
+            .is_some());
 
         // Ownership is reassigned to an existing user.
         state
@@ -619,15 +638,24 @@ mod tests {
         clear_ownerless(&state, &Id::new("ws6")).await;
 
         assert!(
-            ownerless_record(&state, &Id::new("ws6")).await.unwrap().is_none(),
+            ownerless_record(&state, &Id::new("ws6"))
+                .await
+                .unwrap()
+                .is_none(),
             "reassignment must clear the ownerless record"
         );
 
         // And the job keeps it clean (no re-tracking).
         run_once(&state).await.unwrap();
-        assert!(ownerless_record(&state, &Id::new("ws6")).await.unwrap().is_none());
+        assert!(ownerless_record(&state, &Id::new("ws6"))
+            .await
+            .unwrap()
+            .is_none());
         assert!(
-            orphaned_workspaces_with(&state, 0).await.unwrap().is_empty(),
+            orphaned_workspaces_with(&state, 0)
+                .await
+                .unwrap()
+                .is_empty(),
             "a reclaimed workspace must not appear in the orphaned list"
         );
     }
@@ -652,7 +680,10 @@ mod tests {
 
         // The workspace is healthy before the removal.
         run_once(&state).await.unwrap();
-        assert!(ownerless_record(&state, &Id::new("ws7")).await.unwrap().is_none());
+        assert!(ownerless_record(&state, &Id::new("ws7"))
+            .await
+            .unwrap()
+            .is_none());
 
         // The owner's account is removed (SCIM deactivate).
         state.users.delete(&owner.id).await.unwrap();
@@ -660,7 +691,10 @@ mod tests {
 
         // The transition is recorded and the TenantAdmin notified without
         // waiting for the daily job.
-        assert!(ownerless_record(&state, &Id::new("ws7")).await.unwrap().is_some());
+        assert!(ownerless_record(&state, &Id::new("ws7"))
+            .await
+            .unwrap()
+            .is_some());
         assert_eq!(
             ownerless_notifications(&state, "admin7", "ws7").await.len(),
             1,

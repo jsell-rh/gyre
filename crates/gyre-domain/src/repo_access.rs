@@ -243,11 +243,10 @@ mod tests {
             WorkspaceRole::Viewer
         );
         // The restricted developer loses write on this repo.
-        assert!(!effective_repo_permissions(
-            WorkspaceRole::Developer,
-            Some(WorkspaceRole::Viewer)
-        )
-        .contains(&RepoPermission::Write));
+        assert!(
+            !effective_repo_permissions(WorkspaceRole::Developer, Some(WorkspaceRole::Viewer))
+                .contains(&RepoPermission::Write)
+        );
     }
 
     #[test]

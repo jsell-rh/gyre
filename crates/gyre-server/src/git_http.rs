@@ -197,7 +197,11 @@ async fn authorize_repo_access(
                 error!("failed to record RbacDenied audit event: {e}");
             }
         });
-        (StatusCode::FORBIDDEN, format!("repo access denied: {reason}")).into_response()
+        (
+            StatusCode::FORBIDDEN,
+            format!("repo access denied: {reason}"),
+        )
+            .into_response()
     };
 
     let membership = match state
@@ -515,8 +519,8 @@ pub async fn git_upload_pack(
     };
     // Repo access enforcement: clone/fetch needs Read
     // (user-management.md §Repo Access).
-    if let Err(resp) = authorize_repo_access(&state, &auth, &repo, gyre_domain::RepoPermission::Read)
-        .await
+    if let Err(resp) =
+        authorize_repo_access(&state, &auth, &repo, gyre_domain::RepoPermission::Read).await
     {
         return resp;
     }

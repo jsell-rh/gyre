@@ -34,6 +34,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
@@ -57,7 +58,6 @@ pub mod user_profile;
 pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
-pub mod repo_access;
 pub mod worktree;
 
 pub(crate) const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
