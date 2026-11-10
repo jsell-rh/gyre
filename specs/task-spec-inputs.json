@@ -1,7 +1,8 @@
 {
   "version": 1,
-  "shared": [],
+  "shared": ["shared/architectural-invariants"],
   "sections": {
+    "shared/architectural-invariants": {"file": "specs/development/architecture.md", "heading": ["Architecture & Engineering Standards", "Architectural Invariants"]},
     "specs/GOAL.md#document": {"file": "specs/GOAL.md", "document": true},
     "specs/development/frontend-testing.md#document": {"file": "specs/development/frontend-testing.md", "document": true},
     "specs/system/abac-policy-engine.md#abac-policy-engine/cli": {"file": "specs/system/abac-policy-engine.md", "heading": ["ABAC Policy Engine", "CLI"]},
