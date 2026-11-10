@@ -113,3 +113,77 @@
 - **Test assertions on the mock stack** — the five task-107 tests and the mock (`spawn_mock_signing_stack`) were re-read in full: the mock's single-chain trustBundle and body-discarding rekor_post remain the test-side enablers of F11 and F4 respectively; the JWT-payload decode without signature verification remains subsumed by F7. No new gaps beyond the recorded findings.
 
 **Verdict: needs-revision** (unchanged). The implementation cannot issue a certificate from any real Fulcio instance (F1), does not bind the task/user attribution the spec's Layer 3 sentence requires (F2), and its verification path is subvertible (F3, F4, F5, F11), non-durable (F9), unregistered with ABAC (F8), un-integrated with the provenance API (F6), unbounded in external-call latency (F10), and negatively tested only on one of four verification legs (F7).
+---
+
+## R16 — merge-repair round (candidate `3dbf00241`, base `fca5de5fb`)
+
+**Status: approved.** This round's candidate is the R15-approved implementation
+(candidate `4f7430b0`) merged onto the newly assigned base `fca5de5fb` (main:
+admission-policy preflight fix, impersonation, spec lifecycle configs, rollout
+policies) with merge repairs. The review verified (a) the task's core surfaces
+survived the merge byte-identical, (b) each merge resolution is sound, and (c)
+the round's follow-on repairs are real.
+
+**Verification performed** (evidence under `/tmp/stage/review-evidence/`, index
+in `summary.txt`):
+
+- **Core surfaces byte-identical to the approved candidate** (git diff
+  `4f7430b06..3dbf00241`): `sigstore.rs`, `gyre-ports`/`commit_signature_repo.rs`,
+  the SQLite/PostgreSQL commit-signature adapters, all three `task107_*` test
+  files, and `api/provenance.rs` — the R15 deep verification (upstream wire
+  formats, per-phase negative tests, rogue-leaf attack, F1–F19) carries over
+  unchanged.
+- **Migration renumbering (this round's real repair):** the task's
+  `2026-10-09-000056_commit_signatures` collided on Diesel version
+  `20261009000056` with the base's `2026-10-09-000056_user_tenant_id` (one
+  migration runs per version — the table was silently never created on fresh
+  DBs). Renumbered to `2026-10-09-000060` (next unused sequence; `uniq -d` over
+  the migration dirs is empty; `check-migration-versions.sh` and
+  `check-migration-sql-portability.sh` exit 0). `--test task107_signing_key_env`
+  passes against a fresh SQLite DB — the exact probe that failed pre-renumber
+  with "no such table: commit_signatures".
+- **auth.rs merge:** `bearer_token` present at every `AuthenticatedAgent`
+  construction site (extractor paths, `authenticate_token`, `validate_jwt`,
+  `validate_federated_jwt`, and the base-side literals in `impersonation.rs`,
+  `api/spawn.rs` ×5, `mcp.rs` ×5); base's `record_auth_success` auth-audit
+  emission preserved alongside; JWT tenant claim resolved to base's documented
+  schema-default contract (`default_tenant_claim` on `JwtClaims`,
+  hierarchy-enforcement.md §1) — coherent with the fabricated-scope gate's
+  frozen 2-entry exemption state taken from base. `auth::` 56/56 including
+  `jwt_missing_tenant_id_defaults_to_default`, `is_system_principal` spoof-shape,
+  and the F12 key-persistence tests.
+- **jj.rs merge:** base's task-104 `AbacDenied` audit emission merged into the
+  four per-handler repo-ABAC denials; call sites type-match
+  `record_abac_denied` (abac_middleware.rs:1180); per-handler ABAC enforcement
+  retained; `api::jj` 14/14.
+- **Registration intact:** the verification route remains registered in both
+  `api/mod.rs` and the ABAC `ResourceResolver` (repo/read); route-registry gate
+  exit 0.
+- **Docs:** `server-config.md` carries both the base's `GYRE_IMPERSONATION_TTL`
+  and the task's signing rows; `api-reference.md` rows match the implemented
+  `CommitSignature`/`SignatureVerificationResult` shapes.
+- **Static gates at the merged head** (all exit 0): migration-versions,
+  migration-sql-portability, arch, abac-route-registry,
+  fabricated-scope-defaults, mem-port-contracts, in-memory-state-stores,
+  unbounded-external-http, inert-enforcement, abac-exempt-handlers,
+  lossy-secret-conversion, scope-literal-defaults, forged-scope-fields,
+  task-commit-attribution, mcp-write-tools, `cargo fmt --check`.
+- **Build + focused suites:** `cargo check -p gyre-server` and
+  `-p gyre-adapters` exit 0; sigstore 17/17, commit_signatures 6/6, api::jj
+  14/14, api::provenance 5/5, auth 56/56, impersonation 15/15, api::spawn
+  52/52, mcp 88/88, `task107_upstream_conformance` 3/3,
+  `task107_signing_key_env` 1/1, `task107_signing_key_persistence` 1/1.
+
+**No new findings.** The merge neither weakened the task's enforcement nor
+dropped base-side behavior in the conflict files; the migration collision was a
+real silent-failure class and is genuinely repaired.
+
+**Deferred to verification (sandbox limits, not code defects):** live
+Fulcio/Rekor interop remains blocked by network policy (`curl
+https://fulcio.sigstore.dev/api/v2/trustBundle` → exit 7, connect refused —
+`live-fulcio-curl.txt`; wire contract covered by the upstream-conformance
+probe); the review wrapper rejects workspace-wide `--all-targets`/`cargo test
+--all` (per-package focused equivalents run above); exact-head GitHub CI is
+mandatory after review.
+
+**Verdict: approved.**
