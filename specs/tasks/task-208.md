@@ -2,7 +2,7 @@
 title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
 commits: ["e7c2182567eadc53ec267283f3f0b9c48fdd7111", "aecd6847da18a86095e7688fe41bb92f4332a63b", "a11cbf7e109440f5e7406523f4751a48eb1dbe6a", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9", "98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
