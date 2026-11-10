@@ -7,6 +7,10 @@ class AssessmentAttention(Attention):
     category = "assessment"
 
 
+class NeedsTriage(AssessmentAttention):
+    category = "requirements_triage"
+
+
 def validate(report, inputs):
     if not isinstance(report, dict):
         raise ValueError('missing assessment report')
@@ -26,7 +30,8 @@ def validate(report, inputs):
         if missing:
             raise ValueError('Assessment omits requirement evidence: ' + ', '.join(sorted(missing)))
     gaps = report.get('gaps')
-    if not isinstance(gaps, list) or (report['decision'] == 'gap') != bool(gaps):
+    if (not isinstance(gaps, list) or (report['decision'] == 'gap' and not gaps)
+            or (report['decision'] == 'still_satisfied' and gaps)):
         raise ValueError('gap decision must carry concrete findings, and no-gap must not')
     if any(not isinstance(item, dict) or not all(isinstance(item.get(k),str) and item[k].strip()
            for k in ('requirement','file','detail')) for item in gaps):
@@ -49,7 +54,7 @@ def run(execution, task):
         raise AssessmentAttention(str(exc)) from exc
     receipt = report | {'artifact':str(execution.directory/'outcome.json'), 'generation':task['generation']}
     if report['decision'] == 'needs_triage':
-        raise AssessmentAttention('Requirement assessment needs triage: ' + json.dumps(report['evidence']))
+        raise NeedsTriage('Requirement assessment needs triage: ' + json.dumps(report['evidence']))
     if report['decision'] == 'gap':
         finding = {'id':execution.claim['id'], 'category':'requirements_gap',
                    'source':inp.get('candidate') or inp['base'], 'details':report['gaps'],

@@ -29,9 +29,10 @@ def snapshot(store):
         attention = next((item for item in related if item['state'] == 'attention'), None)
         if satisfied(data):
             attention, retry = None, None  # Historical failures remain in attempts, not the current condition.
+        triage_attention = bool(attention and json.loads(attention['result']).get('category') == 'requirements_triage')
         shared_wait = (data.get('repair') or {}).get('shared_environment')
         state = ('merged' if satisfied(data) and data.get('delivered') else
-                 'resolved' if satisfied(data) else 'failed' if attention else 'running' if active else
+                 'resolved' if satisfied(data) else 'needs-triage' if triage_attention else 'failed' if attention else 'running' if active else
                  'needs-triage' if (data.get('requirements') or {}).get('errors') else
                  'published' if retry and retry['stage'] == 'publish' and data.get('pr') else
                  'deferred' if retry else 'assessing' if pending(data) else

@@ -657,3 +657,8 @@ All model stages defer gyre-server code generation to the independent verifier;
 server `cargo check` and explicit smaller-package probes remain available to
 implementation/review. This prevents the large test compiler and model heap from
 competing for the same 4 GiB. The verifier still runs the full required suites.
+
+Semantic spec conflicts are `needs-triage`, distinct from implementation failures.
+Their stage/generation hold survives unrelated main advances; a requirement
+change or explicit operator retry releases it. Evidence and conflicting findings
+remain attached to the attempt instead of provoking speculative implementation.

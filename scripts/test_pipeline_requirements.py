@@ -275,6 +275,20 @@ class RequirementTests(unittest.TestCase):
         self.assertEqual(proof['paths'],['guard.py'])
         self.assertEqual(git('rev-parse','HEAD'),patch_sha)
 
+    def test_semantic_triage_can_record_conflicting_findings_without_becoming_coding(self):
+        inputs={'candidate':'main','base':'main','requirements':'fp'}
+        fact={'requirement':'task','file':'spec.md:1','detail':'Two approved specs conflict'}
+        report={'candidate':'main','requirements':'fp','decision':'needs_triage','evidence':[fact],'gaps':[fact]}
+        self.assertEqual(validate(report,inputs),report)
+        self.store.put_task('task-001','g',BODY,{'requirements':{'fingerprint':'fp'},'assessment_pending':{'changes':{}}})
+        ident=discover(self.store,'assess','main')[0];claim=self.store.claim('assess','actor')
+        self.store.retry(ident,claim['token'],{'category':'requirements_triage','message':'Approved specs conflict'},attention=True)
+        discover(self.store,'assess','new-main')
+        self.assertIsNone(self.store.claim('assess','actor',eligible=lambda w:eligible(self.store,w)))
+        self.assertEqual(discover(self.store,'implement','new-main'),[])
+        view=cockpit(self.store)['tasks'][0]
+        self.assertEqual(view['state'],'needs-triage');self.assertEqual(view['condition'],'Approved specs conflict')
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])
