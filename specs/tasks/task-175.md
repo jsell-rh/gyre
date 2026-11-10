@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Item Structure"
   - "ui-layout.md §Action Buttons per Item Type"
   - "ui-layout.md §8. Briefing Layout"
-commits: ["98f6c234564283c3f5bebce30145b49e3e965eca", "f5d3446bb5bfbb680caa429b748ac881ad791024", "3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901", "db5b4f8222cacbf7e1531a7b1725a6866380fdfa"]
+commits: ["98f6c234564283c3f5bebce30145b49e3e965eca", "f5d3446bb5bfbb680caa429b748ac881ad791024", "3a17bff5e5e0940306f67f13cfed844fdd38ca15", "c424ae307c4d282c095c4af28596acf34fc6cdab", "4797d0f456c06b1090d624ee98ede31a8847cc95", "a9aca60e1ff6dc564bdfc6a53d0f1572f40ceed7", "351bd57dcc59872bafe7f238dc9bb64c9f662cf3", "d6dfb7da45bbd862f5a7249c214c75e6ad475c48", "56395200e6d791faefa6eb588b2a6fc96d89f734", "722c9c29c5114fcc5bd1963f94ee054e4a42add9", "1f31ed07d12007bf3609e9a7c16378223096c0ab", "3c3d16a72e9ce48a87682cfd6a6f557b12f605db", "fd3c74d138cf11a94d2ee015b1f3c973e68d26ed", "7ce04d6903b99a04934528e856778d59e0712901", "db5b4f8222cacbf7e1531a7b1725a6866380fdfa", "956897081069ec8199ba0bf6e706fbfb2dd2af72"]
 ---
 
 ## Spec Excerpt
@@ -84,7 +84,7 @@ failed `checks.sh` run (commit `db5b4f82`); no product behavior changed.
 - **§8 Briefing** (`Briefing.svelte`): five narrative sections, inline action buttons, clickable
   entity references, time-range selector, "Ask about this briefing" chat.
 
-### Verification-gate repairs (this round, commit `db5b4f82`)
+### Verification-gate repairs (this round, commits `db5b4f82` + `956897081`)
 
 - **E0063 compile error (lib test)**: main's task-108 added the `impersonation` field to
   `auth::AuthenticatedAgent`; the branch merge fixed one test initializer in `specs_assist.rs`
@@ -94,13 +94,16 @@ failed `checks.sh` run (commit `db5b4f82`); no product behavior changed.
 - **rustfmt (changed lines)**: the new SQLite `update_body_by_entity_ref` test used six over-long
   single-line `assert_eq!`s; `check-rustfmt-diff.py` flagged lines 457-463. Reformatted to
   rustfmt's multi-line form; `cargo fmt --check` now clean for all three touched crates.
-- **clippy::double_must_use (changed lines)**: async_trait's macro-generated warnings carry
-  primary spans covering the whole trait (line 9 through each method), so adding
-  `update_body_by_entity_ref` made the file's pre-existing macro-noise warnings overlap the diff
-  and fail `check-clippy-diff.py`. `NotificationRepository` was the one port trait missing the
-  repo-standard `#[allow(clippy::double_must_use)] // async_trait generates a must_use future for
-  each method.` annotation carried by every other port trait (workspace, repository, tenant,
-  audit, git_ops, …); added it. Zero double_must_use warnings remain for the file.
+- **clippy::double_must_use and clippy::too_many_arguments (changed lines)**: async_trait's
+  macro-generated warnings carry primary spans covering the whole trait (line 9 through each
+  method), so adding `update_body_by_entity_ref` made the file's pre-existing macro-noise
+  warnings overlap the diff and fail `check-clippy-diff.py`. `NotificationRepository` was the one
+  port trait missing the repo-standard `#[allow(clippy::double_must_use)] // async_trait generates
+  a must_use future for each method.` annotation carried by every other port trait (workspace,
+  repository, tenant, audit, git_ops, …); added it, plus the same method-level
+  `#[allow(clippy::too_many_arguments)]` used for that lint elsewhere (auth.rs,
+  graph_extraction.rs) on the pre-existing 7-parameter `list_for_user` filter signature. Zero
+  clippy warnings remain for the file.
 
 ### Test evidence (focused probes; full gates owned by verification)
 
@@ -111,7 +114,9 @@ failed `checks.sh` run (commit `db5b4f82`); no product behavior changed.
 - `python3 scripts/check-rustfmt-diff.py 89025d728` — "changed lines clean (7 Rust files
   checked)".
 - `python3 scripts/check-clippy-diff.py 89025d728` — re-run after the fixes: no failures
-  (the 14 double_must_use lines and the E0063 are gone; full `--all-targets` clippy compiles).
+  (the 14 double_must_use + 2 too_many_arguments lines and the E0063 are gone; full
+  `--all-targets` clippy compiles). Verified 0 flagged warnings against both the assignment
+  base `89025d728` and the failed run's base `b5a872087`.
 - Prior rounds' evidence (Inbox 74, Accordion/Briefing 43 vitest passes, notification-consumer
   regressions 26, i18n key audit, architecture scripts) is unchanged by this round — no web or
   product source was touched, only the three Rust gate repairs above.
