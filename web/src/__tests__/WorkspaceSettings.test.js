@@ -4,7 +4,7 @@
  * Covers:
  *   - Renders without throwing
  *   - Page header shows workspace name + back button
- *   - 8 tabs are rendered with correct labels
+ *   - 10 tabs are rendered with correct labels
  *   - General tab renders name (display-only), compute target selector
  *   - Trust Level tab renders trust level cards (4 levels)
  *   - Trust Level tab renders implied trust: policy summary (HSI §2a, task-084)
@@ -35,6 +35,10 @@ vi.mock('../lib/api.js', () => ({
     createRepo: vi.fn().mockResolvedValue({ id: 'repo-new', name: 'new-repo' }),
     createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-mirror', name: 'mirrored', is_mirror: true }),
     updateWorkspace: vi.fn().mockResolvedValue({}),
+    secretsList: vi.fn().mockResolvedValue([]),
+    secretCreate: vi.fn().mockResolvedValue({}),
+    secretDelete: vi.fn().mockResolvedValue(null),
+    secretRotate: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
 }));
@@ -47,7 +51,7 @@ const mockWorkspace = {
   name: 'Payments',
   description: 'Payment processing workspace',
   trust_level: 'Guided',
-  default_compute_target: null,
+  compute_target_id: null,
 };
 
 describe('WorkspaceSettings', () => {
@@ -90,10 +94,10 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 9 tabs', () => {
+  it('renders all 10 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(9);
+    expect(tabs.length).toBe(10);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust Level');
@@ -104,7 +108,17 @@ describe('WorkspaceSettings', () => {
     expect(labels).toContain('Repos');
     expect(labels).toContain('Compute');
     expect(labels).toContain('LLM Config');
+    expect(labels).toContain('Secrets');
     expect(labels).toContain('Audit');
+  });
+
+  it('Secrets tab loads the scoped secrets panel', async () => {
+    const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+    await fireEvent.click(container.querySelector('#ws-tab-secrets'));
+    const panel = container.querySelector('[data-testid="secrets-panel"]');
+    expect(panel).toBeTruthy();
+    expect(panel.getAttribute('data-scope')).toBe('workspace');
+    expect(api.secretsList).toHaveBeenCalledWith('workspace', 'ws-1');
   });
 
   it('General tab is active by default', () => {
@@ -530,10 +544,9 @@ describe('WorkspaceSettings', () => {
       await new Promise(r => setTimeout(r, 0));
       // Table should appear
       const table = container.querySelector('[data-testid="members-table"]');
-      if (table) {
-        const rows = table.querySelectorAll('[data-testid="member-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(table).toBeTruthy();
+      const rows = table.querySelectorAll('[data-testid="member-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
 
     it('shows empty state when no members', async () => {
@@ -705,10 +718,9 @@ describe('WorkspaceSettings', () => {
       await openAuditTab(container);
       await new Promise(r => setTimeout(r, 0));
       const list = container.querySelector('[data-testid="audit-list"]');
-      if (list) {
-        const rows = list.querySelectorAll('[data-testid="audit-row"]');
-        expect(rows.length).toBeGreaterThan(0);
-      }
+      expect(list).toBeTruthy();
+      const rows = list.querySelectorAll('[data-testid="audit-row"]');
+      expect(rows.length).toBeGreaterThan(0);
     });
   });
 

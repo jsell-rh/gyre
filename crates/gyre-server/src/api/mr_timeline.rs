@@ -423,7 +423,11 @@ mod tests {
 
     /// Create a repo with workspace_id "ws-test". Returns (app, repo_id).
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"workspace_id": "ws-test", "name": "test-repo"});
+        create_repo_named(app, "test-repo").await
+    }
+
+    async fn create_repo_named(app: Router, name: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": "ws-test", "name": name});
         let resp = app
             .clone()
             .oneshot(authed_post("/api/v1/repos", body))
@@ -862,7 +866,10 @@ mod tests {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
-        let (app, repo_id2) = create_repo(app).await; // second repo
+        // Second, DISTINCT repo: (workspace_id, name) is unique (SQLite
+        // idx_repos_workspace_name; the mem adapter guards it in code), so a
+        // same-named fixture would now be rejected.
+        let (app, repo_id2) = create_repo_named(app, "test-repo-2").await; // second repo
 
         let body = serde_json::json!({
             "repository_id": repo_id,

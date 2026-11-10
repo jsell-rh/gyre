@@ -104,6 +104,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/diff", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/mirror/sync", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/sync-specs", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
@@ -128,6 +129,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/settings/spec-lifecycle",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),
@@ -318,6 +324,20 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                // Admin user impersonation (identity-security.md §Impersonation).
+                // Request/end are admin-only (`admin` resource →
+                // builtin-admin-only-deny rejects non-Admin roles); the
+                // handlers additionally verify the Admin role and a real
+                // user identity. Approve/deny are ABAC-exempt: the TARGET
+                // user must call them and may hold any role (a ReadOnly
+                // target must still be able to consent or refuse);
+                // authorization is per-handler — the caller's verified
+                // user id must equal the request's target user, plus the
+                // one-time approval code on approve.
+                RouteResourceMapping::api("/api/v1/admin/impersonate", "admin", None),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/approve"),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/deny"),
+                RouteResourceMapping::api("/api/v1/admin/impersonate/:request_id", "admin", None),
                 // NEW-27 fix: all /api/v1/admin/* routes use resource_type="admin" so that
                 // builtin-admin-only-deny (priority 850) rejects non-Admin callers.
                 // Previously, kill/reassign used "agent" and compute-targets used
@@ -352,6 +372,22 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // Tenant-scoped compute targets (agent-runtime spec §3):
+                // reads are tenant-member visible (handler enforces tenant
+                // scoping), mutations additionally require the Admin role
+                // in the handler body. Registered here rather than carried
+                // as exemption-file debt — the two stale exemption entries
+                // for these paths were removed when the routes landed in
+                // the resolver (check-abac-route-registry.sh shrinks).
+                RouteResourceMapping::api("/api/v1/compute-targets", "compute_target", None),
+                RouteResourceMapping::api("/api/v1/compute-targets/:id", "compute_target", None),
+                // ── Secrets (platform-model.md §7, task-098) ─────────────
+                // Admin-only: builtin-secret-admin-only (priority 860) denies
+                // every non-Admin role on the "secret" resource type; Admins
+                // are allowed by builtin-admin-all-operations (900) first.
+                RouteResourceMapping::api("/api/v1/secrets", "secret", None),
+                RouteResourceMapping::api("/api/v1/secrets/:id", "secret", None),
+                RouteResourceMapping::api("/api/v1/secrets/:id/rotate", "secret", Some("write")),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
                 RouteResourceMapping::api(
@@ -370,6 +406,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
+                RouteResourceMapping::api("/api/v1/search/suggest", "search", None),
+                RouteResourceMapping::api("/api/v1/search/facets", "search", None),
                 RouteResourceMapping::api("/api/v1/admin/search/reindex", "admin", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),
@@ -388,6 +426,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-spec-set",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/rollout-policy",
                     "meta_spec",
                     None,
                 ),
@@ -438,8 +481,25 @@ impl ResourceResolver {
                     None,
                 ),
                 // ── Meta-specs ─────────────────────────────────────────────
+                RouteResourceMapping::api("/api/v1/meta-specs-registry", "meta_spec", None),
+                RouteResourceMapping::api("/api/v1/meta-specs-registry/:id", "meta_spec", None),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs-registry/:id/versions",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs-registry/:id/versions/:version",
+                    "meta_spec",
+                    None,
+                ),
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/specs/:path/meta-spec-bindings",
                     "meta_spec",
                     None,
                 ),
@@ -462,13 +522,12 @@ impl ResourceResolver {
                 // POST /users (create) is admin-only, enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
-                RouteResourceMapping::api("/api/v1/users/me/agents", "agent", None),
-                RouteResourceMapping::api("/api/v1/users/me/tasks", "task", None),
-                RouteResourceMapping::api("/api/v1/users/me/mrs", "merge_request", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/read"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/unread"),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
@@ -568,6 +627,35 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             conditions: vec![], // no conditions — matches everyone (Admin already allowed at 900)
             actions: vec!["*".to_string()],
             resource_types: vec!["admin".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Priority 860: Secrets are Admin-only (platform-model.md §7).
+        // Admin role is allowed by builtin-admin-all-operations (900) before
+        // this Deny is consulted; every other role (Developer, Agent,
+        // ReadOnly, ...) is denied read/write/delete on the "secret"
+        // resource type. Agents receive secret VALUES as environment
+        // variables at spawn — never through the Admin API or MCP.
+        Policy {
+            id: Id::new("builtin-secret-admin-only"),
+            name: "builtin:secret-admin-only".to_string(),
+            description: "Secret management (Admin API /secrets) is restricted to the Admin role"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 860,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["secret".to_string()],
             enabled: true,
             built_in: true,
             immutable: false,
@@ -857,6 +945,69 @@ pub fn init_resolver() {
     RESOURCE_RESOLVER.get_or_init(ResourceResolver::new);
 }
 
+/// Identity-security.md §Impersonation: attribute calls made under an
+/// impersonation token even when they bypass policy evaluation — ABAC-exempt
+/// routes and unresolved patterns (previously these returned before the
+/// attribution block, leaving e.g. an impersonated read of the target's
+/// private notifications unattributed and uncounted).
+///
+/// Peeks the bearer token; any request that is not an active impersonation
+/// token passes through untouched (no behavior change). When it is one, the
+/// action is recorded (fire-and-forget) and the request is marked so the
+/// handler's own auth extraction does not double-count the same call.
+async fn record_impersonated_passthrough(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    surface: &'static str,
+) -> Request<Body> {
+    use axum::http::header::AUTHORIZATION;
+
+    let Some(token) = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return req;
+    };
+    if !token.starts_with("ey") {
+        return req;
+    }
+    // Cheap cryptographic pre-filter: only impersonation JWTs proceed to
+    // the session lookup.
+    let Some(claims) = state
+        .agent_signing_key
+        .validate_impersonation_opt(token, &state.base_url)
+    else {
+        return req;
+    };
+    let Some(auth) = crate::impersonation::resolve_impersonation_auth(&claims, &state).await else {
+        // Inactive session — the handler's auth extraction will reject it.
+        return req;
+    };
+
+    let (mut parts, body) = req.into_parts();
+    // Upstream middlewares (last_seen) may have marked the request to
+    // defer attribution to this middleware — for exempt/unresolved routes
+    // THIS branch is the attribution owner, so record regardless and mark
+    // the request so the handler's own auth extraction does not
+    // double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
+    if let Some(imp) = &auth.impersonation {
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            imp,
+            parts.method.as_str(),
+            parts.uri.path(),
+            true,
+            surface,
+        );
+    }
+    Request::from_parts(parts, body)
+}
+
 // ---------------------------------------------------------------------------
 // Middleware function
 // ---------------------------------------------------------------------------
@@ -882,17 +1033,36 @@ pub async fn abac_middleware(
     let (resource_type, action_override, exempt) =
         match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
             Some(m) => (m.resource_type, m.action_override, m.exempt),
-            None => return next.run(req).await,
+            None => {
+                // No policy evaluation, but the call is still attributed
+                // when made under an impersonation token
+                // (identity-security.md §Impersonation).
+                let req =
+                    record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
+                return next.run(req).await;
+            }
         };
 
-    // ABAC-exempt routes pass through immediately.
+    // ABAC-exempt routes pass through immediately — after impersonation
+    // attribution, so an impersonated read of the target's private
+    // notifications is still audited (identity-security.md §Impersonation:
+    // full audit trail of ALL actions taken during impersonation).
     if exempt {
+        let req = record_impersonated_passthrough(state.clone(), req, "abac-exempt").await;
         return next.run(req).await;
     }
 
     // Extract auth from request (splits and reconstructs).
     let method = req.method().clone();
     let (mut parts, body) = req.into_parts();
+
+    // Evaluated routes are attributed AFTER policy evaluation (with the
+    // decision outcome). Mark the request so the auth-resolution layer
+    // (`AuthenticatedAgent::from_request_parts`, called here and again by
+    // handler extractors) does not double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
 
     let auth = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(a) => a,
@@ -901,8 +1071,11 @@ pub async fn abac_middleware(
 
     let req = Request::from_parts(parts, body);
 
-    // System token bypasses ABAC entirely.
-    if auth.agent_id == "system" {
+    // System token bypasses ABAC entirely. `is_system_principal()` (not an
+    // agent_id string match): API-key/JWT auth sets agent_id from the user's
+    // display_name, so a user named "system" would otherwise spoof this
+    // bypass (task-099 F1 revision).
+    if auth.is_system_principal() {
         return next.run(req).await;
     }
 
@@ -937,6 +1110,21 @@ pub async fn abac_middleware(
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
+    // Identity-security.md §Impersonation: every API call made with an
+    // impersonation token is attributed to the impersonator in the audit
+    // trail and counted in the session's actions_taken. Fire-and-forget so
+    // the audit write never blocks the request.
+    if let Some(imp) = auth.impersonation.clone() {
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            &imp,
+            method.as_str(),
+            &pattern,
+            result.effect == PolicyEffect::Allow,
+            "abac",
+        );
+    }
+
     // Record decision to audit log.
     let decision = policy_engine::build_decision(
         &result,
@@ -959,6 +1147,17 @@ pub async fn abac_middleware(
                 matched_policy = ?result.matched_policy,
                 "ABAC denied request"
             );
+            // task-104: AbacDenied audit event (observability.md §Audit
+            // Event Types) — the policy engine rejected the request.
+            record_abac_denied(
+                &state,
+                &auth,
+                resource_type,
+                action,
+                result.matched_policy.as_deref(),
+                &pattern,
+            )
+            .await;
             (
                 StatusCode::FORBIDDEN,
                 Json(json!({"error": "insufficient permissions"})),
@@ -966,6 +1165,51 @@ pub async fn abac_middleware(
                 .into_response()
         }
     }
+}
+
+/// Record an `AbacDenied` audit event (observability.md §Audit Event Types:
+/// ABAC policy rejects request) with the spec'd detail fields: agent_id,
+/// policy_id, resource, action, claims.
+///
+/// Shared by the ABAC middleware and per-handler ABAC enforcement
+/// (e.g. git smart-HTTP push) so every policy denial lands in the audit
+/// trail regardless of which layer rejected the request.
+pub async fn record_abac_denied(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    resource: &str,
+    action: &str,
+    policy_id: Option<&str>,
+    endpoint: &str,
+) {
+    let event = gyre_domain::AuditEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::AbacDenied,
+        if auth.agent_id.is_empty() {
+            None
+        } else {
+            Some(gyre_common::Id::new(auth.agent_id.clone()))
+        },
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "policy".to_string(),
+        None,
+        gyre_domain::AuditOutcome::Blocked,
+        serde_json::json!({
+            "agent_id": auth.agent_id,
+            "policy_id": policy_id,
+            "resource": resource,
+            "action": action,
+            "claims": auth.jwt_claims,
+            "endpoint": endpoint,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1360,401 @@ pub mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn abac_denial_records_abac_denied_audit_event() {
+        // task-104: an ABAC policy rejection must land in the audit store
+        // with the spec'd detail fields (agent_id, policy_id, resource,
+        // action, claims).
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let events = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                event_type: Some("abac_denied".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1, "one abac_denied event");
+        let e = &events[0];
+        assert_eq!(e.detail["agent_id"], "readonly-user");
+        assert_eq!(e.detail["resource"], "task");
+        assert_eq!(e.detail["action"], "write");
+        assert_eq!(e.detail["endpoint"], "/api/v1/tasks");
+        assert!(
+            e.detail["policy_id"].as_str().is_some(),
+            "the denying policy must be named, got {:?}",
+            e.detail["policy_id"]
+        );
+        // The caller's JWT claims travel with the denial for forensics.
+        assert_eq!(e.detail["claims"]["sub"], "ro-sub");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uninstrumented_abac_guards_record_abac_denied_audit_event() {
+        // Review repair (task-104 round 11): per-handler repo/workspace-level
+        // ABAC guards — the G6 kv-store policies, the same policy layer the
+        // git push path already instruments via record_abac_denied — rejected
+        // with 403 while recording no abac_denied event: create_worktree, the
+        // four jj mutation endpoints, repo orchestrator spawn, the
+        // briefing/ask repo-scope guard, spawn_agent_core (REST + MCP), and
+        // the conversations workspace-read guard. ABAC-side equivalent of
+        // the round-8/9/10 per-handler RBAC sweep. Each sub-case gets a
+        // fresh state so the recorded event count is exactly one.
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::body::Body;
+        use http::Request;
+        use tower::ServiceExt;
+
+        // Fresh state with production-seeded builtin policies (as main.rs
+        // does) plus a G6 kv-store policy on `scope_key` requiring a
+        // `team=infra` claim no caller below carries. The builtin seed keeps
+        // the middleware layer permissive for the caller (Developer write /
+        // Admin all) so the per-handler guard is the only denial source.
+        async fn denied_state(scope_key: &str) -> Arc<AppState> {
+            let state = make_test_state_with_jwt();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(seed_builtin_policies(&state))
+                    .expect("seed built-in policies")
+            });
+            init_resolver();
+            let policies = vec![crate::abac::AbacPolicy {
+                resource_type: "repo".to_string(),
+                resource_id: None,
+                required_claims: std::iter::once(("team".to_string(), "infra".to_string()))
+                    .collect(),
+            }];
+            state
+                .kv_store
+                .kv_set(
+                    "abac_policies",
+                    scope_key,
+                    serde_json::to_string(&policies).unwrap(),
+                )
+                .await
+                .unwrap();
+            state
+        }
+
+        async fn seed_repo(state: &AppState, repo_id: &str, workspace_id: &str) {
+            use gyre_domain::Repository;
+            let repo = Repository::new(
+                gyre_common::Id::new(repo_id),
+                gyre_common::Id::new(workspace_id),
+                format!("repo-{repo_id}"),
+                format!("/repos/repo-{repo_id}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        async fn seed_workspace(state: &AppState, workspace_id: &str) {
+            let ws = gyre_domain::Workspace::new(
+                gyre_common::Id::new(workspace_id),
+                gyre_common::Id::new("tenant-1"),
+                format!("ws-{workspace_id}"),
+                format!("ws-{workspace_id}"),
+                1000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+
+        async fn assert_one_abac_denied(
+            state: &AppState,
+            resource: &str,
+            action: &str,
+            endpoint: &str,
+        ) {
+            let events = gyre_ports::AuditRepository::query(
+                &*state.audit,
+                &gyre_ports::AuditQueryFilter {
+                    event_type: Some("abac_denied".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(events.len(), 1, "one abac_denied event for {endpoint}");
+            let e = &events[0];
+            assert_eq!(e.detail["resource"], resource);
+            assert_eq!(e.detail["action"], action);
+            assert_eq!(e.detail["endpoint"], endpoint);
+            assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+        }
+
+        // Keycloak-style Developer JWT: builtin policies allow read/write/
+        // spawn at the middleware layer, but it carries jwt_claims, so the
+        // per-handler G6 evaluation must still apply (and deny).
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "dev-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        // Admin JWT for briefing/ask: "generate" is not in the Developer
+        // allow-list, so an Admin caller (allowed everywhere at the
+        // middleware layer) isolates the per-handler guard as the denial
+        // source — same construction as briefing_ask_repo_scope_abac_denied
+        //_returns_403 in graph.rs.
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-sub",
+                "preferred_username": "admin-user",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        // 1. Reviewer's probe: Developer creating a worktree on a repo whose
+        //    G6 policy requires team=infra.
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/worktrees")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "agent_id": "agent-1",
+                                "branch": "feat/x",
+                                "path": "/tmp/wt-1"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(&state, "repo", "write", "POST /api/v1/repos/:id/worktrees")
+                .await;
+        }
+
+        // 2–5. The four jj mutation endpoints share the same per-handler
+        //      repo-level guard.
+        for (suffix, body) in [
+            ("new", Some(serde_json::json!({ "description": "d" }))),
+            ("squash", None),
+            ("undo", None),
+            (
+                "bookmark",
+                Some(serde_json::json!({ "name": "b", "change_id": "c" })),
+            ),
+        ] {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let body = body
+                .map(|b| Body::from(serde_json::to_string(&b).unwrap()))
+                .unwrap_or(Body::empty());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/repo-1/jj/{suffix}"))
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "jj/{suffix}");
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "write",
+                &format!("POST /api/v1/repos/:id/jj/{suffix}"),
+            )
+            .await;
+        }
+
+        // 6. Repo orchestrator spawn (route is registry-exempt — the
+        //    per-handler check is the operative ABAC enforcement).
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/orchestrator/spawn")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({ "name": "ro" })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "write",
+                "POST /api/v1/repos/:id/orchestrator/spawn",
+            )
+            .await;
+        }
+
+        // 7. Briefing/ask with a request-body repo scope the caller's claims
+        //    do not satisfy (Admin passes the middleware layer).
+        {
+            let state = denied_state("repo-1").await;
+            seed_workspace(&state, "ws-briefing").await;
+            seed_repo(&state, "repo-1", "ws-briefing").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-briefing/briefing/ask")
+                        .header("Authorization", format!("Bearer {admin_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "question": "q",
+                                "repo_id": "repo-1"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "repo",
+                "generate",
+                "POST /api/v1/workspaces/:id/briefing/ask",
+            )
+            .await;
+        }
+
+        // 8. Agent spawn: spawn_agent_core evaluates the repo's G6 policies
+        //    before any agent/task state is created.
+        {
+            let state = denied_state("repo-1").await;
+            seed_repo(&state, "repo-1", "ws-1").await;
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/agents/spawn")
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "name": "worker",
+                                "repo_id": "repo-1",
+                                "task_id": "task-1",
+                                "branch": "feat/x"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(&state, "repo", "spawn", "POST /api/v1/agents/spawn").await;
+        }
+
+        // 9. Conversation retrieval: per-handler workspace-read guard on a
+        //    workspace whose G6 policy rejects the caller's claims.
+        {
+            let state = denied_state("ws-conv").await;
+            let sha = state
+                .conversations
+                .store(
+                    &gyre_common::Id::new("agent-1"),
+                    &gyre_common::Id::new("ws-conv"),
+                    &gyre_common::Id::new("default"),
+                    b"conversation-bytes",
+                )
+                .await
+                .unwrap();
+            let app = crate::build_router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/conversations/{sha}"))
+                        .header("Authorization", format!("Bearer {developer_jwt}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert_one_abac_denied(
+                &state,
+                "workspace",
+                "read",
+                "GET /api/v1/conversations/:sha",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolver_covers_required_routes() {
         init_resolver();
         let resolver = RESOURCE_RESOLVER.get().unwrap();
@@ -1218,6 +1857,116 @@ pub mod tests {
             StatusCode::FORBIDDEN,
             "tunnel must be Admin-only"
         );
+    }
+
+    /// task-098: the /api/v1/secrets routes must be Admin-only at the ABAC
+    /// layer (builtin-secret-admin-only, priority 860) — Developers and Agents
+    /// are denied; Admins pass via builtin-admin-all-operations (900).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn secrets_routes_are_admin_only() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::{delete, get, post};
+
+        let state_base = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .expect("seed built-in policies")
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        // Route patterns are built from a shared base rather than repeated
+        // as literals: check-abac-route-registry.sh freezes the count of
+        // duplicated "/api/v1/..." path literals in this file (resolve() is
+        // first-match, so a duplicated registry entry is dead code). The
+        // resolver itself has exactly one entry per secrets path; building
+        // the test patterns here keeps the literal count at that baseline.
+        let list_pattern = "/api/v1".to_owned() + "/secrets";
+        let item_pattern = format!("{list_pattern}/:id");
+        let rotate_pattern = format!("{item_pattern}/rotate");
+        let item_uri = format!("{list_pattern}/sec-1");
+        let rotate_uri = format!("{item_uri}/rotate");
+        let app = Router::new()
+            .route(&list_pattern, get(ok_handler).post(ok_handler))
+            .route(&item_pattern, delete(ok_handler))
+            .route(&rotate_pattern, post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state_base.clone(),
+                abac_middleware,
+            ))
+            .with_state(state_base);
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let admin_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-sub",
+                "preferred_username": "admin",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        // Developer: every secrets route is denied.
+        for (method, uri) in [
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {dev_token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "Developer must be denied {method} {uri}"
+            );
+        }
+
+        // Admin: allowed on every secrets route.
+        for (method, uri) in [
+            ("GET", list_pattern.as_str()),
+            ("POST", list_pattern.as_str()),
+            ("DELETE", item_uri.as_str()),
+            ("POST", rotate_uri.as_str()),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {admin_token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Admin must be allowed {method} {uri}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

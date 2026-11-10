@@ -23,6 +23,7 @@
     else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
   }
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import SecretsPanel from './SecretsPanel.svelte';
 
   let {
     onBack = undefined,
@@ -33,6 +34,7 @@
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
     { id: 'workspaces', labelKey: 'tenant_settings.tabs.workspaces' },
     { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
+    { id: 'secrets',    labelKey: 'tenant_settings.tabs.secrets' },
     { id: 'policies',   label: 'Policies' },
     { id: 'llm',        label: 'LLM Defaults' },
     { id: 'analytics',  label: 'Analytics' },
@@ -970,6 +972,16 @@
             </table>
           {/if}
         {/if}
+      </div>
+
+    <!-- ── Secrets (platform-model.md §7 UI) ────────────────────────── -->
+    {:else if activeTab === 'secrets'}
+      <div id="tab-panel-secrets" role="tabpanel" aria-label="Secrets" class="tab-panel" data-testid="tenant-tab-secrets">
+        <div class="panel-header">
+          <h2 class="panel-title">{$t('tenant_settings.tabs.secrets')}</h2>
+          <p class="panel-desc">{$t('secrets_panel.hint')}</p>
+        </div>
+        <SecretsPanel scope="tenant" scopeId={null} />
       </div>
 
     <!-- ── Audit ──────────────────────────────────────────────────────── -->

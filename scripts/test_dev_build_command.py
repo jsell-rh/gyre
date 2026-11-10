@@ -74,6 +74,18 @@ elif mode == 'exit7':
         self.assertEqual(child.returncode, 7, error)
         self.assertEqual((self.root / 'calls').read_text(), 'nested\nexit7\n')
 
+    def test_lean_compiler_settings_override_inherited_agent_environment(self):
+        import json
+        self.env.update(CARGO_INCREMENTAL='1',RUSTFLAGS='-C debuginfo=2',CARGO_PROFILE_TEST_DEBUG='2')
+        self.real.write_text("#!/usr/bin/env python3\nimport os,json;print(json.dumps({k:os.environ[k] for k in ('CARGO_INCREMENTAL','RUSTFLAGS','CARGO_PROFILE_TEST_DEBUG','CARGO_PROFILE_TEST_INCREMENTAL')}))\n")
+        result=subprocess.run([str(self.root/'cargo'),'test'],env=self.env,capture_output=True,text=True,check=True)
+        value=json.loads(result.stdout)
+        self.assertEqual(value['CARGO_INCREMENTAL'],'0')
+        self.assertEqual(value['CARGO_PROFILE_TEST_INCREMENTAL'],'false')
+        self.assertEqual(value['CARGO_PROFILE_TEST_DEBUG'],'0')
+        self.assertIn('--threads=1',value['RUSTFLAGS'])
+        self.assertNotIn('debug-assertions',value['RUSTFLAGS'])
+
     def test_review_rejects_workspace_suite_before_starting_a_build_but_permits_focused_tests(self):
         self.env['GYRE_PIPELINE_STAGE']='review'
         for args in (['test','--all'],['build','--workspace'],['clippy','--all-targets']):

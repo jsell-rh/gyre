@@ -10,13 +10,14 @@
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
+  import SecretsPanel from './SecretsPanel.svelte';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'repos', 'compute', 'llm', 'audit'];
+  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'repos', 'compute', 'llm', 'secrets', 'audit'];
   let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
@@ -25,7 +26,7 @@
   // (display-only for name/description; compute target selector)
   let computeTargets = $state([]);
   let computeLoading = $state(false);
-  let defaultComputeTarget = $state(workspace?.default_compute_target ?? '');
+  let defaultComputeTarget = $state(workspace?.compute_target_id ?? '');
   let generalSaving = $state(false);
   let generalSaved = $state(false);
 
@@ -129,7 +130,7 @@
   // Sync form values when workspace prop changes
   $effect(() => {
     if (workspace) {
-      defaultComputeTarget = workspace.default_compute_target ?? '';
+      defaultComputeTarget = workspace.compute_target_id ?? '';
       trustLevel = workspace.trust_level ?? 'Autonomous';
       persistedTrustLevel = workspace.trust_level ?? 'Autonomous';
       warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
@@ -524,7 +525,11 @@
     if (!workspace?.id) return;
     generalSaving = true;
     try {
-      await api.updateWorkspace(workspace.id, { default_compute_target: defaultComputeTarget });
+      // Empty selection means "no workspace target — fall back to tenant
+      // default" (agent-runtime.md §3); the API clears via JSON null.
+      await api.updateWorkspace(workspace.id, {
+        compute_target_id: defaultComputeTarget || null,
+      });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
     } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_settings')); }
@@ -1249,7 +1254,7 @@
                 {#if ct.description}
                   <p class="compute-desc">{ct.description}</p>
                 {/if}
-                {#if ct.id === (defaultComputeTarget || workspace?.default_compute_target)}
+                {#if ct.id === (defaultComputeTarget || workspace?.compute_target_id)}
                   <span class="compute-default-badge">{$t('workspace_settings.compute.default_badge')}</span>
                 {/if}
               </div>
@@ -1344,6 +1349,17 @@
               </div>
             </div>
           {/if}
+        {/if}
+      </div>
+
+    <!-- Secrets tab (platform-model.md §7 UI) -->
+    {:else if activeTab === 'secrets'}
+      <div class="settings-section" data-testid="secrets-tab">
+        <h2 class="section-title">{$t('workspace_settings.tabs.secrets')}</h2>
+        {#if workspace?.id}
+          <SecretsPanel scope="workspace" scopeId={workspace.id} />
+        {:else}
+          <p class="empty-text">{$t('workspace_settings.secrets_need_entity')}</p>
         {/if}
       </div>
 
