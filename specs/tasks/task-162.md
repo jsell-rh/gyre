@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "9e5a0171d", "5626a68fc", "62862a9e8", "d588cc879", "92db84be1", "0c8b6fa1e"]
 ---
 
 ## Spec Excerpt
@@ -145,6 +145,24 @@ together; `cargo check -p gyre-server --tests` clean; focused suites
 (message_dispatcher 9, gate_executor 25, reconciliation wave-completion 1)
 all pass. Earlier merges **62862a9e8** (3c39ab1f7) and **d588cc879**
 (e5415ae12, task-099) likewise merged cleanly with no task-owned conflict.
+
+A still later merge of the assigned base into this branch, **0c8b6fa1e**
+(b5a872087, task-108's admin user impersonation), had one conflict in
+`crates/gyre-server/src/mem.rs` (both sides edited the `test_state_inner`
+builder): resolved as the union — this branch's `message_dispatch` channel
+pair with the receiver stored in `AppState` (single-owner, taken by
+`spawn_message_consumer`) is kept, main's no-op drain spawn for the
+dispatch receiver is dropped as superseded by the real dispatcher, and
+main's meta-spec binding store wiring
+(`MemMetaSpecRepository::with_binding_store` shared with
+`meta_spec_bindings`, task-116's delete-guard contract) is taken. The
+HEAD side's duplicated `agent_inbox_max`/`user_workspace_state` fields
+were dropped (already present once in the auto-merged region). Verified
+at that head: `cargo check -p gyre-server --tests` clean; focused suites
+message_dispatcher (9), gate_executor (25), reconciliation (33),
+meta_spec (40), notifications (12) all pass; arch and
+task-commit-attribution checks pass. Evidence under
+/tmp/stage/review-evidence (task162-merge-repair-*.txt).
 
 Note for reviewers: `check-notification-test-coverage.sh` still exits 2 on
 this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
