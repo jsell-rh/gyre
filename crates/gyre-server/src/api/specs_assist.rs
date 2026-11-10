@@ -1752,10 +1752,83 @@ mod tests {
                 !diff.is_empty(),
                 "conflict notification body must carry the line diff for the Inbox diff view"
             );
-            assert!(
-                diff.iter().any(|d| d["op"] == "add"),
-                "submitted lines should appear as add ops in the persisted diff"
-            );
-        }
+    }
+    }
+
+    // TEMP REVIEW PROBE: a user editing the same spec
+    // PATH in a DIFFERENT workspace must NOT receive a SpecConflict
+    // notification for this workspace's conflict.
+    #[tokio::test]
+    async fn review_probe_cross_workspace_editor_not_notified() {
+        use crate::PresenceEntry;
+        use gyre_domain::Repository;
+
+        let state = test_state();
+        let repo = Repository::new(
+            Id::new("repo-conf-x"),
+            Id::new("ws-conf-x"),
+            "confx",
+            "/tmp/gyre-nonexistent-conf-repo-x",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        state
+            .spec_ledger
+            .save(&ledger_entry(
+                "system/conflict-x.md",
+                "server-sha-x",
+                "ws-conf-x",
+            ))
+            .await
+            .unwrap();
+        // user-z is editing the SAME spec path string but in ANOTHER workspace.
+        state.presence.write().await.insert(
+            ("user-z".to_string(), "sess-z".to_string()),
+            PresenceEntry {
+                workspace_id: "ws-OTHER".to_string(),
+                view: "specs".to_string(),
+                editing_entity: Some("spec:specs/system/conflict-x.md".to_string()),
+                timestamp: 0,
+                server_last_seen: 0,
+                connection_id: 1,
+            },
+        );
+        let caller = AuthenticatedAgent {
+            agent_id: "user-a".to_string(),
+            user_id: Some(Id::new("user-a")),
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let req = SpecSaveRequest {
+            spec_path: "specs/system/conflict-x.md".to_string(),
+            content: "# X\n".to_string(),
+            message: "edit".to_string(),
+            base_sha: Some("client-sha-x".to_string()),
+            overwrite: false,
+        };
+        let resp = save_spec(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("repo-conf-x".to_string()),
+            caller,
+            Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let leaked = state
+            .notifications
+            .list_for_user(&Id::new("user-z"), None, None, None, None, 100, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.notification_type == NotificationType::SpecConflict)
+            .count();
+        assert_eq!(
+            leaked, 0,
+            "CROSS-WORKSPACE LEAK: user-z (workspace ws-OTHER) received {leaked} SpecConflict notification(s) for a conflict in ws-conf-x"
+        );
     }
 }

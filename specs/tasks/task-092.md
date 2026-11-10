@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: [task-237]
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -130,3 +130,11 @@ All probes run at the exact branch head `2c2cbc401`:
   in the meantime and pass at this head.
 
 Exact-head GitHub checks remain the independent reviewer's gate.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/specs_assist.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
