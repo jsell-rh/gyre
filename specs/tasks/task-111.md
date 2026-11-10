@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb"]
 ---
 
 ## Spec Excerpt
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management (this attempt: re-merged the retained source checkpoint onto base `cd752300c` in merge commit `763389787`; the implementation itself is the branch's prior reviewed work, unchanged in substance):
+Session management is implemented end-to-end against `user-management.md` §Session Management (implementation is the branch's prior reviewed work; this round repaired the one verification failure — a duplicate Diesel migration version — in commit `a4e0eaf8f`):
 
 - **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields (id, user_id, token_hash, ip_address, user_agent, created_at, last_active_at, expires_at, revoked); only the SHA-256 of the API key is stored (`hash_api_key`), never plaintext. `is_active(now)` = not revoked and not expired.
 - **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — they are the durable sign-out record).
@@ -96,9 +96,13 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants `GET|DELETE|POST /users/:user_id/sessions[...]` with Admin-role **and tenant-containment** per-handler checks (ABAC-exempt routes): `ensure_same_tenant_session_target` rejects cross-tenant targets (fail-closed on a target with no tenant binding). Target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### Merge resolution (this attempt, commit `763389787`)
+### Verification repair (this round, commit `a4e0eaf8f`)
 
-Merged base `cd752300c` (task-208 "My Stuff" amendment, task-104 audit events, R19 jj-export on complete) into the branch; four content conflicts, all resolved keeping both sides' real fixes:
+The verification stage (`checks.sh`, exit 1) failed on `check-migration-versions.sh`: after merging base `3d87a1507`, two migrations mapped to Diesel version `20261008000059` — the base's task-109 `2026-10-08-000059_spec_lifecycle_configs` and this branch's `2026-10-08-000059_user_sessions`. Diesel runs only one migration per version (alphabetically first), so the `user_sessions` DDL was silently dropped on fresh databases. Fixed by renumbering the branch's migration directory to `2026-10-08-000060_user_sessions` (next unused sequence; `up.sql` is idempotent `CREATE TABLE IF NOT EXISTS`, so databases that already applied either 000059 migration are unaffected); spec/coverage doc references updated to match. Both `check-migration-versions.sh` and `check-migration-sql-portability.sh` now pass.
+
+### Merge resolution (prior round, merge `5ed14345a` onto base `3d87a1507`)
+
+Merged base `3d87a1507` (task-109 spec lifecycle configs, task-208 "My Stuff" amendment, task-104 audit events, R19 jj-export on complete) into the branch; four content conflicts, all resolved keeping both sides' real fixes:
 
 - `api/mod.rs`: kept the session imports/routes; took the base's removal of `get_my_agents`/`get_my_mrs`/`get_my_tasks` (spec §"My Stuff" amendment strikes those endpoints).
 - `api/spawn.rs`: took the base's R19 jj bookmark-set + git-export before MR stat computation; kept the branch's earlier-resolved `repo` (M34 workspace enforcement) so stats use it instead of re-looking-up the repository.
@@ -106,15 +110,14 @@ Merged base `cd752300c` (task-208 "My Stuff" amendment, task-104 audit events, R
 - `specs/coverage/system/user-management.md`: merged header audit — 11 n/a (task-208's row-22 reclassification), 21 task-assigned, 4 implemented (task-120's rows 2/3/11 + task-111's row 12).
 - Merge-fallout repairs in auto-merged files: 5 base-added `merge_processor.rs` test call sites updated to the 7-arg `MergeRequest::new` (workspace `ws-1` hoisted into the constructor, value unchanged); `rbac.rs` `uninstrumented_role_guards_record_rbac_denied_audit_event` now seeds the `repo-1` repository its create_mr probe requires (create_mr is fail-closed on unknown repositories since the branch's scope-fabrication repair).
 
-### Test evidence (at head `763389787`)
+### Test evidence (at head `a4e0eaf8f`)
 
-All runs with `SKIP_WEB_BUILD=1`; logs under `/tmp/stage/review-evidence/task-111-*.log`:
+All runs with `SKIP_WEB_BUILD=1`; this round's logs under `/tmp/stage/review-evidence/task-111-repair-*.log`:
 
-- `cargo test -p gyre-server --lib` — **1619 passed, 0 failed**. Includes the session killing tests: `api/users.rs` — `sessions_endpoint_lists_session_created_by_auth`, `revoke_session_then_credential_is_rejected`, `revoking_one_device_session_does_not_sign_out_other_devices`, `revoke_all_sessions_signs_out_everywhere`, `revoke_all_blocks_credential_from_never_seen_device`, `my_session_listing_excludes_revoked_and_expired_sessions`, `admin_session_listing_excludes_revoked_and_expired_sessions`, `revoke_cannot_target_another_users_session`, `tenant_admin_can_view_and_revoke_another_users_sessions`, `non_admin_cannot_view_or_revoke_another_users_sessions`, `tenant_admin_revoke_all_signs_user_out_everywhere`, `admin_session_endpoints_unknown_user_is_404`, `cross_tenant_admin_cannot_view_or_revoke_another_tenants_user_sessions`; `auth.rs` — `session_last_active_touch_is_throttled`, `expired_session_is_reminted_not_zombified`, `signout_everywhere_survives_retention_cleanup`, `ws_auth_rejects_signed_out_everywhere_credential`, `ws_auth_rejects_revoked_ws_device_session`.
-- `cargo test -p gyre-adapters --lib` — **417 passed, 0 failed** (includes the 8 `sqlite::user_profile::tests::session*` adapter tests: roundtrip, duplicate-id, four-field device match, newest-match, TTL slide, owner-scoped revoke, revoke-all scope, retention-never-deletes-revoked).
-- `cargo test -p gyre-domain` — **443 passed, 0 failed**.
-- `cargo check -p gyre-server --lib` clean; `cargo fmt --all --check` clean; clippy warnings on this merge's changed lines: none (remaining crate warnings are pre-existing in the base).
-- Mechanical checks all pass: `check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-scope-literal-defaults.sh`, `check-abac-exempt-handlers.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-forged-scope-fields.sh`, `check-forwarded-header-trust.sh`, `check-inert-enforcement.sh`, `check-lossy-secret-conversion.sh`, `check-fail-open-ref-resolution.sh`, `check-in-memory-state-stores.sh`, `check-mcp-write-tools.sh`, `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-migration-sql-portability.sh`, `check-unbounded-external-http.sh`.
+- `cargo test -p gyre-adapters --lib` — **421 passed, 0 failed** (includes the 8 `sqlite::user_profile::tests::session*` adapter tests: roundtrip, duplicate-id, four-field device match, newest-match, TTL slide, owner-scoped revoke, revoke-all scope, retention-never-deletes-revoked; every test constructs a fresh SQLite DB through the constructor that runs all pending embedded migrations, so the renumbered `user_sessions` migration is exercised on fresh databases).
+- `cargo test -p gyre-server --lib session` — **21 passed, 0 failed**; plus `-- signout_everywhere revoke_all_blocks tenant_admin_revoke_all ws_auth_rejects` — **5 passed, 0 failed**. Together these are all the session killing tests: `api/users.rs` — `sessions_endpoint_lists_session_created_by_auth`, `revoke_session_then_credential_is_rejected`, `revoking_one_device_session_does_not_sign_out_other_devices`, `revoke_all_sessions_signs_out_everywhere`, `revoke_all_blocks_credential_from_never_seen_device`, `my_session_listing_excludes_revoked_and_expired_sessions`, `admin_session_listing_excludes_revoked_and_expired_sessions`, `revoke_cannot_target_another_users_session`, `tenant_admin_can_view_and_revoke_another_users_sessions`, `non_admin_cannot_view_or_revoke_another_users_sessions`, `tenant_admin_revoke_all_signs_user_out_everywhere`, `admin_session_endpoints_unknown_user_is_404`, `cross_tenant_admin_cannot_view_or_revoke_another_tenants_user_sessions`; `auth.rs` — `session_last_active_touch_is_throttled`, `expired_session_is_reminted_not_zombified`, `signout_everywhere_survives_retention_cleanup`, `ws_auth_rejects_signed_out_everywhere_credential`, `ws_auth_rejects_revoked_ws_device_session`.
+- Prior round at the pre-repair head additionally ran the full suites green: `cargo test -p gyre-server --lib` — 1619 passed, 0 failed; `cargo test -p gyre-domain` — 443 passed, 0 failed; `cargo fmt --all --check` clean; clippy changed-lines clean.
+- Mechanical checks pass, including the previously failing `check-migration-versions.sh` and `check-migration-sql-portability.sh` (this round), plus `check-arch.sh`, `check-abac-route-registry.sh`, `check-scope-literal-defaults.sh`, `check-abac-exempt-handlers.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-forged-scope-fields.sh`, `check-forwarded-header-trust.sh`, `check-inert-enforcement.sh`, `check-lossy-secret-conversion.sh`, `check-fail-open-ref-resolution.sh`, `check-in-memory-state-stores.sh`, `check-mcp-write-tools.sh`, `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-unbounded-external-http.sh`.
 
 ### Prior review repairs (retained from earlier attempts, unchanged this round)
 
