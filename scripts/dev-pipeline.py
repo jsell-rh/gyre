@@ -37,6 +37,8 @@ def source(store):
         if recovery:
             from pipeline.requirement_migration import plan, apply
             apply(store, plan(store, path, recovery))
+        from pipeline.fulfillment import reconcile
+        reconcile(store, path, revision)
         store.set_setting('observed_main', revision)
         return revision
 
