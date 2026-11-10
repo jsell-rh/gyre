@@ -36,7 +36,10 @@ def snapshot(store):
                  'blocked' if shared_wait or task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
-        condition = '; '.join((data.get('requirements') or {}).get('errors') or []) or ('Requirements changed; independent assessment pending' if pending(data) else None) or priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        condition = (priority.get('error') or '; '.join((data.get('requirements') or {}).get('errors') or []) or
+                     (json.loads((attention or retry)['result']).get('message') if attention or retry else None) or
+                     (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or
+                     ('Requirements changed; independent assessment pending' if pending(data) else None))
         if shared_wait and not condition:
             condition = 'Waiting for shared CI environment repair: ' + data['repair']['prerequisite']
         history = [json.loads(row['data']).get('delivered') for row in store.db.execute(

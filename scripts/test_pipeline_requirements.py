@@ -196,6 +196,15 @@ class RequirementTests(unittest.TestCase):
         self.assertEqual(discover(self.store,'assess','main'),[])
         self.assertEqual(len(discover(self.store,'triage','main')),1)
 
+    def test_failed_assessment_reports_its_actual_failure(self):
+        self.sync();task=self.store.task('task-001')
+        self.store.put_task('task-001',task['generation'],BODY,task['data']|{'delivered':None,
+            'assessment_pending':{'changes':{}}})
+        ident=discover(self.store,'assess','main')[0];claim=self.store.claim('assess','owner')
+        self.store.retry(ident,claim['token'],{'category':'assessment','message':'A deterministic check failed'},attention=True)
+        view=cockpit(self.store)['tasks'][0]
+        self.assertEqual(view['state'],'failed');self.assertEqual(view['condition'],'A deterministic check failed')
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])
