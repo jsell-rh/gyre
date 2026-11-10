@@ -9,10 +9,12 @@
 //! divergence check compares the recorded delta against recent deltas from other
 //! agents targeting the same spec.  Conflicting interpretations generate priority-5
 //! inbox notifications for all Admin and Developer workspace members.
-
 use gyre_common::{
     call_graph::{CallGraphRunRecord, Language},
-    graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
+    graph::{
+        ArchitecturalDelta, DeltaEdgeEntry, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge,
+        GraphNode,
+    },
     Id, Notification, NotificationType,
 };
 use gyre_domain::{
@@ -335,6 +337,21 @@ async fn do_extract(
         new_edge_map.insert(key, edge);
     }
 
+    // Edge delta detail for narrative rendering (realized-model.md §6 edge
+    // template): qualified names resolved from the merged node state — new
+    // edges against the final node map, removed edges against the old one
+    // (their endpoints are soft-deleted after this pass).
+    let qn_by_id: HashMap<&str, &str> = final_nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.qualified_name.as_str()))
+        .collect();
+    let old_qn_by_id: HashMap<&str, &str> = old_node_map
+        .values()
+        .map(|n| (n.id.as_str(), n.qualified_name.as_str()))
+        .collect();
+    let mut delta_edges_added: Vec<DeltaEdgeEntry> = Vec::new();
+    let mut delta_edges_removed: Vec<DeltaEdgeEntry> = Vec::new();
+
     let mut edges_added_count: usize = 0;
     let mut edges_removed_count: usize = 0;
 
@@ -349,10 +366,19 @@ async fn do_extract(
             edge.first_seen_at = now;
             graph_store.create_edge(edge.clone()).await?;
             edges_added_count += 1;
+            if let Some(e) = edge_entry(edge, &qn_by_id) {
+                delta_edges_added.push(e);
+            }
         }
     }
-    edges_removed_count +=
-        sweep_stale_edges(&old_edge_map, &new_edge_map, graph_store.as_ref()).await?;
+    edges_removed_count += sweep_stale_edges(
+        &old_edge_map,
+        &new_edge_map,
+        graph_store.as_ref(),
+        &old_qn_by_id,
+        &mut delta_edges_removed,
+    )
+    .await?;
 
     let node_count = final_nodes.len();
     let edge_count = new_edge_map.len();
@@ -366,8 +392,8 @@ async fn do_extract(
             "nodes_added": delta_nodes_added,
             "nodes_removed": delta_nodes_removed,
             "nodes_modified": delta_nodes_modified,
-            "edges_added": edges_added_count,
-            "edges_removed": edges_removed_count,
+            "edges_added": delta_edges_added,
+            "edges_removed": delta_edges_removed,
         })
         .to_string();
         (
@@ -689,6 +715,21 @@ fn edge_type_key(et: &EdgeType) -> &'static str {
     }
 }
 
+fn edge_entry<'a>(
+    edge: &GraphEdge,
+    qn_by_id: &HashMap<&'a str, &'a str>,
+) -> Option<DeltaEdgeEntry> {
+    let (source, target) = (
+        qn_by_id.get(edge.source_id.as_str())?,
+        qn_by_id.get(edge.target_id.as_str())?,
+    );
+    Some(DeltaEdgeEntry {
+        edge_type: edge_type_key(&edge.edge_type).to_string(),
+        source: (*source).to_string(),
+        target: (*target).to_string(),
+    })
+}
+
 /// Soft-delete stale Pass 1 edges (step 5 of `do_extract`).
 ///
 /// F8 (task-072 R2): `Calls` edges are exempt — they are owned by Pass 2, the
@@ -700,11 +741,18 @@ fn edge_type_key(et: &EdgeType) -> &'static str {
 /// edges from the Rust/TS syntax extractors stay until Pass 2 for those
 /// languages lands (Phase 1 scope is Go).
 ///
-/// Returns the number of edges removed.
+/// Returns the number of edges removed. Each actually-removed edge also
+/// appends a `DeltaEdgeEntry` (endpoint qualified names resolved against
+/// `old_qn_by_id`, the pre-extraction node state — removed-edge endpoints are
+/// soft-deleted by this pass) to `delta_edges_removed` for narrative
+/// rendering (realized-model.md §6); edges whose endpoints cannot be
+/// resolved are omitted from the narrative rather than given a guessed name.
 async fn sweep_stale_edges(
     old_edge_map: &HashMap<(String, String, String), GraphEdge>,
     new_edge_map: &HashMap<(String, String, String), GraphEdge>,
     graph_store: &dyn GraphPort,
+    old_qn_by_id: &HashMap<&str, &str>,
+    delta_edges_removed: &mut Vec<DeltaEdgeEntry>,
 ) -> anyhow::Result<usize> {
     let mut removed = 0usize;
     for (key, edge) in old_edge_map {
@@ -714,6 +762,9 @@ async fn sweep_stale_edges(
             }
             graph_store.delete_edge(&edge.id).await?;
             removed += 1;
+            if let Some(e) = edge_entry(edge, old_qn_by_id) {
+                delta_edges_removed.push(e);
+            }
         }
     }
     Ok(removed)
@@ -1420,6 +1471,46 @@ mod tests {
             node_type: node_type.to_string(),
             qualified_name: qname.to_string(),
         }
+    }
+
+    #[test]
+    fn edge_entry_resolves_qualified_names() {
+        let qn_by_id: HashMap<&str, &str> = [("n-1", "crate::Foo"), ("n-2", "crate::Bar")]
+            .into_iter()
+            .collect();
+        let e = GraphEdge {
+            id: Id::new("e-1"),
+            repo_id: Id::new("repo-1"),
+            source_id: Id::new("n-1"),
+            target_id: Id::new("n-2"),
+            edge_type: EdgeType::Implements,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 100,
+            deleted_at: None,
+        };
+        let entry = edge_entry(&e, &qn_by_id).expect("both endpoints known");
+        assert_eq!(entry.edge_type, "implements");
+        assert_eq!(entry.source, "crate::Foo");
+        assert_eq!(entry.target, "crate::Bar");
+    }
+
+    #[test]
+    fn edge_entry_skips_unknown_endpoints() {
+        // Grounding contract: unknown endpoints are omitted, never guessed.
+        let qn_by_id: HashMap<&str, &str> = [("n-1", "crate::Foo")].into_iter().collect();
+        let e = GraphEdge {
+            id: Id::new("e-1"),
+            repo_id: Id::new("repo-1"),
+            source_id: Id::new("n-1"),
+            target_id: Id::new("n-ghost"),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 100,
+            deleted_at: None,
+        };
+        assert!(edge_entry(&e, &qn_by_id).is_none());
     }
 
     #[test]
@@ -2345,6 +2436,151 @@ mod tests {
         );
     }
 
+    // ── Compact-delta edge counts (realized-model.md §6, task-152) ─────────────
+
+    /// Drive the REAL end-to-end extraction pipeline over a real bare git repo:
+    /// commit 1 extracts nodes + a Contains edge; commit 2 removes the child
+    /// file so the edge disappears. With no agent context the delta takes the
+    /// compact count-only format, and `"edges_removed"` must record the TRUE
+    /// removed-edge count. Regression test for the c14e5769 refactor that
+    /// dropped `edges_removed_count += 1` from the removal loop (persisted
+    /// `"edges_removed": 0` while edges were actually removed).
+    #[tokio::test]
+    async fn compact_delta_records_true_removed_edge_count() {
+        use crate::mem::MemSpecAssertionResultRepository;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&bare)
+                .status()
+                .unwrap()
+                .success(),
+            "git init --bare failed"
+        );
+
+        // Working clone for authoring commits.
+        let work = tmp.path().join("work");
+        std::process::Command::new("git")
+            .args(["clone", bare.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-C", work.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        // RustExtractor.detect requires a Cargo.toml at the repo root.
+        std::fs::write(
+            work.join("Cargo.toml"),
+            "[package]\nname = \"edge-count-fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Commit 1: two public functions → two Contains edges (module → fn).
+        std::fs::write(work.join("lib.rs"), "pub fn find() {}\npub fn index() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "one",
+        ]);
+        let sha1 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        let store = Arc::new(MemGraphStore::new());
+        let repo_id = Id::new("repo-edge-count");
+        let results_repo = Arc::new(MemSpecAssertionResultRepository::default());
+        // Pass 2 telemetry sinks (task-076): real in-memory sinks — the marker
+        // path runs on the no-toolchain-evidence branch here, but it is the
+        // production wiring, not a stub.
+        let telemetry = Arc::new(CallGraphTelemetry {
+            kv: Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>,
+            metrics: Arc::new(crate::metrics::Metrics::new().unwrap()),
+        });
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha1,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+            Arc::clone(&results_repo) as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+            None,
+            Arc::clone(&telemetry),
+        )
+        .await;
+
+        let edges_after_first = store.list_edges(&repo_id, None).await.unwrap().len();
+        assert!(
+            edges_after_first >= 2,
+            "commit 1 must extract two Contains edges, got {edges_after_first}"
+        );
+
+        // Commit 2: drop one function → its Contains edge disappears.
+        std::fs::write(work.join("lib.rs"), "pub fn find() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "two",
+        ]);
+        let sha2 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha2,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+            results_repo as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+            None,
+            telemetry,
+        )
+        .await;
+
+        // The second delta must record the removed edge: compact format, no
+        // agent ctx. Read it back through the port, not the in-memory write.
+        let deltas = store.list_deltas(&repo_id, None, None).await.unwrap();
+        assert_eq!(deltas.len(), 2, "one delta per extraction");
+        let second = &deltas[1];
+        let facts: serde_json::Value = serde_json::from_str(&second.delta_json).unwrap();
+        let removed = facts["edges_removed"].as_u64().unwrap_or(999);
+        assert_eq!(
+            removed, 1,
+            "compact delta must record the true removed-edge count (delta_json: {})",
+            second.delta_json
+        );
+    }
+
     #[tokio::test]
     async fn pass2_dedups_calls_edge_already_present_from_pass1() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2517,10 +2753,29 @@ mod tests {
                 })
                 .collect();
 
-        let removed = sweep_stale_edges(&old_edge_map, &HashMap::new(), &store)
-            .await
-            .unwrap();
+        let old_qn_by_id: HashMap<&str, &str> =
+            [("fn-a", "crate::fn_a"), ("mod-x", "crate::mod_x")]
+                .into_iter()
+                .collect();
+        let mut delta_edges_removed: Vec<DeltaEdgeEntry> = Vec::new();
+        let removed = sweep_stale_edges(
+            &old_edge_map,
+            &HashMap::new(),
+            &store,
+            &old_qn_by_id,
+            &mut delta_edges_removed,
+        )
+        .await
+        .unwrap();
         assert_eq!(removed, 1, "only the non-Calls stale edge is removed");
+        assert_eq!(
+            delta_edges_removed.len(),
+            1,
+            "only the actually-removed edge yields a narrative entry"
+        );
+        assert_eq!(delta_edges_removed[0].edge_type, "contains");
+        assert_eq!(delta_edges_removed[0].source, "crate::fn_a");
+        assert_eq!(delta_edges_removed[0].target, "crate::mod_x");
 
         let live = store.list_edges(&repo_id, None).await.unwrap();
         assert_eq!(
