@@ -331,6 +331,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-1", &auth).await.is_ok());
     }
@@ -363,6 +364,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-1", &auth).await.is_ok());
     }
@@ -393,6 +395,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-A", &auth).await.is_ok());
     }
@@ -424,6 +427,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-B", &auth).await.is_err());
     }
@@ -473,6 +477,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-A", &auth).await.is_ok());
         assert!(check_repo_abac(&state, "repo-B", &auth).await.is_err());
@@ -502,6 +507,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(
             check_repo_abac(&state, "repo-corrupt", &admin_auth)
@@ -518,6 +524,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(
             check_repo_abac(&state, "repo-corrupt", &agent_auth)

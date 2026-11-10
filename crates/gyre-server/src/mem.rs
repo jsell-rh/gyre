@@ -4095,6 +4095,7 @@ fn test_state_inner(
         ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        ws_connection_users: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         traces: Arc::new(MemTraceRepository::default()),
         otlp_config: crate::otlp_receiver::OtlpServerConfig {
             enabled: false,

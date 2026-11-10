@@ -177,9 +177,6 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/auth/key-bindings` | Revoke all active key bindings for the authenticated user; useful for logout flow; returns 204; emits `key_binding.revoked` for each revoked binding (TASK-047, authorization-provenance §2.3, §7.7) |
 | `POST` | `/api/v1/users` | Create a user (bootstrap: the admin user of a new tenant) and mint an authenticating API key in the same call (platform-model.md §8). **Admin only** (per-handler role check). Body: `{username, tenant_id, roles?}` — `tenant_id` is required and must reference an existing tenant (the user is scoped at creation; the auth extractor fail-closes on unbound users). Response: `{user, api_key: {key, name}}` — `key` is the plaintext `gyre_<uuid>` API key, returned exactly once; only its SHA-256 hash is persisted (task-099) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
-| `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
-| `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
-| `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
 | `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification delivery preferences — per-type channels (email, in-app, webhook), quiet hours, digest frequency (HSI §12) |
 | `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
 | `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
@@ -227,6 +224,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task, revoke agent token (Admin only) (M11.1, task-103) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
+| `POST` | `/api/v1/admin/impersonate` | **Admin only** — request to impersonate a user: `{target_user_id}` → `201 {request_id, expires_at}`. The one-time approval code is delivered to the **target user** only (Inbox notification + WS push), never to the requesting admin. Constraints: target must not be an Admin (prohibited), not the caller, max one active session per admin (identity-security.md §Impersonation) |
+| `POST` | `/api/v1/admin/impersonate/{request_id}/approve` | **Target user** (any role; per-handler authorization: caller must be the request's target) — approve with `{approval_code}` → `201 {impersonation_token, expires_at, session_id}`. The token is a short-lived EdDSA JWT (`sub` = target, `impersonator_id` = acting admin, TTL from `GYRE_IMPERSONATION_TTL`, default 900 s); all calls with it are audited as the impersonator acting as the target |
+| `POST` | `/api/v1/admin/impersonate/{request_id}/deny` | **Target user** — explicitly deny the pending impersonation request |
+| `DELETE` | `/api/v1/admin/impersonate/{request_id}` | **Admin only** (must be the impersonating admin) — end the session; revokes the token immediately and emits `ImpersonationEnded` with `duration_secs`/`actions_taken` |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
 | `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events — requires authentication |

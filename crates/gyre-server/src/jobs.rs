@@ -582,6 +582,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register impersonation expiry job (runs every 30 seconds,
+    // identity-security.md §Impersonation): ends sessions past their TTL
+    // (emitting ImpersonationEnded) and expires stale approval requests.
+    registry
+        .register(
+            JobDefinition {
+                name: "impersonation_expiry".to_string(),
+                description: "Ends impersonation sessions past their TTL and expires \
+                     stale approval requests (identity-security.md §Impersonation)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::impersonation::expire_sessions(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
