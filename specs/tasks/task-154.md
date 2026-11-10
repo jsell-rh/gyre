@@ -136,10 +136,17 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
   MATCH clause (constant rank, body-prefix snippet). Filters apply BEFORE
   the result limit — not post-filtered.
 - **PostgreSQL**: terms + quoted phrases flow through
-  `websearch_to_tsquery` (implicit AND, real phrase semantics); facet filters
-  use `IN` lists on columns / `metadata->>key`; `updated_at` is a real
-  BIGINT column (PG tables can be ALTERed in place, `ADD COLUMN IF NOT
-  EXISTS` covers pre-existing deployments).
+  `websearch_to_tsquery` (implicit AND, real phrase semantics) and are
+  applied as the `s.tsv @@ q` row filter — RESTORED by the review repair
+  (task-154 round 2): a rewrite of `build_filters()` had reserved the
+  tsquery for ranking but dropped the match predicate, so every text query
+  returned all facet-passing rows (cross join) and `facet_counts(Some(q))`
+  with text aggregated the whole index. Four SQL-shape regression tests in
+  `postgres/search.rs` now pin the predicate (and the facet-only / bind-order
+  shapes); a mutation check confirmed they fail when the predicate is
+  removed. Facet filters use `IN` lists on columns / `metadata->>key`;
+  `updated_at` is a real BIGINT column (PG tables can be ALTERed in place,
+  `ADD COLUMN IF NOT EXISTS` covers pre-existing deployments).
 - **Mem**: same contract in code — phrase = exact case-insensitive
   substring, facet AND/OR composition, time bounds on `updated_at`.
 - `facet_counts(Some(q))` in all three adapters aggregates the same
@@ -181,4 +188,7 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
   touched file.
 - Known limit: the PostgreSQL leg compiles and mirrors the SQLite contract
   but has no runtime test — the repo has no PG test harness (no PG tests,
-  no client in this sandbox); recorded for remote verification.
+  no client in this sandbox). The restored `s.tsv @@ q` predicate is pinned
+  by SQL-shape regression tests (mutation-verified) and by review probe
+  evidence (`grep '@@'` over the captured statement now matches); execution
+  against a live PG instance is recorded for remote verification.

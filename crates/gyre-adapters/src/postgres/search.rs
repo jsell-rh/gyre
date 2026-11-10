@@ -265,6 +265,14 @@ fn build_filters(query: &SearchQuery, w: &mut PgWhereBuilder) -> (bool, String) 
     } else {
         String::new()
     };
+    // The tsquery join alone filters nothing (it would be a cross join that
+    // only feeds ranking); the full-text predicate `s.tsv @@ q` is the actual
+    // row filter for terms and quoted phrases (§Simple Search / §Quoted
+    // Phrases). It must be emitted here so both search() and facet_counts()
+    // restrict to the text-matched rows.
+    if has_text {
+        w.push("s.tsv @@ q".to_string());
+    }
     if let Some(et) = &query.entity_type {
         let p = w.text(et.clone());
         w.push(format!("s.entity_type = {p}"));
@@ -546,5 +554,78 @@ impl SearchPort for PgStorage {
             Ok(count as u64)
         })
         .await??)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests for the filter builder. The repo has no PG
+    //! server harness, so these capture the generated statement shape — the
+    //! exact surface where the task-154 review found the full-text predicate
+    //! (`s.tsv @@ q`) had been dropped, leaving a ranking-only cross join.
+
+    use super::*;
+
+    /// A text query MUST emit the `s.tsv @@ q` row filter — the tsquery FROM
+    /// fragment alone filters nothing (cross join feeding ts_rank only), so
+    /// without this predicate every text query returns all facet-passing
+    /// rows and facet_counts(Some(q)) aggregates the whole index.
+    #[test]
+    fn text_query_emits_tsv_match_predicate() {
+        let q = SearchQuery::parse("\"merge queue\" ordering");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        assert!(has_text);
+        assert!(from_tsq.contains("websearch_to_tsquery"));
+        let sql = w.sql();
+        assert!(
+            sql.contains("s.tsv @@ q"),
+            "full-text predicate missing from WHERE: {sql}"
+        );
+        // The WHERE clause is real (not empty), i.e. the predicate lands in
+        // the statement's filter position, not just the builder's internals.
+        assert!(sql.starts_with(" WHERE "));
+    }
+
+    /// Terms-only queries go through the same predicate (§Simple Search is
+    /// AND-of-terms enforced by websearch_to_tsquery + the tsv match).
+    #[test]
+    fn simple_terms_query_emits_tsv_match_predicate() {
+        let q = SearchQuery::parse("identity security JWT");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, _) = build_filters(&q, &mut w);
+        assert!(has_text);
+        assert!(w.sql().contains("s.tsv @@ q"));
+    }
+
+    /// A facet-only query (§Faceted Filtering browse) intentionally has no
+    /// text match: no FROM fragment, no tsv predicate, but real WHERE
+    /// clauses for the facets.
+    #[test]
+    fn facet_only_query_has_no_tsv_predicate_but_real_filters() {
+        let q = SearchQuery::parse("type:spec status:approved");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        assert!(!has_text);
+        assert!(from_tsq.is_empty());
+        let sql = w.sql();
+        assert!(!sql.contains("@@"));
+        assert!(sql.contains("s.entity_type IN"));
+        assert!(sql.contains("s.metadata->>"));
+    }
+
+    /// The tsquery parameter is reserved FIRST (referenced in the FROM
+    /// clause, ahead of the WHERE placeholders), so the bind order emitted
+    /// by `search()`/`facet_counts()` matches the placeholder numbering.
+    #[test]
+    fn tsquery_parameter_is_bound_first() {
+        let q = SearchQuery::parse("\"merge queue\" type:spec workspace:platform-team");
+        let mut w = PgWhereBuilder::new();
+        let (_, from_tsq) = build_filters(&q, &mut w);
+        // FROM references $1; every WHERE placeholder must number after it.
+        assert!(from_tsq.contains("$1::text"), "from: {from_tsq}");
+        let sql = w.sql();
+        assert!(!sql.contains("$1::"), "WHERE reuses the FROM parameter: {sql}");
+        assert!(sql.contains("$2::text"));
     }
 }
