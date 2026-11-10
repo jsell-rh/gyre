@@ -235,6 +235,13 @@ fn format_context_prompt(
 /// `system://context` for an MCP caller: resolves the task (explicit
 /// `task_id` argument wins, then the task bound to the caller's identity),
 /// the caller's worktree, and the governing repo, then renders the prompt.
+///
+/// Containment (repo invariant): the loaded task must live inside the
+/// caller's scope — workspace mismatch always denies, and a repo mismatch
+/// denies when both the task and the caller carry a repo — mirroring
+/// `handle_spawn_worker`'s PERMISSION_DENIED check in mcp.rs. Without it,
+/// an explicit `task_id` argument would disclose any task's title,
+/// description, and acceptance criteria across workspace/tenant boundaries.
 pub async fn context_prompt_for_caller(
     state: &AppState,
     scope: &PromptScope,
@@ -251,7 +258,18 @@ pub async fn context_prompt_for_caller(
                 .find_by_id(tid)
                 .await
                 .map_err(|e| format!("task lookup failed: {e}"))?;
-            Some(t.ok_or_else(|| format!("task '{tid}' not found"))?)
+            let t = t.ok_or_else(|| format!("task '{tid}' not found"))?;
+            if t.workspace_id != scope.workspace_id {
+                return Err(format!(
+                    "task '{tid}' belongs to a different workspace"
+                ));
+            }
+            if let Some(caller_repo) = &scope.repo_id {
+                if !t.repo_id.to_string().is_empty() && t.repo_id != *caller_repo {
+                    return Err(format!("task '{tid}' belongs to a different repo"));
+                }
+            }
+            Some(t)
         }
         None => None,
     };

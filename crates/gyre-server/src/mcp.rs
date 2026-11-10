@@ -6155,6 +6155,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_prompts_get_context_rejects_cross_scope_task_id() {
+        let state = seed_prompt_state().await;
+        // A victim workspace in a different tenant with a confidential task.
+        let victim_ws = gyre_domain::Workspace::new(
+            Id::new("ws-victim"),
+            Id::new("tenant-b"),
+            "Victim WS",
+            "victim-ws",
+            1_700_000_000,
+        );
+        state.workspaces.create(&victim_ws).await.unwrap();
+        let mut victim_task =
+            Task::new(Id::new("task-victim"), "SECRET victim title", 1_700_000_000);
+        victim_task.description = Some("confidential acceptance criteria".to_string());
+        victim_task.workspace_id = Id::new("ws-victim");
+        victim_task.repo_id = Id::new("repo-victim");
+        state.tasks.create(&victim_task).await.unwrap();
+
+        // Explicit task_id from another workspace: denied, no text leaked.
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-victim"})),
+        )
+        .await
+        .expect_err("cross-workspace task_id must be denied");
+        assert!(
+            err.contains("different workspace"),
+            "unexpected error: {err}"
+        );
+        assert!(!err.contains("SECRET"), "error leaked task title: {err}");
+
+        // A bound task (JWT task_id claim) from another workspace is denied
+        // by the same containment check.
+        let auth = agent_auth_with_task(
+            "agent-bound-cross",
+            "ws-mcp-prompt",
+            "repo-mcp-prompt",
+            "task-victim",
+        );
+        let err = handle_prompt_get(&state, &auth, "system://context", None)
+            .await
+            .expect_err("cross-workspace bound task must be denied");
+        assert!(
+            err.contains("different workspace"),
+            "unexpected error: {err}"
+        );
+
+        // Same workspace, different repo: denied for a repo-scoped agent.
+        let mut other_repo_task =
+            Task::new(Id::new("task-other-repo"), "Other repo task", 1_700_000_000);
+        other_repo_task.workspace_id = Id::new("ws-mcp-prompt");
+        other_repo_task.repo_id = Id::new("repo-other");
+        state.tasks.create(&other_repo_task).await.unwrap();
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-other-repo"})),
+        )
+        .await
+        .expect_err("cross-repo task_id must be denied for a repo-scoped agent");
+        assert!(err.contains("different repo"), "unexpected error: {err}");
+
+        // A workspace-scoped agent (no repo) may read a same-workspace task
+        // in any repo — the workspace is the ABAC boundary there.
+        let auth = agent_auth("agent-ws-scoped", "ws-mcp-prompt", None);
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-other-repo"})),
+        )
+        .await
+        .expect("same-workspace task must render for a workspace-scoped agent");
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("Other repo task"), "task missing:\n{text}");
+
+        // An in-scope explicit task_id still renders for a repo-scoped agent.
+        let mut own_task = Task::new(Id::new("task-own"), "Own in-scope task", 1_700_000_000);
+        own_task.workspace_id = Id::new("ws-mcp-prompt");
+        own_task.repo_id = Id::new("repo-mcp-prompt");
+        state.tasks.create(&own_task).await.unwrap();
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-own"})),
+        )
+        .await
+        .expect("in-scope task_id must render");
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("Own in-scope task"), "task missing:\n{text}");
+    }
+
+    #[tokio::test]
     async fn mcp_prompts_get_constraints_include_budget_and_scope() {
         let state = seed_prompt_state().await;
         let ws_key = format!("workspace:ws-mcp-prompt");
