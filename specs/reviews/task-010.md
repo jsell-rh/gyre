@@ -69,3 +69,61 @@ Sweep for new findings:
 - All 1,843 tests pass (0 failures, 14 ignored).
 
 No new findings. **TASK-010 verified complete.**
+
+## R5 — 2026-09-30
+
+Reviewer: Independent review (pipeline stage)
+Candidate under review: `75262ffc0` (base `078ec12a5`)
+
+The candidate's diff from base is documentation-only: the HSI §11 parity-table
+amendment (`5b06eded9`) plus task-doc bookkeeping (`918d4fd11`, `75262ffc0`).
+No file under `crates/`, `web/`, or `scripts/` differs from base — the five
+parity surfaces are the production code previously verified in R1–R4 and
+landed on main. This round independently re-confirmed the contract rather
+than trusting the prior labels:
+
+- **Surfaces present and real** (source inspection at candidate):\  `briefing://` (three-step `since` resolution matching the REST handler at
+  graph.rs:1567-1569, delegating to `assemble_briefing`), `notifications://`
+  (same `list_for_user` + `NotificationResponse` + `{notifications, limit,
+  offset}` envelope as users.rs:280-294), `trace://` (MR existence check →
+  `assemble_gate_trace`), `graph_concept` (delegates to
+  `assemble_concept_projection`/`assemble_workspace_concept_projection`,
+  graph.rs:624/664 — the same functions the REST handlers at graph.rs:747 and
+  1899 call), `spec_assist` (full REST pipeline: per-user/workspace rate
+  limit → LLM config check → content resolution → prompt → LLM → diff
+  validation).
+- **Auth/scoping**: `/mcp` requires the `AuthenticatedAgent` extractor;
+  per-tool RBAC `needs_write` gate enforces role minimums; agent-JWT
+  repo-scope validation applies to `gyre_create_mr`. Resources are
+  workspace-addressed with existence checks, consistent with the
+  pre-existing `agents://`/`queue://` pattern.
+- **Tests** (`SKIP_WEB_BUILD=1`, evidence in `/tmp/stage/review-evidence/`):
+  focused run (`mcp_briefing_resource mcp_notifications_resource
+  mcp_trace_resource mcp_graph_concept mcp_spec_assist mcp_tools_list`)
+  — 20 passed, 0 failed; full `mcp::` module — 88 passed, 0 failed. Tests
+  drive the full router with real state and assert real content (sections,
+  `last_seen_at`-derived `since`, manifest-projection-not-substring), not
+  just absence of errors.
+- **Mechanical checks**: `check-task-commit-attribution.sh` OK;
+  `check-mcp-write-tools.sh` OK (8 write-capable tools gated).
+  `check-mcp-wrapper-parity.sh` exits 1 with 25 heuristic hits — all
+  flagged lines are error-path `json!({"error": ...})` returns, the
+  `secrets://` metadata section, or pre-existing handlers; `mcp.rs` is
+  byte-identical to base, so this is a pre-existing advisory condition,
+  not a candidate defect.
+- **Spec amendment legitimacy**: the amendment implements the exact
+  resolution the base coverage audit prescribed ("amend spec table naming
+  via spec lifecycle rather than renaming tools") per task rule 4. All 25
+  shipped MCP tools use snake_case; renaming two to dotted names would
+  break the convention and existing consumers. Coverage row 50 was already
+  `implemented` at base; only the note text changed.
+- **Contract repair (finding 799608cbdb)**: the candidate's task doc is
+  byte-identical to the assigned contract (empty diff against the job
+  body), with all round notes confined to `## Shipped`.
+
+Non-blocking observations (pre-existing at base, untouched by this
+candidate): the doc comment at mcp.rs:2524 still refers to the handler as
+`graph.concept` (dotted pre-amendment name), and the coverage row's mcp.rs
+line citations have drifted as the file evolved via later task merges.
+
+No blocking findings. **Candidate `75262ffc0` approved.**
