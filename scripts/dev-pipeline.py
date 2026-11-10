@@ -33,6 +33,10 @@ def source(store):
         subprocess.run(['git', 'checkout', '--quiet', '--detach', 'origin/main'], cwd=path, check=True)
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=path, text=True).strip()
         sync_checkout(store, path, revision)
+        recovery = store.setting('requirements_recovery_revision')
+        if recovery:
+            from pipeline.requirement_migration import plan, apply
+            apply(store, plan(store, path, recovery))
         store.set_setting('observed_main', revision)
         return revision
 
