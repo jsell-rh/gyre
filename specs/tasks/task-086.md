@@ -3,7 +3,7 @@ title: "HSI Explorer Liveness Indicators (Two Layers)"
 spec_ref: "human-system-interface.md §3 Design Principle"
 depends_on:
   - task-065
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
 commits: ["c4d00719ceec949c6ccd455ff80bd58c428d1d3a", "7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "2aafb8f27418b2dbd1681f6d442c26dea2677931"]
@@ -65,137 +65,84 @@ Read `specs/system/human-system-interface.md` §3 "Design Principle: The Built S
 
 ## Shipped
 
-Both liveness layers of HSI §3 are implemented in production frontend code
-(product surface in commit c17b6c95; review repairs in commits a3ad5d02 —
-repo scoping — and 7da87564 — the canvas-load timeline query below; upstream
-rebase resolution in merge commit 2bd17bd3 — both liveness and upstream's
-causal-trace/focus features coexist in `ExplorerView`/`ExplorerCanvas`;
-verification repair in commit c4d00719 — a rustfmt-only fix to the
-`per_page` test's pinned-timestamp loop, described under Test evidence).
+Both liveness layers of HSI §3 are implemented in production frontend
+code. Product surface in commit c17b6c95; review repairs in a3ad5d02
+(repo-scoped MR queries via `repository_id` + server-side `per_page`),
+7da87564 (canvas-load timeline query), c4d00719 (rustfmt repair);
+verified asset build 2aafb8f2.
 
 ### Layer 1 — SDLC activity
 
-- **Active agent glow** — `web/src/lib/liveness.svelte.js` exports a
-  reactive `activeRuns` map plus `createLivenessTracker(wsStore,
-  { fetchTask })`, wired in `App.svelte` to the shared workspace WebSocket
-  store. The tracker listens for Telemetry-tier bus messages
-  (`kind: "run_started"` / `"run_finished"`, payload `{ agent_id, task_id }`
-  — the exact envelope the server builds in the `record_activity` MCP tool
-  for `MessageKind::RunStarted/RunFinished` and forwards to workspace WS
-  subscribers as `{ kind, payload }`) and resolves the run's task → spec
-  via `GET /api/v1/tasks/:id` (its response carries `spec_path`; best-effort,
-  guarded against a run finishing mid-fetch). `ExplorerCanvas` maps each
-  active run's spec to graph nodes (spec_path/spec_paths basename match
-  plus `governed_by` edges to a matching spec node) and pulses those nodes
-  with a sky-400 glow (2s sine cycle). The render loop stays alive only
-  while a glowing node is actually on screen; the redraw is deferred to a
-  macrotask so the mount flush is never drawn into synchronously.
-- **Recent-change fading ring** — `computeRecentChanges` folds the repo's
-  `ArchitecturalDelta` records into a per-node map of change times for
-  deltas within the last hour (delta timestamps are epoch seconds;
-  `nodes_added`/`nodes_modified` entries matched by qualified_name;
-  count-only and unparseable deltas skipped). Draw-time `recentChangeAlpha`
-  fades the amber ring linearly from full opacity to zero over exactly 60
-  minutes — never an instant off; a 60-second interval nudges a redraw
-  while unfaded rings exist (no per-frame timer).
-- **Gate status edges (Evaluative lens only)** — `ExplorerView` loads the
-  repo's recent MRs and their gate results
-  (`GET /merge-requests?repository_id=<repo>&per_page=10`, then
-  `GET /merge-requests/:id/gates` per spec_ref-carrying MR) best-effort
-  into `gateRecords` (`{ mrId, spec_ref, gates }`), passed to the canvas.
-  `computeNodeGateStatus` maps each MR's `spec_ref` to the nodes its spec
-  governs — a failed gate wins over passing ones; pending/running-only sets
-  prove nothing and are ignored. In the Evaluative lens, edge drawing
-  colors an edge green when both endpoints have all gates passed and red
-  when either endpoint has a failed gate; the `nodeGateStatus` derivation
-  is gated on `lens === 'evaluative'`, so the default Structural lens never
-  computes or renders gate colors. The legend gains green/red gate entries
-  only while gate data is live.
-- **Repo scoping of liveness MR queries (review repair, a3ad5d02)** — the
-  loaders originally sent `{ repo_id, per_page }`, but the server's
-  `ListMrsQuery` only recognizes `repository_id` (unknown keys are
-  silently dropped), so the MR list fell through to the tenant-wide set:
-  another repo's failed gate on a same-named spec could color this repo's
-  edges red, and the per-MR gates fan-out was unbounded. Both
-  `loadGateData` and `loadTraceData` now send `repository_id`, and
-  `per_page` is implemented server-side on `GET /merge-requests`: the
-  handler sorts by `created_at` descending (deterministic across adapters,
-  whose list ordering is not contractual) and truncates before the per-MR
-  enrichment, so dropped MRs cost no extra queries. As a side effect the
-  trace loader now genuinely sees the most recent MRs first.
-- **Canvas-load timeline query (review repair, 7da87564)** — the fading
-  ring was originally driven only by the `timeline` prop fed from
-  `graphTimeline`, which loads inside the lazy Architecture-Insights
-  effect — a panel collapsed by default — so in the default view the
-  canvas received `timeline=[]` and no ring was ever drawn. ExplorerView
-  now runs a dedicated liveness loader on canvas load:
-  `api.repoGraphTimeline(repoId, since)` with
-  `since = Math.floor((Date.now() − RECENT_CHANGE_WINDOW_MS)/1000)`,
-  exactly the `?since=<epoch-1h>` bound the implementation plan specifies,
-  keeping the payload small (no `until` — the window runs to the present).
-  The canvas `timeline` prop prefers the insights panel's full timeline
-  (a superset) once that panel loads and falls back to the liveness slice
-  otherwise; stale responses are dropped when the user switches repos
-  mid-fetch. Non-blocking and best-effort, like the trace/gate loaders.
+- **Active agent glow** — `web/src/lib/liveness.svelte.js` provides a
+  reactive `activeRuns` map and `createLivenessTracker(wsStore,
+  { fetchTask })`, wired in `App.svelte` to the workspace WebSocket
+  store. The tracker listens for Telemetry-tier `run_started` /
+  `run_finished` bus messages (the exact `{ kind, payload: { agent_id,
+  task_id } }` envelope the server forwards) and resolves each run's
+  task → spec via `GET /api/v1/tasks/:id`. `ExplorerCanvas` maps active
+  runs' specs to graph nodes (spec_path basename match plus
+  `governed_by` edges) and pulses them with a sky-400 glow (2s sine
+  cycle); the render loop runs only while a glowing node is on screen.
+- **Recent-change fading ring** — a dedicated canvas-load liveness
+  loader (`loadLivenessTimeline`) queries
+  `GET /api/v1/repos/:id/graph/timeline?since=<now−1h>` (no `until`)
+  so rings appear in the default view, not only when the collapsed
+  Architecture-Insights panel loads; `computeRecentChanges` folds the
+  deltas into a per-node change-time map and draw-time
+  `recentChangeAlpha` fades the amber ring linearly to zero over
+  exactly 60 minutes (60-second redraw nudge, no per-frame timer).
+  The canvas `timeline` prop prefers the insights panel's full
+  timeline once loaded and falls back to the liveness slice.
+- **Gate status edges (Evaluative lens only)** — `loadGateData` fetches
+  the repo's MRs (`repository_id`, `per_page` 10) and per-MR gate
+  results into `gateRecords`; `computeNodeGateStatus` maps each MR's
+  `spec_ref` to the nodes its spec governs (a failed gate wins). In
+  the Evaluative lens, edges render green (all passed) / red (any
+  failed); the `nodeGateStatus` derivation is gated on
+  `lens === 'evaluative'`, so the default Structural lens never
+  computes or renders gate colors. Where upstream's later
+  per-spec-recency `gateStatusBySpec` data is also present, it
+  overrides the record-aggregate coloring (documented precedence in
+  the edge-draw code); both mechanisms compose without weakening
+  either.
 
 ### Layer 2 — trace play icon (scaffolding)
 
 - Nodes with linked trace spans (the `nodeSpanStats` index over
-  `GET /merge-requests/:id/trace` data, already loaded for the Evaluative
-  lens) render a ▶ play badge at the node's bottom-right corner. Clicking
-  it (hit-test shares `playIconRect` with the drawer, so the clickable
-  region is exactly the drawn region) switches to the Evaluative lens and
-  starts the existing span-tree particle playback from the beginning —
-  the data wiring this task owes; particles/scrubbing polish remains a
-  follow-on task per the assignment.
+  `GET /merge-requests/:id/trace` data) render a ▶ play badge;
+  clicking it (hit-test region == drawn region) switches to the
+  Evaluative lens and starts the span-tree particle playback. Full
+  particle/scrubbing polish remains a follow-on task per the plan.
+
+### Requirements-changed repair (this round)
+
+The retained source checkpoint (65c56896) was merged with current main
+(078ec12a) at f7b1267e9; the merged tree is byte-identical to main
+(tree `5f6ae702…`), i.e. the published implementation already contains
+every content line of the checkpoint, and all five frontmatter commits
+are ancestors of HEAD. The current contract was revalidated at the
+merged HEAD with focused probes (below) — no surface code needed
+re-implementation.
 
 ### Test evidence
 
-- `web/src/__tests__/liveness.test.js` (28 tests) — tracker lifecycle
-  (run_started records + async spec resolution, run_finished removal,
-  mid-fetch finish guard), spec-ref → node mapping, recent-change window
-  and fade math, gate status precedence, and edge status composition.
-- `web/src/__tests__/ExplorerCanvasLiveness.test.js` (14 tests) — the
-  real component: glow stroke rendered only for governed nodes while a
-  run is active and removed after `run_finished`; fading ring alpha
-  decreases with age and never snaps; gate edge colors appear only in the
-  Evaluative lens (Structural stays structural-colored); ▶ play badge
-  drawn on span-carrying nodes and its click starts playback.
-- `web/src/__tests__/ExplorerViewLivenessWiring.test.js` (4 tests) — the
-  liveness loaders' HTTP wiring: every MR list call carries
-  `repository_id` for the current repo (never `repo_id`) with a bounded
-  `per_page`, and gates are fetched for the current repo's spec_ref-carrying
-  MRs against a contract-faithful mock (returns MRs only when
-  `repository_id` matches); the canvas-load timeline query fires exactly
-  once with a `since` bound of one hour (epoch seconds) and no `until`;
-  and end-to-end through the real ExplorerView → ExplorerCanvas mount
-  with the insights panel collapsed (the default), the loaded delta draws
-  the amber fading ring. Mutation-checked: reverting the MR-query fix to
-  `repo_id`, removing the canvas-load `loadLivenessTimeline` call, or
-  reverting the canvas `timeline` prop wiring each fails the corresponding
-  tests. (The suite's rAF stub is queue-based — a synchronous stub leaves
-  a stale `animFrame` id that suppresses data-driven redraws — and the
-  beforeEach re-establishes default api mock implementations so per-test
-  overrides cannot leak.)
-- Server: `api::merge_requests::tests::list_mrs_per_page_keeps_newest` —
-  `per_page` caps the list to the most recently created MRs, newest
-  first, with distinct pinned timestamps; full module
-  `api::merge_requests::` 32/32 passed (`cargo test -p gyre-server --lib
-  api::merge_requests`, exit 0, after the rustfmt repair below).
-- Full suite: `npm test` in `web/` — after the upstream rebase merge
-  (2bd17bd3, resolving additive conflicts in ExplorerView/ExplorerCanvas so
-  the liveness imports/props and upstream's `focusRequest`/`windowEscape`/
-  causal-trace wiring all survive together): 74 files, 1783 passed /
-  41 skipped, exit 0 (locked deps via `npm ci`). The four conflict regions
-  were all additive (both sides' features kept); no liveness behavior was
-  weakened by the merge.
-- Verification repair (c4d00719) — the verification gate's rustfmt check
-  failed on changed line 1407 of `crates/gyre-server/src/api/merge_requests.rs`
-  (the pinned-timestamp array literal in the `per_page` test exceeded the
-  line-width budget). `cargo fmt -p gyre-server` reformats that one loop;
-  no behavior change, and `cargo fmt --check` is clean afterwards. All
-  other gate failures in that run: none — every other check in the log
-  passed and the web build itself succeeded (the Svelte a11y/unused-CSS
-  lines in the log tail are pre-existing non-fatal warnings).
-- Evidence (commands, SHAs, exit codes, output) saved under
-  `/tmp/stage/review-evidence/task-086-*.txt` for executor retention.
+- `web/src/__tests__/liveness.test.js` (28) — tracker lifecycle,
+  spec-ref → node mapping, recent-change window/fade math, gate
+  precedence, edge status composition.
+- `web/src/__tests__/ExplorerCanvasLiveness.test.js` (14) — the real
+  component: glow on governed nodes only, ring fade never snaps, gate
+  edge colors only in the Evaluative lens, ▶ badge and click-to-play.
+- `web/src/__tests__/ExplorerViewLivenessWiring.test.js` (4) — HTTP
+  wiring: `repository_id` (never `repo_id`) with bounded `per_page`,
+  canvas-load timeline query with a one-hour `since` and no `until`,
+  end-to-end ring rendering with the insights panel collapsed.
+- Revalidation at merged HEAD f7b1267e9 (evidence:
+  `/tmp/stage/review-evidence/task-086-revalidation.txt`): the three
+  liveness suites 46/46 passed; merged-surface suites
+  (ExplorerCanvas, ExplorerCanvas-performance, lens-rendering, api)
+  224/224 passed; `cargo test -p gyre-server --lib
+  api::merge_requests` 33/33 passed (includes
+  `list_mrs_per_page_keeps_newest`). Prior round's full suite: 74
+  files, 1783 passed / 41 skipped; full gates are owned by
+  verification, and the identical-to-main tree rules out merge
+  regression by construction.
