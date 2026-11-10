@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "afd28f1710b0c910109bd684c9acc7a1760c3144"]
 ---
 
 ## Spec Excerpt
@@ -122,8 +122,9 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 ## Shipped
 
 All three HSI §12 gaps are implemented in production code (checkpoint
-f7f3b081, call-site repair ca1ac78e, base-77473763 merge 960cfb43, and
-this round's review-repair 94af4aef on the base-fb1f82e31 merge 0cfd963).
+f7f3b081, call-site repair ca1ac78e, base-77473763 merge 960cfb43,
+review-repair 94af4aef on the base-fb1f82e31 merge 0cfd963, and the
+requirements_changed remerge afd28f171 onto current base 078ec12).
 Every acceptance criterion was re-verified on the final merged tree.
 
 ### Behavior shipped
@@ -210,26 +211,73 @@ seeding their own key shape.
   approver sees nothing); seed comments now state the key shape matches
   the production writer.
 
-### Test evidence (post-94af4aef, merged tree)
+### Remerge afd28f171 (requirements_changed: current base 078ec12, task-123
+notification entity taxonomy)
 
-- `cargo test -p gyre-server --lib`: 1545 passed, 0 failed — includes
+The retained task-209 checkpoint (d465d3f) was remerged onto current base
+078ec12, which lands task-123's notification-entity work (mark_read /
+read_at, 18-variant NotificationType with legacy-name parse aliases,
+entity-source + action_url columns) alongside task-208's My-Stuff removal.
+Eight conflicted files resolved so both feature sets compose:
+
+- `gyre-domain/src/audit.rs` — both event-variant sets kept: task-209's
+  TrustChange/GateOverride/MetaSpecPublish AND the base's source-control /
+  access-control / impersonation variants (as_str/from_str/round-trip test
+  merged for all).
+- `sqlite/notification.rs`, `postgres/notification.rs`, `mem.rs` — the
+  base's `mark_read` implementation kept AND task-209's
+  `count_unresolved(user, ws, exclude_types)` signature kept (the merged
+  port trait requires both; the exclusion filter stays in-query).
+- `api/meta_specs.rs` — task-209's scope-aware per-handler DELETE
+  authorization kept (Global → tenant Admin; Workspace → tenant
+  containment + workspace Owner/Admin), with the base's task-104
+  `record_rbac_denied` audit instrumentation re-added on every deny path
+  (Global non-admin, cross-tenant, non-ws-admin, and the missing-row
+  branch), so the stronger authorization did not silently drop RbacDenied
+  events.
+- `api/users.rs` tests — the disabled-preference test now seeds/asserts
+  `SpecApprovalRequested` (the merged taxonomy's name; the legacy
+  `SpecPendingApproval` string still parses via `NotificationType::parse`
+  alias, so pre-unification rows keep loading).
+- Base-side test call sites adapted to the 8-arg `list_for_user`
+  (exclude_types) signature with `&[]` (background callers, no preference
+  filtering): merge_processor.rs ×2, notifications.rs helper,
+  personas.rs ×2, dep_staleness.rs ×3, meta_specs.rs ×2.
+- `docs/api-reference.md` — users/me block merged: task-209's
+  notification-preferences/judgments/tokens rows, the base's full
+  18-variant notifications row + read/unread endpoints, My Agents/Tasks/
+  MRs rows dropped (routes deleted by task-208 in the base).
+- `specs/coverage/system/human-system-interface.md` — rows 53 (task-209)
+  and 54 (task-208) both implemented; matrix 21/35; audit header records
+  both landings.
+- `web/src/__tests__/UserProfile.test.js` — object-wrapped
+  `{notifications: [...]}`/`{judgments: [...]}` mocks kept (matches the
+  real wire shape and UserProfile.svelte's tolerant unwrap); the
+  myAgents/myTasks/myMrs mocks dropped with task-208's API-client removal.
+
+### Test evidence (post-afd28f171, merged tree)
+
+- `cargo test -p gyre-server --lib`: 1690 passed, 0 failed — includes
   the §12 write-path tests (`disabled_preference_excludes_type_from_
   inbox_and_count`, `get_me_returns_recorded_auth_provider_info`,
   `trust_transition_writes_trust_change_audit_event`,
   `human_approval_on_failed_gate_writes_gate_override_event`,
-  `publish_writes_meta_spec_publish_audit_event`), the three new
-  approve/reject/revoke e2e judgment tests, and the base's F1
-  tenant-binding / task-177 / task-140 / task-141 suites.
-- `cargo test -p gyre-adapters --lib`: 399 passed, 0 failed (11-test
-  user_profile suite: ledger merge/filter/pagination/withdrawal-
+  `publish_writes_meta_spec_publish_audit_event`), the approve/reject/
+  revoke e2e judgment tests, and the base's task-123 mark_read /
+  entity-source suites.
+- `cargo test -p gyre-server --tests`: all integration suites green
+  (graph_integration, search_wiring, e2e bundles).
+- `cargo test -p gyre-adapters`: 440 passed, 6 ignored, 0 failed
+  (11-test user_profile suite: ledger merge/filter/pagination/withdrawal-
   attribution, notification exclusion, record_login debounce +
   issuer-change carve-out).
-- `cargo check -p gyre-server -p gyre-adapters`: clean; `cargo fmt
-  --all` applied; focused clippy on the touched crates: no warnings in
-  edited regions (workspace clippy warnings are pre-existing elsewhere).
-- No web code authored this round; web/dist restored to the staged
-  state (build.rs rebuilt it during cargo test — generated assets are
-  owned by the executor per assignment).
+- `cargo test -p gyre-domain -p gyre-ports -p gyre-common -p gyre-cli`:
+  all green (audit round-trip covers both variant sets).
+- `cd web && npm ci && npm test`: 99 files, 2013 passed, 41 skipped,
+  0 failed (UserProfile 26/26).
+- `cargo check --all` clean (SKIP_WEB_BUILD=1); `cargo fmt` applied to
+  the touched crates; web/dist left at the executor's staged state
+  (generated assets are owned by the executor per assignment).
 - Mechanical checks OK: check-arch, check-migration-versions,
   check-migration-sql-portability, check-mem-port-contracts,
   check-fabricated-scope-defaults, check-abac-exempt-handlers,
@@ -239,12 +287,15 @@ seeding their own key shape.
   check-lossy-secret-conversion, check-scope-literal-defaults,
   check-relative-path-defaults, check-byte-slice-truncation,
   check-forwarded-header-trust, check-unbounded-external-http,
-  check-fail-open-ref-resolution. Note: `check-tenant-filter.sh` cannot
-  execute under this sandbox's mawk (gawk-only 3-arg `match()`); this
-  round's only SQL changes add caller-scoped equality filters
-  (rejected_by/revoked_by) to already caller-scoped judgment queries,
-  no new tenant-crossing surface; CI runs it under gawk.
+  check-fail-open-ref-resolution, check-task-commit-attribution.
+  Note: `check-tenant-filter.sh` cannot execute under this sandbox's
+  mawk (gawk-only syntax); it fails identically on both merge parents
+  (verified: HEAD d465d3f and base 078ec12), so it is an environment
+  restriction, not a regression — this round adds no new queries (only
+  test call-site adaptations); CI runs it under gawk.
 
-Evidence retained at /tmp/stage/review-evidence/task-209-approval-key-repair.md
-and /tmp/stage/review-evidence/task-209-rebase-77473763.md (controller
-artifact paths; commands, exit codes, and outputs above).
+Evidence retained at /tmp/stage/review-evidence/task-209-remerge-078ec12.md
+(commands, exit codes, and outputs; earlier controller artifact paths
+/tmp/stage/review-evidence/task-2....md and
+/tmp/stage/review-evidence/task-209-rebase-77473763.md remain valid for
+their rounds).
