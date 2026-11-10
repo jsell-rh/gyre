@@ -304,10 +304,10 @@ Repaired the two round-3 review findings:
   `SPECS_PATH_ROUTE`/`REPOS_ID_ROUTE` consts so the frozen duplicate
   `/api/v1/...` literal count stays at 17.
 
-### Test evidence (run at merge head a60b86a17, after the base-b5a872087
+### Test evidence (run at merge head ec1f694d5, after the base-dbf9edaea
 rebase)
 
-- `cargo test -p gyre-server --lib` — **1651 passed / 0 failed**
+- `cargo test -p gyre-server --lib` — **1694 passed / 0 failed**
   (includes `abac_middleware` 37, `policy_engine` 34; the five §Policy
   Example tests, the membership/entity-lookup attribute tests, and the
   round-1/2/3 tests run end-to-end through live tower oneshot requests
@@ -362,6 +362,26 @@ verification/publication gates.
   `check-arch`, `check-abac-route-registry`, `check-mem-port-contracts`,
   `check-forwarded-header-trust`, `check-fabricated-scope-defaults` all
   pass.
+- **Rebase (ec1f694d5):** merged base dbf9edaea (task-117 compute target
+  model: Kubernetes/local/SSH/container compute, spec-lifecycle configs,
+  task spec_ref, and the task-109/115/117/174 task-file updates). Single
+  source conflict in `api/spawn.rs` at the worker-JWT mint site: the base
+  added the pre-mint `wl_image_hash` image-digest resolution plus a
+  `mint_with_workload` call, while task-128 had switched that site to
+  `mint_scoped` (workspace_id/repo_id/persona/attestation_level claims).
+  Resolution keeps BOTH: the base's digest-resolution block runs before
+  minting, `mint_scoped` gained a `wl_image_hash: Option<String>` parameter
+  (set in claims; other `wl_*` workload claims stay on the post-spawn
+  attestation record per the base's design), and the spawn site passes the
+  resolved digest through it. The three test-side `mint_scoped` callers in
+  `abac_middleware.rs` were updated for the new parameter. `SUMMARY.md`
+  was again mechanically regenerated — the base's copy was stale relative
+  to its own coverage files (agent-runtime 5, spec-lifecycle row shifts).
+  Post-merge probes: `cargo test -p gyre-server --lib` 1694 passed /
+  0 failed (1651 pre-merge; the base contributed the additional tests),
+  `cargo check -p gyre-cli` clean, and all invariant scripts listed in
+  the test-evidence section pass. Evidence transcript:
+  `/tmp/stage/review-evidence/rebase-dbf9edaea-merge.txt`.
 - **Rebase (a60b86a17):** merged base b5a872087 (task-108 admin user
   impersonation, task-104 audit event types, task-205 manifest-driven
   Concept Views, task-208 profile changes, and their verified lineage —
