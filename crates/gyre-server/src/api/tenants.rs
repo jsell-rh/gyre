@@ -193,6 +193,7 @@ mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
