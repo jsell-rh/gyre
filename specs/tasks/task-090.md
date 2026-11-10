@@ -3,10 +3,10 @@ title: "HSI Explorer Three Lenses (Structural, Evaluative, Observable)"
 spec_ref: "human-system-interface.md §3 Three Lenses"
 depends_on:
   - task-065
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Three Lenses"
-commits: ["86b6f3006ebe07a38fa3f890efacb00cdfbfb320", "9ebea6a428733496e57b32d2e3b18a9cb6f24732", "54c0b32ab22c74e7a86d535779c1f83e139ab6ce", "00d6497aa6e3258482053be801849ed2e5dcdc3e", "47fca19981be89efbc6dc8ddf687f6dcf9a7f86f", "f51574568c6c3ebdd025d42892ddb27a423129eb", "7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee", "3543192816a9df2a63720ba43fe9bddbcbe4b692"]
+commits: ["86b6f3006ebe07a38fa3f890efacb00cdfbfb320", "9ebea6a428733496e57b32d2e3b18a9cb6f24732", "54c0b32ab22c74e7a86d535779c1f83e139ab6ce", "00d6497aa6e3258482053be801849ed2e5dcdc3e", "47fca19981be89efbc6dc8ddf687f6dcf9a7f86f", "f51574568c6c3ebdd025d42892ddb27a423129eb", "7bb23bca676396d8434491cef270f6094a92a36f", "0766a16799c0cd414080d98b0cad5f56e561e7ee", "3543192816a9df2a63720ba43fe9bddbcbe4b692", "7d3313d51"]
 ---
 
 ## Spec Excerpt
@@ -88,8 +88,7 @@ per spec "future"). The lens substrate (toolbar toggle, structural base,
 trace-particle evaluative, observable banner) came from task-065; this task
 closed the remaining HSI §3 gaps — the evaluative overlays for test coverage
 / gate outcomes / spec approval, and URL persistence of the lens selection —
-merged with the task-086 liveness base (both feature sets coexist in
-ExplorerCanvas/ExplorerView).
+composed with the task-086 liveness base.
 
 ### Shipped behavior
 
@@ -110,82 +109,56 @@ ExplorerCanvas/ExplorerView).
   the task-086 record-aggregate coloring applies first; the per-spec recency
   join (`gateStatusByNodeId`: most recent MR with concluded gates per spec
   path, latest run per gate decides) overrides it for edges leaving a
-  governed node. Precomputed per node; the legend shows the aggregate gate
-  entries only while the per-spec join has no data.
+  governed node.
 - **Data loading** (ExplorerView `loadEvaluativeData`): gate outcomes joined
   from this repo's recent MRs (repo-scoped `repository_id` + server-side
   `per_page: 10`, newest first) and the spec approval ledger
-  (`GET /api/v1/specs/approvals`), best-effort and non-blocking, alongside
-  the task-086 loaders and the trace loader.
+  (`GET /api/v1/specs/approvals`), best-effort and non-blocking.
 - **URL persistence**: lens restored from `?lens=evaluative` deep links on
   mount, synced via `history.replaceState` on switch (other params and the
   `#drill=` hash preserved).
 - **Ledger API**: `SpecApprovalResponse` serializes `rejected_at` /
   `rejected_reason` so a rejected approval (✗) is distinguishable from a
-  revoked one (back to ⏳ pending) — server round-trip test included.
-- **Observable lens**: disabled (`aria-disabled`, tooltip "requires
-  production telemetry integration") per spec — future work.
+  revoked one (back to ⏳ pending).
+- **Observable lens**: disabled (`aria-disabled`, tooltip "requires production
+  telemetry integration") per spec — future work.
+- **Evaluative toolbar legend** (Coverage ok/partial/low, Gate pass/fail,
+  Approved/Pending/Rejected) documents the HSI §3 overlays; the
+  `toolbar-evaluative-linux.png` e2e baseline was regenerated once
+  (`9ebea6a428`) when that legend legitimately wrapped the toolbar to a
+  second row (same locator, same `maxDiffPixelRatio`, no assertion weakened).
 
-### Test evidence
+### Reconciliation with the current base (this round)
 
-- `web/src/__tests__/lens-rendering.test.js` — 27 unit tests: coverage
-  thresholds/badge colors, node→spec join (spec_path, spec_paths,
-  GovernedBy targets, soft-deleted edges ignored), gate pass/fail resolution
-  (fail wins), approval status from ledger history, composed decorations,
-  URL param read/write.
-- `web/src/__tests__/ExplorerCanvas.test.js` — lens component tests:
-  evaluative legend entries, coverage badge drawn green at 85% (and NOT in
-  structural lens), gate edge/ring colors, a differential EDGE-stroke test
-  isolating the per-spec gate edge coloring by path geometry, approval icons
-  ✓/⏳/✗ (and absent in structural lens), lens switching preserves node
-  label positions exactly (no re-layout).
-- `web/src/__tests__/ExplorerViewLensUrl.test.js` — 6 tests: structural
-  default has no param, evaluative persists `?lens=evaluative`, switching
-  back drops it, deep-link restore, observable disabled state + tooltip, and
-  the evaluative gate-data load being repo-scoped (all three loaders fire,
-  every `mergeRequests` call carries `repository_id`, never `repo_id`).
-- `web/src/__tests__/ExplorerCanvasLiveness.test.js` +
-  `ExplorerViewLivenessWiring.test.js` (task-086) still pass unchanged.
-- `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
-  `list_spec_approvals_includes_rejection_fields`).
-- Full `npm test` in `web/`: 80 files, 1865 passed / 41 skipped (exit 0).
-- E2E (`npx playwright test`): 65 passed — see the CI repair below.
+The independently reviewed implementation (retained source checkpoint
+`d00990bc`) was reconciled with the current contract base `078ec12a` (merge
+`7d3313d51`, working tree clean, no unresolved conflicts):
 
-### CI repair: evaluative toolbar visual baseline
+- All task-090 source files are intact after the merge: `lens-rendering.js`,
+  `ExplorerView.svelte`, and the three lens test files are byte-identical to
+  the reviewed checkpoint; `ExplorerCanvas.svelte` and `gates.rs` carry the
+  new-base evolution (notifications, canvas density policy, ViewEvents) on
+  top of the lens features — both feature sets coexist.
+- `ExplorerViewLensUrl.test.js` drills into the repo via the current
+  workspace realized-architecture graph (double-click on the rendered repo
+  node, task-174) instead of the retired workspace repo cards.
+- Generated `web/dist` is restored from the assignment base per controller
+  policy; final integration rebuilds and publishes those assets remotely
+  from source. No dist files were committed in this round.
+- Full e2e/GitHub-CI validation is owned by verification/publication; no
+  visual baseline was changed in this round (no current failure artifacts to
+  act on).
 
-PR head 55064c8dc failed the E2E gate (run 42503691204):
-`evaluative_lens_toggle_changes_toolbar` expected a 919x103 toolbar but the
-candidate renders 919x133. Root cause: the `toolbar-evaluative-linux.png`
-baseline dated from task-065; the task-090 evaluative legend (Coverage
-ok/partial/low, Gate pass/fail, Approved/Pending/Rejected — asserted by the
-ExplorerCanvas unit tests and required to document the HSI §3 overlays)
-wraps onto an extra `flex-wrap` row, so the toolbar legitimately grew. The
-rendered UI is the specced one; the baseline was stale.
+### Test evidence (this round, branch HEAD `7d3313d51`)
 
-Fixed in commit `9ebea6a428` by regenerating the baseline against HEAD's
-committed dist with the locked playwright/chromium (no assertion weakened:
-same locator, same `maxDiffPixelRatio: 0.02`, same timeout). Verified with
-byte-exact local reproduction of the CI failure (identical 919x103 vs
-919x133, 31764 diff pixels), the regenerated baseline is byte-identical to
-the actual PNG captured by the failing CI run, the full
-`explorer-visual.spec.js` suite passes (16/16, `toolbar-default.png`
-unchanged), and the full e2e suite passes (65/65). Evidence retained at
-/tmp/stage/review-evidence (controller-side).
-
-### Generated web/dist disposition (repair round)
-
-The review finding that branch HEAD's committed `web/dist` bundle equals the
-pre-task-090 base bundle is confirmed and is a generated-asset issue only —
-no source defect: `web/src` and `gates.rs` are byte-identical to the
-independently reviewed candidate 64598aca. Per controller policy the executor
-restores web/dist from the assignment base and final integration rebuilds and
-publishes those assets remotely from source. Verified in this round
-(evidence: /tmp/stage/review-evidence/task-090-dist): a fresh `npm ci` +
-`vite build` of HEAD source (temp outDir, committed dist untouched) emits
-`index-QXRGsaeH.js` byte-identical (sha256 4c80cc80…) to the verified task-090
-feature bundle from 54c0b32ab, containing gateStatusBySpec, specApprovals,
-lens URL persistence, and the evaluative legend labels. Focused re-run:
-lens-rendering + ExplorerCanvas + ExplorerViewLensUrl — 191/191 passed.
-No dist files were committed in this assignment.
+- `vitest run lens-rendering.test.js ExplorerCanvas.test.js
+  ExplorerViewLensUrl.test.js` — 191/191 passed, exit 0.
+- `vitest run ExplorerCanvasLiveness ExplorerViewLivenessWiring
+  ExplorerViewWorkspaceGraph ExplorerViewViewEvents` — 35/35 passed, exit 0
+  (task-086 liveness and new-base canvas features unaffected by the merge).
+- `cargo test -p gyre-server --lib api::gates` — 12 passed (incl.
+  `list_spec_approvals_includes_rejection_fields`), exit 0.
+- Probe commands, exit codes, and output retained at
+  /tmp/stage/review-evidence/task-090-reconcile (controller-side).
 
 Acceptance criteria left unchecked for independent review.
