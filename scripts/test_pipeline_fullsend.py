@@ -281,10 +281,12 @@ else: print('fixture control operation')
         return subprocess.run([str(self.shim/'openshell'),*args],env={**self.env,**(extra or {})},capture_output=True,text=True,timeout=30)
 
     def test_creation_is_reserved_and_owned_before_real_cli_and_capacity_is_enforced(self):
-        result=self.invoke('sandbox','create','--name',self.name,'--keep','--','sleep','infinity')
+        self.store.set_setting('compute_memory:task-9999:implement',8)
+        result=self.invoke('sandbox','create','--name',self.name,'--memory','8Gi','--keep','--','sleep','infinity')
         self.assertEqual(result.returncode,0,result.stderr)
         state=json.loads((self.root/'backend.json').read_text())
         self.assertNotIn('--keep',state['calls'][0])
+        self.assertEqual(state['calls'][0][state['calls'][0].index('--memory')+1],'4Gi')
         self.assertIn('gyre.dev/work='+self.work,state['calls'][0])
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'present')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')
