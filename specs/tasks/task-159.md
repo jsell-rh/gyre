@@ -156,29 +156,32 @@ MR detail view reads, so the graph cannot disagree with gate results.
 Original backend, policy API, drift evaluation, UI, and tests shipped in
 recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad, followed
 by the starvation review repair (commit 8a99bd808), the fefde2946 base
-merge and its attestation-ABAC test repair (commit 11a702b89).
+merge and its attestation-ABAC test repair (commit 11a702b89), and the
+b5a8720878 base merge (task-108/106/116/140/205/208; merge commit
+34b4b8ebc) whose single content conflict — both sides appending test
+suites at the tail of `mod tests` in `merge_processor.rs` — was resolved
+by keeping both blocks intact.
 
-This round merged the assigned base b5a8720878 (task-108 admin
-impersonation, task-106 automatic jj rebase on branch movement, task-116
-prompt-set attestation wiring, task-140/205/208; merge commit 34b4b8ebc).
-The single content conflict — the tail of the `mod tests` block in
-`crates/gyre-server/src/merge_processor.rs` — was both sides appending
-test suites at the same anchor: task-159's §9 drift tests vs the base's
-task-106 rebase + task-116 attestation tests. Resolved by keeping both
-blocks intact. No production code changed this round; the base's
-production changes (including `meta_specs_used` attestation population
-and the jj rebase hook in `process_next`) auto-merged cleanly alongside
-task-159's selection-time drift hold.
+This round continued from checkpoint 6df4d7880 (the prior iteration
+timed out mid-verification during the cold compile of the focused
+workspaces suite; no code change was pending) and completed the merge of
+the assigned base fca5de5fb (PR #763 admission-policy preflight fix;
+merge commit e29668348). The base touches only pipeline scripts and
+docs (`scripts/pipeline/compute.py`, `scripts/dev-pipeline.py`,
+`scripts/test_pipeline_admission.py`, `docs/dev-pipeline.md`) — no
+product surface, no content conflicts with task-159's drift hold, and
+no new commits needed on the task's `commits:` list (the attribution
+check excludes merge commits and non-product commits). No production
+code changed this round.
 
-Evidence this round: `cargo test -p gyre-server --lib merge_processor` —
-90 passed (drift + strict-drift suites together with the base's
-rebase/attestation tests); focused drift/policy suites — 11 passed;
-`reconciliation::`/`merge_deps::`/`api::workspaces::` — 69 passed; full
-`cargo test -p gyre-server --lib` — 1633 passed, 0 failed
-(merge-correctness probe). check-arch, check-abac-route-registry,
-check-task-commit-attribution, check-inert-enforcement,
-check-migration-versions, check-dead-message-kinds green. Logs retained
-under /tmp/stage/review-evidence/task-159-*.log. The
+Evidence this round: `cargo test -p gyre-server --lib api::workspaces::`
+— 20 passed; focused drift/strict-drift/policy suites — 11 passed;
+`merge_processor` — 90 passed; `reconciliation::` + `merge_deps::` —
+52 passed; full `cargo test -p gyre-server --lib` — 1686 passed,
+0 failed (merge-correctness probe). check-arch,
+check-task-commit-attribution, check-abac-route-registry,
+check-migration-versions green. Logs retained under
+/tmp/stage/review-evidence/task-159-*.log. The
 acceptance-criteria checkboxes are left unchecked in the task body per
 the assigned contract; the criteria themselves are satisfied by the
 shipped behavior above.
