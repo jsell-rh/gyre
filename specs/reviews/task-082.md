@@ -69,3 +69,58 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## R11 Findings (re-dispatch round — candidate `3fcc55c17`, base `078ec12a5`)
+
+**No findings — approved.**
+
+This round ships no product code (diff base→candidate touches only
+`specs/system/human-system-interface.md`,
+`specs/coverage/system/human-system-interface.md`, and
+`specs/tasks/task-082.md`), which is the correct outcome: the assigned
+product (the 6-item sidebar) is complete in history — all five commits
+(`d99ace7b`, `f332f774`, `72bd5823`, `9561ee86`, `79323318`) are ancestors
+of the assigned base, review-accepted through R10 — and the requirement was
+subsequently superseded by `ui-navigation.md` (header note, Principle 5 "No
+sidebar", §9 "From HSI §1"), with task-210's 2026-10-09 navigation binding
+correction (commit `a781ede2`, ancestor of base) having removed the sidebar
+from the shell. Reintroducing it would contradict the canonical spec and
+re-open the recorded ui-navigation coverage row-3 regression.
+
+The round's actual work — the in-place HSI §1/§1.3 supersession amendment —
+is verified genuine and precedent-conformant:
+
+- The amendment mirrors the accepted task-208 user-management.md precedent:
+  dated note under §1 naming the superseding spec and what supersedes what,
+  an amendment note on §1.3, historical text retained, coverage row 3 amended
+  with the same date. This is the "formal spec amendment via spec lifecycle"
+  half of the resolution the 2026-09-30 ui-navigation audit explicitly called
+  for (coverage row 3: "needs either sidebar removal or formal spec amendment
+  via spec lifecycle" — task-210 did the removal, this round records it).
+- The amendment's factual claims all check out: `ui-navigation.md:3`
+  supersedes HSI §1 including the six-item sidebar; Principle 5 (`:28`)
+  mandates "No sidebar"; the ui-navigation coverage matrix carries the
+  2026-10-09 navigation binding correction note; `scripts/check-task-commit-attribution.sh`
+  passes at the candidate.
+- Independent test evidence at the candidate: `npm ci` then
+  `npx vitest run NoSidebar.test.js WorkspaceDrawerSectionNav.test.js
+  AppShell.test.js` — 78/78 passed, exit 0 (output retained under
+  /tmp/stage/review-evidence/web-focused-nosidebar-shell.txt), matching the
+  Shipped section's claim exactly. `NoSidebar.test.js` is a genuine
+  behavioral guard: it mounts the real App and asserts no
+  `[data-testid="sidebar"]`/`.sidebar`/`.sidebar-item` elements exist, the
+  mobile drawer lists the five workspace-home sections (excluding
+  Inbox/Meta-specs/Explorer), and g-key shortcuts navigate — so
+  reintroducing the sidebar would fail it.
+- The candidate's Shipped section is transparent about the supersession
+  state rather than claiming fresh product delivery — no fake completion.
+
+Observations considered and rejected as below the relevance bar: (1) the
+frontmatter `commits:` list carries four of the five historical commits
+(`d99ace7b` dropped) — the attribution check passes (d99ace7b's subject line
+carries no task label, so it is not a "task-labeled product-surface commit"
+under the check's definition), all five are ancestors of the base so review
+scoping of this round's diff is unaffected, and the Shipped section
+documents all five; (2) the task's acceptance-criteria checkboxes remain
+checked from the historical round while the sidebar is no longer in the
+product — the Shipped section prominently records the supersession, and
+rewriting the historical record is not this round's assignment.
