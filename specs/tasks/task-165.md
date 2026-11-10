@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["57bc4ea7e76bb4e95eb76cbd372df54bea510846", "27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["821ec1f017f1ef5a1c6f3034cbd7e1ce1d0437be", "57bc4ea7e76bb4e95eb76cbd372df54bea510846", "27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
 ---
 
 ## Spec Excerpt
@@ -60,6 +60,47 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 
 ## Shipped
+
+Repair round 5 (merge commit `821ec1f01`) — **rebase onto new base
+`b5a872087899e8bc4a18092ab56990a26e9ca9af` (task-108 user impersonation
++ task-099 persona_id)**: resolved seven content conflicts, all the same
+class — both sides extended the same `Agent` struct/rows/handlers with
+independent new fields. Resolution unions both changes, no behavior
+dropped:
+
+- `gyre-domain/src/agent.rs`: `Agent` carries both `attestation_level`
+  (task-165) and `persona_id` (base); base's `bootstrap_workspace()`
+  helper retained.
+- `gyre-adapters` sqlite + postgres `agent.rs` and `schema.rs`: rows,
+  insertables, upsert/update sets, and `into_agent()` mappings carry both
+columns; `2026-10-10-000059_agent_attestation_level` does not collide
+  with base's date-prefixed versions (`check-migration-versions.sh` OK).
+- `gyre-server/src/api/agents.rs`: `AgentResponse` exposes both fields.
+- `gyre-server/src/git_http.rs` (test module): kept all eight task-165
+  push tests and the base's new
+  `push_modifying_spec_revokes_ledger_approvals` (ledger-path vs git-path
+  normalization regression).
+- `specs/coverage/SUMMARY.md`: regenerated mechanically via
+  `scripts/update-coverage-summary.sh` from the merged per-spec files
+  (both sides had hand-diverged rows).
+
+Verified at `821ec1f01` (logs under `/tmp/stage/review-evidence/`,
+prefix `task165-r5-`):
+
+- `cargo check -p gyre-server -p gyre-cli` → exit 0.
+- `cargo test -p gyre-server git_http::` → 62 passed, 0 failed — includes
+  all eight task-165 push tests and the base's
+  `push_modifying_spec_revokes_ledger_approvals`.
+- `cargo test -p gyre-server api::stack_attest` → 14 passed;
+  `cargo test -p gyre-domain stack` → 9 passed;
+  `cargo test -p gyre-adapters sqlite::agent` → 17 passed (both new
+  columns round-trip through the merged adapter).
+- Gates: `check-arch.sh`, `check-event-payload.sh`,
+  `check-migration-versions.sh`, `check-migration-sql-portability.sh`,
+  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
+  `check-dead-message-kinds.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh` → all exit 0; `cargo fmt --all -- --check`
+  → clean.
 
 Repair round 4 (commit `57bc4ea7e`, responding to review `cfaa0223`
 on candidate `b00336daf`) — **rustfmt violations on task-changed lines
