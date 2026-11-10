@@ -2,7 +2,7 @@
 
 **Spec:** [`system/meta-spec-reconciliation.md`](../../system/meta-spec-reconciliation.md)
 **Last audited:** 2026-09-30 (full re-audit of all 4 `implemented` rows 5-8 at HEAD c6d18964 with fresh code evidence — all confirmed Partial, no status changes, no hollow rows found; only commit since 2026-09-29 audit touching audited files is 998a3518 (task-087 HSI trace capture), which adds no meta-spec behavior but shifts the merge_processor.rs anchor for row 7 from :1407 to :1416. `task-assigned` rows 9-15 left unchanged per rules; n/a rows 1-4/16-18 spot-checked correct.)
-**Coverage:** 5/11 (7 n/a, 6 task-assigned, 5 implemented)
+**Coverage:** 6/11 (7 n/a, 5 task-assigned, 6 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|

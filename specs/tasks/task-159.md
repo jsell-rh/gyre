@@ -151,37 +151,43 @@ MR detail view reads, so the graph cannot disagree with gate results.
   check-dead-message-kinds, check-migration-sql-portability,
   check-task-commit-attribution.
 
-### Round note (base-merge repairs)
+### Round note (review-repair round f05caa26)
 
-Original backend, policy API, drift evaluation, UI, and tests shipped in
-recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad, followed
-by the starvation review repair (commit 8a99bd808), the fefde2946 base
-merge and its attestation-ABAC test repair (commit 11a702b89), and the
-b5a8720878 base merge (task-108/106/116/140/205/208; merge commit
-34b4b8ebc) whose single content conflict — both sides appending test
-suites at the tail of `mod tests` in `merge_processor.rs` — was resolved
-by keeping both blocks intact.
+Prior rounds: original backend, policy API, drift evaluation, UI, and
+tests (recovered checkpoint 333030908 + feat commit abbcd4aad); the
+starvation review repair (8a99bd808); base merges fefde2946 (with the
+attestation-ABAC test repair, 11a702b89), b5a8720878 (merge 34b4b8ebc),
+and fca5de5fb (merge e29668348, no product change). This round merged
+the assigned base 18adceb68 (PR #765 four-GiB frontend-heap fix; merge
+19fd874a2 — pipeline scripts, docs, and one ExplorerCanvas test only,
+no conflict against the task-159 surface) and repaired the two review
+findings from round f05caa26:
 
-This round continued from checkpoint 6df4d7880 (the prior iteration
-timed out mid-verification during the cold compile of the focused
-workspaces suite; no code change was pending) and completed the merge of
-the assigned base fca5de5fb (PR #763 admission-policy preflight fix;
-merge commit e29668348). The base touches only pipeline scripts and
-docs (`scripts/pipeline/compute.py`, `scripts/dev-pipeline.py`,
-`scripts/test_pipeline_admission.py`, `docs/dev-pipeline.md`) — no
-product surface, no content conflicts with task-159's drift hold, and
-no new commits needed on the task's `commits:` list (the attribution
-check excludes merge commits and non-product commits). No production
-code changed this round.
+- **Coverage header (docs finding, fixed):** the meta-spec-reconciliation
+  coverage header read `5/11 (7 n/a, 6 task-assigned, 5 implemented)`
+  while the table holds 6 implemented rows (5,6,7,8,11,13) and 5
+  task-assigned rows (9,10,12,14,15); corrected to
+  `6/11 (7 n/a, 5 task-assigned, 6 implemented)` (mechanically recounted
+  against the table).
+- **Stale committed web/dist (code finding, resolved at the source
+  level):** the committed bundle predates the task-159 drift UI, so it
+  contains none of the `mq-drift` / `data-drift` / `Meta-spec drift` /
+  `mq-tooltip-drift` markers. Under this assignment's executor runtime,
+  generated `web/dist` files are restored from the assignment base and
+  the final integration stage rebuilds and publishes those assets
+  remotely, so the dist regeneration is deliberately not performed or
+  committed here. Source-level verification recorded instead: all four
+  marker classes are present in
+  `web/src/components/MergeQueueGraph.svelte`, byte-identical to review
+  checkpoint 7d5a9715 where the reviewer's fresh `npm run build` of this
+  source reproduced all of them in `dist/assets/*.js`; no `web/src`
+  file changed this round, so that build reproduction still stands for
+  the remote integration rebuild.
 
-Evidence this round: `cargo test -p gyre-server --lib api::workspaces::`
-— 20 passed; focused drift/strict-drift/policy suites — 11 passed;
-`merge_processor` — 90 passed; `reconciliation::` + `merge_deps::` —
-52 passed; full `cargo test -p gyre-server --lib` — 1686 passed,
-0 failed (merge-correctness probe). check-arch,
-check-task-commit-attribution, check-abac-route-registry,
-check-migration-versions green. Logs retained under
-/tmp/stage/review-evidence/task-159-*.log. The
-acceptance-criteria checkboxes are left unchecked in the task body per
+No production code changed this round; the single new commit is the
+docs-only header fix, which is outside the attribution check's product
+surface (crates/, web/src, web/tests), so the `commits:` frontmatter is
+unchanged. Evidence retained under /tmp/stage/review-evidence/.
+The acceptance-criteria checkboxes remain unchecked in the task body per
 the assigned contract; the criteria themselves are satisfied by the
 shipped behavior above.
