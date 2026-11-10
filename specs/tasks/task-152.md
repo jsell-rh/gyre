@@ -123,49 +123,46 @@ The original "stubbed for now" narrative comment in `graph.rs` is gone.
 
 ### Test evidence
 
-At the current merged head (candidate rebased onto base `fefde294`), `CARGO_HOME=/tmp/cargo-home`,
-`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
+At the current merged head (candidate rebased onto base `b5a872087`, merge `6184bb3d0`),
+`CARGO_HOME=/tmp/cargo-home`, `SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
 
-- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed** (`r8-domain-narrative.log`).
+- `cargo test -p gyre-server --lib api::graph` → **35 passed, 0 failed** (`r10-server-api-graph.log`)
+  — both test sets kept through the rebase: the narrative tests
+  (`timeline_endpoint_returns_grounded_narrative`, briefing template-fallback and
+  LLM-path tests) and main's concept-view + repo-scoped briefing filter tests.
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed**
+  (`r10-domain-narrative.log`).
 - `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed, 0 failed**
-  (`r8-server-narrative.log`) — includes `timeline_endpoint_returns_grounded_narrative` (asserts
-  every clause of the spec's template example), `briefing_summary_falls_back_to_template_
-narrative_without_llm`, `briefing_summary_uses_llm_narrative_when_configured`.
-- `cargo test -p gyre-server --lib api::graph` → **31 passed, 0 failed** (`r8-server-api-graph.log`)
-  — narrative generation tests and main's repo-scoped briefing filter tests, both kept through
-  the rebase.
-- Earlier rounds on the pre-merge tree additionally passed: full `gyre-domain --lib` (447),
-  `gyre-common --lib` (116), `graph_extraction` (31), `session_registry` (4), and the repo gate
-  suite (rustfmt/clippy diff-clean vs base, arch/ABAC/migration/attribution checks, exit 0).
+  (`r10-server-narrative.log`).
+- `cargo test -p gyre-server --test graph_integration` → **38 passed, 0 failed**
+  (`r10-graph-integration.log`), `cargo check --all` clean (`r10-check-all.log`),
+  `cargo fmt --all --check` clean, and the arch/ABAC-route/migration/attribution/
+  dead-message-kind gate scripts all pass at the merge head.
+- Earlier rounds on prior heads additionally passed: full `gyre-domain --lib` (447),
+  `gyre-common --lib` (116), `graph_extraction` (31), the repo gate suite, and the
+  full Playwright e2e suite (65 passed, including `briefing_section_renders`).
 
-### Final round repairs
+### Rebase/merge repairs
 
-- Resolved the rebase of the candidate onto base `fefde294`: kept both test sets in
-  `api/graph.rs`, union imports in `graph_extraction.rs`; `collect_architecture_narratives`
-  honors main's briefing `repo_filter` contract (repo filter applied uniformly to every
-  repo-derived section).
-- Verification finding repaired: `git diff --check` vs base flagged a new blank line at EOF in
-  this file (`specs/tasks/task-152.md:209`); the Shipped notes were rewritten concisely with a
-  single trailing newline, and `git diff --check fefde294 HEAD` is now clean.
-
-### CI repair (e2e workflow)
-
-- GitHub E2E run 42623773713 on head `47e58b11` failed at "Install Playwright browsers"
-  before any test ran: `ubuntu-latest` now resolves to ubuntu 26.04 and the locked
-  Playwright 1.58.2 refuses to install browsers there ("Playwright does not support
-  chromium on ubuntu26.04-x64"). Fixed by pinning the e2e job to `ubuntu-24.04`
-  (`.github/workflows/e2e.yml`, commit `75fc67f23`), the image the locked Playwright
-  supports. A Playwright version bump was rejected: it changes the chromium revision
-  and would invalidate the committed visual baselines.
-- The suite the failed run never reached was validated locally at head `47e58b11`:
-  server built with `SKIP_WEB_BUILD=1` (serves the assignment base's committed
-  `web/dist`), run against the staged chromium-1208 that Playwright 1.58.2 expects:
-  `npx playwright test` → **65 passed, 0 failed** (1.9m, `r9-e2e-full.log`), including
-  `briefing_section_renders` (exercises the narrative-bearing briefing against the
-  real server) and every explorer visual regression baseline.
+- **Onto `fefde294`** (round 8): kept both `api/graph.rs` test sets, union imports in
+  `graph_extraction.rs`; `collect_architecture_narratives` honors main's briefing
+  `repo_filter` contract.
+- **e2e CI** (round 9): GitHub E2E run 42623773713 failed at browser install because
+  `ubuntu-latest` resolves to ubuntu 26.04, unsupported by the locked Playwright 1.58.2.
+  The e2e job is pinned to `ubuntu-24.04` (commit `75fc67f23`); a Playwright bump was
+  rejected because it would invalidate the committed visual baselines. The suite was
+  validated locally at that head: 65 passed, 0 failed (`r9-e2e-full.log`).
+- **Onto `b5a872087`** (this round, merge `6184bb3d0`): main had landed task-205
+  (manifest concept views) and task-104 (briefing-ask ABAC audit event) after the
+  candidate branched. Resolutions: kept main's concept-view handlers and ABAC audit
+  in `api/graph.rs` and dropped the candidate's stale pre-task-205 substring concept
+  search; kept the task-152 narrative section and the narrative-populating timeline
+  body; unioned both `api/graph.rs` test sets; `e2e.yml` kept main's identical
+  ubuntu-24.04 pin; `realized-model.md` coverage keeps main's task-205 addendum and
+  task-152 row 9 (`implemented`) with main's row 10 concept-views note.
 
 ### Verification scope
 
-Exact-head GitHub CI — now the E2E Tests job on the pinned ubuntu-24.04 image — remains
-mandatory on the host. Committed `web/dist` is the assignment base's staged state; local
-builds ran with `SKIP_WEB_BUILD=1` so it is untouched by this round.
+Exact-head GitHub CI — including the E2E Tests job on the pinned ubuntu-24.04 image —
+remains mandatory on the host. Committed `web/dist` is the assignment base's staged
+state; local builds ran with `SKIP_WEB_BUILD=1` so it is untouched by these rounds.
