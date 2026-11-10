@@ -22,6 +22,11 @@
 //!   returns FTS5 snippet markers and a bm25-derived score;
 //! - durability: a second `build_state` on the same file still finds the doc
 //!   (an in-memory index loses it).
+//!
+//! task-153 endpoint legs ride the same middleware stack: GET
+//! /search/suggest (prefix autocomplete, empty-prefix and auth rejection),
+//! GET /search/facets (whole-index aggregation), and facet_counts on the
+//! /search response (filtered-set aggregation).
 
 use axum::body::Body;
 use gyre_ports::search::{SearchDocument, SearchQuery};
@@ -175,6 +180,112 @@ async fn sqlite_url_wires_fts5_search_port() {
     );
     // Facet round-trip through the API surface.
     assert_eq!(hit["facets"]["status"], "backlog");
+
+    // ── §API/§Response Format: facet_counts on the search response ───────
+    // Aggregated over the filtered match set (the quokka task), not the
+    // whole index and not a truncated page.
+    let fc = &body["facet_counts"];
+    assert_eq!(
+        fc["type"]["task"].as_u64(),
+        Some(1),
+        "facet_counts.type must count the matching task: {fc}"
+    );
+    assert_eq!(
+        fc["status"]["backlog"].as_u64(),
+        Some(1),
+        "facet_counts.status must aggregate the match set's facets: {fc}"
+    );
+
+    // ── §API: GET /search/suggest — prefix autocomplete ──────────────────
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=quok", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let suggestions = body["suggestions"].as_array().unwrap();
+    assert_eq!(
+        suggestions.len(),
+        1,
+        "suggest must prefix-match 'quok' against 'Quokka census': {body}"
+    );
+    assert_eq!(suggestions[0]["text"], "Quokka census");
+    assert_eq!(suggestions[0]["entity_type"], "task");
+    assert!(!suggestions[0]["entity_id"].as_str().unwrap().is_empty());
+
+    // Empty prefix: empty list — never "every title in the index".
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["suggestions"].as_array().map(Vec::len),
+        Some(0),
+        "empty prefix must yield no suggestions: {body}"
+    );
+
+    // Non-matching prefix: empty list.
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=zzz", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["suggestions"].as_array().map(Vec::len), Some(0));
+
+    // Suggest is authenticated like /search itself: no token → 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/search/suggest?q=quok")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "suggest must sit behind require_auth"
+    );
+    // Facets endpoint likewise.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/search/facets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "facets must sit behind require_auth"
+    );
+
+    // ── §API: GET /search/facets — whole-index aggregation ───────────────
+    let resp = call(&app, "GET", "/api/v1/search/facets", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let facets = &body["facets"];
+    // wiring-1 (indexed directly) + the API-created quokka task.
+    assert_eq!(
+        facets["type"]["task"].as_u64(),
+        Some(2),
+        "facets must aggregate the whole index: {facets}"
+    );
+    // Only the API-created task carries a status facet (backlog).
+    assert_eq!(facets["status"]["backlog"].as_u64(), Some(1));
 
     // ── Durability: fresh state on the same file still finds the doc ───────
     let state2 = build_state(TOKEN, "http://localhost:3000", None);
