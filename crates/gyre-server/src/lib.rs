@@ -80,9 +80,9 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -304,6 +304,8 @@ pub struct AppState {
     pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
     /// Per-repo spec enforcement policies (persisted).
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
+    /// Per-repo spec lifecycle configuration (persisted).
+    pub spec_lifecycle_configs: Arc<dyn gyre_ports::SpecLifecycleRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
     /// Authorization provenance attestation chains (TASK-006).
@@ -1082,6 +1084,10 @@ pub fn build_state(
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
+        ),
+        spec_lifecycle_configs: store!(
+            dyn SpecLifecycleRepository,
+            mem::MemSpecLifecycleRepository::default()
         ),
         attestation_store: store!(
             dyn AttestationRepository,
