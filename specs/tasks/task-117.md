@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["1ffe1397f4cf331544cdbc691fac2eeb2771f52b", "c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "71967943dd45cec83c6c0a2047948d774560efd7"]
+commits: ["71967943dd45cec83c6c0a2047948d774560efd7", "1ffe1397f4cf331544cdbc691fac2eeb2771f52b", "c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30"]
 ---
 
 ## Spec Excerpt
@@ -418,6 +418,32 @@ prompt delivery + meta-spec repository split upstream):
   seeded persona section) from `spec.containers[0].env`. Same
   assertion strength, observed against real dispatch code.
 
+Round 12 (`a17041706`, requirements_changed re-integration — base
+`dbf9edaea`, the published task-117 merge on main plus upstream
+task-108/109/115/116/174 work, merged with the retained source
+checkpoint `447119c70`):
+
+- **Re-integration verification, no code repair required.** The
+current task contract (`specs/tasks/task-117.md` at the new base)
+differs from the retained checkpoint only in bookkeeping
+(`progress: complete`, the verified-asset commit `71967943d` added
+to the `commits:` frontmatter); the acceptance criteria and coverage
+sections are unchanged. The base's task-117 surface —
+`gyre-ports/src/compute.rs`, `gyre-adapters/src/compute/`, spawn /
+compute-target / workspace handlers, `docker/gyre-agent/` — is
+byte-identical to the retained checkpoint (the base's publication
+descends from this candidate lineage), so the merge keeps it
+unchanged while adding the upstream features. All base differences
+are purely additive (spec-lifecycle config port/adapters/API,
+signal_chain orchestrator registry, explorer view updates); the two
+additive `mem.rs` blocks (`MemSpecLifecycleRepository`, the
+`spec_lifecycle_configs` + `orchestrator_registry` test-state fields)
+auto-merge cleanly beside task-117's `spawned_backends` state — no
+content conflicts, no semantic artifacts to repair (the recurring
+round-5/11 `test_state_inner` shape did not recur: the base's
+changes are new struct fields, not signature changes). Evidence in
+`round12-requirements-changed-merge/`.
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -533,5 +559,18 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   in-memory-state-stores, migration-versions,
   task-commit-attribution gates -> exit 0 (logs in
   `round11-merge-repair/`).
+- Round 12 (`a17041706`, requirements_changed re-integration):
+  `cargo check -p gyre-server --all-targets` -> exit 0; full
+  `cargo test -p gyre-server --lib` -> **1659 passed, 0 failed**
+  (includes upstream signal_chain/spec-lifecycle additions);
+  `api::spawn` -> **52 passed, 0 failed**; `compute_target` ->
+  **24 passed, 0 failed**; `cargo test -p gyre-adapters compute
+  --lib` -> **39 passed, 0 failed** (4 ignored); arch,
+  abac-route-registry, migration-versions, mem-port-contracts,
+  in-memory-state-stores, task-commit-attribution gates -> exit 0;
+  coverage rows 22–26 all `implemented`, no `not-started` rows in
+  `specs/coverage/system/agent-runtime.md`; working tree clean after
+  all runs (log and transcripts in
+  `round12-requirements-changed-merge/`).
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
