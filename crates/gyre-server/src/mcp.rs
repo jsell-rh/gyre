@@ -1688,7 +1688,8 @@ async fn create_uncertainty_notifications(
             &tenant_id,
             now,
         );
-        notif.entity_ref = Some(agent_id.to_string());
+        notif.source.entity_type = "agent".to_string();
+        notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
         if let Err(e) = state.notifications.create(&notif).await {

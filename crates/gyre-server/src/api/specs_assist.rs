@@ -254,8 +254,9 @@ async fn spec_conflict_response(
             now as i64,
         );
         notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_path.to_string());
-        notif.repo_id = Some(repo.id.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = spec_path.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
         }
@@ -713,7 +714,8 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
+    // Priority-2 "Spec approval requested" notification (user-management.md
+    // §Notification Entity + HSI §2/§8).
     // user_id is "system" — real per-user fan-out requires workspace membership
     // which is outside this task's scope.
     let notif_id = new_id();
@@ -721,12 +723,14 @@ pub async fn save_spec(
         notif_id,
         repo.workspace_id.clone(),
         Id::new("system"),
-        NotificationType::SpecPendingApproval,
+        NotificationType::SpecApprovalRequested,
         format!("Spec pending approval: {}", req.spec_path),
         &tenant_id,
         now as i64,
     );
-    notif.entity_ref = Some(mr_id.to_string());
+    notif.source.entity_type = "mr".to_string();
+    notif.source.entity_id = mr_id.to_string();
+    notif.source.repo_id = Some(repo.id.clone());
     // Non-fatal — MR is created even if notification fails.
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
@@ -979,10 +983,10 @@ mod tests {
         let notifs = state.notifications.list_recent(10).await.unwrap();
         let spec_notif = notifs
             .iter()
-            .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
-            .expect("SpecPendingApproval notification must be created");
-        assert_eq!(spec_notif.priority, 2);
-        assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
+            .find(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+            .expect("SpecApprovalRequested notification must be created");
+        assert_eq!(spec_notif.priority_rank, 2);
+        assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
     }
 
     #[tokio::test]
@@ -1731,10 +1735,10 @@ mod tests {
                 1,
                 "user {uid} must get exactly one SpecConflict notification, got {notifs:?}"
             );
-            assert_eq!(conflict[0].priority, 2);
+            assert_eq!(conflict[0].priority_rank, 2);
             assert_eq!(
-                conflict[0].entity_ref.as_deref(),
-                Some("specs/system/conflict.md")
+                conflict[0].source.entity_id.as_str(),
+                "specs/system/conflict.md"
             );
             let body: serde_json::Value =
                 serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();
