@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "cfd42842d2ccffeef17ac0be43ab2f3c949843ed"]
 ---
 
 ## Spec Excerpt
@@ -97,25 +97,28 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
+
 ## Shipped
 
-**Repair round 10 — review finding (coverage docs), commit
-`58a012bc5`.** Single finding, docs-only: the task's four declared
-coverage sections — `user-management.md` rows 5 (Tenant-Level User
-Onboarding), 6 (Workspace Invitation Flow), 7 (Invitation Expiry),
-25 (Tenant Invitations) — were still `task-assigned` with empty
-notes even though all 10 acceptance criteria pass with independent
-evidence (26/69/1564/400 test runs; mutation probes killed;
-mechanical guards verified across rounds 8–9). Repaired in
-`specs/coverage/system/user-management.md`: rows 5/6/7/25 marked
-`implemented` with evidence notes pending independent review, header
-counts 3/36 → 7/36 (23 → 19 task-assigned, 3 → 7 implemented), per
-the task-111/task-120 ready-for-review precedent. No product code
-changed this round; re-verified at this head:
-`cargo test -p gyre-server --lib api::invitations` — 26 passed /
-0 failed.
+**Repair round 11 (requirements changed): rebase the retained task-110
+source checkpoint onto base `cd752300c`, merge commit
+`cfd42842d2`.** The prior implementation (9 review rounds, 10/10
+acceptance criteria) was retained on checkpoint `8efdd1c07`; this round
+re-merges it onto the current contract. The merge brought the upstream
+task-208 spec amendment ("My Stuff" Views supersession) which deleted
+the `/api/v1/users/me/{agents,tasks,mrs}` routes, handlers, and ABAC
+mappings that the checkpoint still carried. Conflicts resolved in 4
+files: the three removed me-routes were dropped on both the router
+(`api/mod.rs`) and the ABAC registry (`abac_middleware.rs`) per the
+amended spec, while the task-110 surface was preserved intact
+(`GET /users/me/invitations` plus all tenant/workspace invitation
+routes); the exemption-file narrative conflict took the upstream text
+(entry list unchanged, 2 frozen entries); the coverage header merged
+the base's 2026-11-04 audit with task-110's implemented rows (merged
+counts verified against the table: 11 n/a, 18 task-assigned,
+7 implemented). No product behavior of the invitation flow changed.
 
-### Shipped behavior (task-110, prior rounds)
+### Shipped behavior (carried from prior rounds, re-verified at this head)
 
 - **Tenant invitations:** domain entities
   (`gyre-domain/src/invitation.rs`), ports
@@ -134,93 +137,28 @@ changed this round; re-verified at this head:
   (caller must be the invited user; no pending invitation → 404).
   In-app notification to the invitee carries `kind:
   workspace_invitation` with `accept_url`/`decline_url`.
-- **Single-use race safety:** `transition_status(id, from, to,
-  accepted_at)` enforces conditional status claims inside the write
-  (SQLite/Postgres conditional `UPDATE`, mem check-and-set); accept
-  claims Pending→Accepted before creating user/memberships, decline,
-  revoke, and expiry use the same transition, so terminal statuses
-  are never overwritten by racing writers.
-- **Authorization:** all routes registered in `api/mod.rs` with ABAC
-  resolver mappings and per-handler enforcement; HTTP-layer negative
-  tests prove non-admins get 403 (tenant invite) and non-members get
-  403 (workspace invite) through the full routing chain.
-- **Policy enforcement (round 7):** `allow_re_invite: false` rejects
-  re-invites after a terminal-state invitation with 409 on both
-  surfaces; pending-scope uniqueness is enforced by partial unique
-  indexes (migration `2026-11-08-000059_invitation_pending_unique`)
-  with raced-duplicate dedupe, so terminal statuses never conflict
-  and re-invite after expiry/revocation is unaffected.
-- **SSO/local account linking (round 4):**
-  `UserRepository::claim_external_id` is the single sanctioned
-  external_id transition (SQLite/Postgres/mem); the auth email-link
-  path claims through it after external_id match and verified
-  same-tenant email, and stamps `last_login_at` per upstream's
-  every-login contract.
-- **Repair round 9 (findings `d559534738b54ad398ee79fd95770725`,
-  commit `797cf52f`):** tenant-invitation accept LINKS an existing
-  SSO-provisioned account via the new case-insensitive, tenant-
-  scoped `UserRepository::find_by_email` (no parallel shadow
-  account) and ACTIVATES pre-assigned memberships; derived usernames
-  resolve collisions through `sanitize_username` +
-  `resolve_unique_username` (bob, bob-2, ...) while explicit handles
-  are validated before the single-use claim (400 invalid / 409
-  taken, both retryable); `GYRE_INVITE_EXPIRY_INTERVAL_SECS=0`
-  falls back to default instead of panicking the interval;
-  `load_policy` fails closed on a corrupt policy row; +6 HTTP-layer
-  two-tenant containment tests. Evidence log:
-  `/tmp/stage/review-evidence/task-110-repair-round-9.md`.
-- **Docs:** `docs/api-reference.md` covers all invitation routes,
-  selectors and the policy endpoints; `docs/server-config.md`
-  documents `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
+- **Expiry:** `InvitationPolicy` (tenant/workspace expiry days,
+  `max_pending_invitations`, `allow_re_invite`) persisted per tenant
+  via `GET/PUT /api/v1/tenant/invitations/policy`; corrupt policy row
+  fails closed. Background job uses the same conditional
+  `transition_status` claim as accept, so a racing accept is never
+  overwritten; expired tokens are rejected on accept (409 → Expired).
 
-### Test evidence (round 9, commit `797cf52f`)
+### Test evidence (this head, merge commit `cfd42842d2`)
 
-- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports`
-  (SKIP_WEB_BUILD=1) — clean.
-- `cargo test -p gyre-server --lib api::invitations` — 26 passed /
-  0 failed (was 20; +6 new tests).
-- `cargo test -p gyre-server --lib auth` — 69 passed / 0 failed.
-- `cargo test -p gyre-server --lib` (full) — 1564 passed / 0 failed.
-- `cargo test -p gyre-adapters` (full) — 400 passed / 0 failed /
-  12 ignored (was 399; +1 `find_by_email` adapter test).
-- Mechanical guards: every guard OK at the assignment-start head
-  `39bef9d66` is still OK with this diff; the 33 guards that FAIL at
-  that head fail byte-identically with and without this diff
-  (verified by stashing), all in task-089/157/upstream code —
-  e.g. `check-non-atomic-creation` → `git_http.rs:1555`,
-  `check-dependent-scope-resolution` → `reconciliation.rs:925` —
-  left for upstream-side fixes per the round-8 note.
-
-### Test evidence (round 8, at merge commit `b53fa1484`)
-
-- `cargo check --all` (SKIP_WEB_BUILD=1) — clean.
-- `cargo test -p gyre-server --lib auth` — 69 passed / 0 failed.
-- `cargo test -p gyre-server --lib api::invitations` — 20 passed /
-  0 failed.
-- `cargo test -p gyre-adapters --lib migration` — 8 passed /
-  0 failed, including `no_duplicate_migration_version_prefixes`,
-  `migration_000058_backfills_unique_url_safe_usernames` (exercising
-  the renumbered migration in its target batch),
-  `migrations_create_tables`, `migrations_pending_zero_after_startup`
-  (full embedded set on a fresh database), and
-  `migration_000059_dedupes_raced_pending_invitations_before_index`.
-- `cargo test -p gyre-adapters` (full) — 399 passed / 0 failed /
-  12 ignored.
-- Mechanical guards at the merge head — all exit 0:
-  `check-migration-versions` (FAIL at the auto-merged tree before the
-  renumber, OK after), `check-migration-sql-portability`,
-  `check-fabricated-scope-defaults`, `check-scope-literal-defaults`,
-  `check-arch`, `check-abac-route-registry`,
-  `check-abac-exempt-handlers`, `check-inert-enforcement`,
-  `check-mem-port-contracts`, `check-mcp-write-tools`,
-  `check-dead-message-kinds`, `check-byte-slice-truncation`,
-  `check-relative-path-defaults`, `check-fail-open-ref-resolution`,
-  `check-lossy-secret-conversion`, `check-forwarded-header-trust`,
-  `check-in-memory-state-stores`, `check-unbounded-external-http`,
-  `check-non-atomic-creation`, `check-forged-scope-fields`, and
-  `check-task-commit-attribution`.
-- Known pre-existing (verified identical at upstream base `774737638`
-  via a scratch worktree this round):
-  `check-dependent-scope-resolution.sh` reports 2 findings in
-  task-089/157 code (`explorer_views.rs:736`, `reconciliation.rs:925`);
-  left for upstream-side fixes.
+- `cargo test -p gyre-server --lib api::invitations` — 26 passed / 0
+  failed (lifecycle, TenantAdmin guard, cross-tenant 403, token
+  CSPRNG+hash, cap, decline, expiry, SSO-link, username collisions).
+- `cargo test -p gyre-adapters invitation` — 5 passed / 0 failed
+  (roundtrips, pending-scope unique index, raced-duplicate dedupe,
+  transition_status source-status guard).
+- `cargo test -p gyre-server --lib` — 1630 passed / 0 failed
+  (merge-validation across users/auth/abac after the task-208 route
+  removals met the task-110 additions).
+- `cargo test --workspace --no-run` — exit 0 (all targets compile).
+- Mechanical guards all green: migration versions, ABAC route
+  registry, ABAC-exempt handlers, arch, mem port contracts, MCP write
+  tools, dead message kinds, fabricated scope defaults.
+- Evidence retained at `/tmp/stage/review-evidence/task-110-rebase.md`.
+- web/dist untouched (executor restores from assignment base; remote
+  rebuild owns publication).
