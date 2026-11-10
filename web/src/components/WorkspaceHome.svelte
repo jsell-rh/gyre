@@ -25,7 +25,7 @@
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
   import Briefing from './Briefing.svelte';
-  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import ExplorerView from './ExplorerView.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -174,33 +174,25 @@
   let specsStatusFilter = $state('');
 
   // ── Architecture state (ui-navigation.md §2 — collapsed by default) ────
+  // The section body renders the workspace-scoped Explorer (ui-layout.md §5
+  // Workspace Scope — Realized Architecture): repos as nodes, cross-repo
+  // dependencies as edges, C4 Container level. Data loading and error states
+  // live inside ExplorerView.
   let archExpanded = $state(false);
-  let archLoading = $state(false);
-  let archError = $state(null);
-  let archGraph = $state(null); // { nodes: [], edges: [] }
-
-  async function loadArchGraph() {
-    if (!workspace?.id) return;
-    const gen = wsLoadGen;
-    archLoading = true;
-    archError = null;
-    try {
-      const data = await api.workspaceGraph(workspace.id);
-      if (stale(gen)) return;
-      archGraph = data;
-    } catch (e) {
-      if (stale(gen)) return;
-      archError = e.message || 'Failed to load workspace graph';
-      archGraph = { nodes: [], edges: [] };
-    } finally {
-      if (!stale(gen)) archLoading = false;
-    }
-  }
 
   function toggleArch() {
     archExpanded = !archExpanded;
-    if (archExpanded && !archGraph && !archLoading) {
-      loadArchGraph();
+  }
+
+  /** Double-click a repo node in the workspace graph → scope change to repo
+   *  (drill to crate level). Routes through the host shell so the URL and
+   *  breadcrumb update (App.goToRepo → /workspaces/:slug/r/:repo/architecture). */
+  function handleArchEnterRepo(repo) {
+    const full = repos.find((r) => r.id === (repo.id ?? repo.repo_id));
+    if (full) {
+      onSelectRepo?.(full, 'architecture');
+    } else {
+      toastError(`"${repo.name ?? repo.id}" is in another workspace and cannot be opened from here.`);
     }
   }
 
@@ -1280,7 +1272,6 @@
     loadBudget();
     loadMergeQueue();
     loadDepHealth();
-    loadArchGraph();
   });
 
   // ── Explorer sidebar click → expand Architecture (HSI §1.3) ───────────
@@ -1289,7 +1280,6 @@
   $effect(() => {
     if (archExpandSignal > 0) {
       archExpanded = true;
-      if (!archGraph && !archLoading) loadArchGraph();
     }
   });
 </script>
@@ -1739,40 +1729,16 @@
             </button>
             {#if archExpanded}
               <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
-                {#if archLoading}
-                  <div class="skeleton-row"></div>
-                  <div class="skeleton-row"></div>
-                {:else if archError}
-                  <div class="error-row" role="alert">
-                    <p class="error-text">{archError}</p>
-                    <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
-                  </div>
-                {:else if archGraph}
-                  <div class="arch-canvas-wrap" data-testid="arch-canvas">
-                    <ExplorerCanvas
-                      nodes={archGraph.nodes ?? []}
-                      edges={archGraph.edges ?? []}
-                      onNodeDetail={(node) => {
-                        // Single-click → detail panel with repo metadata
-                        // (ui-layout.md §5 Workspace Scope: "Click a repo node →
-                        // detail panel shows repo metadata").
-                        if (!node) return;
-                        openDetailPanel?.({ type: 'repo', id: node.repo_id ?? node.id, data: node });
-                      }}
-                      onScopeDrill={(node) => {
-                        // Double-click → drill to next C4 level = repo scope
-                        // (ui-layout.md §3 Drill-Down: scope change, breadcrumb
-                        // updates, URL changes via pushState — App.goToRepo).
-                        const repo = repos.find(r => r.id === node.repo_id);
-                        if (repo) {
-                          onSelectRepo?.(repo, 'architecture');
-                        } else {
-                          toastError(`"${node.name ?? node.id}" is not a repository in this workspace.`);
-                        }
-                      }}
-                    />
-                  </div>
-                {/if}
+                <!-- Workspace-scoped Explorer (ui-layout.md §5): repos as nodes,
+                     cross-repo dependencies as edges, double-click drills to the
+                     repo's crate-level architecture (scope change via the shell). -->
+                <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                  <ExplorerView
+                    embedded={true}
+                    scope={{ type: 'workspace', workspaceId: workspace?.id }}
+                    onEnterRepo={handleArchEnterRepo}
+                  />
+                </div>
               </div>
             {/if}
           </section>
@@ -5855,9 +5821,9 @@
   }
 
   .arch-canvas-wrap {
-    height: 320px;
+    height: 460px;
     position: relative;
-    overflow: hidden;
+    overflow: auto;
   }
 
   /* ── Decisions / Action Needed section ────────────────────────────── */

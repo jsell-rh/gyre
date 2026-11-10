@@ -129,6 +129,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/settings/spec-lifecycle",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),
@@ -367,6 +372,15 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // Tenant-scoped compute targets (agent-runtime spec §3):
+                // reads are tenant-member visible (handler enforces tenant
+                // scoping), mutations additionally require the Admin role
+                // in the handler body. Registered here rather than carried
+                // as exemption-file debt — the two stale exemption entries
+                // for these paths were removed when the routes landed in
+                // the resolver (check-abac-route-registry.sh shrinks).
+                RouteResourceMapping::api("/api/v1/compute-targets", "compute_target", None),
+                RouteResourceMapping::api("/api/v1/compute-targets/:id", "compute_target", None),
                 // ── Secrets (platform-model.md §7, task-098) ─────────────
                 // Admin-only: builtin-secret-admin-only (priority 860) denies
                 // every non-Admin role on the "secret" resource type; Admins
@@ -392,6 +406,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
+                RouteResourceMapping::api("/api/v1/search/suggest", "search", None),
+                RouteResourceMapping::api("/api/v1/search/facets", "search", None),
                 RouteResourceMapping::api("/api/v1/admin/search/reindex", "admin", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),

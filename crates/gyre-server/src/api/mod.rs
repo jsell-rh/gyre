@@ -48,6 +48,7 @@ pub mod search;
 pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod specs;
 pub mod specs_assist;
@@ -61,6 +62,18 @@ pub mod users;
 pub mod version;
 pub mod workload;
 pub mod workspaces;
+
+/// Deserialize helper that keeps an explicit JSON `null` distinct from an
+/// absent field. serde collapses `null` to `None` inside `Option<Value>`,
+/// which would make a "clear this field" request indistinguishable from
+/// "leave it alone". Returns `Some(Value::Null)` for a present null so
+/// handlers can branch on the difference. Pair with `#[serde(default)]`.
+pub fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
 
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
@@ -189,6 +202,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
+        )
+        // Spec lifecycle configuration (spec-lifecycle.md §Configuration)
+        .route(
+            "/api/v1/repos/:id/settings/spec-lifecycle",
+            get(spec_lifecycle::get_spec_lifecycle).put(spec_lifecycle::set_spec_lifecycle),
         )
         // ABAC policies (G6)
         .route(
@@ -636,6 +654,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",
