@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
-commits: ["6b800e1b5e29dbea9480d7aaa0e6b9947688d15b", "d7d341ca19c2de6ebd48516bf712e27a51061697", "cd84c820d32b7670febdd659ed051daf7b5719a0", "ec3e247ed31b5f1b18297cf2e2594c4dcbb862d7"]
+commits: ["6b800e1b5e29dbea9480d7aaa0e6b9947688d15b", "d7d341ca19c2de6ebd48516bf712e27a51061697", "cd84c820d32b7670febdd659ed051daf7b5719a0", "ec3e247ed31b5f1b18297cf2e2594c4dcbb862d7", "29ffb55c3c0a6828548bf52cd6dbec6bf94603d9c"]
 ---
 
 ## Spec Excerpt
@@ -127,56 +127,76 @@ rounds (F1-F19).
   sign/verify paths against a Fulcio built from upstream proto
   documentation.
 
-### This round (rebase repair onto base `72ad2a128`, head `255a92da2`)
+### This round (merge repair onto base `fca5de5fb`, head `29ffb55c3`)
 
 - **Base merge resolution**: the assigned repair merged the assignment
-  base `72ad2a128` (task-096 rollback circuit breaker main, carrying the
-  task-193/task-083 scope-fallback fixes and the hard-failing
-  `seed_builtin_policies`) into the branch. Three conflicts resolved:
-  - `crates/gyre-adapters/src/postgres/mod.rs`: kept BOTH module
-    declarations — the base's `budget_call` (task-096 budget-call port)
-    and the task's `commit_signature` (task-107 repository adapter).
-  - `scripts/fabricated-scope-defaults-exemptions.txt`: took the base's
-    fixed-site state — the `specs.rs` spec-rejected notification tenant
-    fallback (fixed in task-193's repair) and the `git_http.rs`
-    push-event ws_id fallback (fixed: resolved from the repo record,
-    skip + log on lookup failure) no longer exist at the merged head,
-    so their exemption entries are removed. The `auth.rs` entry stays
-    at line 838 — task-107's own `auth.rs` changes (bearer-token
-    plumbing for Fulcio) shifted the site from the base's 773; the
-    merged tree's live flagged sites are exactly the three remaining
-    entries (auth.rs:838, speculative_merge.rs:372, gate_executor.rs:111),
-    under the frozen count of 4. No entries added.
-  - `scripts/warn-continue-creation-exemptions.txt`: took the base's
-    side — both warn-continue creation sites (`spawn.rs` interrogation
-    policy, `abac_middleware.rs` `seed_builtin_policies`) are fixed on
-    main and propagate creation errors now; zero entries remain.
-- **Follow-on repair**: `api/jj.rs` test helper now `.expect`s the
-  `Result` of `seed_builtin_policies` — the base's hard-fail fix turned
-  the discarded result into an `unused_must_use` warning that the CI
-  clippy gate would flag. `Cargo.lock`: `syn` version disambiguation
-  required by the merged dependency graph.
-- `cargo check -p gyre-server -p gyre-adapters --all-targets` passes
-  at the merged head; `cargo fmt --check` clean; all exemption-file
-  static gates (fabricated-scope, warn-continue, abac-exempt-handlers,
-  byte-slice-truncation, fail-open-ref-resolution, inert-enforcement,
-  relative-path-defaults, scope-literal-defaults,
-  lossy-secret-conversion, mem-port-contracts, migration-versions,
-  unwritten-store-fields, abac-route-registry, arch,
-  task-commit-attribution) pass.
-- F19 (upstream Fulcio trust-bundle protojson `CertificateChain` object
-  shape) and F12-F17 from prior rounds remain in place at the merged
-  head, re-verified by the focused suites below.
+  base `fca5de5fb` (main: admission-policy preflight fix, impersonation,
+  spec lifecycle configs, rollout policies) into the branch. Four
+  conflicts resolved:
+  - `crates/gyre-server/src/auth.rs`: kept BOTH sides' additions — the
+    task's `bearer_token` plumbing for Fulcio (field, both assignment
+    sites in `authenticate_request`, F12 key-persistence tests) and the
+    base's auth-audit `record_auth_success` emission plus the
+    `is_system_principal` spoof-shape test. For the JWT `tenant_id`
+    claim the BASE's semantics win: the branch's prior round had fixed
+    the flagged `claims.tenant_id` fallback by rejecting a JWT with no
+    tenant claim, but main independently fixed the same site
+    (task-103/task-104 verification repair) with the documented
+    single-tenant IdP contract — the claim's serde schema default
+    (`default_tenant_claim` on `JwtClaims`, "absent = default tenant",
+    a deterministic function of the verified token, not a use-site
+    fallback). The merged tree takes main's contract and its test
+    (`jwt_missing_tenant_id_defaults_to_default` replaces the branch's
+    rejection test); trunk semantics are preserved and the flagged site
+    stays fixed either way.
+  - `docs/server-config.md`: kept the base's `GYRE_IMPERSONATION_TTL`
+    row plus the task's signing rows (`GYRE_SIGNING_MODE` with legacy
+    `GYRE_SIGSTORE_MODE` alias, `GYRE_AGENT_SIGNING_KEY`,
+    `GYRE_FULCIO_URL`, `GYRE_REKOR_URL`); the base's obsolete
+    "fulcio reserved for future" `GYRE_SIGSTORE_MODE` row is superseded
+    by the task's row that documents the same legacy alias.
+  - `scripts/fabricated-scope-defaults-exemptions.txt` +
+    `check-fabricated-scope-defaults.sh`: took the base's state —
+    2 entries (speculative_merge.rs:372, gate_executor.rs:111),
+    `FROZEN_EXEMPTION_COUNT=2`, with main's fix history for the
+    auth.rs/git_http.rs sites. No entries added; the gate passes at the
+    merged head.
+- **Follow-on repairs**:
+  - **Migration version collision**: the base's
+    `2026-10-09-000056_user_tenant_id` claimed the Diesel version
+    `20261009000056` that the task's
+    `2026-10-09-000056_commit_signatures` also mapped to — only one
+    runs per version, so the `commit_signatures` table was silently
+    never created on fresh databases
+    (`task107_signing_key_env` failed with "no such table:
+    commit_signatures"). Renumbered the task's migration to
+    `2026-10-09-000060_commit_signatures` (next unused sequence);
+    `check-migration-versions.sh` and
+    `check-migration-sql-portability.sh` pass.
+  - Base-side `AuthenticatedAgent` constructors gained the task's
+    `bearer_token` field (`impersonation.rs`, `api/spawn.rs` x5,
+    `mcp.rs` x2) and task-side test literals in `commit_signatures.rs`
+    gained the base's `impersonation` field.
+- `cargo check -p gyre-server -p gyre-adapters --all-targets` passes at
+  the merged head; `cargo fmt --check` clean; static gates re-run here:
+  fabricated-scope, migration-versions, migration-sql-portability,
+  arch, abac-route-registry, abac-exempt-handlers, mem-port-contracts,
+  task-commit-attribution, unbounded-external-http, inert-enforcement —
+  all pass.
+- F1-F19 from prior rounds remain in place at the merged head,
+  re-verified by the focused suites below.
 
-### Verification evidence (head `255a92da2`, under /tmp/stage/review-evidence/)
+### Verification evidence (head `29ffb55c3`, under /tmp/stage/review-evidence/)
 
-Focused suites at the merged head: `rebase-focused-tests.txt` —
-sigstore 17/17 (including the F19 shape test), commit_signatures 6/6,
-api::provenance 5/5, api::jj 14/14 (including the
-fulcio-unreachable fallback test through the real router),
-`task107_signing_key_persistence` 1/1;
-`rebase-focused-tests-integration.txt` — `task107_upstream_conformance`
-3/3 and `task107_signing_key_env` 1/1. `cargo check -p gyre-server -p
+`task107-merge-focused-tests.txt` — auth:: 56/56 (including
+`jwt_missing_tenant_id_defaults_to_default`, the F12 key-persistence
+tests, and the `is_system_principal` spoof-shape test), sigstore 17/17,
+commit_signatures 6/6, api::provenance 5/5, api::jj 14/14 (including
+the fulcio-unreachable fallback test through the real router),
+impersonation 15/15, api::spawn::tests 52/52, mcp::tests 88/88;
+`task107-merge-integration-tests.txt` — `task107_upstream_conformance`
+3/3, `task107_signing_key_env` 1/1, `task107_signing_key_persistence`
+1/1; `auth_integration` 21/21. `cargo check -p gyre-server -p
 gyre-adapters --all-targets` exits 0. Full workspace suites,
 architecture checks, all-target Clippy, and GitHub CI are owned by
 verification/publication; live Fulcio interop remains blocked by
