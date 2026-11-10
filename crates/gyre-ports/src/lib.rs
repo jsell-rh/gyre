@@ -108,7 +108,8 @@ pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
 pub use search::{
-    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+    FacetCounts, FacetFilter, ParsedQuery, SearchDocument, SearchPort, SearchQuery, SearchResult,
+    SearchSuggestion, TimeBounds, UPDATED_AT_KEY, parse_query,
 };
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
