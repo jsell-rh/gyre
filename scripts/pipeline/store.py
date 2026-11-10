@@ -209,8 +209,22 @@ class Store:
     def admission_name(ident, token):
         return f'admission-{ident}-{token}'
 
+    def compute_resources(self):
+        """Cleanup debt occupies compute until fresh scoped runtime evidence says otherwise."""
+        context,namespace=self.setting('runtime_kube_context'),self.setting('runtime_namespace')
+        now=time.time()
+        result=[]
+        for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'"):
+            proof=json.loads(row['data']).get('compute_observation') or {}
+            released=(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
+                and proof.get('context')==context and proof.get('namespace')==namespace
+                and proof.get('work')==row['work'] and proof.get('token')==row['token']
+                and proof.get('absent') is True and 0<=now-proof.get('at',0)<180)
+            if not released:result.append(row)
+        return result
+
     def compute_used(self):
-        return self.db.execute("SELECT count(*) FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'").fetchone()[0]
+        return len(self.compute_resources())
 
     def verification_reserve(self, capacity=None):
         capacity=self.setting('slots',8) if capacity is None else capacity
@@ -224,9 +238,8 @@ class Store:
             return False
         if stage == 'verify':
             return True
-        used=self.db.execute("""SELECT count(*) FROM resources r LEFT JOIN work w ON w.id=r.work
-            WHERE r.kind IN ('sandbox','admission') AND r.state<>'absent'
-            AND COALESCE(w.stage,'unknown')<>'verify'""").fetchone()[0]
+        verification={r['id'] for r in self.db.execute("SELECT id FROM work WHERE stage='verify'")}
+        used=sum(row['work'] not in verification for row in self.compute_resources())
         return used < capacity-self.verification_reserve(capacity)
 
     def ordered_ready(self):
@@ -315,13 +328,16 @@ class Store:
                                  finding.get('source'), finding['category'], json.dumps(finding), time.time()))
             self.db.execute("UPDATE work SET state='succeeded',result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (json.dumps(result), time.time(), ident))
-            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') == 'merged'):
-                victims = self.db.execute("SELECT id FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
+            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') in ('merged','environment_refresh')):
+                victims = self.db.execute("SELECT id,input FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
                 for victim in victims:
+                    if result.get('status')=='environment_refresh' and json.loads(victim['input']).get('base')==result.get('target_base'):
+                        continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
             lane = self.setting('integration_lane')
-            if lane and lane['task'] == row['task'] and self.integration_lane() is None:
+            refresh_idle=(result.get('status')=='environment_refresh' and not self.db.execute("SELECT 1 FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchone())
+            if lane and lane['task'] == row['task'] and (self.integration_lane() is None or refresh_idle):
                 self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
                 self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):

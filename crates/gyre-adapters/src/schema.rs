@@ -39,6 +39,8 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        // TASK-099 F2: persona attached to this agent (orchestrators).
+        persona_id -> Nullable<Text>,
     }
 }
 
@@ -59,6 +61,7 @@ diesel::table! {
         tenant_id -> Text,
         workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,
@@ -185,6 +188,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        // TASK-099 F1: tenant binding; nullable for legacy OIDC users
+        // (the auth extractor fail-closes on unbound users).
         username -> Text,
         avatar_url -> Nullable<Text>,
         preferences -> Nullable<Text>,
@@ -427,7 +432,7 @@ diesel::table! {
         spec_sha -> Text,
         approver_id -> Text,
         signature -> Nullable<Text>,
-        approved_at -> BigInt,
+        approved_at -> Nullable<BigInt>,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
         revocation_reason -> Nullable<Text>,
@@ -519,6 +524,13 @@ diesel::table! {
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
         enforce_manifest -> Integer,
+    }
+}
+
+diesel::table! {
+    spec_lifecycle_configs (repo_id) {
+        repo_id -> Text,
+        config -> Text,
     }
 }
 
@@ -727,6 +739,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     gate_results,
     repo_push_gates,
     spec_policies,
+    spec_lifecycle_configs,
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,

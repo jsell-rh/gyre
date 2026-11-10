@@ -42,6 +42,7 @@ pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
