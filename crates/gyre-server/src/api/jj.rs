@@ -100,9 +100,20 @@ pub async fn jj_new(
     Json(req): Json<NewChangeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/jj/new",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
     let change_id = state
         .jj_ops
         .jj_new(&path, &req.description)
@@ -121,9 +132,20 @@ pub async fn jj_squash(
     auth: AuthenticatedAgent,
 ) -> Result<Json<CommitSignature>, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/jj/squash",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
     let commit_sha = state
         .jj_ops
         .jj_squash(&path)
@@ -179,9 +201,20 @@ pub async fn jj_undo(
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/jj/undo",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
     state
         .jj_ops
         .jj_undo(&path)
@@ -198,9 +231,20 @@ pub async fn jj_bookmark(
     Json(req): Json<BookmarkRequest>,
 ) -> Result<StatusCode, ApiError> {
     let path = repo_path(&state, &repo_id).await?;
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event — per-handler repo-level ABAC
+        // denial outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/jj/bookmark",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
     state
         .jj_ops
         .jj_bookmark_create(&path, &req.name, &req.change_id)

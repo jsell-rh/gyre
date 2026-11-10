@@ -285,15 +285,28 @@ pub async fn admin_kill_agent(
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
-    // Kill the actual process if it is running. The PID is captured for the
-    // AgentKilled audit event before the registry entry is consumed.
+    // Kill the actual process/container/Pod if it is running. The backend
+    // recorded at spawn time decides how: a container ID goes to
+    // `docker rm --force`, a Pod name to `kubectl delete pod`, a remote
+    // container over SSH — falling back to LocalTarget (pid kill) only for
+    // agents whose backend is unknown (pre-task-117 records). The PID is
+    // captured for the AgentKilled audit event before the registry entry
+    // is consumed.
     let mut killed_pid: Option<u32> = None;
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
         killed_pid = handle.pid;
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+        let backend = state.spawned_backends.lock().await.remove(&id);
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
                 .await
-        {
+            }
+        };
+        if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
     }
@@ -324,17 +337,19 @@ pub async fn admin_kill_agent(
     }
 
     let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "event_id": uuid::Uuid::new_v4().to_string(),
-            "agent_id": agent.id.to_string(),
-            "status": "dead",
-            "description": format!("Agent {} force-killed by admin", agent.name),
-            "timestamp": now,
-        })),
-    );
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "event_id": uuid::Uuid::new_v4().to_string(),
+                "agent_id": agent.id.to_string(),
+                "status": "dead",
+                "description": format!("Agent {} force-killed by admin", agent.name),
+                "timestamp": now,
+            })),
+        )
+        .await;
 
     // M23: Emit container_crashed audit event if this agent had a container.
     if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
@@ -353,6 +368,11 @@ pub async fn admin_kill_agent(
     // Revoke the agent's token — killed agents must not continue to
     // authenticate. Revocation is audited as an AgentTokenRevoked event.
     crate::agent_audit::revoke_agent_token(&state, &agent, "admin_kill").await;
+
+    // Platform Model §7: revoke task-scoped ephemeral secrets on kill
+    // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
+    // for the agent's task and logs `secret.revoked` per secret.
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     let killed_by = auth
@@ -419,14 +439,16 @@ pub async fn admin_reassign_agent(
     }
 
     let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "agent_id": agent.id.to_string(),
-            "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
-        })),
-    );
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "agent_id": agent.id.to_string(),
+                "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
+            })),
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -740,17 +762,19 @@ pub async fn admin_seed(
         ),
     ];
     for (event_id, agent_id, event_type, description, timestamp) in events {
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": event_id,
-                "agent_id": agent_id,
-                "event_type": event_type,
-                "description": description,
-                "timestamp": timestamp,
-            })),
-        );
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": event_id,
+                    "agent_id": agent_id,
+                    "event_type": event_type,
+                    "description": description,
+                    "timestamp": timestamp,
+                })),
+            )
+            .await;
     }
 
     Ok(Json(SeedResponse {
@@ -980,17 +1004,30 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        state.emit_telemetry(
+        // emit_telemetry resolves the tenant scope from the workspace
+        // record (task-099 F1) and skips the emission when the workspace
+        // does not exist — seed it so the event is actually emitted.
+        let ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "test-event-1",
-                "agent_id": "agent-1",
-                "event_type": "state_changed",
-                "description": "Test event",
-                "timestamp": 1000u64,
-            })),
+            gyre_common::Id::new("default"),
+            "Default",
+            "default",
+            0,
         );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "test-event-1",
+                    "agent_id": "agent-1",
+                    "event_type": "state_changed",
+                    "description": "Test event",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1012,28 +1049,42 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
-        state.emit_telemetry(
+        // Same as admin_audit_returns_events: seed the workspace so the
+        // telemetry emission resolves a tenant scope (task-099 F1).
+        let ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e1",
-                "agent_id": "agent-x",
-                "event_type": "run_started",
-                "description": "From agent-x",
-                "timestamp": 1000u64,
-            })),
-        );
-        state.emit_telemetry(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e2",
-                "agent_id": "agent-y",
-                "event_type": "run_started",
-                "description": "From agent-y",
-                "timestamp": 2000u64,
-            })),
+            "Default",
+            "default",
+            0,
         );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e1",
+                    "agent_id": "agent-x",
+                    "event_type": "run_started",
+                    "description": "From agent-x",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e2",
+                    "agent_id": "agent-y",
+                    "event_type": "run_started",
+                    "description": "From agent-y",
+                    "timestamp": 2000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1087,6 +1138,105 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+    }
+
+    #[tokio::test]
+    async fn admin_kill_revokes_task_scoped_secrets() {
+        use crate::api::now_secs;
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = now_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-kill-teardown"),
+            Id::new("default"),
+            "Kill Teardown WS",
+            "kill-teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-kill-teardown"), "kill-teardown", now);
+        agent.workspace_id = Id::new("ws-kill-teardown");
+        agent.current_task_id = Some(Id::new("task-kill-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-kill-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-kill-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-teardown/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "admin kill must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive admin kill"
+        );
     }
 
     #[tokio::test]
