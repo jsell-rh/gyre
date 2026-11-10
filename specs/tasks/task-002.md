@@ -2,7 +2,7 @@
 title: "CLI HSI Parity Commands"
 spec_ref: "human-system-interface.md §11 (CLI/MCP Parity Constraint)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-002.md
 coverage_sections: []
 commits: []
