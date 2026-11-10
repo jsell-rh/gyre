@@ -57,3 +57,89 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 3 — independent rebase review (candidate f282becd2, base b5a872087)
+
+Scope: this round's candidate is the prior-reviewed source rebased onto base
+`b5a872087` (merge `6184bb3d0`, resolving conflicts in `api/graph.rs`,
+`e2e.yml`, `specs/coverage/system/realized-model.md`) plus a docs commit.
+The review question: did the merge resolution preserve BOTH main's newly
+landed work (task-205 manifest concept views, task-104 briefing-ask ABAC
+audit event) AND the task-152 narrative implementation — and does everything
+still hold at the exact head?
+
+**Merge resolution verified parent-by-parent** (`git diff` against each
+parent of `6184bb3d0`):
+
+- Dropped from the candidate side: only the stale pre-task-205 substring
+  concept search (`assemble_concept_results` + substring handlers),
+  correctly superseded — main's manifest-based concept handlers are present
+  at HEAD (`get_graph_concept`, `resolve_concept_view`, workspace union).
+- Dropped from main's side: only `impl From<ArchitecturalDelta> for
+  DeltaResponse`, the "stubbed for now" summary doc, and the
+  `.map(Into::into)` delta collections — each replaced by the
+  narrative-populating versions (`DeltaResponse::from_delta` with grounding
+  + attribution). No main functionality lost.
+- `briefing_ask`'s caller-scope `check_repo_abac` guard survives as MAIN's
+  task-104 variant (denial + `record_abac_denied` audit event) — the
+  candidate's simpler variant was the line the merge dropped; authorization
+  is strictly not regressed.
+- `.github/workflows/e2e.yml` is byte-identical to base (main had already
+  landed the same ubuntu-24.04 pin the candidate added in round 9).
+
+**Test evidence at the exact head** (`CARGO_HOME=/tmp/cargo-home`,
+`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-domain --lib narrative` → **18 passed, 0 failed**
+  (`r11-domain-narrative.log`).
+- `cargo test -p gyre-server --lib -- narrative briefing` → **27 passed,
+  0 failed** (`r11-server-narrative.log`) — both narrative test sets
+  survived the rebase alongside main's repo-filter/ABAC tests.
+- `cargo test -p gyre-server --lib api::graph` → **35 passed, 0 failed**
+  (`r11-server-api-graph.log`).
+- `cargo test -p gyre-server --test graph_integration` → **38 passed,
+  0 failed** (`r11-graph-integration.log`).
+
+**Mutation probes (discriminating-power proof, both restored after):**
+
+- Gutting `generate_template_narrative` to `return String::new()` →
+  `timeline_endpoint_returns_grounded_narrative` and
+  `briefing_summary_falls_back_to_template_narrative_without_llm` **FAIL**
+  — the template generator is genuinely load-bearing at the HTTP surface.
+- Forcing `llm_architecture_narrative` to always return the fallback →
+  `briefing_summary_uses_llm_narrative_when_configured` **FAILS** — the
+  LLM-path test cannot pass on the template floor.
+
+**Gates at the exact head**: all 19 mechanical gate scripts pass
+(`r11-gates.log`), including arch, abac-route-registry (frozen baseline),
+byte-slice-truncation, inert-enforcement, unbounded-external-http (the
+narrative LLM call is `tokio::time::timeout`-bounded), mem-port-contracts,
+and task-commit-attribution. For the candidate-modified
+`check-template-substitution.sh` I independently planted `{{rogue_var}}`
+inside `PROMPT_GRAPH_NARRATIVE`'s string value: the gate **fails with exit 1
+and correct attribution** to `llm_architecture_narrative` — the round-2 fix
+retains true-positive detection (comment-strip only removes doc-block
+placeholders that can never reach a prompt). Tree verified clean after
+restoration.
+
+**Attribution scoping**: the task-labeled product-surface commits reachable
+from this branch (`173fa028`) are recorded in the frontmatter; earlier
+attempt commits (`c14e57697`, `f88e55b7`) are not ancestors of HEAD — their
+source rode the `595c39034` recovery checkpoint, which IS recorded.
+Coverage row 9 is `implemented` with accurate anchors; `| not-started |`
+count for realized-model.md is 0.
+
+Minor (non-blocking, recorded for completeness):
+
+- `explorer_ws.rs` session-registry hardening (`max.max(1)` panic guard for
+  a 0 cap, per-instance registry, eviction tests) rode the recovery
+  checkpoint; real fixes with real tests, not fakery — but outside §6
+  narrative scope. Noted, not blocking.
+- Workspace-wide `cargo fmt --all --check` is blocked by the executor's
+  cargo wrapper in this sandbox (focused probes only); deferred to host
+  verification alongside exact-head GitHub CI including the E2E job.
+
+Round-3 verdict: **approved** — the §6 contract (template + LLM narrative,
+timeline/diff/briefing wiring, fallback behavior) is implemented, grounded,
+tested with discriminating tests, and the rebase onto `b5a872087` lost
+nothing from either side.
