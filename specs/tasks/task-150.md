@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "12c5fe5e5eb1cd58aa89557637b25a8f59966de0"]
 ---
 
 ## Spec Excerpt
@@ -93,7 +93,10 @@ capability.
   (observe/plan/act/monitor/reconcile), and escalation rules.
 - `system://context` — task title/spec ref/description/status/priority,
   worktree branch+path, repo name/path/default branch (explicit `task_id`
-  argument, else the caller's bound task; unknown task errors).
+  argument, else the caller's bound task; unknown task errors). Every task
+  load is containment-checked against the caller's scope (see the repair
+  section below): a task in another workspace (or, for a repo-scoped agent,
+  another repo) is rejected instead of rendered.
 - `system://constraints` — workspace + tenant budget limits with remaining
   budget, agent lifetime cap, and workspace/tenant scope boundaries.
 
@@ -122,12 +125,31 @@ of that single source of truth, and `docs/api-reference.md` describes the
 actual semantics. `docs/agent-protocol.md` retains the pre-existing M32
 wording inherited unchanged from the base.
 
+### Review repair: system://context scope containment (12c5fe5e5)
+
+Review found that `context_prompt_for_caller` (prompts.rs, reached from
+`prompts/get system://context`) loaded a caller-supplied `task_id` with no
+containment check — any authenticated agent could render any task's title,
+description, and acceptance criteria across workspace/tenant boundaries.
+The repair mirrors `handle_spawn_worker`'s check in mcp.rs: a task whose
+workspace differs from the caller's scope workspace is rejected (error
+carries no task text), and a repo mismatch is rejected when both the caller
+and the task carry a repo; a workspace-scoped agent (no repo scope) may
+still read same-workspace tasks in any repo. The check applies to both the
+explicit `task_id` argument and the caller's bound task.
+`mcp_prompts_get_context_rejects_cross_scope_task_id` reproduces the exact
+disclosure scenario from the finding (victim workspace in another tenant,
+"SECRET victim title", attacker agent with explicit `task_id`) and asserts
+the denial, plus bound-task, cross-repo, workspace-scoped-allow, and
+in-scope-render cases.
+
 ### Test evidence
 
 Focused probes (logs under `/tmp/stage/review-evidence/`):
 
 - `cargo test -p gyre-server --lib -- api::spawn::tests:: mcp::tests::
-  prompt_assembly::` — **155 passed, 0 failed**, including:
+  prompt_assembly::` — **156 passed, 0 failed** (repair round, log
+  `task150-repair-focused-tests.log`), including:
   `spawn_injects_all_four_system_prompts_with_persona` (env-dump compute
   target asserts all four `GYRE_PROMPT_*` vars with task title, spec ref,
   branch, workspace scope), `spawn_without_persona_injects_prompts_but_no_persona`,
@@ -138,12 +160,14 @@ Focused probes (logs under `/tmp/stage/review-evidence/`):
   `spawn_delivers_meta_spec_prompt_to_agent_env` (task-116 delivery guard)
   and `spawn_omits_meta_spec_set_sha_without_required_meta_specs`
   (empty-set null case, added this round).
-- `docker/gyre-agent` `npm test` — 12/12 pass (cred-proxy + agent-runner).
+- `docker/gyre-agent` `npm test` — 12/12 pass (cred-proxy + agent-runner)
+  (pre-repair round; the repair touches no agent-runner code).
 - Invariant scripts all exit 0: check-arch, check-mcp-write-tools,
-  check-abac-route-registry, check-migration-versions,
-  check-byte-slice-truncation, check-relative-path-defaults,
-  check-inert-enforcement, check-dead-message-kinds,
-  check-mem-port-contracts, check-fail-open-ref-resolution.
+  check-abac-exempt-handlers (re-run this round), check-abac-route-registry,
+  check-migration-versions, check-byte-slice-truncation,
+  check-relative-path-defaults, check-inert-enforcement,
+  check-dead-message-kinds, check-mem-port-contracts,
+  check-fail-open-ref-resolution.
 - `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) succeeds. A
   `cargo clippy` failure in `gyre-common` (`used as a loop counter`) is
   pre-existing on the assigned base — `gyre-common` is byte-identical to
