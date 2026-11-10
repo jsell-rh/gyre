@@ -248,7 +248,7 @@ No GCP credential file is needed.
 A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
-unconfirmed deletion stays charged and is retried independently. A pending
+unconfirmed compute release stays charged and deletion is retried independently. A pending
 allocation is retained across fullsend's readiness retries; a repeated create
 adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
 allocations cannot be recreated within an attempt. A deleted sandbox
@@ -441,7 +441,16 @@ Infrastructure errors retain the same work identity and use exponential backoff
 from five seconds up to fifteen minutes. Pending autoscaler capacity waits within
 the existing sandbox. Failed input clones retry before sandbox allocation. No failure retains a sandbox
 for debugging: artifacts are captured locally, deletion is attempted immediately,
-and cleanup retries unresolved deletion while the reservation remains charged.
+and cleanup retries unresolved deletion. Cleanup debt and compute occupancy are
+tracked separately: a deleting allocation releases its compute slot only after
+scoped Kubernetes inventories establish that its sandbox is suspended, deleting,
+or absent and no matching pod remains. Sandbox state is read before pod state;
+even a terminating pod remains charged. Evidence is bound to the resource claim,
+cluster context, and namespace, and expires after three minutes. Unknown,
+incomplete, or stale evidence keeps the slot charged. Gateway sandbox/provider
+cleanup records and retries remain intact, and cleanup of the same task still
+precedes a replacement attempt. The cockpit reports occupied slots separately
+from pending deletions.
 
 Model admission also checks the pinned inference endpoint before reserving a
 sandbox. The shared probe uses `ENMAAS_API_KEY` or the local secret-store entry
@@ -559,7 +568,7 @@ only those unchanged files, leaving candidate deletions intact; modified or
 pre-existing files are never blindly cleaned. This prevents the verifier itself
 from contaminating the exact checkout it later checks. Git retries reuse the
 allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
-unconfirmed deletion charged until authoritative absence. Slots zero drains
+unconfirmed compute release charged until scoped runtime evidence proves absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
 

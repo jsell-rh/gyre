@@ -7,6 +7,14 @@
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
+  import { onViewEvent, dispatchViewEvent, viewEventFromDom } from '../lib/viewEvents.js';
+  import { applyDensityPolicy } from '../lib/canvas-density.js';
+  // ui-layout.md §10 Layout Engines: the layout registry (task-170) maps
+  // ViewSpec layout names to renderer components; the generated view's
+  // `layout` field selects the renderer (see applyGeneratedViewSpec).
+  import { getLayout } from '../lib/layoutRegistry.js';
+  import { resolveScopeNodes, edgeSrc, edgeTgt } from '../lib/view-query-scope.js';
+  import VirtualNodeList from '../lib/VirtualNodeList.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
@@ -19,6 +27,7 @@
   import { toast as showToast } from '../lib/toast.svelte.js';
   import Briefing from './Briefing.svelte';
   import WorkspaceCards from './WorkspaceCards.svelte';
+  import DependencyGraph from './DependencyGraph.svelte';
   // HSI §3 Default Views (task-088): Spec Realization, Change, System Trace.
   // Boundary is the default explorer view (canvas drill-down), so it has no
   // dedicated component — the ExplorerCanvas IS the Boundary View.
@@ -28,10 +37,23 @@
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
+  const goToWorkspaceHomeCtx = getContext('goToWorkspaceHome');
+  // Repo scope change from the workspace graph (ui-layout.md §5: double-click
+  // a repo node → scope changes to repo). Wired by App.svelte; absent in
+  // standalone/test renders where the in-place drill fallback applies.
+  const goToRepoCtx = getContext('goToRepo');
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null, archSubTab = undefined, onArchSubTabChange = undefined } = $props();
+  let {
+    scope = { type: 'tenant' },
+    onSelectWorkspace = null,
+    workspaceName = null,
+    embedded = false,
+    onEnterRepo = null,
+    archSubTab = undefined,
+    onArchSubTabChange = undefined,
+  } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
 
@@ -54,9 +76,17 @@
   let wsReposLoading = $state(true);
   let wsReposError = $state(null);
   // HSI §3 Boundary View Level 1: per-repo type/endpoint counts from the
-  // workspace knowledge graph + cross-repo dependency chips.
+  // workspace knowledge graph, rendered as a sub-label on each repo node.
   let wsRepoStats = $state({});   // repoId → { types, endpoints }
-  let wsRepoDeps = $state({});    // repoId → [{ name, target_repo_id }]
+
+  // ── Workspace-scope cross-repo dependency graph (ui-layout.md §5) ──────
+  // C4 "Container" level: repos as nodes, cross-repo dependencies as edges.
+  let wsDepEdges = $state([]);
+  let wsDepExternal = $state([]); // repos referenced by edges but not in this workspace
+  let wsDepLoading = $state(true);
+  let wsDepError = $state(null);
+  // Repo metadata detail panel (single-click on a repo node)
+  let repoDetail = $state(null);
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -119,18 +149,28 @@
   let tracePlaybackNonce = 0;
 
   /**
-   * Apply a generated ViewSpec (HSI §3) to the ExplorerCanvas.
+   * Apply a generated ViewSpec (HSI §3) to the Explorer.
    *
-   * The ViewSpec is translated to a ViewQuery the canvas renders (concept /
-   * node-type filters, callouts, and the LLM's explanation as the query
-   * annotation — the sidebar annotation alongside the graph). A "flow"
-   * layout additionally fetches the trace_source MR's captured trace and
-   * starts particle playback on the evaluative lens; the server already
-   * guarantees flow views are trace-backed, so a fetch failure here falls
-   * back to the structural lens (client mirror of the server fallback).
+   * The ViewSpec's `layout` field selects the renderer through the layout
+   * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
+   * render on the SVG canvas positioned by ELK, 'side-by-side' on the
+   * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
+   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
+   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   *
+   * For the canvas-rendered layouts the ViewSpec is translated to a
+   * ViewQuery the canvas renders (concept / node-type filters, callouts,
+   * and the LLM's explanation as the query annotation — the sidebar
+   * annotation alongside the graph). A "flow" layout additionally fetches
+   * the trace_source MR's captured trace and starts particle playback on
+   * the evaluative lens; the server already guarantees flow views are
+   * trace-backed, so a fetch failure here falls back to the structural
+   * lens (client mirror of the server fallback).
    */
   function applyGeneratedViewSpec(spec) {
     if (!spec || typeof spec !== 'object') return;
+    const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
+    activeLayout = getLayout(layoutName) ? layoutName : 'graph';
     const query = viewSpecToViewQuery(spec);
     if (query) {
       activeViewQuery = query;
@@ -156,6 +196,22 @@
     }
   }
 
+  // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
+  // The generated ViewSpec's `layout` field (set in applyGeneratedViewSpec)
+  // selects the renderer through the layout registry. Layouts rendered by
+  // the unified canvas (graph/flow/timeline) and the shell-owned list
+  // layout have no dedicated registry component — the boundary branch
+  // below renders them; the rest dispatch to their registered renderer.
+  const CANVAS_LAYOUTS = new Set(['graph', 'flow', 'timeline']);
+  let activeLayout = $state('graph');
+
+  /** Dismiss the generated layout — return to the default graph canvas.
+   *  The active view query is kept (it stays visible via the canvas's own
+   *  annotation UI and can be cleared from the manual query editor). */
+  function clearGeneratedLayout() {
+    activeLayout = 'graph';
+  }
+
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
   // canvasState.recent_interactions.  ExplorerView adds higher-level
@@ -166,6 +222,123 @@
     explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
   }
 
+  // ── Uniform ViewEvent handling (ui-layout.md §10 Interaction Events) ──────────
+  // The Explorer shell handles all ViewEvents uniformly:
+  //   click        → open the detail panel
+  //   dblclick     → drill down (scope into the entity's repo)
+  //   hover        → show a tooltip
+  //   context-menu → open an actions menu
+  // Events marked `handled` were already serviced by an integrated emitter
+  // (ExplorerCanvas routes its own click/drill/tooltip/menu interactions
+  // through its direct callbacks) — they are observed here for interaction
+  // tracking only, never re-performed.
+  let viewTooltip = $state(null); // { x, y, name, type }
+  let viewMenu = $state(null);    // { x, y, entity, data }
+
+  /** Open the node detail panel (shared by canvas callback + ViewEvents). */
+  function openNodeDetail(n) {
+    detailNode = n;
+    highlightedSpanId = null;
+    if (n?._action === 'view_spec' && n.spec_path) {
+      openSpecEditor(n.spec_path);
+    } else if (n?._action === 'create_spec') {
+      // Open spec editor with a template for the uncovered node
+      const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+      specEditorOpen = true;
+      specEditorPath = suggestedPath;
+      const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
+      specEditorContent = template;
+      specEditorOriginal = '';
+      specEditorError = '';
+    }
+    // 'view_code' and plain nodes render in the detail panel (location shown
+    // by NodeDetailPanel) — setting detailNode above covers them.
+  }
+
+  function handleViewEvent(ev) {
+    if (!ev) return;
+    pushInteraction(`viewevent:${ev.type}:${ev.entity_type}:${ev.entity_id}`);
+    if (ev.handled) return;
+    const data = ev.data;
+    switch (ev.type) {
+      case 'click':
+        viewMenu = null;
+        if (data) openNodeDetail(data);
+        break;
+      case 'dblclick':
+        // Drill-down: scope the Explorer into the entity's repo when it
+        // lives elsewhere; otherwise open its detail panel.
+        if (data?.repo_id && data.repo_id !== selectedRepoId) {
+          selectRepo({ id: data.repo_id });
+        } else if (data) {
+          openNodeDetail(data);
+        }
+        break;
+      case 'hover':
+        viewTooltip = data
+          ? {
+              x: ev.position?.x ?? 0,
+              y: ev.position?.y ?? 0,
+              name: data.name ?? data.qualified_name ?? data.id,
+              type: data.node_type ?? ev.entity_type,
+            }
+          : null;
+        break;
+      case 'context-menu':
+        viewTooltip = null;
+        viewMenu = {
+          x: ev.position?.x ?? 0,
+          y: ev.position?.y ?? 0,
+          entity: ev.entity_type,
+          data,
+        };
+        break;
+    }
+  }
+
+  $effect(() => onViewEvent(handleViewEvent));
+
+  function onWindowClick(e) {
+    // Clicking anywhere dismisses the hover tooltip; clicking outside the
+    // ViewEvent actions menu dismisses it.
+    if (viewTooltip) viewTooltip = null;
+    if (viewMenu && !e.target.closest?.('.viewevent-menu')) viewMenu = null;
+  }
+
+  function viewMenuAction(action) {
+    const data = viewMenu?.data;
+    viewMenu = null;
+    if (!data) return;
+    if (action === 'details') {
+      openNodeDetail(data);
+    } else if (action === 'code' && data.file_path) {
+      openNodeDetail({ ...data, _action: 'view_code' });
+    } else if (action === 'spec' && data.spec_path) {
+      openNodeDetail({ ...data, _action: 'view_spec' });
+    } else if (action === 'copy_id') {
+      navigator.clipboard?.writeText?.(String(data.id ?? ''));
+    }
+  }
+
+  /** Cards (Architecture Insights entries) emit ViewEvents too — they are
+   *  interactive elements under ui-layout.md §10 ("nodes, edges, rows, cards"). */
+  function emitCardViewEvent(domEvent, node) {
+    dispatchViewEvent(
+      domEvent.currentTarget,
+      viewEventFromDom(domEvent, 'node', node?.id ?? node?.qualified_name ?? node?.name ?? 'unknown', node)
+    );
+  }
+
+  function cardClick(domEvent, node) {
+    emitCardViewEvent(domEvent, node);
+  }
+
+  function cardKeydown(e, node) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      emitCardViewEvent(e, node);
+    }
+  }
   // §10 Interaction Context: the active view query is part of the canvas
   // state sent with each message, so the LLM knows what view is currently
   // applied ("what about this one?" can build on the active query).
@@ -841,6 +1014,7 @@
       loadRepos();
     }
     if (scopeType === 'workspace') {
+      repoDetail = null;
       loadWsRepos();
     }
   });
@@ -882,13 +1056,96 @@
     } finally {
       wsReposLoading = false;
     }
+    loadWsDepGraph();
     loadWsBoundaryStats();
   }
 
-  /** HSI §3 Boundary View Level 1 — enrich the workspace repo cards with
-   *  type/endpoint counts (from the aggregated workspace knowledge graph)
-   *  and cross-repo dependency chips. Best-effort: failures leave the cards
-   *  without counts rather than breaking the repo list. */
+  /** Load cross-repo dependency edges for the workspace graph canvas
+   *  (ui-layout.md §5 Workspace Scope — Realized Architecture). */
+  async function loadWsDepGraph() {
+    if (!scope.workspaceId) {
+      wsDepLoading = false;
+      return;
+    }
+    wsDepLoading = true;
+    wsDepError = null;
+    try {
+      const data = await api.workspaceDependencyGraph(scope.workspaceId);
+      wsDepEdges = data?.edges ?? [];
+      wsDepExternal = data?.nodes ?? [];
+    } catch (e) {
+      // The dependency graph is additive context — repos-as-nodes still render
+      // from wsRepos; surface the failure without blocking the canvas.
+      wsDepError = e.message ?? 'Failed to load cross-repo dependencies';
+      wsDepEdges = [];
+      wsDepExternal = [];
+    } finally {
+      wsDepLoading = false;
+    }
+  }
+
+  // Workspace graph nodes: every repo in the workspace (C4 containers), plus
+  // external repos referenced by dependency edges so cross-workspace edges
+  // have visible endpoints. Isolated repos (no edges) still appear as nodes.
+  // Each node carries its HSI §3 Level 1 type/endpoint counts (when loaded)
+  // for the counts sub-label inside the node box.
+  let wsGraphNodes = $derived.by(() => {
+    const nodes = wsRepos.map((r) => ({
+      repo_id: r.id,
+      name: r.name,
+      repo: r,
+      types: wsRepoStats[r.id]?.types ?? null,
+      endpoints: wsRepoStats[r.id]?.endpoints ?? null,
+    }));
+    const seen = new Set(wsRepos.map((r) => r.id));
+    for (const n of wsDepExternal) {
+      if (n?.repo_id && !seen.has(n.repo_id)) {
+        nodes.push({ repo_id: n.repo_id, name: n.name ?? n.repo_id, external: true, types: null, endpoints: null });
+        seen.add(n.repo_id);
+      }
+    }
+    return nodes;
+  });
+
+  let wsGraphEdges = $derived(wsDepEdges);
+
+  /** Single-click a repo node → detail panel with repo metadata (§5). */
+  function showRepoDetail(node) {
+    const repo = wsRepos.find((r) => r.id === node.repo_id);
+    repoDetail = repo
+      ? { ...repo, external: false }
+      : { id: node.repo_id, name: node.name, external: true };
+  }
+
+  /** Double-click a repo node → drill to crate level: scope changes to repo
+   *  (URL update + breadcrumb change in the host shell). Falls back to the
+   *  in-place crate-level graph when no host navigation is available. */
+  function enterRepo(nodeOrRepo) {
+    const repo = nodeOrRepo.repo ?? wsRepos.find((r) => r.id === nodeOrRepo.repo_id) ?? nodeOrRepo;
+    if (!repo?.id && !repo?.repo_id) return;
+    repoDetail = null;
+    if (onEnterRepo) {
+      onEnterRepo(repo.id ? repo : { id: repo.repo_id, name: repo.name });
+      return;
+    }
+    if (goToRepoCtx) {
+      goToRepoCtx(repo.id ? repo : { id: repo.repo_id, name: repo.name }, 'architecture');
+      return;
+    }
+    // No host shell — drill in place (canvas switches to the repo's crate-level graph)
+    selectRepo(repo.id ? repo : { id: repo.repo_id, name: repo.name, description: repo.description });
+  }
+
+  /** Empty-state action: go where repos can be created (workspace home). */
+  function goToCreateRepo() {
+    goToWorkspaceHomeCtx?.();
+  }
+
+  /** HSI §3 Boundary View Level 1 — enrich the workspace graph nodes with
+   *  type/endpoint counts (from the aggregated workspace knowledge graph).
+   *  Best-effort: failures leave the nodes without counts rather than
+   *  breaking the canvas (the counts render as a muted sub-label on each
+   *  repo node, per the HSI §3 Level 1 node boxes). */
   async function loadWsBoundaryStats() {
     if (!scope.workspaceId) return;
     try {
@@ -906,25 +1163,6 @@
     } catch {
       wsRepoStats = {};
     }
-    // Cross-repo dependency chips per repo (names resolved against the list).
-    const deps = {};
-    await Promise.all(
-      wsRepos.map(async (repo) => {
-        try {
-          const edges = await api.repoDependencies(repo.id);
-          deps[repo.id] = (Array.isArray(edges) ? edges : []).map((e) => ({
-            target_repo_id: e.target_repo_id,
-            name:
-              wsRepos.find((r) => r.id === e.target_repo_id)?.name ??
-              e.target_artifact ??
-              e.target_repo_id,
-          }));
-        } catch {
-          deps[repo.id] = [];
-        }
-      })
-    );
-    wsRepoDeps = deps;
   }
 
   /** Switch the Explorer view (HSI §3 view selector). Resetting to Boundary
@@ -1336,9 +1574,12 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
+      if (viewMenu) { viewMenu = null; return; }
+      if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
       if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
+      if (repoDetail) { repoDetail = null; return; }
       if (activeViewQuery) { activeViewQuery = null; return; }
       return;
     }
@@ -1443,6 +1684,38 @@
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
+  // Rendering density policy for the canvas area (ui-layout.md §10):
+  // the shell owns the >1000-node list fallback; the public-only filter
+  // (>500) is applied inside ExplorerCanvas with its own banner.
+  let graphDensity = $derived(applyDensityPolicy(effectiveGraph?.nodes ?? []));
+
+  // ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ──
+  /** Renderer component for the active layout (capitalized for Svelte's
+   *  dynamic component syntax; null → unified canvas / shell list). */
+  let LayoutRenderer = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout) || activeLayout === 'list') return null;
+    return getLayout(activeLayout)?.component ?? null;
+  });
+
+  /** The active layout's registry entry (label key, engine selector). */
+  let activeLayoutReg = $derived(getLayout(activeLayout));
+
+  /** Nodes/edges the generated layout renderer receives: the active view
+   *  query's scope applied to the effective graph, so a generated
+   *  hierarchical/layered/side-by-side/diff/list view shows the same node
+   *  set the unified canvas would show for the same spec (null scope or an
+   *  unmatched scope → full graph, mirroring the canvas). */
+  let generatedLayoutGraph = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout)) return null;
+    const allNodes = effectiveGraph?.nodes ?? [];
+    const allEdges = effectiveGraph?.edges ?? [];
+    const scoped = resolveScopeNodes(activeViewQuery?.scope, allNodes, allEdges);
+    const nodes = scoped ?? allNodes;
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = allEdges.filter((e) => ids.has(edgeSrc(e)) && ids.has(edgeTgt(e)));
+    return { nodes, edges };
+  });
+
   // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
   // Uses imported functions from timeline-utils.js for testability.
   let timelineDeltaStats = $derived.by(() => {
@@ -1514,24 +1787,25 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} />
+<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} onclick={onWindowClick} />
 
 {#if scopeType === 'tenant'}
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
   <WorkspaceCards {onSelectWorkspace} />
 
 {:else if scopeType === 'workspace' && !showingRepoGraph}
-  <!-- Workspace scope: repo list for graph exploration — S4.4b -->
-  <div class="ws-repo-list" aria-busy={wsReposLoading}>
-    <div class="ws-repo-header">
-      <h1 class="page-title">{$t('explorer_view.workspace_title')}</h1>
-      <p class="ws-repo-desc">{$t('explorer_view.workspace_desc')}</p>
-    </div>
+  <!-- Workspace scope: realized architecture — repos as nodes, cross-repo
+       dependencies as edges (ui-layout.md §5, C4 "Container" level) — S4.4b -->
+  <div class="ws-arch-view" aria-busy={wsReposLoading || wsDepLoading}>
+    {#if !embedded}
+      <div class="ws-repo-header">
+        <h1 class="page-title">{$t('explorer_view.workspace_title')}</h1>
+        <p class="ws-repo-desc">{$t('explorer_view.workspace_desc')}</p>
+      </div>
+    {/if}
     {#if wsReposLoading}
-      <div class="ws-repo-grid">
-        <Skeleton height="80px" />
-        <Skeleton height="80px" />
-        <Skeleton height="80px" />
+      <div class="ws-arch-canvas-loading">
+        <Skeleton lines={6} />
       </div>
     {:else if wsReposError}
       <div class="error-banner" role="alert">
@@ -1539,42 +1813,94 @@
         <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">{$t('common.retry')}</button>
       </div>
     {:else if wsRepos.length === 0}
-      <EmptyState title={$t('explorer_view.no_repos')} description={$t('explorer_view.no_repos_desc')} />
+      <!-- Empty state (§5): zero repos → centered message with a create link -->
+      <div class="ws-arch-empty">
+        <EmptyState
+          title={$t('explorer_view.no_repos')}
+          description={$t('explorer_view.no_repos_desc')}
+        >
+          {#snippet action()}
+            <button class="go-admin-btn" onclick={goToCreateRepo} data-testid="ws-arch-create-repo">
+              {$t('explorer_view.create_repo')}
+            </button>
+          {/snippet}
+        </EmptyState>
+      </div>
     {:else}
-      <div class="ws-repo-grid">
-        {#each wsRepos as repo (repo.id)}
-          <button class="ws-repo-card" onclick={() => selectRepo(repo)} aria-label={$t('explorer_view.explore_repo', { values: { name: repo.name } })}>
-            <div class="ws-repo-card-left">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="ws-repo-icon" aria-hidden="true">
-                <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-              </svg>
-              <div class="ws-repo-info">
-                <span class="ws-repo-name">{repo.name}</span>
-                {#if repo.description}
-                  <span class="ws-repo-description">{repo.description}</span>
-                {/if}
-                <!-- HSI §3 Boundary View Level 1: type/endpoint counts from the
-                     workspace knowledge graph (C4 container card). -->
-                <span class="ws-repo-counts">
-                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.types ?? 0} types</span>
-                  <span class="ws-repo-count-sep">·</span>
-                  <span class="ws-repo-count">{wsRepoStats[repo.id]?.endpoints ?? 0} endpoints</span>
-                </span>
-                {#if wsRepoDeps[repo.id]?.length}
-                  <span class="ws-repo-deps" title="Cross-repo dependencies">
-                    {#each wsRepoDeps[repo.id].slice(0, 4) as dep}
-                      <span class="ws-repo-dep-chip">→ {dep.name}</span>
-                    {/each}
-                    {#if wsRepoDeps[repo.id].length > 4}
-                      <span class="ws-repo-dep-more">+{wsRepoDeps[repo.id].length - 4}</span>
-                    {/if}
-                  </span>
-                {/if}
-              </div>
+      <div class="ws-arch-body">
+        <div class="ws-arch-canvas" data-testid="ws-arch-canvas">
+          {#if wsDepError}
+            <div class="ws-dep-warning" role="status">
+              <span>{$t('explorer_view.dep_graph_unavailable', { values: { error: wsDepError } })}</span>
+              <button class="chip-clear" onclick={loadWsDepGraph} aria-label={$t('common.retry')}>↻</button>
             </div>
-            <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
-          </button>
-        {/each}
+          {/if}
+          <DependencyGraph
+            nodes={wsGraphNodes}
+            edges={wsGraphEdges}
+            scope="workspace"
+            showScopeToggle={false}
+            onNodeClick={showRepoDetail}
+            onNodeDblClick={enterRepo}
+          />
+        </div>
+        {#if repoDetail}
+          <!-- Single-click detail panel: repo metadata (§5) -->
+          <aside class="ws-repo-detail" data-testid="ws-repo-detail" aria-label={repoDetail.name}>
+            <div class="ws-repo-detail-header">
+              <h2 class="ws-repo-detail-title" title={repoDetail.name}>{repoDetail.name}</h2>
+              <button
+                class="ws-repo-detail-close"
+                onclick={() => { repoDetail = null; }}
+                aria-label={$t('common.close')}
+                type="button"
+              >✕</button>
+            </div>
+            {#if repoDetail.description}
+              <p class="ws-repo-detail-desc">{repoDetail.description}</p>
+            {/if}
+            {#if repoDetail.external}
+              <p class="ws-repo-detail-external">{$t('explorer_view.repo_external')}</p>
+            {/if}
+            <dl class="ws-repo-detail-meta">
+              <div class="meta-row">
+                <dt>{$t('explorer_view.repo_detail_id')}</dt>
+                <dd class="mono">{repoDetail.id ?? repoDetail.repo_id}</dd>
+              </div>
+              {#if repoDetail.default_branch}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_branch')}</dt>
+                  <dd class="mono">{repoDetail.default_branch}</dd>
+                </div>
+              {/if}
+              {#if repoDetail.created_at}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_created')}</dt>
+                  <dd>{new Date(repoDetail.created_at * 1000).toLocaleDateString()}</dd>
+                </div>
+              {/if}
+              {#if repoDetail.updated_at}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_updated')}</dt>
+                  <dd>{new Date(repoDetail.updated_at * 1000).toLocaleDateString()}</dd>
+                </div>
+              {/if}
+            </dl>
+            <div class="ws-repo-detail-actions">
+              <!-- Keyboard-reachable equivalent of the double-click drill -->
+              <button
+                class="enter-btn"
+                onclick={() => enterRepo(repoDetail)}
+                data-testid="ws-repo-detail-explore"
+              >
+                {$t('explorer_view.explore_architecture')}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                  <path d="M9 18l6-6-6-6"/>
+                </svg>
+              </button>
+            </div>
+          </aside>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1832,6 +2158,71 @@
                 </div>
               {/if}
               {#if explorerViewMode === 'boundary'}
+              {#if LayoutRenderer}
+                <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
+                     Engines): the ViewSpec `layout` field selects the renderer
+                     through the layout registry — hierarchical/layered render on
+                     the SVG canvas positioned by ELK, side-by-side on the CSS
+                     Grid composite, diff on the structural-diff component. The
+                     scope of the spec's ViewQuery filters the node set. -->
+                <div class="gen-layout-wrap" data-layout={activeLayout} data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t(activeLayoutReg?.labelKey ?? 'explorer_view.layout_graph')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <LayoutRenderer
+                      nodes={generatedLayoutGraph.nodes}
+                      edges={generatedLayoutGraph.edges}
+                      repoId={selectedRepoId}
+                      engine={activeLayoutReg?.engine ?? 'graph'}
+                      onSelectNode={openNodeDetail}
+                    />
+                  </div>
+                </div>
+              {:else if activeLayout === 'list'}
+                <!-- ui-layout.md §10 `list` engine: native Svelte {#each} rows
+                     with virtual scrolling (registry component is null — the
+                     shell owns the list renderer). -->
+                <div class="gen-layout-wrap" data-layout="list" data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t('explorer_view.layout_list')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <VirtualNodeList
+                      nodes={generatedLayoutGraph.nodes}
+                      viewportHeight={520}
+                    />
+                  </div>
+                </div>
+              {:else if graphDensity.mode === 'list'}
+                <!-- ui-layout.md §10 Canvas Rendering: >1000 nodes even after
+                     the public filter → list layout with virtual scrolling +
+                     a warning (the shell owns the fallback swap). -->
+                <div class="density-list-fallback" role="region" aria-label="Graph as virtualized list">
+                  <div class="density-list-banner" role="status">
+                    Graph too large for canvas rendering ({graphDensity.total} nodes) —
+                    switched to list layout with virtual scrolling.
+                  </div>
+                  <VirtualNodeList
+                    nodes={effectiveGraph.nodes ?? []}
+                    viewportHeight={520}
+                  />
+                </div>
+              {:else}
               <!-- windowEscape={false}: ExplorerView owns the window-level Escape
                    cascade (onWindowKeydown: spec editor → query editor → detail panel →
                    active view query) and already exits trace mode through it; a second
@@ -1848,27 +2239,7 @@
                 gateStatusBySpec={gateStatusBySpec}
                 specApprovals={specApprovals}
                 bind:canvasState={explorerCanvasState}
-                onNodeDetail={(n) => {
-                  detailNode = n;
-                  highlightedSpanId = null;
-                  if (n?._action === 'view_spec' && n.spec_path) {
-                    openSpecEditor(n.spec_path);
-                  } else if (n?._action === 'create_spec') {
-                    // Open spec editor with a template for the uncovered node
-                    const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
-                    specEditorOpen = true;
-                    specEditorPath = suggestedPath;
-                    const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
-                    specEditorContent = template;
-                    specEditorOriginal = '';
-                    specEditorError = '';
-                  } else if (n?._action === 'view_code' && n.file_path) {
-                    // Open in code: show file in detail panel.
-                    // The NodeDetailPanel displays Location (file_path:line).
-                    // This preserves canvas state unlike opening a new browser tab.
-                    detailNode = n;
-                  }
-                }}
+                onNodeDetail={openNodeDetail}
                 onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
@@ -1892,6 +2263,7 @@
                 onTimelineMarkerClick={(_delta) => {}}
                 {timelineDeltaStats}
               />
+              {/if}
               {:else if explorerViewMode === 'spec-realization'}
                 <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
                 <SpecRealizationView
@@ -1933,7 +2305,17 @@
                         <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
                         <div class="arch-type-grid">
                           {#each graphTypes.slice(0, 20) as node}
-                            <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                            <div
+                              class="arch-type-card"
+                              title={node.qualified_name ?? node.name}
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.name ?? node.qualified_name} ({node.node_type ?? 'type'})"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
                               <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
                               {#if node.doc_comment}
@@ -2012,7 +2394,16 @@
                         <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
                         <ul class="arch-risk-list">
                           {#each repoRisks.slice(0, 10) as node}
-                            <li class="arch-risk-item">
+                            <li
+                              class="arch-risk-item"
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.qualified_name ?? node.name} risk hotspot"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
                               <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '\u2014'}</span>
                               {#if node.risk_reason ?? node.reason}
@@ -2492,9 +2883,45 @@
   </div>
 {/if}
 
+<!-- ── Uniform ViewEvent surfaces (ui-layout.md §10 Interaction Events) ────── -->
+<!-- Hover tooltip fed by ViewEvents from non-integrated emitters (SVG canvas,
+     list rows, cards). ExplorerCanvas renders its own tooltip internally. -->
+{#if viewTooltip}
+  <div
+    class="viewevent-tooltip"
+    style="left: {viewTooltip.x + 14}px; top: {viewTooltip.y + 14}px;"
+    role="tooltip"
+    aria-hidden="true"
+  >
+    <span class="viewevent-tooltip-type">{viewTooltip.type}</span>
+    <span class="viewevent-tooltip-name">{viewTooltip.name}</span>
+  </div>
+{/if}
+
+<!-- Context-menu actions fed by ViewEvents -->
+{#if viewMenu}
+  <div class="viewevent-menu-backdrop" onclick={() => (viewMenu = null)} oncontextmenu={(e) => { e.preventDefault(); viewMenu = null; }} role="presentation"></div>
+  <div
+    class="viewevent-menu"
+    style="left: {viewMenu.x}px; top: {viewMenu.y}px;"
+    role="menu"
+    aria-label="Entity actions"
+  >
+    <div class="viewevent-menu-title">{viewMenu.data?.name ?? viewMenu.data?.id ?? viewMenu.entity}</div>
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('details')}>View details</button>
+    {#if viewMenu.data?.file_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('code')}>Open in code</button>
+    {/if}
+    {#if viewMenu.data?.spec_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('spec')}>View governing spec</button>
+    {/if}
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('copy_id')}>Copy ID</button>
+  </div>
+{/if}
+
 <style>
-  /* ── Workspace scope repo list ──────────────────────────────────────── */
-  .ws-repo-list {
+  /* ── Workspace scope: realized architecture graph (§5) ───────────── */
+  .ws-arch-view {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -2516,105 +2943,179 @@
     color: var(--color-text-muted);
   }
 
-  .ws-repo-grid {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+  .ws-arch-canvas-loading {
+    padding: var(--space-4);
   }
 
-  .ws-repo-card {
+  .ws-arch-empty {
+    flex: 1;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
+  }
+
+  .ws-arch-body {
+    display: flex;
     gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
+    align-items: stretch;
+    min-height: 420px;
+    flex: 1;
+  }
+
+  .ws-arch-canvas {
+    flex: 1;
+    min-width: 0;
+    position: relative;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
+    overflow: hidden;
   }
 
-  .ws-repo-card:hover {
-    border-color: var(--color-focus);
+  .ws-dep-warning {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
+    border: 1px solid var(--color-warning, #eab308);
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 
-  .ws-repo-card:focus-visible {
+  .ws-dep-warning .chip-clear {
+    background: none;
+    border: none;
+    color: var(--color-link);
+    cursor: pointer;
+    padding: 0;
+    font-size: var(--text-sm);
+  }
+
+  /* Repo metadata detail panel (single-click, §5) */
+  .ws-repo-detail {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow-y: auto;
+  }
+
+  .ws-repo-detail-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .ws-repo-detail-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+  }
+
+  .ws-repo-detail-close {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-1);
+    line-height: 1;
+  }
+
+  .ws-repo-detail-close:hover { color: var(--color-text); }
+
+  .ws-repo-detail-close:focus-visible,
+  .enter-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
-  .ws-repo-card-left {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-width: 0;
+  .ws-repo-detail-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
   }
 
-  .ws-repo-icon {
+  .ws-repo-detail-external {
+    margin: 0;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
-    flex-shrink: 0;
+    font-style: italic;
   }
 
-  .ws-repo-info {
+  .ws-repo-detail-meta {
+    margin: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
-    min-width: 0;
+    gap: var(--space-2);
   }
 
-  .ws-repo-name {
-    font-size: var(--text-sm);
+  .meta-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .meta-row dt {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
     font-weight: 600;
+  }
+
+  .meta-row dd {
+    margin: 0;
+    font-size: var(--text-sm);
     color: var(--color-text);
   }
 
-  .ws-repo-description {
+  .ws-repo-detail .mono {
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
-  /* HSI §3 Boundary View Level 1: type/endpoint counts + dep chips on cards */
-  .ws-repo-counts {
-    display: inline-flex;
-    gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
+  .ws-repo-detail-actions {
+    margin-top: auto;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
   }
 
-  .ws-repo-count-sep { color: var(--color-border); }
-
-  .ws-repo-deps {
+  .enter-btn {
     display: inline-flex;
+    align-items: center;
     gap: var(--space-1);
-    flex-wrap: wrap;
-  }
-
-  .ws-repo-dep-chip {
-    font-size: var(--text-xs);
+    background: transparent;
+    border: none;
     color: var(--color-link);
-    background: color-mix(in srgb, var(--color-link) 10%, transparent);
-    border-radius: var(--radius-full, 999px);
-    padding: 0 var(--space-2);
-  }
-
-  .ws-repo-dep-more {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-  }
-
-  .ws-repo-explore {
+    font-family: var(--font-body);
     font-size: var(--text-sm);
-    color: var(--color-link);
-    flex-shrink: 0;
     font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .enter-btn:hover { color: var(--color-link-hover); }
+
+  @media (max-width: 900px) {
+    .ws-arch-body { flex-direction: column; }
+    .ws-repo-detail { width: 100%; }
   }
 
   /* ── Repo scope: graph view styles ───────────────────────────────────── */
@@ -2977,7 +3478,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }
-    .ws-repo-card,
     .go-admin-btn,
     .chip-clear,
     .graph-error button { transition: none; }
@@ -4459,5 +4959,146 @@
     .chat-expand-btn {
       display: none !important;
     }
+  }
+  .arch-risk-item {
+    cursor: pointer;
+  }
+
+  .arch-type-card {
+    cursor: pointer;
+  }
+  .arch-type-card:focus-visible,
+  .arch-risk-item:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  /* ── Density list fallback (ui-layout.md §10: >1000 nodes → list) ───── */
+  .density-list-fallback {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+    padding: var(--space-3, 12px);
+    box-sizing: border-box;
+  }
+  .density-list-banner {
+    padding: 8px 12px;
+    border: 1px solid #f87171;
+    border-radius: 8px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #f87171;
+    font-size: 13px;
+  }
+
+  /* ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ── */
+  .gen-layout-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+  }
+  .gen-layout-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 3px 6px 3px 10px;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #cbd5e1;
+    font-size: 12px;
+  }
+  .gen-layout-chip-clear {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .gen-layout-chip-clear:hover {
+    color: #e2e8f0;
+    background: #1e293b;
+  }
+  .gen-layout-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── ViewEvent surfaces (ui-layout.md §10 Interaction Events) ───────── */
+  .viewevent-tooltip {
+    position: fixed;
+    z-index: 300;
+    background: rgba(15, 15, 26, 0.95);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    pointer-events: none;
+    max-width: 320px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  }
+  .viewevent-tooltip-type {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+  }
+  .viewevent-tooltip-name {
+    font-size: 13px;
+    color: #e2e8f0;
+    word-break: break-all;
+  }
+
+  .viewevent-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 290;
+  }
+  .viewevent-menu {
+    position: fixed;
+    z-index: 300;
+    min-width: 200px;
+    background: var(--color-surface, #111827);
+    border: 1px solid var(--color-border, #334155);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewevent-menu-title {
+    font-size: 12px;
+    color: #94a3b8;
+    padding: 6px 10px 8px;
+    border-bottom: 1px solid #1e293b;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+  }
+  .viewevent-menu-item {
+    background: transparent;
+    border: none;
+    color: #e2e8f0;
+    text-align: left;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .viewevent-menu-item:hover {
+    background: #1e293b;
   }
 </style>

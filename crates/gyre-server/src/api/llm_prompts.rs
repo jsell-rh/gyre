@@ -192,6 +192,8 @@ pub async fn list_tenant_defaults(
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<PromptTemplateResponse>>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/admin/llm/prompts")
+            .await;
         return Err(ApiError::Forbidden("admin role required".to_string()));
     }
 
@@ -227,6 +229,13 @@ pub async fn upsert_tenant_default(
     Json(body): Json<UpsertPromptBody>,
 ) -> Result<(StatusCode, Json<PromptTemplateResponse>), ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/admin/llm/prompts/:function",
+        )
+        .await;
         return Err(ApiError::Forbidden("admin role required".to_string()));
     }
     if !LLM_FUNCTION_KEYS.contains(&function_key.as_str()) {
