@@ -192,7 +192,14 @@ pub async fn record_audit_event(
     } else {
         Some(gyre_common::Id::new(auth.agent_id.clone()))
     };
-    let user_id = auth.user_id.clone();
+    // Identity-security.md §Impersonation: events pushed during an
+    // impersonation session are attributed to the impersonator (the admin
+    // acting as the target), with the attribution context in detail.
+    let user_id = auth
+        .impersonation
+        .as_ref()
+        .map(|imp| imp.impersonator_id.clone())
+        .or_else(|| auth.user_id.clone());
 
     // Caller-scope validation (task-102 F2), see `validate_workspace_scope` /
     // `validate_repo_scope` above: mismatch or unknown scope rejects the
@@ -241,6 +248,17 @@ pub async fn record_audit_event(
         if let Some(p) = pid {
             obj.entry("pid").or_insert(serde_json::json!(p));
         }
+    }
+    // Impersonation attribution context (identity-security.md §Impersonation):
+    // the record's user_id is the impersonator; detail carries both identities
+    // plus the session so the trail shows the impersonator acting as the target.
+    if let (Some(obj), Some(imp)) = (detail.as_object_mut(), auth.impersonation.as_ref()) {
+        obj.entry("impersonator_id")
+            .or_insert(serde_json::json!(imp.impersonator_id.as_str()));
+        obj.entry("target_user_id")
+            .or_insert(serde_json::json!(imp.target_user_id.as_str()));
+        obj.entry("impersonation_session_id")
+            .or_insert(serde_json::json!(imp.session_id));
     }
 
     let event = AuditEvent::new(
