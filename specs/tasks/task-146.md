@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "17face906b7d075c68c798094f914b5d63488039", "897b5565d8791abde8b81cf4de4fa26e3e23eda7"]
 ---
 
 ## Spec Excerpt
@@ -150,7 +150,9 @@ fail-closed `resolve_ref` sites, the relative-path literal in spawn.rs,
 and the dead traces.rs exemption entry. The fabricated-scope exemption
 list intersected across lineages down to one entry
 (speculative_merge.rs). The analytics migration is renumbered to the
-next unused sequence — `2026-10-08-000059_analytics_scope_columns`.
+next unused sequence — now `2026-10-08-000060_analytics_scope_columns`
+(renumbered again past base's colliding
+`2026-10-08-000059_spec_lifecycle_configs`; see below).
 A wall-clock race in `rate_limit_exhaustion_returns_429` (predates this
 branch) was fixed deterministically by injecting the clock into
 `RateLimiter`. web/dist is byte-identical to base (this branch never
@@ -177,26 +179,65 @@ token against the freshly created "dev" tenant. Both routes' doc
 comments record the asymmetry and its reason so a future merge does not
 silently re-unify it.
 
-The regression test now seeds the built-in personas in both the foreign
-and the caller's tenant: the own-tenant positive control needs an
-approved persona in scope (the merged base resolves the spawn persona
-fail-closed — the old test environment predates that), and seeding the
-foreign tenant proves the 403 comes from containment, not from a missing
-persona. Assertion strength unchanged (403 + no agent row for the
-foreign workspace; 201 + agent row for the caller's own tenant).
+### Review-repair round: adapter test strength + migration renumber (17face906, 897b5565)
 
-### Test evidence (this round: commit 3bcd6f525 on merge 72da380b3)
+Two repairs on top of the merged base 18adceb68 (merge conflicts
+resolved as unions — base's facet_counts search aggregation kept
+alongside this branch's `search.query` analytics emission):
 
-- Reproduced the finding first: `cargo test -p gyre-server --test
-  api_integration orchestrator_spawn_denied_across_tenants` failed with
-  `404 != 403` on the pre-fix tree (evidence:
-  /tmp/stage/review-evidence/).
-- Post-fix: `--test api_integration` 67 passed / 0 failed (was 66/1);
-  `--lib` 1658 passed / 0 failed; `cargo fmt --check` clean; clippy
-  clean on the changed files (pre-existing warnings elsewhere only).
-- Offline gates exit 0: arch, ABAC registry + exempt handlers,
-  forged-scope, fabricated-scope, scope-literal, inert-enforcement,
-  migration versions, task-commit attribution (with the new commit
-  listed in the frontmatter).
+1. **Duplicate migration version (17face906, real defect caught by the
+   strengthened test):** base added
+   `2026-10-08-000059_spec_lifecycle_configs`, colliding with this
+   branch's `2026-10-08-000059_analytics_scope_columns`. Diesel runs
+   only one migration per version, so the analytics scope columns
+   (`user_id`/`session_id`/`workspace_id`/`repo_id`) were silently
+   missing on fresh databases — the adapter test failed at insert time
+   with "table analytics_events has no column named user_id".
+   Renumbered the analytics migration to the next unused sequence,
+   `2026-10-08-000060_analytics_scope_columns`;
+   `check-migration-versions.sh` and the
+   `no_duplicate_migration_version_prefixes` guard test both pass.
+
+2. **Weak sqlite adapter test (897b5565, the assigned review
+   finding):** `analytics_query_filtered_all_params` seeded data in
+   which every scope predicate alone isolated the expected row, so
+   dropping any single predicate from
+   `SqliteAnalyticsRepository::query_filtered` shipped green, and the
+   `user_id` predicate was never exercised on the default production
+   backend. Reseeded with cross-cutting data — agents span workspaces,
+   workspaces span repos, users span workspaces — and now assert each
+   scope filter (`agent_id`, `user_id`, `workspace_id`, `repo_id`)
+   individually against strict expected id sets, plus exact/prefix
+   `event_name`, the conjunctive case, inclusive `since`/`until`, and
+   newest-first `limit`.
+
+### Test evidence (this round: commits 17face906 + 897b5565 on merge 03a01d59a)
+
+- Mutation-verified the strengthened test: deleting the `workspace_id`,
+  `user_id`, `agent_id`, or `repo_id` predicate from the sqlite
+  `query_filtered` each fails `cargo test -p gyre-adapters --lib
+  analytics_query_filtered_all_params` (evidence:
+  /tmp/stage/review-evidence/mutation-adapter-{workspace,user,agent,repo}-filter-postfix.log).
+- `cargo test -p gyre-adapters --lib` 431 passed / 0 failed / 6
+  ignored; `cargo test -p gyre-server --lib analytics` 42 passed;
+  `--lib search` 3 passed; `--test api_integration` 67 passed / 0
+  failed; `--test search_wiring` 1 passed (exercises base's
+  facet_counts alongside the search.query emission).
+- `cargo fmt --check` clean; clippy clean on the changed files
+  (pre-existing warnings elsewhere only).
+- Offline gates exit 0: arch, migration versions, ABAC registry +
+  exempt handlers, forged-scope, fabricated-scope, scope-literal,
+  inert-enforcement, mem-port-contracts, dead-message-kinds,
+  byte-slice, relative-path, fail-open-ref, lossy-secret,
+  mcp-write-tools, forwarded-header, in-memory-state,
+  unbounded-external-http, task-commit attribution (with both new
+  commits listed in the frontmatter).
 - Full workspace suite, all-target clippy, and GitHub CI remain owned by
   the deterministic verification stage.
+
+### Prior-round history
+
+Workspace-orchestrator spawn containment (3bcd6f525): the regression
+seed now plants approved personas in both the foreign and the caller's
+tenant so the 403 provably comes from containment (assertion strength
+unchanged: 403 + no agent row foreign, 201 + agent row own-tenant).
