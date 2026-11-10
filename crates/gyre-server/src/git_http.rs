@@ -4643,6 +4643,163 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn repo_access_enforced_on_git_transport_for_user_principals() {
+        // user-management.md §Repo Access on the git smart-HTTP transport —
+        // the enforcement point for clone/fetch/push. The rest of this suite
+        // authenticates with the system token, which authorize_repo_access
+        // admits unconditionally; these assertions use real user principals
+        // (API keys + workspace memberships) so the membership/override
+        // check actually gates the transport and regresses loudly if the
+        // Read/Write permission mapping or the restrict-only override
+        // logic breaks.
+        let (app, state, _tmp, ws_slug, repo_name, _repo_path) = git_app_with_repo().await;
+
+        async fn member_user(
+            state: &Arc<crate::AppState>,
+            ws_id: &str,
+            role: gyre_domain::WorkspaceRole,
+            key: &str,
+        ) -> Id {
+            let id = Id::new(format!("user-{key}"));
+            let mut user =
+                gyre_domain::User::new(id.clone(), format!("ext-{key}"), format!("u-{key}"), 0);
+            user.tenant_id = Some(Id::new("default"));
+            user.global_role = gyre_domain::GlobalRole::Member;
+            user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&user).await.unwrap();
+            let mut m = gyre_domain::WorkspaceMembership::new(
+                Id::new(format!("m-{key}")),
+                id.clone(),
+                Id::new(ws_id),
+                role,
+                Id::new("system"),
+                0,
+            );
+            m.accept(0);
+            state.workspace_memberships.create(&m).await.unwrap();
+            state
+                .api_keys
+                .create(&crate::auth::hash_api_key(key), &id, "test")
+                .await
+                .unwrap();
+            id
+        }
+
+        let dev_id = member_user(
+            &state,
+            "ws-test",
+            gyre_domain::WorkspaceRole::Developer,
+            "gyre-test-dev-key",
+        )
+        .await;
+        let _viewer_id = member_user(
+            &state,
+            "ws-test",
+            gyre_domain::WorkspaceRole::Viewer,
+            "gyre-test-viewer-key",
+        )
+        .await;
+        // A user of the same tenant with NO workspace membership.
+        let mut outsider =
+            gyre_domain::User::new(Id::new("user-outsider"), "ext-out", "outsider", 0);
+        outsider.tenant_id = Some(Id::new("default"));
+        outsider.global_role = gyre_domain::GlobalRole::Member;
+        outsider.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&outsider).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("gyre-test-outsider-key"),
+                &outsider.id,
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let info_refs =
+            |service: &str| format!("/git/{ws_slug}/{repo_name}/info/refs?service={service}");
+
+        // Effective role → transport permission per the §Repo Access
+        // table: Developer reads and writes, Viewer reads only, non-members
+        // nothing.
+        for (key, service, expected) in [
+            ("gyre-test-dev-key", "git-upload-pack", StatusCode::OK),
+            ("gyre-test-dev-key", "git-receive-pack", StatusCode::OK),
+            ("gyre-test-viewer-key", "git-upload-pack", StatusCode::OK),
+            (
+                "gyre-test-viewer-key",
+                "git-receive-pack",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "gyre-test-outsider-key",
+                "git-upload-pack",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(info_refs(service))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected, "{key} on {service}");
+        }
+
+        // A per-repo override restricting the Developer to Viewer on this
+        // repo: fetch (Read) stays allowed, push (Write) is denied — the
+        // override restricts, never expands.
+        let over = gyre_domain::RepoAccessOverride::new(
+            Id::new("override-git-1"),
+            Id::new("repo-1"),
+            dev_id.clone(),
+            gyre_domain::WorkspaceRole::Viewer,
+            Id::new("system"),
+            0,
+        );
+        state.repo_access_overrides.create(&over).await.unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(info_refs("git-upload-pack"))
+                    .header("Authorization", "Bearer gyre-test-dev-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a Developer restricted to Viewer keeps read (fetch) access"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(info_refs("git-receive-pack"))
+                    .header("Authorization", "Bearer gyre-test-dev-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer restricted to Viewer loses write (push) access"
+        );
+    }
+
     fn auth_header() -> &'static str {
         "Bearer test-token"
     }

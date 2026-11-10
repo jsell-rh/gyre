@@ -15,6 +15,14 @@
 //!    flagged as "orphaned" in the admin dashboard
 //!    (`GET /api/v1/admin/orphaned-workspaces`).
 //!
+//! The spec trigger is an owner *departure* ("when a workspace Owner
+//! leaves"): a workspace that never had an Owner — created by the system
+//! principal or an agent, which have no user identity to hold a membership
+//! — is healthy by design and is neither recorded nor notified. Evidence
+//! that an owner once existed is an Owner membership row (the departed
+//! owner's row survives account deletion/deactivation; user deletion does
+//! not cascade memberships).
+//!
 //! Reassigning ownership (`PUT /api/v1/workspaces/{id}/members/{user_id}/role`
 //! with `{"role": "Owner"}`) clears the ownerless record and the flag.
 
@@ -94,6 +102,22 @@ pub async fn has_active_owner(state: &Arc<AppState>, workspace_id: &Id) -> anyho
         }
     }
     Ok(false)
+}
+
+/// Whether the workspace has ever had an Owner: any Owner membership row,
+/// even one whose user record is gone. User deletion does not cascade
+/// memberships, so a departed Owner's row survives as evidence that an
+/// owner existed — the spec's trigger for the ownerless flow ("when a
+/// workspace Owner leaves"). A workspace with no Owner membership at all
+/// was never owned (system/agent-operated by design) and must not be
+/// flagged or notified.
+async fn has_ever_had_owner(state: &Arc<AppState>, workspace_id: &Id) -> anyhow::Result<bool> {
+    Ok(state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await?
+        .iter()
+        .any(|m| m.role == WorkspaceRole::Owner))
 }
 
 /// Read the persisted ownerless record for a workspace, if any.
@@ -210,8 +234,11 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
 ///
 /// - Has an active Owner → clear any ownerless record (the workspace was
 ///   reclaimed; ownership was reassigned).
-/// - No active Owner and no record → record `ownerless_since = now` and
-///   notify the TenantAdmins.
+/// - No active Owner and never had one → not tracked (no owner departed;
+///   system/agent-operated workspaces are healthy by design).
+/// - No active Owner but an Owner membership exists (the owner left) and
+///   no record → record `ownerless_since = now` and notify the
+///   TenantAdmins.
 /// - No active Owner and a record → retry the notification when it has not
 ///   been created yet; otherwise nothing (the orphan flag is derived from
 ///   `ownerless_since` + the threshold, not re-recorded).
@@ -227,6 +254,12 @@ async fn track_workspace(state: &Arc<AppState>, ws: &Workspace) -> anyhow::Resul
                 "workspace_ownership: owner present, ownerless record cleared"
             );
         }
+        return Ok(());
+    }
+
+    // Never owned → no departure ever happened → not ownerless (spec:
+    // "when a workspace Owner leaves").
+    if !has_ever_had_owner(state, &ws.id).await? {
         return Ok(());
     }
 
@@ -458,7 +491,14 @@ mod tests {
             .create(&make_user("admin2", "t2", GlobalRole::TenantAdmin))
             .await
             .unwrap();
-        // A Developer membership is not an Owner — the workspace is ownerless.
+        // The workspace's Owner left (user record gone, membership row
+        // remains) and a Developer member is still present — the workspace
+        // is ownerless by departure, not never-owned.
+        state
+            .workspace_memberships
+            .create(&make_membership("departed-owner", "ws1", Role::Owner))
+            .await
+            .unwrap();
         state
             .workspace_memberships
             .create(&make_membership("member1", "ws1", Role::Developer))
@@ -551,6 +591,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn never_owned_workspace_is_not_tracked_or_notified() {
+        // user-management.md §Ownership Transfer & Reclamation frames the
+        // ownerless flow as "when a workspace Owner leaves". A workspace
+        // with no Owner membership at all — e.g. one created by the system
+        // principal or an agent, which hold no user identity — was never
+        // owned and must not be flagged or generate TenantAdmin
+        // notification noise.
+        let state = test_state();
+        let ws = make_workspace("ws8");
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .users
+            .create(&make_user("admin8", "t1", GlobalRole::TenantAdmin))
+            .await
+            .unwrap();
+        // A Developer membership alone is not evidence an owner existed.
+        state
+            .workspace_memberships
+            .create(&make_membership("member8", "ws8", Role::Developer))
+            .await
+            .unwrap();
+
+        run_once(&state).await.unwrap();
+
+        assert!(
+            ownerless_record(&state, &Id::new("ws8"))
+                .await
+                .unwrap()
+                .is_none(),
+            "a never-owned workspace must not be recorded as ownerless"
+        );
+        assert!(
+            ownerless_notifications(&state, "admin8", "ws8")
+                .await
+                .is_empty(),
+            "a never-owned workspace must not notify TenantAdmins"
+        );
+    }
+
+    #[tokio::test]
     async fn job_re_runs_do_not_duplicate_notifications() {
         let state = test_state();
         let ws = make_workspace("ws4");
@@ -558,6 +638,13 @@ mod tests {
         state
             .users
             .create(&make_user("admin4", "t1", GlobalRole::TenantAdmin))
+            .await
+            .unwrap();
+        // The workspace's Owner departed (membership row remains, user
+        // record gone).
+        state
+            .workspace_memberships
+            .create(&make_membership("departed-owner", "ws4", Role::Owner))
             .await
             .unwrap();
 
@@ -618,8 +705,14 @@ mod tests {
             .create(&make_user("admin6", "t1", GlobalRole::TenantAdmin))
             .await
             .unwrap();
+        // The workspace's Owner departed → ownerless.
+        state
+            .workspace_memberships
+            .create(&make_membership("departed-owner", "ws6", Role::Owner))
+            .await
+            .unwrap();
 
-        // Workspace starts ownerless → tracked.
+        // Workspace is ownerless by departure → tracked.
         run_once(&state).await.unwrap();
         assert!(ownerless_record(&state, &Id::new("ws6"))
             .await

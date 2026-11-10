@@ -2369,8 +2369,11 @@ mod tests {
     #[tokio::test]
     async fn member_management_requires_owner_admin_or_tenant_admin() {
         // A plain Developer member (API-key auth) must not be able to grant
-        // workspace membership. The request passes ABAC (Developer role may
-        // write), so the 403 comes from the handler's membership check.
+        // workspace membership. Runs the PRODUCTION pipeline (api router +
+        // abac_middleware + builtin policies, as build_router layers them):
+        // the request passes ABAC — the Developer global role may write, and
+        // the recorded decision is Allow — so the 403 provably comes from
+        // the handler's membership check, not from policy evaluation.
         let state = test_state();
         let (ws_id, _owner_id) = seed_workspace_with_owner(&state).await;
         let now = 1_700_000_000u64;
@@ -2405,7 +2408,16 @@ mod tests {
             .await
             .unwrap();
 
-        let app = crate::api::api_router().with_state(state);
+        crate::abac_middleware::init_resolver();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed builtin policies");
+        let app = crate::api::api_router()
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::abac_middleware::abac_middleware,
+            ))
+            .with_state(state.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -2424,6 +2436,20 @@ mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "a Developer member must not be able to grant membership"
+        );
+
+        // The 403 came from the handler: ABAC evaluated this exact request
+        // to Allow (Developer global role may write on workspace_member).
+        let decisions = state
+            .policies
+            .list_decisions(None, Some("workspace_member"), 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| { d.decision == gyre_domain::PolicyEffect::Allow && d.action == "write" }),
+            "the request must have passed ABAC (Allow) so the 403 is the handler's"
         );
     }
 }

@@ -652,6 +652,26 @@ fn extract_workspace_id(pattern: &str, path: &str) -> Option<String> {
     None
 }
 
+/// Extract the repo id from a request path, given its matched route
+/// pattern — the path segment following `repos` where the pattern has a
+/// parameter (`/api/v1/repos/:id/...`). Returns `None` when the pattern
+/// does not address a repo (e.g. `/api/v1/repos` itself, or
+/// `/api/v1/repos/mirror` whose next segment is a literal, not a
+/// parameter).
+fn extract_repo_id(pattern: &str, path: &str) -> Option<String> {
+    let pat_segs: Vec<&str> = pattern.trim_matches('/').split('/').collect();
+    let path_segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    for (i, seg) in pat_segs.iter().enumerate() {
+        if *seg == "repos" {
+            let param = pat_segs.get(i + 1)?;
+            if param.starts_with(':') {
+                return path_segs.get(i + 1).map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Built-in policy seed (M34 Slice 4)
 // ---------------------------------------------------------------------------
@@ -1246,14 +1266,41 @@ pub async fn abac_middleware(
     // user-management.md §Workspace Membership: expose the caller's role in
     // the workspace the request addresses as `subject.workspace_role`, so
     // policies can gate on workspace-level roles (e.g. the builtin
-    // workspace-member-management policy). Resolved from the real membership
-    // store; absent when the caller has no membership (agent tokens, users
-    // of other workspaces) — policies requiring it then simply don't match.
+    // workspace-member-management and repo-access-override-management
+    // policies). Resolved from the real membership store; absent when the
+    // caller has no membership (agent tokens, users of other workspaces) —
+    // policies requiring it then simply don't match (fail-closed).
+    //
+    // Workspace-addressed routes (`/api/v1/workspaces/:id/...`) name the
+    // workspace in the path. Repo-addressed routes
+    // (`/api/v1/repos/:id/...`) do not — the repo's workspace is resolved
+    // from the repo store, because repo access is inherited from workspace
+    // membership (user-management.md §Repo Access) and policies gate repo
+    // admin actions on the caller's workspace role. An unresolvable repo
+    // id yields no attribute, so policies requiring the role deny — never
+    // the reverse.
     if let Some(user_id) = &auth.user_id {
-        if let Some(ws_id) = extract_workspace_id(&pattern, req.uri().path()) {
+        let workspace_id = if let Some(ws_id) = extract_workspace_id(&pattern, req.uri().path()) {
+            Some(Id::new(ws_id))
+        } else if let Some(repo_id) = extract_repo_id(&pattern, req.uri().path()) {
+            match state.repos.find_by_id(&Id::new(repo_id)).await {
+                Ok(Some(repo)) => Some(repo.workspace_id.clone()),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %pattern,
+                        "abac_middleware: failed to load repo for workspace-role resolution: {e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(ws_id) = workspace_id {
             if let Ok(Some(m)) = state
                 .workspace_memberships
-                .find_by_user_and_workspace(user_id, &Id::new(ws_id))
+                .find_by_user_and_workspace(user_id, &ws_id)
                 .await
             {
                 ctx.set("subject.workspace_role", m.role.as_str());

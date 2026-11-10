@@ -59,6 +59,12 @@ pub struct SetOverrideRequest {
 }
 
 /// Load a repo and enforce the caller's tenant scope on it.
+///
+/// Fail-closed on an unresolvable scope: a repo whose workspace lookup
+/// errors or comes back empty is rejected (NotFound), never passed
+/// through — the tenant gate cannot be evaluated, and this repo's
+/// standards treat that as denial (same containment as git_http's
+/// tenant-scoped `resolve_repo_by_slug`).
 async fn load_repo_scoped(
     state: &AppState,
     auth: &AuthenticatedAgent,
@@ -69,8 +75,14 @@ async fn load_repo_scoped(
         .find_by_id(&Id::new(repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
-    if let Ok(Some(ws)) = state.workspaces.find_by_id(&repo.workspace_id).await {
-        if !auth.is_system_principal() && ws.tenant_id.to_string() != auth.tenant_id {
+    if !auth.is_system_principal() {
+        let ws = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .map_err(ApiError::Internal)?
+            .ok_or_else(|| ApiError::NotFound(format!("workspace for repo {repo_id} not found")))?;
+        if ws.tenant_id.to_string() != auth.tenant_id {
             return Err(ApiError::Forbidden(
                 "cross-tenant repo access denied".to_string(),
             ));
@@ -256,11 +268,13 @@ pub async fn get_repo_access(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use axum::{body::Body, Router};
     use gyre_common::Id;
     use gyre_domain::{Repository, User, Workspace, WorkspaceMembership, WorkspaceRole};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -270,15 +284,49 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// Seed a workspace + repo in tenant t-1 plus a member user with the
-    /// given workspace role. Returns (app router, state, repo_id, user_id).
-    /// The member gets an API key (`dev-repo-key`) authenticating as a
-    /// Developer-role user so ABAC read/write actions pass and the
-    /// membership/override logic under test is what answers.
-    async fn seed(
-        role: WorkspaceRole,
-    ) -> (Router, std::sync::Arc<crate::AppState>, String, String) {
+    /// Build the PRODUCTION request pipeline for authorization tests: the
+    /// api router with the ABAC middleware layered over it and the built-in
+    /// policies seeded, exactly as `build_router` does in lib.rs. Tests
+    /// that build `api_router()` bare bypass policy evaluation entirely —
+    /// they cannot see a route whose intended managers are default-denied
+    /// by the middleware before the handler ever runs.
+    fn production_app(state: &Arc<crate::AppState>) -> Router {
+        crate::abac_middleware::init_resolver();
+        crate::api::api_router()
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::abac_middleware::abac_middleware,
+            ))
+            .with_state(state.clone())
+    }
+
+    /// The fixture: tenant t-1, one workspace with one repo, and two user
+    /// principals with API keys —
+    ///
+    /// - the manager: a workspace Admin member whose GLOBAL role is a plain
+    ///   Developer (no platform Admin, no TenantAdmin). This is exactly the
+    ///   principal user-management.md §Repo Access says may manage per-repo
+    ///   overrides ("Admin: Full (read, write, admin, manage gates)"), and
+    ///   exactly the one a bare-router harness cannot speak for: only the
+    ///   ABAC path (subject.workspace_role resolved from the repo's
+    ///   workspace) can admit them.
+    /// - the target: a workspace Developer member, the subject of the
+    ///   override.
+    struct Fixture {
+        app: Router,
+        state: Arc<crate::AppState>,
+        repo_id: String,
+        target_id: String,
+        manager_key: String,
+        target_key: String,
+    }
+
+    async fn seed(target_role: WorkspaceRole) -> Fixture {
         let state = crate::mem::test_state();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed builtin policies");
+
         let now = 1_700_000_000u64;
         let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
         state.tenants.create(&tenant).await.unwrap();
@@ -303,43 +351,167 @@ mod tests {
         );
         state.repos.create(&repo).await.unwrap();
 
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let mut user = User::new(
-            Id::new(user_id.clone()),
-            format!("member-ext-{user_id}"),
-            format!("member-{user_id}"),
-            now,
-        );
-        user.tenant_id = Some(Id::new("t-1"));
-        user.global_role = gyre_domain::GlobalRole::Member;
-        user.roles = vec![gyre_domain::UserRole::Developer];
-        state.users.create(&user).await.unwrap();
+        // A user of tenant t-1 with an API key and a workspace membership.
+        async fn member(
+            state: &Arc<crate::AppState>,
+            ws_id: &str,
+            workspace_role: WorkspaceRole,
+            key: &'static str,
+            now: u64,
+        ) -> String {
+            let user_id = uuid::Uuid::new_v4().to_string();
+            let mut user = User::new(
+                Id::new(user_id.clone()),
+                format!("member-ext-{user_id}"),
+                format!("member-{user_id}"),
+                now,
+            );
+            user.tenant_id = Some(Id::new("t-1"));
+            // Global role stays a plain Member with the Developer platform
+            // role — the workspace membership, not the global role, is what
+            // must carry the override-management capability.
+            user.global_role = gyre_domain::GlobalRole::Member;
+            user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&user).await.unwrap();
 
-        let membership = WorkspaceMembership::new(
-            Id::new(uuid::Uuid::new_v4().to_string()),
-            Id::new(user_id.clone()),
-            Id::new(ws_id),
-            role,
-            Id::new("system"),
-            now,
-        );
-        state
-            .workspace_memberships
-            .create(&membership)
+            let mut membership = WorkspaceMembership::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                Id::new(user_id.clone()),
+                Id::new(ws_id),
+                workspace_role,
+                Id::new("system"),
+                now,
+            );
+            membership.accept(now);
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .unwrap();
+            state
+                .api_keys
+                .create(
+                    &crate::auth::hash_api_key(key),
+                    &Id::new(user_id.clone()),
+                    "test",
+                )
+                .await
+                .unwrap();
+            user_id
+        }
+
+        let _manager_id = member(&state, &ws_id, WorkspaceRole::Admin, "ws-admin-key", now).await;
+        let target_id = member(&state, &ws_id, target_role, "ws-target-key", now).await;
+
+        let app = production_app(&state);
+        Fixture {
+            app,
+            state,
+            repo_id,
+            target_id,
+            manager_key: "ws-admin-key".to_string(),
+            target_key: "ws-target-key".to_string(),
+        }
+    }
+
+    fn put_override(f: &Fixture, user_id: &str, role: &str) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri(format!(
+                "/api/v1/repos/{}/access-overrides/{user_id}",
+                f.repo_id
+            ))
+            .header("Authorization", format!("Bearer {}", f.manager_key))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"role": role}).to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn workspace_admin_manages_overrides_through_production_abac() {
+        // user-management.md §Repo Access gives the workspace Admin role
+        // repo `admin`. This test runs the PRODUCTION pipeline (api router
+        // + abac_middleware + builtin policies, as build_router layers
+        // them): a workspace Admin member whose global role is a plain
+        // Developer must reach the handler (ABAC allow via
+        // builtin-repo-access-override-management resolving
+        // subject.workspace_role from the repo's workspace) and create the
+        // override. Regressions that leave subject.workspace_role
+        // unresolved on repo-addressed routes default-deny this principal
+        // with a 403 before the handler runs.
+        let f = seed(WorkspaceRole::Developer).await;
+
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, &f.target_id, "Viewer"))
             .await
             .unwrap();
-        state
-            .api_keys
-            .create(
-                &crate::auth::hash_api_key("dev-repo-key"),
-                &Id::new(user_id.clone()),
-                "test",
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "a workspace Admin member must manage per-repo overrides through the ABAC layer"
+        );
+
+        // The ABAC decision for the manager's request was Allow — the 201
+        // came through policy evaluation, not around it.
+        let decisions = f
+            .state
+            .policies
+            .list_decisions(None, Some("repo"), 50)
+            .await
+            .unwrap();
+        let put_decision = decisions
+            .iter()
+            .find(|d| d.action == "admin" && d.decision == gyre_domain::PolicyEffect::Allow)
+            .expect("an Allow decision for the repo admin action");
+        assert_eq!(
+            put_decision.matched_policy.as_ref().map(|p| p.as_str()),
+            Some("builtin-repo-access-override-management"),
+            "the workspace Admin's allow must come from the override-management policy"
+        );
+
+        // DELETE lifts the restriction through the same path.
+        let resp = f
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/repos/{}/access-overrides/{}",
+                        f.repo_id, f.target_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", f.manager_key))
+                    .body(Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
 
-        let app = crate::api::api_router().with_state(state.clone());
-        (app, state, repo_id, user_id)
+    #[tokio::test]
+    async fn non_admin_member_cannot_manage_overrides_through_production_abac() {
+        // A Developer workspace member (global Developer) is denied by the
+        // ABAC layer itself: the repo `admin` action matches no policy for
+        // them (builtin-developer-write-access covers read/write/spawn/...,
+        // not admin; the override-management policy requires
+        // subject.workspace_role In [Owner, Admin]).
+        let mut f = seed(WorkspaceRole::Developer).await;
+        f.manager_key = f.target_key.clone();
+
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, &f.target_id, "Viewer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer member must be denied override management by the ABAC layer"
+        );
     }
 
     #[tokio::test]
@@ -347,16 +519,21 @@ mod tests {
         // user-management.md §Repo Access: a per-repo override restricts a
         // Developer to Viewer on one repo — the effective permission set
         // collapses to read-only while the workspace role stays Developer.
-        let (app, state, repo_id, user_id) = seed(WorkspaceRole::Developer).await;
+        let f = seed(WorkspaceRole::Developer).await;
 
-        // Before the override: Developer permissions per the spec table.
-        let resp = app
+        // Before the override: the target reads their own access
+        // (Developer permissions per the spec table).
+        let resp = f
+            .app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/repos/{repo_id}/access/{user_id}"))
-                    .header("Authorization", "Bearer dev-repo-key")
+                    .uri(format!(
+                        "/api/v1/repos/{}/access/{}",
+                        f.repo_id, f.target_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", f.target_key))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -368,22 +545,12 @@ mod tests {
         assert_eq!(access["effective_role"], "Developer");
         assert!(access["permissions"].as_array().unwrap().len() > 1);
 
-        // Restrict the Developer to Viewer on this repo.
-        let resp = app
+        // The workspace Admin restricts the Developer to Viewer on this
+        // repo (through the production ABAC pipeline).
+        let resp = f
+            .app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!(
-                        "/api/v1/repos/{repo_id}/access-overrides/{user_id}"
-                    ))
-                    .header("Authorization", "Bearer test-token")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"role": "Viewer"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
+            .oneshot(put_override(&f, &f.target_id, "Viewer"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -392,13 +559,17 @@ mod tests {
 
         // The effective access view now shows the restricted role and a
         // read-only permission set.
-        let resp = app
+        let resp = f
+            .app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/repos/{repo_id}/access/{user_id}"))
-                    .header("Authorization", "Bearer dev-repo-key")
+                    .uri(format!(
+                        "/api/v1/repos/{}/access/{}",
+                        f.repo_id, f.target_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", f.target_key))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -419,15 +590,17 @@ mod tests {
         );
 
         // Lifting the override restores the workspace role.
-        let resp = app
+        let resp = f
+            .app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri(format!(
-                        "/api/v1/repos/{repo_id}/access-overrides/{user_id}"
+                        "/api/v1/repos/{}/access-overrides/{}",
+                        f.repo_id, f.target_id
                     ))
-                    .header("Authorization", "Bearer test-token")
+                    .header("Authorization", format!("Bearer {}", f.manager_key))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -435,9 +608,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(
-            state
+            f.state
                 .repo_access_overrides
-                .find_by_repo_and_user(&Id::new(repo_id), &Id::new(user_id))
+                .find_by_repo_and_user(&Id::new(&f.repo_id), &Id::new(&f.target_id))
                 .await
                 .unwrap()
                 .is_none(),
@@ -449,22 +622,12 @@ mod tests {
     async fn override_cannot_expand_beyond_workspace_role() {
         // user-management.md §Repo Access: overrides can restrict but never
         // expand — capping a Viewer at Developer must be rejected.
-        let (app, _state, repo_id, user_id) = seed(WorkspaceRole::Viewer).await;
+        let f = seed(WorkspaceRole::Viewer).await;
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!(
-                        "/api/v1/repos/{repo_id}/access-overrides/{user_id}"
-                    ))
-                    .header("Authorization", "Bearer test-token")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"role": "Developer"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, &f.target_id, "Developer"))
             .await
             .unwrap();
         assert_eq!(
@@ -478,24 +641,21 @@ mod tests {
     async fn override_create_is_idempotent_rejected() {
         // The port contract: an existing (repo, user) override is a 409, not
         // a silent rewrite.
-        let (app, _state, repo_id, user_id) = seed(WorkspaceRole::Developer).await;
+        let f = seed(WorkspaceRole::Developer).await;
 
-        let req = || {
-            Request::builder()
-                .method("PUT")
-                .uri(format!(
-                    "/api/v1/repos/{repo_id}/access-overrides/{user_id}"
-                ))
-                .header("Authorization", "Bearer test-token")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({"role": "Viewer"}).to_string(),
-                ))
-                .unwrap()
-        };
-        let resp = app.clone().oneshot(req()).await.unwrap();
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, &f.target_id, "Viewer"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let resp = app.oneshot(req()).await.unwrap();
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, &f.target_id, "Viewer"))
+            .await
+            .unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::CONFLICT,
@@ -507,19 +667,49 @@ mod tests {
     async fn override_requires_workspace_membership() {
         // An override caps a membership role — there is nothing to restrict
         // for a non-member.
-        let (app, _state, repo_id, _user_id) = seed(WorkspaceRole::Developer).await;
-        let resp = app
+        let f = seed(WorkspaceRole::Developer).await;
+        let resp = f
+            .app
+            .clone()
+            .oneshot(put_override(&f, "nobody-home", "Viewer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "restricting a non-member must be a 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangling_workspace_scope_is_fail_closed() {
+        // A repo whose workspace row is missing must not pass the tenant
+        // gate: the scope cannot be evaluated, and an unevaluable tenant
+        // gate is denial (fail-closed), never pass-through.
+        let f = seed(WorkspaceRole::Developer).await;
+
+        // Point the repo at a workspace that does not exist.
+        let dangling_repo = Repository::new(
+            Id::new("repo-dangling"),
+            Id::new("ws-no-such-workspace"),
+            "dangling".to_string(),
+            "/tmp/gyre-test/dangling",
+            1_700_000_000,
+        );
+        f.state.repos.create(&dangling_repo).await.unwrap();
+
+        let resp = f
+            .app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .method("PUT")
+                    .method("GET")
                     .uri(format!(
-                        "/api/v1/repos/{repo_id}/access-overrides/nobody-home"
+                        "/api/v1/repos/{}/access/{}",
+                        dangling_repo.id, f.target_id
                     ))
-                    .header("Authorization", "Bearer test-token")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"role": "Viewer"}).to_string(),
-                    ))
+                    .header("Authorization", format!("Bearer {}", f.manager_key))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -527,7 +717,7 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "restricting a non-member must be a 404"
+            "a repo with an unresolvable workspace scope must be denied, not passed through"
         );
     }
 }
