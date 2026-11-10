@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
-commits: ["b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
+commits: ["388c4824210d55f289b2ee4be225d77322f9b8a0", "b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
 ---
 
 ## Spec Excerpt
@@ -317,6 +317,73 @@ reachable):
   `check-task-commit-attribution` green (merge commit also recorded
   in `commits:` frontmatter so review scoping covers the conflict
   resolutions).
+
+### Merge repair (round da1e8f16, onto base `cd4c04fe`)
+
+Merged the assignment base `cd4c04fe4` (task-153 search
+autocomplete/facets and its ancestors: spec lifecycle configs, task
+spec refs, signal chain, narrative, compute targets) into the candidate
+head `f61745fec` (merge commit `388c48242`, recorded in `commits:`).
+One content conflict plus keep-both auto-merges, all source-level:
+
+- **`lib.rs` use-list (the one manual conflict)** — base's
+  `SpecLifecycleRepository` joins the candidate's
+  `TenantMetaSpecSetRepository` in the `gyre_ports` import block.
+- **Keep-both auto-merges** — AppState wiring (`lib.rs`/`mem.rs`/
+  `middleware.rs`) carries both `spec_lifecycle_configs` and
+  `tenant_meta_spec_sets` stores; `schema.rs` + the SQLite table list
+carry both tables; `ports/lib.rs` re-exports both ports;
+  `abac_middleware.rs` registers both route mappings
+  (`search/suggest`, `search/facets`, `tenants/:id/meta-specs/set`);
+  `api/mod.rs` registers both route groups; `api-reference.md`
+  carries both endpoint rows.
+- **`compute_meta_spec_set_sha` (semantic casualty check)** — base
+  never touched the function or any §8 file after the merge base
+  `b5a872087` (verified: `git diff --name-only b5a872087 cd4c04fe`
+  has zero overlap with the §8 file set); the repo-ref signature in
+  base is the pre-merge-base state. The candidate's `&AppState`
+  signature — required for tenant+workspace effective-set resolution
+  — and all its call sites are unchanged and tree-wide consistent.
+- **No migration renumber this round** — the candidate's
+  `2026-11-07-000059_tenant_meta_spec_sets` and base's
+  `2026-10-08-000059_spec_lifecycle_configs` /
+  `2026-11-08-000058_spec_approval_ledger` derive distinct Diesel
+  versions (the date is part of the version); check-migration-versions
+green on the merged tree.
+
+Not compiled in this sandbox — crates.io unreachable (connection
+refused on index/static.crates.io, no cached registry or target dir;
+same restriction as prior rounds — recorded in
+`/tmp/stage/review-evidence/build-restriction-round-da1e8f16.txt`).
+Offline verification at merge commit `388c48242`:
+
+- `cargo fmt --all -- --check` — clean (cargo fmt needs no network).
+- `python3 scripts/check-rustfmt-diff.py cd4c04fe` — clean (53 Rust
+  files changed vs base, all canonical).
+- 19 mechanical invariant checks green on the merged tree (arch,
+  abac-route-registry, abac-exempt-handlers, migration-versions,
+  migration-sql-portability, mem-port-contracts,
+  in-memory-state-stores, forged-scope-fields, scope-literal-defaults,
+  dead-message-kinds, inert-enforcement, mcp-write-tools,
+  byte-slice-truncation, fail-open-ref-resolution,
+  relative-path-defaults, lossy-secret-conversion,
+  fabricated-scope-defaults, forwarded-header-trust,
+  unbounded-external-http).
+- Noise-check: every check script whose output differs between the
+  merged tree and the base tree differs only by line shifts, list
+  reordering (the scripts' grep order is filesystem-dependent), or
+  script-internal noise present on both sides; on deterministic
+  re-runs the cli-spec-parity outputs are byte-identical (see
+  `/tmp/stage/review-evidence/noise-check-comparison-round-da1e8f16.txt`).
+- Remote verification must run the deferred Rust suites:
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` (§8 tenant suite
+  + the set-PUT and fail-closed killing tests +
+  `global_spec_approval_skips_unreadable_workspace_set` + base's new
+  search/spec-lifecycle/signal-chain suites sharing those files) and
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` (the
+  renumbered `000059_tenant_meta_spec_sets` migration must run on a
+  fresh DB alongside base's `2026-10-08-000059` /
+  `2026-11-08-000058`).
 
 ### Test evidence (at this rebase round, merged onto `fefde2946`; prior rounds below)
 
