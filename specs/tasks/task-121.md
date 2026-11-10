@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
   - "user-management.md §Repo Access"
-commits: ["467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
+commits: ["337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
 ---
 
 ## Spec Excerpt
