@@ -1294,9 +1294,8 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
-                && repo_filter.is_none_or(|f| {
-                    n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f)
-                })
+                && repo_filter
+                    .is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),

@@ -476,10 +476,7 @@ async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
     } else {
         (
             gyre_common::NotificationType::AgentBudgetWarning,
-            format!(
-                "Workspace budget at {:.0}% of the daily limit",
-                pct * 100.0
-            ),
+            format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0),
         )
     };
 
@@ -1010,9 +1007,7 @@ mod tests {
         let warnings: Vec<_> = all(&state)
             .await
             .into_iter()
-            .filter(|n| {
-                n.notification_type == gyre_common::NotificationType::AgentBudgetWarning
-            })
+            .filter(|n| n.notification_type == gyre_common::NotificationType::AgentBudgetWarning)
             .collect();
         let mut warned: Vec<&str> = warnings.iter().map(|n| n.user_id.as_str()).collect();
         warned.sort_unstable();
@@ -1047,12 +1042,9 @@ mod tests {
         let exhausted: Vec<_> = all(&state)
             .await
             .into_iter()
-            .filter(|n| {
-                n.notification_type == gyre_common::NotificationType::AgentBudgetExhausted
-            })
+            .filter(|n| n.notification_type == gyre_common::NotificationType::AgentBudgetExhausted)
             .collect();
-        let mut exhausted_users: Vec<&str> =
-            exhausted.iter().map(|n| n.user_id.as_str()).collect();
+        let mut exhausted_users: Vec<&str> = exhausted.iter().map(|n| n.user_id.as_str()).collect();
         exhausted_users.sort_unstable();
         assert_eq!(
             exhausted_users,

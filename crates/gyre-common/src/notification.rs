@@ -503,12 +503,27 @@ mod tests {
         let cases = [
             (NotificationType::MrMerged, NotificationPriority::Low),
             (NotificationType::GatePassed, NotificationPriority::Low),
-            (NotificationType::DependencyStale, NotificationPriority::Medium),
-            (NotificationType::SpecDriftDetected, NotificationPriority::Medium),
-            (NotificationType::AgentBudgetWarning, NotificationPriority::High),
+            (
+                NotificationType::DependencyStale,
+                NotificationPriority::Medium,
+            ),
+            (
+                NotificationType::SpecDriftDetected,
+                NotificationPriority::Medium,
+            ),
+            (
+                NotificationType::AgentBudgetWarning,
+                NotificationPriority::High,
+            ),
             (NotificationType::GateFailure, NotificationPriority::High),
-            (NotificationType::SecurityFinding, NotificationPriority::Urgent),
-            (NotificationType::AgentEscalation, NotificationPriority::Urgent),
+            (
+                NotificationType::SecurityFinding,
+                NotificationPriority::Urgent,
+            ),
+            (
+                NotificationType::AgentEscalation,
+                NotificationPriority::Urgent,
+            ),
             (NotificationType::MrReverted, NotificationPriority::Urgent),
         ];
         for (t, level) in cases {
@@ -518,17 +533,47 @@ mod tests {
 
     #[test]
     fn priority_bands_from_rank() {
-        assert_eq!(NotificationPriority::from_rank(1), NotificationPriority::Urgent);
-        assert_eq!(NotificationPriority::from_rank(2), NotificationPriority::Urgent);
-        assert_eq!(NotificationPriority::from_rank(3), NotificationPriority::High);
-        assert_eq!(NotificationPriority::from_rank(4), NotificationPriority::High);
-        assert_eq!(NotificationPriority::from_rank(5), NotificationPriority::Medium);
-        assert_eq!(NotificationPriority::from_rank(7), NotificationPriority::Medium);
-        assert_eq!(NotificationPriority::from_rank(8), NotificationPriority::Low);
-        assert_eq!(NotificationPriority::from_rank(10), NotificationPriority::Low);
+        assert_eq!(
+            NotificationPriority::from_rank(1),
+            NotificationPriority::Urgent
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(2),
+            NotificationPriority::Urgent
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(3),
+            NotificationPriority::High
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(4),
+            NotificationPriority::High
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(5),
+            NotificationPriority::Medium
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(7),
+            NotificationPriority::Medium
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(8),
+            NotificationPriority::Low
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(10),
+            NotificationPriority::Low
+        );
         // Out-of-range ranks clamp rather than panic.
-        assert_eq!(NotificationPriority::from_rank(0), NotificationPriority::Urgent);
-        assert_eq!(NotificationPriority::from_rank(255), NotificationPriority::Low);
+        assert_eq!(
+            NotificationPriority::from_rank(0),
+            NotificationPriority::Urgent
+        );
+        assert_eq!(
+            NotificationPriority::from_rank(255),
+            NotificationPriority::Low
+        );
     }
 
     #[test]
@@ -555,10 +600,7 @@ mod tests {
             NotificationType::MergeQueueEscalation.default_priority_rank(),
             1
         );
-        assert_eq!(
-            NotificationType::SecretExpiring.default_priority_rank(),
-            7
-        );
+        assert_eq!(NotificationType::SecretExpiring.default_priority_rank(), 7);
         assert_eq!(
             NotificationType::PersonaChangePendingApproval.default_priority_rank(),
             2

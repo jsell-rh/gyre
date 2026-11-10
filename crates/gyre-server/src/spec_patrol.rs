@@ -1052,7 +1052,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 1, "Admin should receive notification");
-        assert_eq!(admin_notifs[0].notification_type, NotificationType::SpecDriftDetected);
+        assert_eq!(
+            admin_notifs[0].notification_type,
+            NotificationType::SpecDriftDetected
+        );
         assert_eq!(admin_notifs[0].priority_rank, 3);
         assert!(admin_notifs[0].title.contains("Spec graph patrol"));
         assert_eq!(admin_notifs[0].source.entity_id, "system/spec-a.md");

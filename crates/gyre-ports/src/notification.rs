@@ -8,6 +8,11 @@ use gyre_common::{Id, Notification};
 /// Per-handler auth — callers MUST verify that the notification's `user_id` and
 /// `tenant_id` match the authenticated user before invoking mutating methods.
 #[async_trait]
+// async_trait generates a must_use future per method; `list_for_user`'s
+// 7 filter parameters (workspace scoping, priority band, type, pagination)
+// are the pre-existing HSI §2 inbox filter surface.
+#[allow(clippy::double_must_use)]
+#[allow(clippy::too_many_arguments)]
 pub trait NotificationRepository: Send + Sync {
     async fn create(&self, notification: &Notification) -> Result<()>;
 

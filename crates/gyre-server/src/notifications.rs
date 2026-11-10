@@ -35,10 +35,7 @@ async fn deep_link(
         },
         None => None,
     };
-    let base = format!(
-        "/workspaces/{}",
-        urlencode(&slug)
-    );
+    let base = format!("/workspaces/{}", urlencode(&slug));
     let Some(repo_name) = repo_name else {
         return Some(base);
     };
@@ -141,7 +138,9 @@ pub async fn notify_rich(
     );
     notif.body = body;
     notif.source.entity_type = entity_type.to_string();
-    notif.source.entity_id = entity_ref.clone().unwrap_or_else(|| workspace_id.as_str().to_string());
+    notif.source.entity_id = entity_ref
+        .clone()
+        .unwrap_or_else(|| workspace_id.as_str().to_string());
     notif.source.repo_id = repo_id.clone().map(Id::new);
 
     notif.action_url = match action_url {
@@ -190,7 +189,12 @@ pub async fn notify_gate_failure(
     };
 
     // Resolve MR title and repo for a human-friendly notification + deep link.
-    let mr = state.merge_requests.find_by_id(&Id::new(mr_id)).await.ok().flatten();
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
@@ -262,7 +266,12 @@ pub async fn notify_gate_passed(
         return;
     }
 
-    let mr = state.merge_requests.find_by_id(&Id::new(mr_id)).await.ok().flatten();
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
@@ -315,7 +324,12 @@ pub async fn notify_mr_merged(
     };
 
     // Resolve MR title and repo for a human-friendly notification + deep link.
-    let mr = state.merge_requests.find_by_id(&Id::new(mr_id)).await.ok().flatten();
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
@@ -367,7 +381,12 @@ pub async fn notify_mr_reverted(
         return; // No human to notify
     };
 
-    let mr = state.merge_requests.find_by_id(&Id::new(mr_id)).await.ok().flatten();
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
@@ -409,13 +428,7 @@ mod tests {
     /// spawned by "user-n1", and an MR authored by that agent.
     async fn setup() -> (std::sync::Arc<crate::AppState>, Id) {
         let state = test_state();
-        let ws = Workspace::new(
-            Id::new("ws-n1"),
-            Id::new("tenant-1"),
-            "WS One",
-            "ws-one",
-            0,
-        );
+        let ws = Workspace::new(Id::new("ws-n1"), Id::new("tenant-1"), "WS One", "ws-one", 0);
         state.workspaces.create(&ws).await.unwrap();
         let repo = Repository::new(
             Id::new("repo-n1"),
@@ -443,10 +456,7 @@ mod tests {
         (state, Id::new("ws-n1"))
     }
 
-    async fn notifs_for(
-        state: &crate::AppState,
-        user: &str,
-    ) -> Vec<gyre_common::Notification> {
+    async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
             .list_for_user(&Id::new(user), None, None, None, None, 50, 0)

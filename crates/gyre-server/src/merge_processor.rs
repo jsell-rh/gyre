@@ -10011,7 +10011,7 @@ mod tests {
             assert_eq!(n.source.entity_id, repo.id.as_str());
             assert_eq!(
                 n.action_url.as_deref(),
-                Some(format!("/workspaces/pause-ws/r/paused-repo").as_str()),
+                Some("/workspaces/pause-ws/r/paused-repo"),
                 "deep link resolves through the workspace slug + repo name"
             );
         }

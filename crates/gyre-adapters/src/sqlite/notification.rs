@@ -109,11 +109,7 @@ impl NotificationRepository for SqliteStorage {
                 title: &n.title,
                 body: n.body.as_deref(),
                 entity_ref: Some(n.source.entity_id.as_str()),
-                repo_id: n
-                    .source
-                    .repo_id
-                    .as_ref()
-                    .map(|r| r.as_str()),
+                repo_id: n.source.repo_id.as_ref().map(|r| r.as_str()),
                 entity_type: Some(n.source.entity_type.as_str()),
                 action_url: n.action_url.as_deref(),
                 read: n.read as i32,
@@ -254,11 +250,8 @@ impl NotificationRepository for SqliteStorage {
                 .as_secs() as i64;
             // `read = true` stamps read_at; `read = false` clears both so an
             // unread notification has no stale read timestamp.
-            let (read_val, read_at): (i32, Option<i64>) = if read {
-                (1, Some(now))
-            } else {
-                (0, None)
-            };
+            let (read_val, read_at): (i32, Option<i64>) =
+                if read { (1, Some(now)) } else { (0, None) };
             diesel::update(
                 notifications::table
                     .filter(notifications::id.eq(id.as_str()))
@@ -465,7 +458,9 @@ mod tests {
         // dismissed counts as read too.
         let mut dismissed = make("old-dismissed", (read_cutoff - 1) as i64, false);
         dismissed.dismissed_at = Some(read_cutoff as i64 - 5);
-        NotificationRepository::create(&s, &dismissed).await.unwrap();
+        NotificationRepository::create(&s, &dismissed)
+            .await
+            .unwrap();
         // old + marked-read via the read flag (not resolved) → deleted as read.
         let mut marked = make("old-marked-read", (read_cutoff - 1) as i64, false);
         marked.read = true;
@@ -475,7 +470,10 @@ mod tests {
         let deleted = NotificationRepository::delete_older_than(&s, read_cutoff, unread_cutoff)
             .await
             .unwrap();
-        assert_eq!(deleted, 4, "old-read, ancient-unread, old-dismissed, old-marked-read");
+        assert_eq!(
+            deleted, 4,
+            "old-read, ancient-unread, old-dismissed, old-marked-read"
+        );
 
         let remaining = NotificationRepository::list_recent(&s, 100).await.unwrap();
         let ids: Vec<&str> = remaining.iter().map(|n| n.id.as_str()).collect();
@@ -575,46 +573,61 @@ mod tests {
 
         let ws = Id::new("ws-1");
         let user = Id::new("user-1");
-        assert!(
-            NotificationRepository::has_active_notification(
-                &s, &ws, &user, "AgentBudgetWarning", "agent-1", 500
-            )
-            .await
-            .unwrap()
-        );
+        assert!(NotificationRepository::has_active_notification(
+            &s,
+            &ws,
+            &user,
+            "AgentBudgetWarning",
+            "agent-1",
+            500
+        )
+        .await
+        .unwrap());
         // Wrong entity, wrong type, or before `since` → no match.
-        assert!(
-            !NotificationRepository::has_active_notification(
-                &s, &ws, &user, "AgentBudgetWarning", "agent-2", 500
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !NotificationRepository::has_active_notification(
-                &s, &ws, &user, "GatePassed", "agent-1", 500
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !NotificationRepository::has_active_notification(
-                &s, &ws, &user, "AgentBudgetWarning", "agent-1", 1001
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!NotificationRepository::has_active_notification(
+            &s,
+            &ws,
+            &user,
+            "AgentBudgetWarning",
+            "agent-2",
+            500
+        )
+        .await
+        .unwrap());
+        assert!(!NotificationRepository::has_active_notification(
+            &s,
+            &ws,
+            &user,
+            "GatePassed",
+            "agent-1",
+            500
+        )
+        .await
+        .unwrap());
+        assert!(!NotificationRepository::has_active_notification(
+            &s,
+            &ws,
+            &user,
+            "AgentBudgetWarning",
+            "agent-1",
+            1001
+        )
+        .await
+        .unwrap());
 
         // Resolving the notification removes it from the active set.
         NotificationRepository::resolve(&s, &Id::new("n-dedup"), &user, None)
             .await
             .unwrap();
-        assert!(
-            !NotificationRepository::has_active_notification(
-                &s, &ws, &user, "AgentBudgetWarning", "agent-1", 500
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!NotificationRepository::has_active_notification(
+            &s,
+            &ws,
+            &user,
+            "AgentBudgetWarning",
+            "agent-1",
+            500
+        )
+        .await
+        .unwrap());
     }
 }

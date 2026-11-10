@@ -176,8 +176,7 @@ pub async fn create_persona(
                     .filter(|m| {
                         matches!(
                             m.role,
-                            gyre_domain::WorkspaceRole::Admin
-                                | gyre_domain::WorkspaceRole::Owner
+                            gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
                         )
                     })
                     .map(|m| m.user_id),

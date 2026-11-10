@@ -109,11 +109,7 @@ impl NotificationRepository for PgStorage {
                 title: &n.title,
                 body: n.body.as_deref(),
                 entity_ref: Some(n.source.entity_id.as_str()),
-                repo_id: n
-                    .source
-                    .repo_id
-                    .as_ref()
-                    .map(|r| r.as_str()),
+                repo_id: n.source.repo_id.as_ref().map(|r| r.as_str()),
                 entity_type: Some(n.source.entity_type.as_str()),
                 action_url: n.action_url.as_deref(),
                 read: n.read as i32,
@@ -254,11 +250,8 @@ impl NotificationRepository for PgStorage {
                 .as_secs() as i64;
             // `read = true` stamps read_at; `read = false` clears both so an
             // unread notification has no stale read timestamp.
-            let (read_val, read_at): (i32, Option<i64>) = if read {
-                (1, Some(now))
-            } else {
-                (0, None)
-            };
+            let (read_val, read_at): (i32, Option<i64>) =
+                if read { (1, Some(now)) } else { (0, None) };
             diesel::update(
                 notifications::table
                     .filter(notifications::id.eq(id.as_str()))
