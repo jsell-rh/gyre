@@ -39,14 +39,7 @@ pub async fn append_log(
 ) -> Result<StatusCode, ApiError> {
     let ts = now_secs();
     let raw = format!("[{}] {}", ts, req.message);
-    {
-        let mut logs = state.agent_logs.lock().await;
-        let buf = logs.entry(id.clone()).or_default();
-        buf.push(raw.clone());
-        if buf.len() > 10_000 {
-            buf.drain(0..buf.len() - 10_000);
-        }
-    }
+    state.agent_logs.append(id.clone(), raw.clone()).await;
     // Broadcast to live SSE subscribers (create channel if needed)
     let mut txs = state.agent_log_tx.lock().await;
     let tx = txs.entry(id).or_insert_with(|| {
@@ -64,11 +57,7 @@ pub async fn get_logs(
 ) -> Result<Json<Vec<String>>, ApiError> {
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
-    let logs = state.agent_logs.lock().await;
-    let lines: Vec<String> = logs
-        .get(&id)
-        .map(|buf| buf.iter().skip(offset).take(limit).cloned().collect())
-        .unwrap_or_default();
+    let lines = state.agent_logs.get(&id, offset, limit).await?;
     Ok(Json(lines))
 }
 

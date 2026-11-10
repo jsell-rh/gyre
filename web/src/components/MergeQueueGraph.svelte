@@ -10,11 +10,14 @@
    * Props:
    *   nodes       — GraphNode[] from GET /api/v1/merge-queue/graph
    *   onNodeClick — (node) => void — navigate to MR detail
+   *   paused      — boolean — the merge queue is paused (platform-model.md
+   *                 §6 UI: "Merge queue shows paused state with reason")
+   *   pauseReason — string | null — human-readable pause reason
    */
 
   import { elkLayout } from '../lib/layout-engines.js';
 
-  let { nodes = [], onNodeClick = () => {} } = $props();
+  let { nodes = [], onNodeClick = () => {}, paused = false, pauseReason = null } = $props();
 
   // ── Layout state ──────────────────────────────────────────────────────────
   let positions = $state({});
@@ -307,6 +310,13 @@
   }
 </script>
 
+{#if paused}
+  <div class="mq-paused-banner" data-testid="mq-paused-banner" role="status">
+    <span class="mq-paused-dot" aria-hidden="true"></span>
+    <span>Merge queue paused{pauseReason ? ` — ${pauseReason}` : ''}</span>
+  </div>
+{/if}
+
 {#if !layoutReady}
   <div class="mq-loading" data-testid="mq-loading">Computing layout...</div>
 {:else if nodes.length === 0}
@@ -507,6 +517,28 @@
     flex-direction: column;
     gap: 8px;
     height: 100%;
+  }
+
+  .mq-paused-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: var(--text-sm, 0.875rem);
+    font-weight: 600;
+    color: var(--color-warning, #eab308);
+    background: color-mix(in srgb, var(--color-warning, #eab308) 10%, var(--color-surface, transparent));
+    border: 1px solid color-mix(in srgb, var(--color-warning, #eab308) 45%, var(--color-border, #2a2a3a));
+    border-radius: var(--radius, 6px);
+  }
+
+  .mq-paused-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-warning, #eab308);
+    flex-shrink: 0;
   }
 
   .mq-legend {

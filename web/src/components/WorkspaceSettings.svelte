@@ -10,13 +10,14 @@
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
+  import SecretsPanel from './SecretsPanel.svelte';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'compute', 'llm', 'audit'];
+  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'repos', 'compute', 'llm', 'secrets', 'audit'];
   let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
@@ -25,7 +26,7 @@
   // (display-only for name/description; compute target selector)
   let computeTargets = $state([]);
   let computeLoading = $state(false);
-  let defaultComputeTarget = $state(workspace?.default_compute_target ?? '');
+  let defaultComputeTarget = $state(workspace?.compute_target_id ?? '');
   let generalSaving = $state(false);
   let generalSaved = $state(false);
 
@@ -129,7 +130,7 @@
   // Sync form values when workspace prop changes
   $effect(() => {
     if (workspace) {
-      defaultComputeTarget = workspace.default_compute_target ?? '';
+      defaultComputeTarget = workspace.compute_target_id ?? '';
       trustLevel = workspace.trust_level ?? 'Autonomous';
       persistedTrustLevel = workspace.trust_level ?? 'Autonomous';
       warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
@@ -184,6 +185,73 @@
   let budgetSaving = $state(false);
   let budgetSaved = $state(false);
   let budgetSaveError = $state(null);
+
+  // ── Repos (HSI §1.5 Admin workspace-scope row: list, create, import) ──
+  let repos = $state([]);
+  let reposLoading = $state(false);
+  let reposError = $state(null);
+  let newRepoOpen = $state(false);
+  let newRepoName = $state('');
+  let newRepoDescription = $state('');
+  let newRepoLoading = $state(false);
+  let newRepoError = $state(null);
+  let importOpen = $state(false);
+  let importUrl = $state('');
+  let importName = $state('');
+  let importLoading = $state(false);
+  let importError = $state(null);
+
+  async function loadRepos(wsId) {
+    reposLoading = true;
+    try {
+      repos = await api.workspaceRepos(wsId) ?? [];
+    } catch (e) {
+      reposError = e?.message ?? String(e);
+      repos = [];
+    } finally {
+      reposLoading = false;
+    }
+  }
+
+  async function handleCreateRepo() {
+    const wsId = workspace?.id;
+    const name = newRepoName.trim();
+    if (!wsId || !name) return;
+    newRepoLoading = true;
+    newRepoError = null;
+    try {
+      await api.createRepo({ name, description: newRepoDescription.trim() || undefined, workspace_id: wsId });
+      newRepoOpen = false;
+      newRepoName = '';
+      newRepoDescription = '';
+      await loadRepos(wsId);
+    } catch (e) {
+      newRepoError = e?.message ?? String(e);
+    } finally {
+      newRepoLoading = false;
+    }
+  }
+
+  async function handleImportRepo() {
+    const wsId = workspace?.id;
+    const url = importUrl.trim();
+    if (!wsId || !url) return;
+    // Derive name from URL if not provided (strip .git suffix, last segment)
+    const name = importName.trim() || url.split('/').pop()?.replace(/\.git$/, '') || '';
+    importLoading = true;
+    importError = null;
+    try {
+      await api.createMirrorRepo({ url, workspace_id: wsId, name });
+      importOpen = false;
+      importUrl = '';
+      importName = '';
+      await loadRepos(wsId);
+    } catch (e) {
+      importError = e?.message ?? String(e);
+    } finally {
+      importLoading = false;
+    }
+  }
 
   // ── Compute ───────────────────────────────────────────────────────────
   let allCompute = $state([]);
@@ -336,6 +404,9 @@
     if (activeTab === 'budget') {
       if (untrack(() => !budget && !budgetLoading)) loadBudget(wsId);
     }
+    if (activeTab === 'repos') {
+      if (untrack(() => repos.length === 0 && !reposLoading)) loadRepos(wsId);
+    }
     if (activeTab === 'compute') {
       if (untrack(() => allCompute.length === 0 && !allComputeLoading)) loadAllCompute();
     }
@@ -385,8 +456,7 @@
     } catch (e) {
       membersError = e.message;
       members = [];
-    }
-    finally { membersLoading = false; }
+    } finally { membersLoading = false; }
   }
 
   async function loadBudget(wsId) {
@@ -455,7 +525,11 @@
     if (!workspace?.id) return;
     generalSaving = true;
     try {
-      await api.updateWorkspace(workspace.id, { default_compute_target: defaultComputeTarget });
+      // Empty selection means "no workspace target — fall back to tenant
+      // default" (agent-runtime.md §3); the API clears via JSON null.
+      await api.updateWorkspace(workspace.id, {
+        compute_target_id: defaultComputeTarget || null,
+      });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
     } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_settings')); }
@@ -1020,6 +1094,141 @@
         {/if}
       </div>
 
+    <!-- Repos tab (HSI §1.5 Admin workspace scope: list, create, import) -->
+    {:else if activeTab === 'repos'}
+      <div class="settings-section" data-testid="repos-tab">
+        <h2 class="section-title">{$t('workspace_settings.tabs.repos')}</h2>
+        <p class="section-desc">{$t('workspace_settings.repos.desc')}</p>
+
+        <div class="audit-filter-bar">
+          <button
+            class="btn-secondary"
+            onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
+            data-testid="repos-new-btn"
+          >
+            {$t('workspace_settings.repos.new_btn')}
+          </button>
+          <button
+            class="btn-secondary"
+            onclick={() => { importOpen = !importOpen; newRepoOpen = false; }}
+            data-testid="repos-import-btn"
+          >
+            {$t('workspace_settings.repos.import_btn')}
+          </button>
+        </div>
+
+        {#if newRepoOpen}
+          <form
+            class="budget-edit"
+            data-testid="repos-new-form"
+            onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
+          >
+            <div class="budget-edit-row">
+              <input
+                class="field-input"
+                type="text"
+                placeholder={$t('workspace_settings.repos.name_placeholder')}
+                bind:value={newRepoName}
+                required
+                disabled={newRepoLoading}
+                data-testid="repos-new-name"
+                aria-label={$t('workspace_settings.repos.name_placeholder')}
+              />
+              <input
+                class="field-input"
+                type="text"
+                placeholder={$t('workspace_settings.repos.desc_placeholder')}
+                bind:value={newRepoDescription}
+                disabled={newRepoLoading}
+                data-testid="repos-new-description"
+                aria-label={$t('workspace_settings.repos.desc_placeholder')}
+              />
+              <button
+                class="btn-primary"
+                type="submit"
+                disabled={newRepoLoading}
+                data-testid="repos-new-submit"
+              >
+                {newRepoLoading ? $t('workspace_settings.repos.creating') : $t('workspace_settings.repos.create_btn')}
+              </button>
+            </div>
+            {#if newRepoError}
+              <p class="error-text" role="alert" data-testid="repos-new-error">{newRepoError}</p>
+            {/if}
+          </form>
+        {/if}
+
+        {#if importOpen}
+          <form
+            class="budget-edit"
+            data-testid="repos-import-form"
+            onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
+          >
+            <div class="budget-edit-row">
+              <input
+                class="field-input"
+                type="text"
+                placeholder={$t('workspace_settings.repos.url_placeholder')}
+                bind:value={importUrl}
+                required
+                disabled={importLoading}
+                data-testid="repos-import-url"
+                aria-label={$t('workspace_settings.repos.url_placeholder')}
+              />
+              <input
+                class="field-input"
+                type="text"
+                placeholder={$t('workspace_settings.repos.name_placeholder')}
+                bind:value={importName}
+                disabled={importLoading}
+                data-testid="repos-import-name"
+                aria-label={$t('workspace_settings.repos.name_placeholder')}
+              />
+              <button
+                class="btn-primary"
+                type="submit"
+                disabled={importLoading}
+                data-testid="repos-import-submit"
+              >
+                {importLoading ? $t('workspace_settings.repos.importing') : $t('workspace_settings.repos.import_go_btn')}
+              </button>
+            </div>
+            {#if importError}
+              <p class="error-text" role="alert" data-testid="repos-import-error">{importError}</p>
+            {/if}
+          </form>
+        {/if}
+
+        {#if reposLoading}
+          <p class="loading-text" data-testid="repos-loading">{$t('workspace_settings.repos.loading')}</p>
+        {:else if reposError}
+          <p class="error-text" role="alert" data-testid="repos-error">{reposError}</p>
+        {:else if repos.length === 0}
+          <p class="empty-text">{$t('workspace_settings.repos.empty')}</p>
+        {:else}
+          <table class="settings-table" data-testid="repos-table">
+            <thead>
+              <tr>
+                <th scope="col">{$t('workspace_settings.repos.col_name')}</th>
+                <th scope="col">{$t('workspace_settings.repos.col_status')}</th>
+                <th scope="col">{$t('workspace_settings.repos.col_default_branch')}</th>
+                <th scope="col">{$t('workspace_settings.repos.col_mirror')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each repos as repo (repo.id)}
+                <tr class="settings-row" data-testid="repos-row">
+                  <td class="cell-mono">{repo.name}</td>
+                  <td>{repo.status ?? '—'}</td>
+                  <td>{repo.default_branch ?? '—'}</td>
+                  <td>{repo.is_mirror ? (repo.mirror_url ?? '—') : '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+
     <!-- Compute tab -->
     {:else if activeTab === 'compute'}
       <div class="settings-section" data-testid="compute-tab">
@@ -1045,7 +1254,7 @@
                 {#if ct.description}
                   <p class="compute-desc">{ct.description}</p>
                 {/if}
-                {#if ct.id === (defaultComputeTarget || workspace?.default_compute_target)}
+                {#if ct.id === (defaultComputeTarget || workspace?.compute_target_id)}
                   <span class="compute-default-badge">{$t('workspace_settings.compute.default_badge')}</span>
                 {/if}
               </div>
@@ -1140,6 +1349,17 @@
               </div>
             </div>
           {/if}
+        {/if}
+      </div>
+
+    <!-- Secrets tab (platform-model.md §7 UI) -->
+    {:else if activeTab === 'secrets'}
+      <div class="settings-section" data-testid="secrets-tab">
+        <h2 class="section-title">{$t('workspace_settings.tabs.secrets')}</h2>
+        {#if workspace?.id}
+          <SecretsPanel scope="workspace" scopeId={workspace.id} />
+        {:else}
+          <p class="empty-text">{$t('workspace_settings.secrets_need_entity')}</p>
         {/if}
       </div>
 

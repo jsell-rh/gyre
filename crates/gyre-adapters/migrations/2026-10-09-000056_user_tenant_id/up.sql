@@ -1,0 +1,16 @@
+-- TASK-099 F1 reconciliation (merge with task-120, base 414fe9aa1):
+--
+-- This migration originally added `users.tenant_id` (nullable; legacy
+-- OIDC-provisioned rows have no binding and the auth extractor
+-- fail-closes on unbound users rather than fabricating a scope).
+--
+-- task-120's 2026-10-08-000058_user_entity_profile_fields — which sorts
+-- EARLIER (20261008... < 20261009...) and is already in the published
+-- lineage — adds the same `tenant_id` column with the same semantics.
+-- Running both on a fresh database aborted with "duplicate column name:
+-- tenant_id", so this migration is now a documented no-op: the column is
+-- owned by 000058 from this merge on.
+--
+-- Databases that recorded version 20261009000056 from earlier builds of
+-- this candidate branch do not re-run it; their tenant_id column matches
+-- 000058's definition exactly (nullable TEXT, no default).
