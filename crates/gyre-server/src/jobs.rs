@@ -508,6 +508,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register task_scheduler job (agent-runtime.md §1 Phases 3–4, task-115):
+    // claims Backlog Delegation/Coordination tasks and runs repo orchestrators
+    // under per-repo registry locks. The 30 s loop itself is spawned in main.rs
+    // (signal_chain::spawn_task_scheduler) and records its cycles under this
+    // same name so /healthz liveness and POST /admin/jobs/task_scheduler/run work.
+    registry
+        .register(
+            JobDefinition {
+                name: "task_scheduler".to_string(),
+                description: "Claims Delegation/Coordination tasks and runs repo orchestrators \
+             (agent-runtime.md §1 Phase 3)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::signal_chain::scheduler_run_once(&state).await },
+        )
+        .await;
+
     // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
     registry
         .register(
@@ -576,6 +596,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
             },
             |state| async move {
                 crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
+    // Register impersonation expiry job (runs every 30 seconds,
+    // identity-security.md §Impersonation): ends sessions past their TTL
+    // (emitting ImpersonationEnded) and expires stale approval requests.
+    registry
+        .register(
+            JobDefinition {
+                name: "impersonation_expiry".to_string(),
+                description: "Ends impersonation sessions past their TTL and expires \
+                     stale approval requests (identity-security.md §Impersonation)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::impersonation::expire_sessions(&state)
                     .await
                     .map(|_| ())
             },

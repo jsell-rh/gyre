@@ -88,6 +88,7 @@ struct TaskRow {
     tenant_id: String,
     workspace_id: String,
     spec_path: Option<String>,
+    spec_ref: Option<String>,
     repo_id: String,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<String>,
@@ -113,8 +114,9 @@ impl TaskRow {
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
             workspace_id: Id::new(self.workspace_id),
-            repo_id: Id::new(self.repo_id),
             spec_path: self.spec_path,
+            spec_ref: self.spec_ref,
+            repo_id: Id::new(self.repo_id),
             cancelled_at: self.cancelled_at.map(|v| v as u64),
             cancelled_reason: self.cancelled_reason,
             task_type: self
@@ -150,6 +152,7 @@ struct NewTaskRow<'a> {
     tenant_id: &'a str,
     workspace_id: &'a str,
     spec_path: Option<&'a str>,
+    spec_ref: Option<&'a str>,
     repo_id: &'a str,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<&'a str>,
@@ -190,6 +193,7 @@ impl TaskRepository for SqliteStorage {
                 tenant_id: &tenant,
                 workspace_id: t.workspace_id.as_str(),
                 spec_path: t.spec_path.as_deref(),
+                spec_ref: t.spec_ref.as_deref(),
                 repo_id: t.repo_id.as_str(),
                 cancelled_at: t.cancelled_at.map(|v| v as i64),
                 cancelled_reason: t.cancelled_reason.as_deref(),
@@ -214,6 +218,7 @@ impl TaskRepository for SqliteStorage {
                     tasks::updated_at.eq(row.updated_at),
                     tasks::workspace_id.eq(row.workspace_id),
                     tasks::spec_path.eq(row.spec_path),
+                    tasks::spec_ref.eq(row.spec_ref),
                     tasks::repo_id.eq(row.repo_id),
                     tasks::cancelled_at.eq(row.cancelled_at),
                     tasks::cancelled_reason.eq(row.cancelled_reason),
@@ -609,5 +614,52 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// Review finding F1 (task-115 round 3): create() must persist the
+    /// task's workspace_id. tasks.workspace_id is TEXT NOT NULL DEFAULT
+    /// 'default', so an insert that omits the column silently re-scopes
+    /// the task into the fabricated 'default' workspace: list_by_workspace
+    /// misses it and find_by_id returns a scope nobody set. The same
+    /// assertion covers the upsert DO UPDATE path (a re-created task must
+    /// move to the new scope, not keep the stale one).
+    #[tokio::test]
+    async fn create_persists_workspace_scope() {
+        let (_tmp, s) = setup();
+        let mut t = make_task("t1", "Workspace-scoped");
+        t.workspace_id = Id::new("ws-42");
+        TaskRepository::create(&s, &t).await.unwrap();
+
+        let found = TaskRepository::find_by_id(&s, &t.id)
+            .await
+            .unwrap()
+            .expect("task survives create");
+        assert_eq!(
+            found.workspace_id, t.workspace_id,
+            "create must persist the caller's workspace scope, not the column default"
+        );
+        assert_eq!(
+            TaskRepository::list_by_workspace(&s, &Id::new("ws-42"))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "newly created task must be visible in its workspace"
+        );
+
+        // Upsert path: re-creating the same id under a different workspace
+        // must carry the new scope through the DO UPDATE set.
+        t.workspace_id = Id::new("ws-99");
+        t.updated_at = 2000;
+        TaskRepository::create(&s, &t).await.unwrap();
+        let found = TaskRepository::find_by_id(&s, &t.id)
+            .await
+            .unwrap()
+            .expect("task survives upsert");
+        assert_eq!(
+            found.workspace_id,
+            Id::new("ws-99"),
+            "upsert DO UPDATE must set workspace_id"
+        );
     }
 }

@@ -166,6 +166,10 @@ export const api = {
   repoSpecPolicy: (id) => request(`/repos/${id}/spec-policy`),
   setRepoSpecPolicy: (id, policy) =>
     request(`/repos/${id}/spec-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
+  // Spec lifecycle config (spec-lifecycle.md §Configuration)
+  repoSpecLifecycle: (id) => request(`/repos/${id}/settings/spec-lifecycle`),
+  setRepoSpecLifecycle: (id, config) =>
+    request(`/repos/${id}/settings/spec-lifecycle`, { method: 'PUT', body: JSON.stringify(config) }),
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
@@ -537,9 +541,6 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
-  myAgents: () => request('/users/me/agents'),
-  myTasks: () => request('/users/me/tasks'),
-  myMrs: () => request('/users/me/mrs'),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
