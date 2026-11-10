@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: ["10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905"]
+commits: ["10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905", "f293796da"]
 ---
 
 ## Spec Excerpt
@@ -99,7 +99,9 @@ repo-B/workspace-B.
   `attestation.context_binding_mismatch` without blocking (Phase 2).
 - **Real generation counter**: `Task.generation` (default 1) persisted in
   the domain, SQLite + Postgres adapters (portable migration
-  `2026-10-08-000059_task_generation`) and exposed in `TaskResponse`.
+  `2026-10-08-000060_task_generation`, renumbered from 000059 after the
+  dbf9edaea base merge introduced a same-version sibling) and exposed in
+  `TaskResponse`.
   Bumped on every reassignment to a different agent in all four mutation
   paths: `update_task` (PUT /api/v1/tasks/:id), spawn reassignment, admin
   reassign, MCP reassign.
@@ -118,28 +120,38 @@ use real git repos, real Ed25519 signatures, and real persisted state.
 `task_generation_increments_on_reassignment` (port) and
 `update_task_api_reassignment_bumps_generation` (PUT API) prove the bump.
 
-On the current head (merge of base fb1f82e31, commit e914d9bda): focused
-filter (`constraint_check admin_reassign update_task_api reassign
-verify_context_binding task_generation`) passes 43/43, spawn tests (the
-merge-conflict file) pass 52/52, and `check-arch.sh`,
-`check-migration-versions.sh`, `check-migration-sql-portability.sh`,
-`check-task-commit-attribution.sh`,
-`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-`check-inert-enforcement.sh`, `check-lossy-secret-conversion.sh` all exit
-0. Evidence: `/tmp/stage/review-evidence/` (per-round details, including
-earlier full-suite runs: gyre-server lib 1493 passed, gyre-adapters 383
-passed / 12 ignored, on head 10d235004).
+On the current head (merge of repair base dbf9edaea, then commit
+f293796da): focused filters pass — `constraint_check` 40/40,
+`verify_context_binding` 1/1, `admin_reassign` 3/3, `api::spawn` 52/52
+(both former conflict files) — `cargo build --all` (SKIP_WEB_BUILD=1)
+succeeds, and `check-arch.sh`, `check-migration-versions.sh`,
+`check-migration-sql-portability.sh` all exit 0. Evidence:
+`/tmp/stage/review-evidence/` (per-round details, including earlier
+full-suite runs: gyre-server lib 1493 passed, gyre-adapters 383 passed /
+12 ignored, on head 10d235004).
 
 ### Merge-resolution rounds
 
-Three base merges were resolved (fefde294, then repair bases), each
-verified by re-running the focused tests and mechanical gates on the
-merged head. The fb1f82e31 round had a single conflict in
+Four base merges were resolved (fefde294, fb1f82e31, then repair base
+dbf9edaea), each verified by re-running the focused tests and mechanical
+gates on the merged head. The fb1f82e31 round had a single conflict in
 `api/spawn.rs` (scoped secret resolution): resolved in favor of the base
 version, which functionally supersedes the branch side by adding the
 Platform Model §7 `secret.accessed` audit event; the branch side was a
-comment-only rewording with identical behavior. Task-188 code was
-unchanged by every merge round.
+comment-only rewording with identical behavior.
+
+The dbf9edaea round had two conflicts. `gyre-domain/src/task.rs`: the
+branch's `generation: 1` field initialization was combined with the
+base's explicit `created_at`/`updated_at` initialization in `Task::new`
+(both sides kept). `api/spawn.rs` again: the base's task-106
+jj-workspace-preferred `effective_work_dir` resolution was kept — it
+functionally supersedes the branch side (comment-only rewording) and
+still canonicalizes relative worktree paths. The merge also collided on
+Diesel migration version 20261008000059 (base `spec_lifecycle_configs`
+vs branch `task_generation`): the branch migration was renumbered to
+`2026-10-08-000060_task_generation` (content unchanged) in commit
+f293796da so both migrations run. Task-188 code was otherwise unchanged
+by every merge round.
 
 ### Scope note
 
