@@ -120,6 +120,10 @@ class RequirementTests(unittest.TestCase):
         self.spec.write_text(self.spec.read_text().replace('Unrelated','Sibling amended'))
         self.store.put_task('task-001','invalidated',BODY,{'requirements':self.snap(),
              'repair':{'category':'requirements_changed'},'candidate':'retained-new-work'})
+        ident=self.store.enqueue('review','task-001','invalidated',{'candidate':'retained-new-work'})
+        running=self.store.claim('review','reviewer')
+        self.assertEqual(plan(self.store,self.root),[])  # Defer while work is running.
+        self.store.finish(ident,running['token'],{'approved':True})
         entries=plan(self.store,self.root)
         self.assertTrue(entries[0]['equivalent'])
         applied=apply(self.store,entries);self.assertEqual(applied,['task-001'])

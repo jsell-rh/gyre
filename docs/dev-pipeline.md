@@ -662,3 +662,9 @@ Semantic spec conflicts are `needs-triage`, distinct from implementation failure
 Their stage/generation hold survives unrelated main advances; a requirement
 change or explicit operator retry releases it. Evidence and conflicting findings
 remain attached to the attempt instead of provoking speculative implementation.
+
+During recovery, `requirements_recovery_revision` can name the original catalog
+revision. Source refresh then retries the guarded migration for deferred tasks
+as their existing claims finish. It does not fence active work or supersede
+unrelated repair findings; once handled, each task's migration marker makes the
+operation a no-op.
