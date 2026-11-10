@@ -6,8 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §4 Scoped Inline Chat"
   - "human-system-interface.md §4 Hard Interrupt"
-commits:
-  - 58e45682
+commits: ["a8d036f466482a9a00157a496d10000d0f36d25c", "58e4568219fd5324a2d2a2b30642602e36a47180"]
 ---
 
 ## Spec Excerpt
