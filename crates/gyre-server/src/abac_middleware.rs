@@ -458,6 +458,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
+                RouteResourceMapping::api("/api/v1/search/suggest", "search", None),
+                RouteResourceMapping::api("/api/v1/search/facets", "search", None),
                 RouteResourceMapping::api("/api/v1/admin/search/reindex", "admin", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),
