@@ -125,7 +125,23 @@ jobs:
           cache-on-failure: true
           prefix-key: v0-test
       - uses: taiki-e/install-action@nextest
+      - name: Install pinned jj (recorded-fixture tests need a real binary)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/jj.tar.gz \
+            https://github.com/jj-vcs/jj/releases/download/v0.39.0/jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz
+          mkdir -p /tmp/jj-dist
+          tar -xzf /tmp/jj.tar.gz -C /tmp/jj-dist
+          test -x /tmp/jj-dist/jj
+          sudo install -m 755 /tmp/jj-dist/jj /usr/local/bin/jj
+          jj --version
+          jj --version | grep -q "0.39.0"
       - run: cargo nextest run --all
+        env:
+          # The jj recorded-fixture tests must execute against the real
+          # binary in CI; a missing jj fails them instead of silently
+          # skipping with zero assertions (task-106 F-CI).
+          GYRE_JJ_TESTS_MUST_RUN: "1"
 
   web-build:
     name: Web build + bundle
@@ -143,6 +159,19 @@ jobs:
         run: cd web && npm run build
       - name: Run vitest component tests
         run: cd web && npm test
+
+  gyre-agent-tests:
+    name: Gyre agent runner tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Zero-dependency: node --test with the real runner against a stubbed
+      # SDK (meta-spec prompt delivery) and the cred-proxy suite.
+      - name: Run agent runner + cred-proxy tests
+        run: cd docker/gyre-agent && npm test
 
   build-release:
     name: Build (release)

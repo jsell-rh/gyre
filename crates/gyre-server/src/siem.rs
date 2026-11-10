@@ -164,6 +164,28 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::ContainerCrashed => 7,
         gyre_domain::AuditEventType::ContainerOom => 8,
         gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
+        // Source control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::GitPushAccepted => 3,
+        gyre_domain::AuditEventType::GitPushRejected => 5,
+        gyre_domain::AuditEventType::GitClone => 3,
+        gyre_domain::AuditEventType::SpecChanged => 4,
+        // Access control events (observability.md §Audit Event Types).
+        gyre_domain::AuditEventType::AuthSuccess => 3,
+        gyre_domain::AuditEventType::AuthFailure => 6,
+        gyre_domain::AuditEventType::AbacDenied => 5,
+        gyre_domain::AuditEventType::RbacDenied => 5,
+        gyre_domain::AuditEventType::ImpersonationStarted => 7,
+        gyre_domain::AuditEventType::ImpersonationEnded => 7,
+        // Agent lifecycle events (observability.md §Audit Event Types):
+        // admin interventions rank highest, detector-marked deaths next,
+        // routine lifecycle signals stay informational.
+        gyre_domain::AuditEventType::AgentKilled => 7,
+        gyre_domain::AuditEventType::AgentDead => 6,
+        gyre_domain::AuditEventType::AgentTokenRevoked => 5,
+        gyre_domain::AuditEventType::AgentReassigned => 4,
+        gyre_domain::AuditEventType::AgentSpawned => 3,
+        gyre_domain::AuditEventType::AgentCompleted => 3,
+        gyre_domain::AuditEventType::AgentHeartbeat => 3,
         gyre_domain::AuditEventType::Custom(_) => 3,
     };
     let event_type = event.event_type.as_str();
@@ -415,9 +437,73 @@ mod tests {
     }
 
     #[test]
+    fn cef_severity_source_control_and_access_control_events() {
+        // observability.md §Audit Event Types severity mapping (task-104):
+        // AuthFailure 6, AbacDenied/RbacDenied/GitPushRejected 5,
+        // AuthSuccess/GitPushAccepted/GitClone 3, ImpersonationStarted/
+        // ImpersonationEnded 7, SpecChanged 4.
+        let cases = [
+            (AuditEventType::AuthFailure, 6),
+            (AuditEventType::AbacDenied, 5),
+            (AuditEventType::RbacDenied, 5),
+            (AuditEventType::GitPushRejected, 5),
+            (AuditEventType::AuthSuccess, 3),
+            (AuditEventType::GitPushAccepted, 3),
+            (AuditEventType::GitClone, 3),
+            (AuditEventType::ImpersonationStarted, 7),
+            (AuditEventType::ImpersonationEnded, 7),
+            (AuditEventType::SpecChanged, 4),
+        ];
+        for (event_type, expected) in &cases {
+            let event = make_event("e1", event_type.clone());
+            let msg = format_cef(&event);
+            // Severity is the 7th CEF header field (index 6):
+            // CEF:0|Vendor|Product|Version|Signature|Name|<severity>|ext
+            let header = msg.split('|').collect::<Vec<_>>();
+            assert!(header.len() >= 8, "CEF header must have 8 fields");
+            assert_eq!(
+                header[6],
+                expected.to_string(),
+                "wrong CEF severity for {}: expected {}, got {}",
+                event_type.as_str(),
+                expected,
+                header[7]
+            );
+        }
+    }
+
+    #[test]
     fn cef_escape_pipes() {
         assert_eq!(cef_escape("foo|bar"), "foo\\|bar");
         assert_eq!(cef_escape("a=b"), "a\\=b");
+    }
+
+    #[test]
+    fn cef_agent_lifecycle_severities() {
+        // observability.md §Audit Event Types severity mapping: admin kill 7,
+        // detector-marked death 6, token revocation 5, reassignment 4,
+        // routine lifecycle signals 3.
+        let cases = [
+            (AuditEventType::AgentKilled, 7),
+            (AuditEventType::AgentDead, 6),
+            (AuditEventType::AgentTokenRevoked, 5),
+            (AuditEventType::AgentReassigned, 4),
+            (AuditEventType::AgentSpawned, 3),
+            (AuditEventType::AgentCompleted, 3),
+            (AuditEventType::AgentHeartbeat, 3),
+        ];
+        for (et, want) in cases {
+            let ev = make_event("e1", et.clone());
+            let cef = format_cef(&ev);
+            let severity: u8 = cef
+                .trim_end()
+                .split('|')
+                .nth(6)
+                .unwrap_or_else(|| panic!("malformed CEF: {cef}"))
+                .parse()
+                .unwrap_or_else(|_| panic!("non-numeric severity in CEF: {cef}"));
+            assert_eq!(severity, want, "wrong CEF severity for {et:?}: {cef}");
+        }
     }
 
     #[tokio::test]

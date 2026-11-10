@@ -419,15 +419,18 @@ def baseline_repair(execution, observation):
     signature = observation.get('failure_signature')
     key = observation['base'] + ':' + (signature or observation['environment'])
     excerpt = Path(observation['baseline_log']).read_text()[-24000:]
-    body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
+    shared=observation.get('status')=='environment_failed'
+    title=('Repair shared CI environment ' + signature[:12]) if shared else ('Repair verified failure on main ' + observation['base'][:12])
+    body = ('---\ntitle: "' + title + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
             'depends_on: []\nprogress: not-started\ncommits: []\n---\n\n'
-            '## Required behavior\n\nReproduce and repair this verified upstream failure. '
+            '## Required behavior\n\n' + ('Repair this shared CI setup failure. The failed installer ran with the same workflow and dependency inputs as the upstream base; an older green run does not prove the current runner supports them. ' if shared else 'Reproduce and repair this verified upstream failure. ') +
             'Implement real production fixes or correct a genuinely broken test setup. '
             'Do not weaken checks, add skips or exemptions, or implement the blocked feature. '
             'Obtain independent review and pass full verification and GitHub checks.\n\n'
             'Base: `' + observation['base'] + '`\n'
             'Environment fingerprint: `' + observation['environment'] + '`\n\n'
+            + ('CI setup inputs: '+json.dumps(observation.get('environment_failure',{}),sort_keys=True)+'\n\n' if shared else '') +
             '## Baseline failure\n\n```text\n' + excerpt + '\n```\n')
     generation = generation_for(store, body)
     with store.transaction():
@@ -449,6 +452,7 @@ def baseline_repair(execution, observation):
         name = f'task-{number:03d}'
         data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
                                 'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
+        if shared:data.update(ci_environment=observation['environment_failure'],triaged=generation)
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?)', (name, generation, body, json.dumps(data), time.time()))
         store.event('baseline_prerequisite', {'base': observation['base'], 'evidence': observation['baseline_log']}, name)
         return name

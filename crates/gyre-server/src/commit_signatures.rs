@@ -249,6 +249,7 @@ mod tests {
             })),
             bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let attr = SigningAttribution::from_auth(&auth);
         assert_eq!(attr.agent_id, "agent-42");
@@ -266,6 +267,7 @@ mod tests {
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let attr = SigningAttribution::from_auth(&auth);
         assert_eq!(attr.agent_id, "system");

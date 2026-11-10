@@ -87,6 +87,9 @@ def run_claim(store, claim):
     execution = Execution(store, claim)
     try:
         with execution.heartbeat():
+            if stage in ('triage','implement','review','verify'):
+                from pipeline.compute import check_admission
+                check_admission(execution)
             item = store.task(claim['task'])
             if item['data'].get('task_override'):
                 from pipeline.catalog import contract

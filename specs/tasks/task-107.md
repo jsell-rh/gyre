@@ -101,7 +101,9 @@ rounds (F1-F19).
   signature, base64 PEM leaf certificate) POSTed at sign time; the
   returned entry UUID is stored with the record.
 - **Persistence** (F9): `CommitSignatureRepository` port with SQLite
-  and PostgreSQL adapters (migration `2026-10-09-000056`), keyed by
+  and PostgreSQL adapters (migration `2026-10-09-000060`, renumbered
+  from `000056` at the base-merge onto `fca5de5fb` — the base's
+  `2026-10-09-000056_user_tenant_id` claimed that version first), keyed by
   `(repo_id, commit_sha)`, wired through `store!` in `build_state`.
 - **Latency bound** (F10): every outbound Fulcio/Rekor call is wrapped
   in `tokio::time::timeout(SIGNING_HTTP_TIMEOUT_SECS = 10)`.

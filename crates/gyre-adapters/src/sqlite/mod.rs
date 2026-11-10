@@ -37,6 +37,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
 pub mod secret;
@@ -45,6 +46,7 @@ pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -241,6 +243,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "rollout_policies",
             "gate_traces",
             "trace_spans",
             "conversations",

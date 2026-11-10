@@ -712,6 +712,7 @@ mod tests {
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
 
         let hex_id = hex::encode(&pub_key);
