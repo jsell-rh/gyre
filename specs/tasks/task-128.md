@@ -304,31 +304,29 @@ Repaired the two round-3 review findings:
   `SPECS_PATH_ROUTE`/`REPOS_ID_ROUTE` consts so the frozen duplicate
   `/api/v1/...` literal count stays at 17.
 
-### Test evidence (run at head 5327b8daa, after the round-3 repair)
+### Test evidence (run at merge head a60b86a17, after the base-b5a872087
+rebase)
 
-- Mutation probes (transcripts under `/tmp/stage/review-evidence/`):
-  disabling the `:path` → `resource.id` population fails BOTH round-3
-  spec-path tests (live: 200-instead-of-403; unit: None-instead-of-Some);
-  restoring the unguarded `normalize_agent_jwt_attributes` setters fails
-  the normalize guard test (claim value overwrites the pre-set one);
-  earlier probes still hold (the pre-fix ungated raw-claim merge fails
-  both round-2 killing tests; a post-extraction overwrite merge fails the
-  NotIn-deny guard; repos-prefix guard removal fails the round-1
-  middleware tests; the fail-open `resolve_dynamic_value` mutant is
-  killed by the round-1 killing case).
-- `cargo test -p gyre-server --lib` — **1570 passed / 0 failed**
-  (includes `abac_middleware` 35, `policy_engine` 34; the five §Policy
+- `cargo test -p gyre-server --lib` — **1651 passed / 0 failed**
+  (includes `abac_middleware` 37, `policy_engine` 34; the five §Policy
   Example tests, the membership/entity-lookup attribute tests, and the
   round-1/2/3 tests run end-to-end through live tower oneshot requests
-  with non-vacuous controls).
+  with non-vacuous controls). Mutation-probe transcripts for rounds 1-3
+  are retained under `/tmp/stage/review-evidence/`.
+- `cargo check -p gyre-cli` passes (covers the base's gyre-cli +
+  gyre-common protocol changes the server lib tests do not exercise).
 - All mechanically-enforced repo invariant scripts pass at this head,
   including `check-abac-route-registry` (duplicate count 17 = frozen
   baseline), `check-arch`, `check-mem-port-contracts`,
   `check-fabricated-scope-defaults`, `check-forged-scope-fields`,
   `check-forwarded-header-trust`, `check-inert-enforcement`,
   `check-scope-literal-defaults`, `check-lossy-secret-conversion`,
-  `check-relative-path-defaults`, `check-byte-slice-truncation`, and the
-  other security-pattern checks.
+  `check-relative-path-defaults`, `check-byte-slice-truncation`,
+  `check-abac-exempt-handlers`, `check-mcp-write-tools`,
+  `check-migration-versions`, `check-migration-sql-portability`,
+  `check-in-memory-state-stores`, `check-fail-open-ref-resolution`,
+  `check-dead-message-kinds`, `check-unbounded-external-http`,
+  `check-unwired-port-methods`, and `check-task-commit-attribution`.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
 verification/publication gates.
@@ -364,3 +362,17 @@ verification/publication gates.
   `check-arch`, `check-abac-route-registry`, `check-mem-port-contracts`,
   `check-forwarded-header-trust`, `check-fabricated-scope-defaults` all
   pass.
+- **Rebase (a60b86a17):** merged base b5a872087 (task-108 admin user
+  impersonation, task-104 audit event types, task-205 manifest-driven
+  Concept Views, task-208 profile changes, and their verified lineage —
+  511 commits). Single text conflict in `specs/coverage/SUMMARY.md`,
+  resolved by mechanical regeneration via
+  `scripts/update-coverage-summary.sh` from the merged coverage files;
+  every source file (`abac.rs`, `abac_middleware.rs`, `auth.rs`,
+  `mcp.rs`, `mem.rs`, `merge_processor.rs`, `api/*`) auto-merged with no
+  task-128 conflicts. Post-merge probes: `cargo test -p gyre-server
+  --lib` 1651 passed / 0 failed (1570 pre-merge; the base contributed
+  the additional tests, including 2 new abac_middleware tests for its
+  impersonation surface), `cargo check -p gyre-cli` clean, and all
+  invariant scripts listed in the test-evidence section pass. Evidence
+  transcript: `/tmp/stage/review-evidence/rebase-b5a872087-merge.txt`.
