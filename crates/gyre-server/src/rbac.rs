@@ -148,6 +148,7 @@ mod tests {
     fn agent_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "agent-sub",
                 "preferred_username": "agent-user",
                 "realm_access": { "roles": ["agent"] }
@@ -159,6 +160,7 @@ mod tests {
     fn readonly_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }

@@ -147,6 +147,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/undo", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/commits/:sha/signature/verification",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/dependencies/:dependency_id",
@@ -537,6 +542,8 @@ impl ResourceResolver {
                 RouteResourceMapping::exempt("/api/v1/users/:user_id/sessions"),
                 RouteResourceMapping::exempt("/api/v1/users/:user_id/sessions/revoke-all"),
                 RouteResourceMapping::exempt("/api/v1/users/:user_id/sessions/:id"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/read"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/unread"),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
@@ -1300,6 +1307,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin",
                 "realm_access": { "roles": ["admin"] }
@@ -1347,6 +1355,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -1822,6 +1831,7 @@ pub mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer",
                 "realm_access": { "roles": ["developer"] }
