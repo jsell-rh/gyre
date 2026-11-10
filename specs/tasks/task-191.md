@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86", "bf2c1a99805235b0c35cc1a1f25358b4490a173d"]
 ---
 
 ## Spec Excerpt
@@ -127,37 +127,27 @@ threshold logic):
 
 ### Test evidence
 
-`cargo test -p gyre-server --lib api::budget` — 17 pass (run in the
-previous sandbox with crates.io access; commands and outputs in
-`/tmp/stage/review-evidence/task-191-evidence.md`, post-rebase run),
+`cargo test -p gyre-server --lib api::budget` — 17 pass,
 including the acceptance tests that fail if enforcement is removed: 85%
 warning (message + notification, agent alive, no re-fire on subsequent
-calls), below-threshold silence, ≥100% graceful stop (agent `Dead`,
+calls, agent-inbox receipt pinned via `messages.list_after`),
+below-threshold silence, ≥100% graceful stop (agent `Dead`,
 counter 0, worktree record intact, reassignment task referencing the task
 id, no re-fire), HardKill inline (no timer), QueuePause (kv pause state
 set, agent alive), cost-limit crossing, serde round-trips, and
-API/SQLite persistence. Admin kill tests (35) pass after the helper
-cutover (including the upstream `admin_kill_emits_lifecycle_audit_events`,
-which pins token revocation with reason `admin_kill` and the
-`AgentKilled` audit attribution); the full `gyre-server` lib suite passes
-post-merge (1492); `check-arch.sh`, the migration-version and
-migration-portability checks, and the other relevant mechanical check
-scripts pass; clippy is clean in the touched files.
-
-The review-repair commit (75adf7def) could not re-run cargo in its
-sandbox — the egress proxy blocks crates.io (`static.crates.io` /
-`index.crates.io` connect refused; probe output in
-`/tmp/stage/review-evidence/task-191-egress-probe.txt`), and no crate
-cache exists on that filesystem. Verification there was static: a
-`rustc` parse check of the modified file (zero syntax errors; only
-standalone-compile unresolved-import errors), signature checks against
-the ports/adapters (`list_after` returns `Destination::Agent` messages;
-`list_by_workspace` excludes them in all three adapters, so workspace-
-feed counts are unchanged), and all grep-based mechanical check scripts
-(green). **Remote verification must re-run
-`cargo test -p gyre-server --lib api::budget`** — the three threshold
-tests now also pin agent-inbox receipt via the new `agent_inbox` helper
-(`messages.list_after`) and fail if the directed emission is removed.
+API/SQLite persistence. Post-merge with base cd4c04fe (merge commit
+`bf2c1a998`, evidence in
+`/tmp/stage/review-evidence/task-191-merge-cd4c04fe-evidence.md`):
+admin kill tests 36 pass (35 prior + 1 new upstream, including
+`admin_kill_emits_lifecycle_audit_events` pinning token revocation with
+reason `admin_kill` and the `AgentKilled` audit attribution),
+`signal_chain` 19 and `secret_rotation` 8 pass (kill path now also
+revokes task-scoped secrets), `cargo check` across gyre-server /
+gyre-adapters / gyre-cli / gyre-domain --all-targets is clean,
+and `check-arch.sh`, the migration-version and migration-portability
+checks, and the other relevant mechanical check scripts pass. The
+full-suite runs (server lib 1492) and clippy cited below predate this
+merge; full workspace gates are owned by verification.
 
 ### Review repair (finding 2441b169079c4baab45e073159c02136)
 
@@ -173,22 +163,32 @@ the dispatch consumer is a no-op drain and WS delivery already ignores
 agent-directed messages, so the extra copies have no side effects beyond
 the agent inbox.
 
-### Rebase resolution (merge of assignment base fefde294)
+### Rebase resolution (merges of bases fefde294 and cd4c04fe)
 
-The assignment base added audit hardening to `admin_kill_agent` (auth
-extractor for `killed_by` attribution, PID capture + attested-PID fallback
-for the `AgentKilled` event, `revoke_agent_token`, `emit_killed`) while this
-branch had extracted that same body into the shared `kill_agent` helper.
-Resolution folded the upstream additions INTO the helper (no fork):
-`kill_agent(state, agent, reason, preserve_worktree, killed_by,
-revoke_reason)` now performs the kill/decrement/worktree handling plus token
-revocation and the `AgentKilled` audit event; the admin handler passes the
-caller identity and `"admin_kill"` (upstream test asserts this exactly),
-budget enforcement passes `"budget_enforcement"` / `"budget_kill"`. The
-budget migration `2026-10-10-000058_budget_enforcement_action` does not
-collide with the base's `2026-10-08-000058_user_entity_profile_fields`
-(Diesel versions include the date prefix; `check-migration-versions.sh`
-passes).
+Two assignment-base merges were resolved by folding upstream
+`admin_kill_agent` additions INTO the shared `kill_agent` helper (no
+fork of the kill/decrement/notify sequence):
+
+- **fefde294:** audit hardening (auth extractor for `killed_by`
+  attribution, PID capture + attested-PID fallback for the `AgentKilled`
+  event, `revoke_agent_token`, `emit_killed`). The admin handler passes
+  the caller identity and `"admin_kill"` (upstream test asserts this
+  exactly); budget enforcement passes `"budget_enforcement"` /
+  `"budget_kill"`.
+- **cd4c04fe** (merge commit `bf2c1a998`, evidence in
+  `/tmp/stage/review-evidence/task-191-merge-cd4c04fe-evidence.md`):
+  (1) `emit_telemetry` became `async` upstream — the helper now `.await`s
+  it, keeping the parameterized `reason` description; (2) upstream added
+  `revoke_agent_task_secrets` (Platform Model §7 teardown) inline in the
+  admin handler — folded into the helper after `revoke_agent_token`, so
+  admin AND budget kills revoke task-scoped ephemeral secrets, matching
+  that function's "every path that ends an agent run" contract. Two
+  `BudgetConfig` test initializers in the upstream `signal_chain.rs`
+  gained `enforcement_action: None` (spec default — no semantics change).
+
+The budget migration `2026-10-10-000058_budget_enforcement_action` does
+not collide with other `000058`-suffixed migrations (Diesel versions
+include the date prefix; `check-migration-versions.sh` passes).
 
 ### Notes for review
 
