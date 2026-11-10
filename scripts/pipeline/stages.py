@@ -44,7 +44,9 @@ def triage(execution, task):
     data = task['data']
     if execution.claim['input'].get('binding_errors'):
         from .execution import Attention
-        raise Attention('Spec input binding needs triage in specs/task-spec-inputs.json: ' + '; '.join(execution.claim['input']['binding_errors']))
+        error = Attention('Spec input binding needs triage in specs/task-spec-inputs.json: ' + '; '.join(execution.claim['input']['binding_errors']))
+        error.category = 'requirements_binding'
+        raise error
     graph = {item['name']: item['data'].get('dependencies') or [] for item in store.tasks()}
     error = contract.graph_errors(graph).get(task['name']) or data.get('metadata_error')
     complete = data.get('dependencies') is not None and data.get('title') and data.get('spec_ref')

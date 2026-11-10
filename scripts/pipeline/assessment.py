@@ -3,6 +3,10 @@ import json
 from .execution import Attention
 
 
+class AssessmentAttention(Attention):
+    category = "assessment"
+
+
 def validate(report, inputs):
     if not isinstance(report, dict):
         raise ValueError('missing assessment report')
@@ -35,17 +39,17 @@ def run(execution, task):
     inp = execution.claim['input']
     result = execution.cloud_step(task, prompt(execution,task))
     if not result.get('valid') or result.get('agent_exit') or result.get('stream_exit'):
-        raise Attention('Assessment failed its read-only source guard; inspect the retained outcome')
+        raise AssessmentAttention('Assessment failed its read-only source guard; inspect the retained outcome')
     from .catalog import contract
     if contract.requirement_parts(result.get('task_body','')) != contract.requirement_parts(task['body']):
-        raise Attention('Assessment changed its assigned task contract')
+        raise AssessmentAttention('Assessment changed its assigned task contract')
     try:
         report = validate(result.get('assessment'),inp)
     except ValueError as exc:
-        raise Attention(str(exc)) from exc
+        raise AssessmentAttention(str(exc)) from exc
     receipt = report | {'artifact':str(execution.directory/'outcome.json'), 'generation':task['generation']}
     if report['decision'] == 'needs_triage':
-        raise Attention('Requirement assessment needs triage: ' + json.dumps(report['evidence']))
+        raise AssessmentAttention('Requirement assessment needs triage: ' + json.dumps(report['evidence']))
     if report['decision'] == 'gap':
         finding = {'id':execution.claim['id'], 'category':'requirements_gap',
                    'source':inp.get('candidate') or inp['base'], 'details':report['gaps'],
@@ -60,7 +64,7 @@ def run(execution, task):
     tree = execution.command('git','rev-parse','HEAD^{tree}',cwd=path).stdout.strip()
     checked = verify(execution,path,{'candidate':source,'base':inp['base'],'head':source,'tree':tree})
     if not checked['passed']:
-        raise Attention('Assessment found no requirement gap, but deterministic verification failed; inspect remote-verification.json before assigning any code repair')
+        raise AssessmentAttention('Assessment found no requirement gap, but deterministic verification failed; inspect remote-verification.json before assigning any code repair')
     receipt['verification'] = checked
     updates = {'assessment_pending':None, 'assessment':receipt, 'triaged':task['generation']}
     previous = task['data'].get('previous_delivery')

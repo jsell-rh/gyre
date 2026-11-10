@@ -98,9 +98,12 @@ class Store:
         self.db.execute('INSERT INTO events(task,work,kind,detail,at) VALUES(?,?,?,?,?)',
                         (task, work, kind, json.dumps(detail), time.time()))
 
-    def put_task(self, name, generation, body, data):
+    def put_task(self, name, generation, body, data, expected=None):
         with self.transaction():
-            old = self.db.execute('SELECT generation FROM tasks WHERE name=?', (name,)).fetchone()
+            old = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
+            if expected is not None and (not old or old['generation'] != expected['generation']
+                    or old['body'] != expected['body'] or json.loads(old['data']) != expected['data']):
+                return False  # A stage completed while catalog inputs were being read.
             self.db.execute('''INSERT INTO tasks VALUES(?,?,?,?,?) ON CONFLICT(name)
                 DO UPDATE SET generation=excluded.generation,body=excluded.body,
                 data=excluded.data,updated=excluded.updated''',

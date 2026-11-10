@@ -40,15 +40,22 @@ def sections(text):
     return nodes
 
 
-def snapshot(checkout, body, contract):
+def snapshot(checkout, body, contract, require_registry=False):
     root = Path(checkout)
     registry_path = root / 'specs/task-spec-inputs.json'
+    if not registry_path.exists() and require_registry:
+        return {'version':2,'fingerprint':digest({'task':body,'error':'missing registry'}),
+                'components':{},'inputs':[],'errors':['Missing specs/task-spec-inputs.json']}
     if not registry_path.exists():
         # Old checkouts retain their original fingerprint until the registry lands.
         specs = {str(p.relative_to(root)): p.read_text() for folder in ('system', 'development')
                  for p in (root / 'specs' / folder).glob('*.md')}
         return {'version': 1, 'fingerprint': contract.generation(body, specs, (root / 'specs/GOAL.md').read_text())}
-    registry = json.loads(registry_path.read_text())
+    try:
+        registry = json.loads(registry_path.read_text())
+    except ValueError as exc:
+        return {'version':2,'fingerprint':digest({'task':body,'error':str(exc)}),
+                'components':{},'inputs':[],'errors':['Invalid spec input registry: '+str(exc)]}
     try:
         front, prose = contract.requirement_parts(body)
     except ValueError as exc:
@@ -91,3 +98,10 @@ def change(before, after):
     old, new = before.get('components', {}), after.get('components', {})
     return {key: {'before': old.get(key), 'after': new.get(key)}
             for key in sorted(old.keys() | new.keys()) if old.get(key) != new.get(key)}
+
+
+def pending(data):
+    """Old broad invalidations also enter assessment without changing epochs."""
+    return data.get('assessment_pending') or (
+        {'migration':True,'changes':{}} if (data.get('repair') or {}).get('category') == 'requirements_changed'
+        and (data.get('requirements') or {}).get('version') == 2 else None)

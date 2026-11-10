@@ -34,9 +34,16 @@ def eligible(store, work):
     requirements = data.get('requirements') or {}
     if requirements.get('errors'):
         return stage == 'triage' and inputs.get('binding_errors') == requirements['errors']
-    if data.get('assessment_pending'):
+    from .requirements import pending
+    assessment = pending(data)
+    if assessment:
+        # Format migration must let an already-running implementation retain
+        # its checkpoint. Discovery never offers another implementation claim.
+        if (stage == 'implement' and work.get('state') == 'claimed'
+                and not data.get('assessment_pending') and inputs.get('repair') == data.get('repair')):
+            return True
         return (stage == 'assess' and inputs.get('requirements') == requirements.get('fingerprint')
-                and inputs.get('changes') == data['assessment_pending'].get('changes', {}))
+                and inputs.get('changes') == assessment.get('changes', {}))
     if stage == 'assess':
         return False
     if stage == 'observe':

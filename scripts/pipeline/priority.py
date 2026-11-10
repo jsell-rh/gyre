@@ -7,7 +7,7 @@ DEFAULT_CLASSES = {'background':-100, 'normal':0, 'high':100, 'repair':200, 'urg
 CONTROL = {'cleanup':1_000_000_300, 'observe':1_000_000_200,
            'publish':1_000_000_100, 'verify':1_000_000_000}
 COMPUTE = {'triage','assess','implement','review','verify'}
-REPAIRS = {'ci','verification','rebase','review','requirements_gap'}
+REPAIRS = {'ci','verification','rebase','review','requirements_gap','requirements_changed'}
 
 
 class PriorityError(ValueError):

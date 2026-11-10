@@ -161,6 +161,41 @@ class RequirementTests(unittest.TestCase):
                 affected.append(number)
         self.assertEqual(affected,['077','085'])
 
+    def test_catalog_compare_and_swap_does_not_erase_a_concurrent_delivery(self):
+        self.sync();old=self.store.task('task-001')
+        self.store.put_task(old['name'],old['generation'],old['body'],old['data']|{'delivered':{'sha':'just-shipped'}})
+        self.assertFalse(self.store.put_task(old['name'],old['generation'],old['body'],old['data'],expected=old))
+        self.assertEqual(self.store.task('task-001')['data']['delivered']['sha'],'just-shipped')
+
+    def test_old_broad_repair_discovers_assessment_without_fencing_running_code(self):
+        self.store.put_task('task-001','legacy',BODY,{'dependencies':[], 'triaged':'legacy',
+            'repair':{'category':'requirements_changed','source':'checkpoint'}})
+        discover(self.store,'implement','main');claim=self.store.claim('implement','old-worker')
+        self.sync()
+        self.assertTrue(eligible(self.store,claim))
+        self.assertEqual(discover(self.store,'implement','main'),[])
+        self.assertEqual(len(discover(self.store,'assess','main')),1)
+        self.assertEqual(self.store.task('task-001')['generation'],'legacy')
+
+    def test_assessment_obeys_compute_admission(self):
+        self.sync();task=self.store.task('task-001')
+        self.store.put_task('task-001',task['generation'],BODY,task['data']|{'delivered':None,
+            'assessment_pending':{'changes':{}}})
+        discover(self.store,'assess','main')
+        self.assertIsNone(self.store.claim('assess','owner',capacity=0))
+        self.store.set_setting('verification_reserved',0)
+        claim=self.store.claim('assess','owner',capacity=2)
+        self.assertIsNotNone(claim)
+        self.assertEqual(self.store.compute_used(),1)
+
+    def test_adopted_registry_cannot_fall_back_to_document_hashing(self):
+        self.sync();self.registry.unlink();self.sync()
+        task=self.store.task('task-001')
+        self.assertTrue(task['data']['requirements']['errors'])
+        self.assertEqual(discover(self.store,'implement','main'),[])
+        self.assertEqual(discover(self.store,'assess','main'),[])
+        self.assertEqual(len(discover(self.store,'triage','main')),1)
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])

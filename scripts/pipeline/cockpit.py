@@ -8,6 +8,7 @@ from .store import STAGES
 
 def snapshot(store):
     from .repairs import satisfied
+    from .requirements import pending
     from .priority import task_priority, classes, PriorityError
     from .execution import gateway
     records = store.tasks()
@@ -31,11 +32,11 @@ def snapshot(store):
                  'resolved' if satisfied(data) else 'failed' if attention else 'running' if active else
                  'needs-triage' if (data.get('requirements') or {}).get('errors') else
                  'published' if retry and retry['stage'] == 'publish' and data.get('pr') else
-                 'deferred' if retry else 'assessing' if data.get('assessment_pending') else
+                 'deferred' if retry else 'assessing' if pending(data) else
                  'blocked' if shared_wait or task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
-        condition = '; '.join((data.get('requirements') or {}).get('errors') or []) or ('Requirements changed; independent assessment pending' if data.get('assessment_pending') else None) or priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        condition = '; '.join((data.get('requirements') or {}).get('errors') or []) or ('Requirements changed; independent assessment pending' if pending(data) else None) or priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
         if shared_wait and not condition:
             condition = 'Waiting for shared CI environment repair: ' + data['repair']['prerequisite']
         history = [json.loads(row['data']).get('delivered') for row in store.db.execute(

@@ -55,7 +55,8 @@ def sync_checkout(store, checkout, revision=None):
         except ValueError:
             gen = hashlib.sha256((body + goal).encode()).hexdigest()
         old = existing.get(path.stem)
-        scoped = snapshot(checkout, body, contract)
+        scoped = snapshot(checkout, body, contract, require_registry=bool(
+            old and (old['data'].get('requirements') or {}).get('version') == 2))
         if scoped['version'] == 2:
             prior = (old or {}).get('data', {}).get('requirements')
             if old and (not prior or prior.get('version') != 2 or prior['fingerprint'] == scoped['fingerprint']):
@@ -64,11 +65,8 @@ def sync_checkout(store, checkout, revision=None):
                                       'catalog_source': revision}
                 if not prior:
                     data['legacy_catalog_source'] = old['data'].get('catalog_source')
-                if (not prior and (data.get('repair') or {}).get('category') == 'requirements_changed'
-                        and not store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(path.stem,)).fetchone()):
-                    data.update(assessment_pending={'migration': True, 'changes': {}}, repair=None)
                 if data != old['data'] or body != old['body']:
-                    store.put_task(path.stem, old['generation'], body, data)
+                    store.put_task(path.stem, old['generation'], body, data, expected=old)
                 continue
             data = safe_metadata(body) | {'requirements': scoped, 'catalog_generation': gen,
                                          'catalog_source': revision}
@@ -82,14 +80,14 @@ def sync_checkout(store, checkout, revision=None):
                                            'previous_generation': old['generation']}}
             elif data['progress'] == 'complete':
                 data['delivered'] = {'imported': True, 'generation': epoch, 'source': revision}
-            store.put_task(path.stem, epoch, body, data)
+            store.put_task(path.stem, epoch, body, data, expected=old)
             continue
         # Operational outcomes survive catalog refresh. A changed contract
         # invalidates receipts; a changed progress label alone does not.
         if old and old['data'].get('catalog_generation') == gen:
             continue
         if old and old['generation'] == gen:
-            store.put_task(path.stem, gen, body, old['data'] | {'catalog_generation': gen})
+            store.put_task(path.stem, gen, body, old['data'] | {'catalog_generation': gen}, expected=old)
             continue
         data = safe_metadata(body) | {'catalog_generation': gen, 'catalog_source': revision}
         if data['progress'] == 'complete' and not old:
@@ -102,11 +100,12 @@ def sync_checkout(store, checkout, revision=None):
                         candidate_base=old['data'].get('candidate_base') or old['data'].get('catalog_source'),
                         repair={'category': 'requirements_changed', 'source': checkpoint,
                                 'id': gen, 'detail': 'Implement the current contract using the retained source checkpoint.'})
-        store.put_task(path.stem, gen, body, data)
+        store.put_task(path.stem, gen, body, data, expected=old)
 
 
 def discover(store, stage, base):
     from .repairs import cached, probe, resolution, satisfied
+    from .requirements import pending
     tasks = {task['name']: task for task in store.tasks()}
     graph = {name: task['data'].get('dependencies') or [] for name, task in tasks.items()}
     errors = contract.graph_errors(graph)
@@ -122,13 +121,14 @@ def discover(store, stage, base):
                 selected.append(store.enqueue('triage',name,task['generation'],
                     {'base':base,'binding_errors':requirements['errors']},priority=20000))
             continue
-        if data.get('assessment_pending'):
+        assessment = pending(data)
+        if assessment:
             if stage == 'assess':
                 selected.append(store.enqueue('assess',name,task['generation'],
-                    {'base':base, 'candidate':base if data['assessment_pending'].get('migration') or data.get('previous_delivery') else data.get('candidate'),
+                    {'base':base, 'candidate':base if assessment.get('migration') or data.get('previous_delivery') else data.get('candidate'),
                      'requirements':requirements['fingerprint'],
                      'required_evidence':list(requirements.get('components',{})),
-                     'changes':data['assessment_pending'].get('changes',{})},priority=20000))
+                     'changes':assessment.get('changes',{})},priority=20000))
             continue
         if stage == 'observe':
             from .ci import publication
@@ -230,7 +230,8 @@ def generation_for(store, body, task_name=None):
              for section in ('system', 'development')
              for path in (checkout / 'specs' / section).glob('*.md')}
     from .requirements import snapshot
-    scoped = snapshot(checkout,body,contract)
+    scoped = snapshot(checkout,body,contract, require_registry=bool(task_name and
+        (store.task(task_name)['data'].get('requirements') or {}).get('version') == 2))
     if scoped['version'] == 2:
         if task_name:
             task = store.task(task_name)
