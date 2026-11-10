@@ -22,6 +22,7 @@ if [[ "${GYRE_PIPELINE_STAGE:-}" =~ ^(implement|review|triage)$ ]] && [ "$comman
       case "$option" in
         --) break;;
         build|test|run|bench|rustc) codegen=1;;
+        --all|--workspace) server=1;;
         -p|--package) expect_package=1;;
         --package=*) package="${option#--package=}";;
         -p?*) package="${option#-p}";;

@@ -66,7 +66,7 @@ elif mode == 'exit7':
         for stage in ('implement','review','triage'):
             self.env['GYRE_PIPELINE_STAGE']=stage
             for args in (['test','-p','gyre-server'],['build','--package=gyre-server'],
-                         ['test','-pgyre-*'],['test','--','-p','gyre-cli'],
+                         ['test','-pgyre-*'],['test','--workspace','-p','gyre-domain'],['test','--','-p','gyre-cli'],
                          ['test','--manifest-path','crates/gyre-server/Cargo.toml']):
                 result=subprocess.run([str(self.root/'cargo'),*args],env=self.env,capture_output=True,text=True)
                 self.assertEqual(result.returncode,64,(stage,args,result.stderr))
