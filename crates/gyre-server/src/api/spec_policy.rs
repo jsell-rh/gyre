@@ -77,6 +77,13 @@ pub async fn set_spec_policy(
     Json(req): Json<SpecPolicy>,
 ) -> Result<(StatusCode, Json<SpecPolicyResponse>), ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/repos/:id/spec-policy",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update spec enforcement policy".to_string(),
         ));
