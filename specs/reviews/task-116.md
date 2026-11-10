@@ -197,3 +197,42 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+---
+
+## Review round 9 (candidate 61242505f, base 18adceb68)
+
+Independent review of the exact candidate. `git diff base..candidate` is
+`specs/tasks/task-116.md` only — all §2 production code equals base (the
+branch's §2 work reached main in earlier rounds); the branch-side commits
+(`1c8a698dd`, `61242505f`) are process/doc-only. The task document matches the
+assigned protected text byte-for-byte (verified against the executor's
+`task_text` record), including the two-commit list; `a293e299` (dropped from
+the list by the HEAD commit) is a pipeline checkpoint commit, an ancestor of
+main itself, not a task-labeled product-surface commit.
+
+Probes run (evidence: `/tmp/stage/review-evidence/task116-round9-review.md`):
+
+- Focused suites: gyre-server `-- meta_spec prompt_assembly stale_pin`
+  (46 pass), `-- api::meta_specs` (29 pass, incl. all round-6/7 regression
+  tests), `-- mem::` (17 pass), gyre-adapters `-- meta_spec` (10 pass).
+- Mutation check: disabling the band-3 approval fail-close in
+  `prompt_assembly.rs` makes `pending_bound_meta_spec_skipped` FAIL — the
+  regression test is real. Source restored, tree re-verified clean at the
+  candidate SHA, suite green again.
+- Mechanical checks: check-arch, check-abac-route-registry,
+  check-mem-port-contracts, check-task-commit-attribution — all exit 0.
+- docker/gyre-agent `npm test` — 12/12 pass (runner prepends
+  `GYRE_META_SPEC_PROMPT`).
+- End-to-end bootstrap probe: ran the real server binary against a fresh
+  SQLite DB — `seeded 9 built-in meta-specs`, exactly the 9 spec'd defaults
+  with the spec's kinds and required flags (conventional-commits the only
+  required one), sha256(prompt) independently recomputed == stored
+  content_hash for every row, `meta_spec_stale_pin_check` job observed
+  running, and a second startup on the same DB seeded nothing new
+  (idempotent). Loopback HTTP was blocked by the sandbox SSRF guard
+  (infrastructure restriction, not a code defect); the DB-level probe covers
+  the seeding path end-to-end.
+
+All ten acceptance criteria hold with independent evidence. No findings.
+Approved.
