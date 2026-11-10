@@ -66,3 +66,31 @@ Independently re-checked each Round 1 finding against the current diff. All thre
 ## Verdict
 
 All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**
+
+## Round 3 — requirements-changed reconciliation (base 078ec12a, candidate 6b7a7b93)
+
+The candidate's tree delta vs base is only `specs/tasks/task-087.md` (task metadata:
+progress → ready-for-review, commit list, shipped notes); every production source file
+is identical to base. Independently verified the retained implementation is complete and
+working on the current base (HSI §3 byte-identical to the prior round's contract, so no
+requirements drift):
+
+- All three frontmatter commits (`59543986`, `115ed5ae`, `998a3518`) and the retained
+  checkpoint `d132816d` are ancestors of the candidate. The dropped frontmatter entry
+  `71707120` is a `checkpoint:` recovery commit, not task-labeled product-surface;
+  `check-task-commit-attribution.sh` passes.
+- Independent test runs (evidence: `/tmp/stage/review-evidence/task-087-round3.md`):
+  gyre-common trace 8/8 (spec casing + legacy aliases); gyre-server trace-named 34/34
+  (api::traces incl. 403 cross-tenant and replacement semantics; gate_executor
+  trace_capture lifecycle; mem trace contract+payload; merge promote/close; mcp trace
+  resources); otlp_receiver 10/10 — the real tonic gRPC round-trip
+  (`grpc_receiver_accepts_export`) passed in this sandbox, plus graph-linkage resolution
+  and max-spans capping; sqlite::trace 7/7; gate_executor full 24/24 (incl. UTF-8
+  truncation boundary safety).
+- Check scripts: check-task-commit-attribution, check-abac-exempt-handlers (75, no trace
+  exemptions), check-mem-port-contracts — all OK.
+- F1/F2/F3 repairs confirmed present in the candidate tree by source inspection
+  (single-path-param payload endpoint with real span→trace→MR→workspace tenant guard;
+  mem payload rows populated in store; PascalCase `as_str` wire format).
+
+No findings. **Approved.**
