@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a", "12f5495f0461154f1da417295ed7527cddc139d1"]
 ---
 
 ## Spec Excerpt
@@ -110,9 +110,9 @@ Read `specs/system/user-management.md` §Notification Entity. Existing notificat
 ## Shipped
 
 Implemented (commits 27bfb2a69, deec7953a0, f92a48916; re-homed onto base
-79dfbdde in merge 33ae5e394) — `user-management.md` §Notification Entity
-is closed in production code; no stand-ins remain on the creation paths
-this task owned.
+79dfbdde in merge 33ae5e394; lint-gate repair 12f5495f0 after merging base
+6cc3df14) — `user-management.md` §Notification Entity is closed in
+production code; no stand-ins remain on the creation paths this task owned.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -253,11 +253,30 @@ coverage row rather than wired to a fake event.
   MrMerged/GateFailure typed notifications with deep links, no
   fabricated link for unresolvable workspaces, mark-read endpoints
   (read/unread cycle + cross-user 404 with no mutation).
-- Post-rebase probes (this assignment, merged tree 33ae5e394 on base
-  79dfbdde): `cargo check --all --all-targets` clean; gyre-common 8
-  notification tests; gyre-server filtered suites — notifications (36),
-  impersonation (15), persona (40), stale-pin (1), users (19) — all
-  passing; gyre-adapters full suite 428 passed. Mechanical checks pass:
-  arch, migration versions and SQL portability, dead message kinds, mem
-  port contracts, task commit attribution. Evidence retained under
+- Post-rebase probes (merged tree 33ae5e394 on base 79dfbdde): `cargo
+  check --all --all-targets` clean; gyre-common 8 notification tests;
+  gyre-server filtered suites — notifications, impersonation, persona,
+  stale-pin, users — all passing; gyre-adapters full suite 428 passed.
+- Verification-repair round (commit 12f5495f0, merged tree on base
+  6cc3df14): verification attempt 31ed4a0f failed the changed-line lint
+  gates, not behavior. Fixes: (1) the nine files whose task-changed
+  lines needed rustfmt were formatted with the gate's exact rustfmt
+  invocation; (2) `clippy::double_must_use` on `NotificationRepository`
+  — the `async_trait` macro emits a must_use future per method whose
+  desugared span covers the whole trait, so the newly inserted
+  `mark_read`/`has_active_notification` methods put the lint on changed
+  lines — fixed with the same inline allow every sibling `gyre-ports`
+  trait carries; (3) `clippy::too_many_arguments` on `list_for_user`
+  (8/7 incl. `self`) — the signature is pre-existing at base (HSI §2
+  inbox filter surface) and the warning only lands on changed lines
+  because the inserted allow line falls inside the desugared method
+  span; allowed with a comment per the merge_processor/
+  graph_extraction precedent; (4) `clippy::useless_format` on the
+  constant-string `format!` in the MergeQueuePaused deep-link assertion
+  replaced with the literal. Post-fix gates on base 6cc3df14:
+  `check-rustfmt-diff.py` and `check-clippy-diff.py` both clean; focused
+  suites re-run green — gyre-common notification (8), gyre-adapters
+  notification (6), gyre-server filtered notification/budget/persona/
+  impersonation/merge_queue/staleness/graph/spec_patrol/users suites
+  (246 + 23 passed, 0 failed). Evidence retained under
   /tmp/stage/review-evidence.
