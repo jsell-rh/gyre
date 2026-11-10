@@ -69,7 +69,7 @@ def adopt(execution, task):
         job = json.loads(job_path.read_text())
         if job['stage'] != claim['stage'] or job['task'] != task['name']:
             raise ValueError('published receipt belongs to another assignment')
-        if claim['stage'] in ('triage', 'review') and not receipt.get('valid'):
+        if claim['stage'] in ('triage', 'assess', 'review') and not receipt.get('valid'):
             continue
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
@@ -124,7 +124,7 @@ def prepare(execution, task, prompt):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
     for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
-    if claim['stage'] in ('review', 'triage'):
+    if claim['stage'] in ('review', 'assess', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
     if claim['stage'] == 'review':
@@ -173,7 +173,7 @@ def prepare(execution, task, prompt):
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
                'providers': [forge_provider],
-               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage'}[stage],
+               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                'sandbox_timeout_seconds': 600,
                'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
@@ -206,7 +206,7 @@ def capture_evidence(execution, sandbox):
     code = """import base64,io,pathlib,tarfile
 root=pathlib.Path('/tmp/stage'); output=io.BytesIO(); total=0
 with tarfile.open(fileobj=output,mode='w:gz') as archive:
- for relative in ('outcome.json','verdict.json','capabilities.json','review-evidence'):
+ for relative in ('outcome.json','assessment.json','verdict.json','capabilities.json','review-evidence'):
   path=root/relative
   paths=path.rglob('*') if path.is_dir() else [path]
   for item in paths:
