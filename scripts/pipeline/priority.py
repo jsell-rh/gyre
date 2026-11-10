@@ -6,8 +6,8 @@ import time
 DEFAULT_CLASSES = {'background':-100, 'normal':0, 'high':100, 'repair':200, 'urgent':300}
 CONTROL = {'cleanup':1_000_000_300, 'observe':1_000_000_200,
            'publish':1_000_000_100, 'verify':1_000_000_000}
-COMPUTE = {'triage','implement','review','verify'}
-REPAIRS = {'ci','verification','rebase','review'}
+COMPUTE = {'triage','assess','implement','review','verify'}
+REPAIRS = {'ci','verification','rebase','review','requirements_gap'}
 
 
 class PriorityError(ValueError):
@@ -57,7 +57,7 @@ def task_priority(store, task):
         unresolved=store.db.execute("""SELECT 1 FROM findings WHERE task=? AND generation=?
             AND resolved_by IS NULL AND category IN ('ci','verification','rebase','review') LIMIT 1""",
             (task['name'],task['generation'])).fetchone()
-        name='repair' if finding.get('category') in REPAIRS or unresolved or data.get('ci_environment') else 'normal'
+        name='repair' if finding.get('category') in REPAIRS or unresolved or data.get('assessment_pending') or data.get('ci_environment') else 'normal'
         source='automatic'
     validate(store,name)
     return {'class':name,'value':classes(store)[name],'source':source,'preemptionPolicy':'Never'}

@@ -27,20 +27,27 @@ def snapshot(store):
         retry = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
         shared_wait = (data.get('repair') or {}).get('shared_environment')
-        state = ('merged' if data.get('delivered') else 'resolved' if data.get('resolved') else 'failed' if attention else
+        state = ('needs-triage' if (data.get('requirements') or {}).get('errors') else
+                 'assessing' if data.get('assessment_pending') else
+                 'merged' if data.get('delivered') else 'resolved' if data.get('resolved') else 'failed' if attention else
                  'running' if active else 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else 'deferred' if retry else
                  'blocked' if shared_wait or task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
-        condition = priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        condition = '; '.join((data.get('requirements') or {}).get('errors') or []) or ('Requirements changed; independent assessment pending' if data.get('assessment_pending') else None) or priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
         if shared_wait and not condition:
             condition = 'Waiting for shared CI environment repair: ' + data['repair']['prerequisite']
+        history = [json.loads(row['data']).get('delivered') for row in store.db.execute(
+            'SELECT data FROM task_history WHERE task=? ORDER BY id DESC',(task['name'],))]
+        deliveries = [d for d in [data.get('delivered'),data.get('previous_delivery'),*history] if d]
+        shipped = next((d for d in deliveries if d.get('sha')),None)
         tasks.append({'name': task['name'], 'title': data.get('title'), 'spec_ref': data.get('spec_ref'),
                       'deps': graph[task['name']], 'state': state, 'stage': active['stage'] if active else None,
                       'progress': data.get('progress'), 'candidate': data.get('candidate'),
                       'seed': data.get('candidate'), 'generation': task['generation'],
-                      'observed_generation': task['generation'] if data.get('delivered') else None,
-                      'merge_sha': (data.get('delivered') or {}).get('sha'), 'pr': data.get('pr'),
+                      'observed_generation': task['generation'] if satisfied(data) else None,
+                      'merge_sha': (shipped or {}).get('sha'), 'ever_shipped':bool(shipped),
+                      'current_satisfied':satisfied(data), 'assessment':data.get('assessment'), 'pr': data.get('pr'),
                       'condition': condition, 'feedback': data.get('repair'), 'ci':data.get('ci'),'priority':priority,
                       'retry_at': retry['retry_at'] if retry else None, 'attempts': len(related)})
         counts[state] = counts.get(state, 0) + 1
@@ -74,7 +81,7 @@ def snapshot(store):
                       for state in ('ready', 'claimed', 'retry', 'succeeded', 'attention')}
               for stage in STAGES}
     return {'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
-            'running': counts.get('running', 0), 'eligible': sum(task['state'] == 'ready' for task in tasks),
+            'running': sum(bool(task['stage']) for task in tasks), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),

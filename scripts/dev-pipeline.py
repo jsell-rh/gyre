@@ -72,7 +72,7 @@ def discover_stage(store, stage, base):
 
 def run_one(store, stage, task=None):
     limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
+    if stage in ('implement', 'assess', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work),
@@ -116,11 +116,11 @@ def run_claim(store, claim):
                 body, count = re.subn(r'(?m)^depends_on:[^\n]*(?:\n[ \t]+-[^\n]*)*', declaration, item['body'], count=1)
                 if count != 1:
                     raise ValueError('cannot persist prerequisite without a unique dependency field')
-                generation = generation_for(store, body)
+                generation = generation_for(store, body, item['name'])
                 updates['triaged'] = None
             if stage in ('triage', 'implement') and result.get('task_body'):
                 body = result['task_body']
-                generation = generation_for(store, body)
+                generation = generation_for(store, body, item['name'])
                 updates.update(metadata(body))
                 updates['task_override'] = None
                 updates['triaged'] = generation if stage == 'triage' else (

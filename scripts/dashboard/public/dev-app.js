@@ -130,7 +130,7 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
+    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need spec binding · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
     e("form", { id: "sandbox-controls", class: "stepper", onsubmit: (event) => {
       event.preventDefault();
