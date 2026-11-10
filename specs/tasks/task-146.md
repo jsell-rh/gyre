@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "17face906b7d075c68c798094f914b5d63488039", "897b5565d8791abde8b81cf4de4fa26e3e23eda7"]
+commits: ["3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "17face906b7d075c68c798094f914b5d63488039", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "6f469a6bbf65aa915005360bca99e2123c5d700e"]
 ---
 
 ## Spec Excerpt
@@ -179,13 +179,13 @@ token against the freshly created "dev" tenant. Both routes' doc
 comments record the asymmetry and its reason so a future merge does not
 silently re-unify it.
 
-### Review-repair round: adapter test strength + migration renumber (17face906, 897b5565)
+### Review-repair round: adapter test strength + migration renumber (17face906, 897b5565, 6f469a6b)
 
 Two repairs on top of the merged base 18adceb68 (merge conflicts
 resolved as unions — base's facet_counts search aggregation kept
 alongside this branch's `search.query` analytics emission):
 
-1. **Duplicate migration version (17face906, real defect caught by the
+1. **Duplicate migration version (17face906 + 6f469a6b, real defect caught by the
    strengthened test):** base added
    `2026-10-08-000059_spec_lifecycle_configs`, colliding with this
    branch's `2026-10-08-000059_analytics_scope_columns`. Diesel runs
@@ -211,7 +211,7 @@ alongside this branch's `search.query` analytics emission):
    `event_name`, the conjunctive case, inclusive `since`/`until`, and
    newest-first `limit`.
 
-### Test evidence (this round: commits 17face906 + 897b5565 on merge 03a01d59a)
+### Test evidence (this round: 17face906, 897b5565, 6f469a6b on merge 03a01d59a)
 
 - Mutation-verified the strengthened test: deleting the `workspace_id`,
   `user_id`, `agent_id`, or `repo_id` predicate from the sqlite
