@@ -792,6 +792,7 @@ mod tests {
     use super::*;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_ports::GitOpsPort as _;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1112,6 +1113,232 @@ mod tests {
         // SHA should be a valid 40-char hex string
         assert_eq!(sha.len(), 40);
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── End-to-end write-through tests (real Git2OpsAdapter + on-disk repo) ──
+    //
+    // The tests above run against NoopGitOps, proving handler logic (branch
+    // naming, MR bookkeeping, existing-MR matching) but not that the save
+    // actually reaches git. These inject the real git2 adapter and an on-disk
+    // bare repository so the full chain — handler → GitOpsPort → libgit2 —
+    // is exercised: a real `spec-edit/*` branch with the spec content, an
+    // appended commit on re-save, and a direct default-branch commit for
+    // prompts (task-011 acceptance criteria).
+
+    /// Seed a real on-disk bare repo (initial commit on `main`) and register
+    /// it in the given state. Keep the returned TempDir alive for the test.
+    async fn seed_real_git_repo(
+        state: &Arc<AppState>,
+        git: Arc<gyre_adapters::Git2OpsAdapter>,
+        name: &str,
+    ) -> (gyre_domain::Repository, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.git"));
+        let path_str = path.to_str().unwrap().to_string();
+        git.init_bare(&path_str).await.expect("init_bare");
+        git.create_initial_commit(&path_str, "main")
+            .await
+            .expect("initial commit");
+        let repo = gyre_domain::Repository::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-1"),
+            name,
+            &path_str,
+            0,
+        );
+        state.repos.create(&repo).await.expect("create repo");
+        (repo, dir)
+    }
+
+    async fn post_save(
+        app: &Router,
+        repo_id: &str,
+        uri_suffix: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/{uri_suffix}"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_spec_write_through_creates_real_branch_and_mr() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "spec-e2e").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision\n\nReal write-through content.",
+                "message": "e2e spec save",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let branch = json["branch"].as_str().unwrap().to_string();
+        assert!(branch.starts_with("spec-edit/specs-system-vision-"));
+
+        // The branch exists in real git and carries the spec content.
+        assert!(
+            git.branch_exists(&repo.path, &branch).await.unwrap(),
+            "spec-edit branch must exist in the on-disk repo"
+        );
+        let content = git
+            .read_file(&repo.path, &branch, "specs/system/vision.md")
+            .await
+            .unwrap()
+            .expect("spec content must be committed to the feature branch");
+        assert_eq!(content, b"# Vision\n\nReal write-through content.".to_vec());
+
+        // The default branch must NOT carry the change (approval-gated flow:
+        // the spec only lands on main when the MR merges).
+        assert!(
+            git.read_file(&repo.path, "main", "specs/system/vision.md")
+                .await
+                .unwrap()
+                .is_none(),
+            "spec save must not write to the default branch directly"
+        );
+
+        // The MR targets the default branch from the new branch.
+        let mrs = state.merge_requests.list_by_repo(&repo.id).await.unwrap();
+        assert_eq!(mrs.len(), 1);
+        assert_eq!(mrs[0].source_branch, branch);
+        assert_eq!(mrs[0].target_branch, "main");
+        assert_eq!(mrs[0].status, MrStatus::Open);
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_appends_commit_to_real_branch() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "spec-e2e-append").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp1 = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision v1",
+                "message": "first edit",
+            }),
+        )
+        .await;
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let branch = json1["branch"].as_str().unwrap().to_string();
+        let mr_id = json1["mr_id"].as_str().unwrap().to_string();
+
+        // initial commit + first spec edit
+        let log1 = git.commit_log(&repo.path, &branch, 10).await.unwrap();
+        assert_eq!(log1.len(), 2);
+
+        // Second save for the same spec_path: same MR, appended commit.
+        let resp2 = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision v2",
+                "message": "second edit",
+            }),
+        )
+        .await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["branch"].as_str().unwrap(), branch);
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id);
+
+        // Exactly one commit was appended to the SAME branch, which now
+        // carries the new content.
+        let log2 = git.commit_log(&repo.path, &branch, 10).await.unwrap();
+        assert_eq!(log2.len(), 3, "append must add exactly one commit");
+        assert_eq!(log2[0].message, "second edit");
+        let content = git
+            .read_file(&repo.path, &branch, "specs/system/vision.md")
+            .await
+            .unwrap()
+            .expect("spec content must remain on the branch");
+        assert_eq!(content, b"# Vision v2".to_vec());
+
+        // No second MR or branch was created.
+        let mrs = state.merge_requests.list_by_repo(&repo.id).await.unwrap();
+        assert_eq!(mrs.len(), 1);
+        let mut branches: Vec<String> = git
+            .list_branches(&repo.path)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string(), branch]);
+    }
+
+    #[tokio::test]
+    async fn save_prompt_write_through_commits_to_default_branch() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "prompt-e2e").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = post_save(
+            &app,
+            repo.id.as_str(),
+            "prompts/save",
+            serde_json::json!({
+                "prompt_path": "specs/prompts/specs-assist.md",
+                "content": "# Updated prompt template",
+                "message": "e2e prompt save",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let sha = json["commit_sha"].as_str().unwrap().to_string();
+
+        // The content is on the DEFAULT branch in real git.
+        let content = git
+            .read_file(&repo.path, "main", "specs/prompts/specs-assist.md")
+            .await
+            .unwrap()
+            .expect("prompt content must be committed to the default branch");
+        assert_eq!(content, b"# Updated prompt template".to_vec());
+
+        // The returned SHA is the real new main tip.
+        let log = git.commit_log(&repo.path, "main", 1).await.unwrap();
+        assert_eq!(log[0].sha, sha);
+        assert_eq!(log[0].message, "e2e prompt save");
+
+        // No feature branch, no MR, no approval notification.
+        let mut branches: Vec<String> = git
+            .list_branches(&repo.path)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string()]);
+        assert!(state.merge_requests.list_by_repo(&repo.id).await.unwrap().is_empty());
     }
 
     #[test]
