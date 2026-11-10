@@ -3,7 +3,7 @@ title: "Implement admin user impersonation"
 spec_ref: "identity-security.md §Impersonation"
 depends_on:
   - task-102
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "identity-security.md §Impersonation"
 commits: ["e17e493afd734295d9de982617271e0c3891a5cd", "f7e7601f25efbf59d25ea64ede574065e37af73f", "64536dbccf6bb5b1d7fcfef754ab7342ad256cba", "14af7abd7e27ffcc7aa28e8703cdda7e97abe218", "a1194a81a0b22e891d7b215b6b019b4861d27c6c", "2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
