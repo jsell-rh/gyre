@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "62862a9e81c5c53e46ac4b936f1b69984fdc74d4", "9e5a0171d11dc6fff1d5634b1a3348266177ce5a", "5626a68fcb94469acc6f6c2504dcd2dbcd204e7c", "d588cc8792d2740cb987f4aca8d1093fa4bfdf60", "92db84be179b04ec15ffb97db3b956b12ff7dd25", "0c8b6fa1eb5702be372d3ec45a64317b12d105f6", "05b32d067e6f79efecbad79a7cd6b8048c743329"]
 ---
 
 ## Spec Excerpt
@@ -169,6 +169,27 @@ this host before scanning any file -- its awk uses gawk-only 3-arg `match()`
 and this host has mawk 1.3.4. Identical failure at pristine base;
 host-tooling issue, unrelated to this task.
 
+A latest merge of the repair base into this branch, **05b32d067**
+(fca5de5fb, merge of main into fix/admission-policy-preflight and the
+branch's first conflict in `jobs.rs`), had two conflicts, both the same
+union class as the earlier main.rs import-list repairs:
+
+- `crates/gyre-server/src/jobs.rs`: this branch's `message_expiry` job
+  registration vs. main's `task_scheduler` job registration - resolved as
+  the union; the registry now registers both jobs.
+- `crates/gyre-server/src/main.rs`: import list - union keeps both
+  `message_dispatcher` and `signal_chain` alongside
+  `seed_builtin_personas`; the auto-merged body already wired
+  `signal_chain::spawn_task_scheduler(state.clone())` and
+  `message_dispatcher::spawn_message_consumer`/`spawn_message_expiry`.
+
+Verified at 05b32d067: `cargo check -p gyre-server --tests --bins` clean;
+focused suites message_dispatcher (9), gate_executor (25),
+reconciliation (36), notifications (12), jobs (11), signal_chain (19)
+all pass; arch, dead-message-kinds, and task-commit-attribution checks
+pass. Evidence under /tmp/stage/review-evidence
+(task162-merge-repair-05b32d067.txt).
+
 ### Review repairs (findings 73a69995, e7aa777ea)
 
 - **Failing test (73a69995, code):**
@@ -208,10 +229,13 @@ host-tooling issue, unrelated to this task.
     `bootstrap_default_tenant` and `seed_builtin_personas` respectively;
     **62862a9e8** (3c39ab1f7) and **d588cc879** (e5415ae12) — clean
     auto-merges; **92db84be1** (assigned base 7373979e8) — clean
-    auto-merge, main.rs untouched.
-  - `commits:` at the head that shipped this note lists all seven
+    auto-merge, main.rs untouched; **0c8b6fa1e** (b5a872087, task-108) —
+    mem.rs conflict resolved as the union (see above); **05b32d067**
+    (fca5de5fb) — jobs.rs and main.rs conflicts resolved as unions
+    (see above).
+  - `commits:` at the head that shipped this note lists all nine
     content-bearing branch commits (both task-labeled commits plus all
-    five merges) so every merge resolution is inside review scoping.
+    seven merges) so every merge resolution is inside review scoping.
     If an executor checkpoint re-derives `commits:` from task-labeled
     commits only and drops the merges again, that frontmatter state is
     wrong, not this record: the merge resolutions remain reviewable via
