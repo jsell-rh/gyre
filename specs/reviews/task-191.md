@@ -1,0 +1,30 @@
+# Review — task-191 (budget enforcement actions: warn/graceful-stop with grace, kill, reassignment)
+
+Spec: `specs/system/platform-model.md` §5 Resource Governance → Enforcement Behavior.
+Candidate under review: `a3b67c65` (branch `pipeline/task-191/99b02dfc9736449eb39a0232a9756824-1`), assigned base `cd4c04fe`.
+Product commits: `b3dea2900` (implementation), `75adf7def` (agent-inbox delivery repair); plus docs/process/merge commits.
+Verdict: **approved** — no findings.
+
+## Probes run (evidence: `/tmp/stage/review-evidence/task-191-review-evidence.md`)
+
+- `cargo test -p gyre-server --lib api::budget` → **17/17 pass** (cold build; `SKIP_WEB_BUILD=1`; `/tmp/stage/bin/cargo`).
+- `cargo test -p gyre-server --lib api::admin` → **36/36 pass** (kill-path refactor regression check).
+- `cargo test -p gyre-adapters --lib sqlite::budget` → **4/4 pass** (incl. `enforcement_action_round_trips_through_sqlite`: set/get, None-clearing upsert, all four variants).
+- **Mutation probe A** (temporarily removed the `check_and_enforce_budget` call from the production funnel `record_llm_call_usage`): `warn_at_80pct_emits_message_and_notification_no_kill` **FAILS** (expected 1 BudgetWarning message, got 0). The acceptance tests exercise the real production path and are not self-confirming. Source restored and hash-verified.
+- **Mutation probe B** (temporarily neutered `kill_exhausted_agents`): `exhausted_graceful_stop_kills_preserves_work_creates_reassignment` and `exhausted_hardkill_override_kills_immediately_without_timer` both **FAIL** (agent stays Active). Restored and hash-verified.
+- Mechanical checks all OK at the candidate: `check-arch.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh`, `check-dead-message-kinds.sh`, `check-abac-exempt-handlers.sh`, `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`, `check-forged-scope-fields.sh`, `check-unbounded-external-http.sh`, `check-task-commit-attribution.sh`.
+
+## Verified against the acceptance criteria
+
+- **Enum + persistence:** `BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause, serde snake_case) in `gyre-domain/src/budget.rs`, re-exported from the domain lib. `BudgetConfig.enforcement_action: Option<_>` (`None` = spec default) threads through migration `2026-10-10-000058_budget_enforcement_action` (portable plain `ALTER TABLE`), SQLite + Postgres row mappings (identical to_db/from_db encoding), and `SetBudgetRequest`/`BudgetResponse`; API PUT round-trip test pins it. Diesel version `20261010000058` is unique (no collision with the upstream `2026-11-08-000058`); seq 000058 was next-unused when the product commit landed — the later-dated upstream 000058 arrived via the base merge, and `check-migration-versions.sh` passes.
+- **Single funnel:** threshold logic exists only in `check_and_enforce_budget_with_grace`; all five `record_llm_call_usage` call sites (agent usage report, briefing/ask, explorer-views/generate, specs/assist, MCP spec_assist) funnel through it. No per-call-site re-implementation.
+- **80% tier:** ≥80%/<100% emits `MessageKind::BudgetWarning` per active agent — both a workspace-feed copy and a Directed `Destination::Agent` copy (necessary and sufficient: the agent MCP poll channel `messages.list_after` filters `to_type == "agent"`, verified in `sqlite/message.rs`; WS delivery ignores agent-directed messages, so no duplicate UI side effects) — plus one `NotificationType::BudgetWarning` per unique spawner. Below 80% fires nothing (negative test). No kill at this tier.
+- **De-dup:** persisted kv marker (`budget_enforcement` namespace) keyed to `period_start`; repeated calls in the same period re-fire nothing (asserted for message, notification, and agent inbox); the midnight counter reset re-arms thresholds naturally.
+- **100% tier (default GracefulStop):** `MessageKind::BudgetExhausted` emitted (workspace + directed), then a `tokio::spawn` grace timer (production default 60s, injectable via `check_and_enforce_budget_with_grace` so tests use 0). After grace, still-`Active` agents are re-listed at kill time (agents that handed off to Idle are spared) and killed via the shared `kill_agent` helper extracted from `admin_kill_agent` (clean cutover — admin handler migrated; 36 admin tests pass). Kill transitions to `Dead`, releases the budget active-agent slot only when the agent held one, preserves worktree/branch records (`preserve_worktree: true` skips both git removal and record deletion; test asserts the worktree record survives), and creates the reassignment task `"Agent hit budget limit on {task-id}, needs reassignment or budget increase"` (parent-linked, High priority) plus an `AgentEscalation` spawner notification. Token revocation, task-secret revocation, and `AgentKilled` audit attribution are folded into the shared helper for both callers.
+- **Overrides:** `HardKill` kills inline (no timer; test asserts no handle); `QueuePause` pauses every workspace repo's merge queue via the real `merge_processor::pause_merge_queue` mechanism (kv `merge_queue_pause` + `MergeQueuePaused` event; test asserts persisted paused state and that the agent stays alive); `Warn` at 100% warns only.
+- **Cost limit:** higher utilization across `max_tokens_per_day`/`max_cost_per_day` drives enforcement (None/zero limits guarded); cost-only crossing test passes.
+- **Architecture:** enum/config in `gyre-domain`, emission/timers/kill in `gyre-server`; `check-arch.sh` passes. Coverage row 28 (platform-model.md Enforcement Behavior) is updated to `implemented` with an honest note that per-level configurability is realized at workspace level only (task-plan scope; documented divergence for tenant/repo levels).
+
+## Non-blocking observations
+
+- The kv-marker de-dup is load-then-save without locking, so two *simultaneous* recordings crossing a threshold in the same instant could both emit (sequential repeats are correctly de-duplicated; kill is idempotent via the Dead check, so the worst case is a duplicate message in a narrow race window). Not a task-contract violation.
