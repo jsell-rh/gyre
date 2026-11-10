@@ -257,3 +257,49 @@ evidence under /tmp/stage/review-evidence: 0 failures / 300 runs under
 the same load post-fix; `rate_limit` and `middleware::` suites pass
 (24 + 19 tests), `cargo fmt --check` clean, clippy clean on changed
 lines.
+
+### Rebase-repair round: base b5a872087 merge (merge commit 72da380b3)
+
+Resolved all 12 conflicted files from the controller-initiated merge of
+base `b5a872087` (task-108 lineage: admin impersonation, task-099 F3
+launch outcomes, task-104 ABAC-denied auditing, task-106 jj workspace
+layout, task-168 git_http scope fix, secret-rotation teardown hooks)
+into this branch. Unions wherever both sides fixed different things:
+
+- `agent.failed`/`agent.completed` analytics emissions (compose
+teardown, repo archive, fail_agent, MCP completion) kept alongside
+base's `revoke_agent_task_secrets` teardown at the same terminal paths.
+- `orchestrator.rs`: base's fail-closed `resolve_orchestrator_persona`
+adopts in place of this branch's advisory `warn_unapproved_persona`
+(stronger fix of the same inert-enforcement finding); base's launch
+outcome 3-tuple cores and system-principal tenant bypass adopted; this
+branch's `agent.spawned` emission and regression test kept (adapted to
+the 3-tuple) alongside base's `spawn_reports_truthful_launch_outcome`.
+- `rate_limit.rs`/`middleware.rs`: both lineages fixed the same 429
+test race independently — base's boxed `NowSecsFn` clock adopted, this
+branch's limiter-injection test refactor kept, both deterministic tests
+kept.
+- fabricated-scope exemptions intersected: auth.rs (task-103/104),
+gate_executor.rs (this branch), git_http.rs (task-168, base) are all
+fixed in the merged tree, so only speculative_merge.rs:372 remains and
+FROZEN_EXEMPTION_COUNT lowers to 1 (below both parents).
+- `specs/coverage/SUMMARY.md` rows unioned and TOTAL recomputed from
+the merged table (802 / 220 n/a / 300 assigned / 119 implemented /
+163 verified, 48%).
+
+Offline gates all exit 0 on the merge commit (arch, ABAC registry +
+exempt handlers, MCP write tools, dead message kinds, byte-slice,
+relative-path, fail-open refs, scope literals, lossy secrets, inert
+enforcement, mem port contracts, forwarded headers, in-memory state,
+unbounded HTTP, SQL portability, forged scope fields, migration
+versions, task attribution, fabricated-scope). `cargo fmt --check`
+clean. All 12 spec-required analytics events retain live production
+emitters post-merge. web/dist byte-identical to base.
+
+`cargo test` could not run in this sandbox: crates.io egress is blocked
+at the egress proxy (only github.com/api.github.com/registry.npmjs.org
+reachable; no vendored crates or registry cache). This is a transport
+restriction recorded for remote verification, not a code defect — full
+suite, clippy, and CI are deferred to the deterministic verification
+stage. Details and the per-file resolution ledger: /tmp/stage/review-
+evidence/test-evidence.md.
