@@ -20,6 +20,7 @@ pub mod graph_extraction;
 pub mod procfs_monitor;
 
 pub(crate) mod health;
+pub mod impersonation;
 pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
@@ -34,6 +35,7 @@ pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
+pub mod prompt_assembly;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
@@ -411,6 +413,12 @@ pub struct AppState {
     /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
     /// connection_id → list of subscribed workspace IDs.
     pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
+    /// Verified user identity per connection — used for user-targeted
+    /// pushes (identity-security.md §Impersonation: notify the impersonated
+    /// user when online). connection_id → verified user_id. Connections
+    /// authenticated without a user identity (shared token, agent tokens)
+    /// are absent. Ephemeral connection state, not a durable store.
+    pub ws_connection_users: Arc<RwLock<HashMap<u64, String>>>,
     /// Gate-time OTel trace capture repository (HSI §3a).
     pub traces: Arc<dyn TraceRepository>,
     /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
@@ -659,6 +667,30 @@ async fn require_auth_middleware(
     match token {
         Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
+            // 1.5. Impersonation JWT (identity-security.md §Impersonation) —
+            //     the same validation as the auth extractor
+            //     (`FromRequestParts` step 1.5): EdDSA signature + active
+            //     session. Without this branch the token is rejected here
+            //     and impersonated calls never reach the API at all.
+            //     Attribution happens downstream in `abac_middleware`.
+            if t.starts_with("ey") {
+                if let Some(claims) = state
+                    .agent_signing_key
+                    .validate_impersonation_opt(t, &state.base_url)
+                {
+                    return match crate::impersonation::resolve_impersonation_auth(&claims, &state)
+                        .await
+                    {
+                        Some(_) => next.run(req).await,
+                        None => (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Impersonation session is not active",
+                        )
+                            .into_response(),
+                    };
+                }
+            }
+
             // Check per-agent tokens using constant-time compare.
             let valid = if let Ok(pairs) = state.kv_store.kv_list("agent_tokens").await {
                 pairs.iter().any(|(_, v)| auth::tokens_equal(v.as_str(), t))
@@ -690,6 +722,32 @@ async fn require_auth_middleware(
             {
                 return next.run(req).await;
             }
+            // task-104: AuthFailure audit event (observability.md §Audit
+            // Event Types) — the global gate rejected the presented token;
+            // the extractors never run for this request. Best-effort token
+            // classification: "ey" prefix = JWT-shaped credential.
+            let token_kind = if t.starts_with("ey") {
+                "agent_jwt"
+            } else {
+                "unknown"
+            };
+            let source_ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string());
+            let user_agent = req
+                .headers()
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            auth::record_auth_failure_for_middleware(
+                &state,
+                token_kind,
+                "invalid token",
+                source_ip,
+                user_agent,
+            )
+            .await;
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
@@ -938,6 +996,16 @@ pub fn build_state(
     // instead of a hardcoded empty set.
     let mem_workspace_store =
         Arc::new(Mutex::new(HashMap::<String, gyre_domain::Workspace>::new()));
+
+    // In pure in-memory mode, the meta-spec and meta-spec-binding repos must
+    // share a single binding store so the delete guard in
+    // `MemMetaSpecRepository` sees the bindings the binding repo writes
+    // (port contract: delete fails when bindings reference the meta-spec).
+    // In DB-backed mode both ports come from the same storage struct, so
+    // this store is unused.
+    let mem_meta_spec_binding_store =
+        Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -1130,11 +1198,13 @@ pub fn build_state(
         },
         meta_specs: store!(
             dyn MetaSpecRepository,
-            mem::MemMetaSpecRepository::default()
+            mem::MemMetaSpecRepository::with_binding_store(Arc::clone(
+                &mem_meta_spec_binding_store
+            ))
         ),
         meta_spec_bindings: store!(
             dyn MetaSpecBindingRepository,
-            mem::MemMetaSpecBindingRepository::default()
+            mem::MemMetaSpecBindingRepository::with_store(Arc::clone(&mem_meta_spec_binding_store))
         ),
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
@@ -1176,6 +1246,7 @@ pub fn build_state(
         ws_connections: Arc::new(RwLock::new(HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
+        ws_connection_users: Arc::new(RwLock::new(HashMap::new())),
         traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
         otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
         conversations: store!(
@@ -1801,6 +1872,67 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// Serialize env-mutating tests: GYRE_REPOS_PATH is process-global and
+    /// parallel test threads race on it.
+    static REPOS_PATH_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// F6 pin: a relative GYRE_REPOS_PATH (e.g. "repos" or "./repos") must
+    /// resolve to an ABSOLUTE path anchored at the process cwd —
+    /// `repos_root` is persisted into `repo.path` rows and handed to jj/git
+    /// child processes, which resolve paths against the COMMAND's cwd, not
+    /// the server's. A relative root silently breaks every child-process
+    /// operation in default deployments.
+    #[test]
+    fn configured_repos_path_makes_relative_config_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        let cwd = std::env::current_dir().unwrap();
+
+        std::env::set_var("GYRE_REPOS_PATH", "repos");
+        let p = configured_repos_path();
+        assert!(
+            p.is_absolute(),
+            "relative GYRE_REPOS_PATH must resolve absolute, got {p:?}"
+        );
+        assert_eq!(p, cwd.join("repos"));
+
+        std::env::set_var("GYRE_REPOS_PATH", "./repos");
+        let p = configured_repos_path();
+        assert_eq!(
+            p,
+            cwd.join("repos"),
+            "'./repos' must normalize to <cwd>/repos"
+        );
+
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// F6 pin (default): with no GYRE_REPOS_PATH configured, the root
+    /// defaults to an absolute <cwd>/repos — never the bare relative
+    /// "./repos" the default deployment used before the fix.
+    #[test]
+    fn configured_repos_path_default_is_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::remove_var("GYRE_REPOS_PATH");
+
+        let p = configured_repos_path();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(p, cwd.join("repos"));
+        assert!(p.is_absolute());
+    }
+
+    /// F6 pin (absolute passthrough): an absolute GYRE_REPOS_PATH must be
+    /// used verbatim.
+    #[test]
+    fn configured_repos_path_absolute_passthrough() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::set_var("GYRE_REPOS_PATH", "/srv/gyre/repos");
+        assert_eq!(
+            configured_repos_path(),
+            std::path::PathBuf::from("/srv/gyre/repos")
+        );
+        std::env::remove_var("GYRE_REPOS_PATH");
     }
 
     /// platform-model.md §2: startup seeding creates the four built-in

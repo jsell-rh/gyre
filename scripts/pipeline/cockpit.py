@@ -77,7 +77,7 @@ def snapshot(store):
             'running': counts.get('running', 0), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
-            'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0),
+            'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
             'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
