@@ -235,6 +235,11 @@ pub async fn compose_teardown(
                     agent.repo_id.as_ref(),
                 );
                 let _ = state.analytics.record(&ev).await;
+
+                // Platform Model §7: compose teardown kills the agent —
+                // revoke its task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
             }
         }
     }

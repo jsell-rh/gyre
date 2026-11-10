@@ -33,7 +33,8 @@
 # scripts/fabricated-scope-defaults-exemptions.txt (path:line form,
 # frozen count). Fix a flagged site by skipping/logging; never add entries.
 # Lowered 5 → 1: specs.rs fanout and gate_executor.rs GateFailure emission
-# fixed by task-146, auth.rs fallback fixed by task-103's repair round.
+# fixed by task-146, auth.rs fallback fixed by task-103/task-104, git_http.rs
+# push-event fallback fixed by task-168 (upstream of the 72ad2a128 merge).
 FROZEN_EXEMPTION_COUNT=1
 #
 # Run by pre-commit and CI.

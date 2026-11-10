@@ -14,15 +14,11 @@
 #
 # See: specs/reviews/task-087.md F1b/F1c (the finding that created this check)
 #
-# --- task-087 revision round (span payload endpoint: fixed — get_span_payload
-# resolves span → trace → MR → workspace and returns Forbidden on tenant
-# mismatch; no entries remain) ---
-
-# --- task-093 revision round (orchestrator spawn routes: fixed for real by
-# the task-146 repair — both handlers now load the scoped entity and compare
-# its tenant against auth.tenant_id, returning Forbidden on mismatch; no
-# entries remain) ---
-
+# The task-093 revision round's orchestrator spawn entries
+# (spawn_workspace_orchestrator F2, spawn_repo_orchestrator F3) were fixed
+# and removed: both handlers now load the target workspace/repo and return
+# Forbidden on tenant mismatch (see api/orchestrator.rs).
+#
 # --- frozen-baseline legacy debt (routes in abac-route-registry-exemptions.txt
 # before the task-093 extension of this check; handlers never had per-handler
 # authorization). Each is a real F1b-class hazard; exemptions keep the check

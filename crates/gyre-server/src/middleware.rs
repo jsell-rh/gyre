@@ -114,6 +114,14 @@ pub async fn last_seen_middleware(
 
     // Extract user_id from auth context. Split+reassemble to use the extractor.
     let (mut parts, body) = req.into_parts();
+    // This middleware runs BEFORE `abac_middleware`, which owns impersonated
+    // action attribution for `/api/v1` routes (evaluated routes after policy
+    // evaluation, exempt/unresolved routes before the passthrough). Mark the
+    // request so the extraction below does not double-count the same call at
+    // the auth-resolution layer (identity-security.md §Impersonation).
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
     let user_id = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(auth) => auth.user_id.map(|id| id.as_str().to_owned()),
         Err(_) => None,
@@ -201,8 +209,15 @@ mod tests {
     }
 
     /// Build router with a very low rate limit for testing.
+    ///
+    /// The limiter's clock is frozen at a fixed unix second: the token bucket
+    /// can never refill mid-test by crossing a wall-clock second boundary, so
+    /// "first request OK, second 429" exhaustion is deterministic.
     fn rate_limited_app(rate: u64) -> Router {
-        rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::new(rate))
+        rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::with_clock(
+            rate,
+            Box::new(|| 1_700_000_000),
+        ))
     }
 
     /// Build router with an injected rate limiter. Lets exhaustion tests
@@ -306,6 +321,7 @@ mod tests {
             ws_connections: base.ws_connections.clone(),
             ws_connection_counter: base.ws_connection_counter.clone(),
             ws_connection_workspaces: base.ws_connection_workspaces.clone(),
+            ws_connection_users: base.ws_connection_users.clone(),
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),
@@ -465,10 +481,10 @@ mod tests {
         // The clock is frozen so the bucket cannot refill between the two
         // requests — with the real clock this test was racy on second
         // boundaries (second request occasionally got a refilled token).
-        let app =
-            rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::with_clock(1, || {
-                1_700_000_000
-            }));
+        let app = rate_limited_app_with_limiter(crate::rate_limit::RateLimiter::with_clock(
+            1,
+            Box::new(|| 1_700_000_000),
+        ));
         let resp1 = app
             .clone()
             .oneshot(
