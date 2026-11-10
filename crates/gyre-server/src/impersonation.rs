@@ -692,6 +692,7 @@ pub async fn resolve_impersonation_auth(
         roles: target.roles.clone(),
         tenant_id: session.tenant_id.clone(),
         jwt_claims: None,
+        bearer_token: None,
         deprecated_token_auth: false,
         impersonation: Some(ImpersonationContext {
             impersonator_id: Id::new(session.impersonator_id.clone()),
