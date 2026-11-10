@@ -130,7 +130,7 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
+    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need spec binding · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
     e("form", { id: "sandbox-controls", class: "stepper", onsubmit: (event) => {
       event.preventDefault();
@@ -205,6 +205,7 @@ function renderOverview() {
   const deferred = tasks.filter((t) => t.state === "deferred");
   const gate = s.health || {};
   const candidate = tasks.filter((t) => t.state === "candidate");
+  const assessing = tasks.filter((t) => ["assessing", "needs-triage"].includes(t.state));
   const blocked = tasks.filter((t) => t.state === "blocked");
   const published = tasks.filter((t) => t.state === "published");
   const cards = [
@@ -259,6 +260,8 @@ function renderOverview() {
     published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
       published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
+    assessing.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Requirement assessment · ${assessing.length}` }),
+      assessing.map((task) => taskButton(task, task.condition || "Independent assessment pending"))) : null,
     blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),
       blocked.map((task) => taskButton(task, task.condition || "Waiting for prerequisite repair"))) : null,
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),
