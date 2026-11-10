@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: ["c4d00719ceec949c6ccd455ff80bd58c428d1d3a", "7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "2aafb8f27418b2dbd1681f6d442c26dea2677931"]
+commits: ["2aafb8f27418b2dbd1681f6d442c26dea2677931", "c4d00719ceec949c6ccd455ff80bd58c428d1d3a", "7da875649ac751dc37afe5b9e496b67ca64393db", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c"]
 ---
 
 ## Spec Excerpt
