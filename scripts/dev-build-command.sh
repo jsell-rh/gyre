@@ -20,7 +20,7 @@ export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 export CARGO_PROFILE_DEV_INCREMENTAL=false CARGO_PROFILE_TEST_INCREMENTAL=false
 export MALLOC_ARENA_MAX=2
 export RUSTFLAGS='-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--threads=1'
-if [ "$command_name" != cargo ]; then export NODE_OPTIONS=--max-old-space-size=1536; fi
+if [ "$command_name" != cargo ]; then export NODE_OPTIONS=--max-old-space-size=2048; fi
 if [ "$command_name" = cargo ]; then
   bounded=(); skip=0; passthrough=0
   for option in "$@"; do
