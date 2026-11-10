@@ -64,6 +64,7 @@ pub async fn create_tenant(
     // non-Admin callers to create tenants would let Developer/Agent roles
     // provision new top-level isolation contexts (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/tenants").await;
         return Err(ApiError::Forbidden(
             "only Admin role may create tenants".to_string(),
         ));
@@ -74,6 +75,10 @@ pub async fn create_tenant(
     t.budget = req.budget;
     t.max_workspaces = req.max_workspaces;
     state.tenants.create(&t).await?;
+    // Platform-model.md §2: every tenant ships with the four built-in
+    // personas, pre-approved at tenant scope. Idempotent (skips existing
+    // slug+scope) so re-running on the same tenant is a no-op.
+    crate::seed_builtin_personas_for_tenant(&state, &t.id).await;
     Ok((StatusCode::CREATED, Json(TenantResponse::from(t))))
 }
 
@@ -108,6 +113,7 @@ pub async fn update_tenant(
     // are governance-level changes that must not be accessible to Developer/Agent
     // roles (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "PUT /api/v1/tenants/:id").await;
         return Err(ApiError::Forbidden(
             "only Admin role may update tenants".to_string(),
         ));
@@ -141,6 +147,7 @@ pub async fn delete_tenant(
     // Admin-only: deleting a tenant destroys all its workspaces, repos, and
     // agent sessions. Restrict to Admin role only (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "DELETE /api/v1/tenants/:id").await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete tenants".to_string(),
         ));
@@ -382,5 +389,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// platform-model.md §2: creating a tenant seeds the four built-in
+    /// personas at that tenant's scope, pre-approved.
+    #[tokio::test]
+    async fn create_tenant_seeds_builtin_personas() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({ "name": "Acme Corp", "slug": "acme-corp" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenants")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let tenant_id = created["id"].as_str().unwrap().to_string();
+
+        // List personas at the new tenant's scope.
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/personas?scope=tenant&scope_id={tenant_id}"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list = body_json(list_resp).await;
+        let mut slugs: Vec<String> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["slug"].as_str().unwrap().to_string())
+            .collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec![
+                "accountability",
+                "repo-orchestrator",
+                "security",
+                "workspace-orchestrator"
+            ]
+        );
+        for p in list.as_array().unwrap() {
+            assert_eq!(p["approval_status"], "Approved");
+        }
     }
 }

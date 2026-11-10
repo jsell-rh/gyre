@@ -103,6 +103,10 @@ pub struct UpdateViewRequest {
 pub struct GenerateViewRequest {
     pub question: String,
     pub repo_id: Option<String>,
+    /// Previous view definition the question refines (HSI §3 Generated
+    /// Views: "follow-up input refines the current view"). Validated
+    /// against the same grammar before the LLM sees it.
+    pub previous_spec: Option<serde_json::Value>,
 }
 
 // ── Built-in view seeding (uses SavedViewRepository) ─────────────────────────
@@ -540,7 +544,24 @@ pub async fn generate_explorer_view(
     // The template may contain {{question}} for backward compatibility, but we strip it
     // and pass the user's question solely as the user prompt.
     let system_prompt = template_content.replace("{{question}}", "");
-    let user_prompt = req.question.clone();
+
+    // Validate the previous view definition (refinement context) against the
+    // same grammar before the LLM sees it — an invalid previous spec is a
+    // client bug, not something to hand the model.
+    if let Some(ref prev) = req.previous_spec {
+        parse_and_validate(prev)?;
+        validate_repo_ownership(&state, &workspace_id, prev).await?;
+    }
+
+    // MR ID discovery (HSI §3): inject recent MRs with trace data so the LLM
+    // can pick a trace_source for flow-layout questions. Same lookup the
+    // has_trace filter on the workspace MR list serves.
+    let recent_traced_mrs = recent_mrs_with_traces(&state, &workspace_id, 10).await;
+    let user_prompt = build_generate_user_prompt(
+        &req.question,
+        req.previous_spec.as_ref(),
+        &recent_traced_mrs,
+    );
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
@@ -559,19 +580,50 @@ pub async fn generate_explorer_view(
     // ~4 chars per token for English, plus response overhead (~500 tokens).
     // Explorer view generation involves structured JSON output and multi-step
     // reasoning, so we apply a 3x multiplier to the base estimate.
+    // Split into input/output for the per-call budget record
+    // (platform-model.md §Budget Tracking) so that input + output equals the
+    // analytics estimate above: the prompt estimate is input, the remainder
+    // (overhead + reasoning multiplier) lands on the output side.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
-    let base_estimate = (estimated_input + 500) as f64;
-    let estimated_tokens = base_estimate * 3.0;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(caller.agent_id.clone()),
         None,
         "llm_query",
-        estimated_tokens,
+        base_estimate,
         "tokens",
         now_secs(),
     );
     let _ = state.costs.record(&cost_entry).await;
+
+    // Per-call budget record + workspace/tenant counter increment
+    // (platform-model.md §Budget Tracking). User-initiated query:
+    // agent_id/task_id/repo_id are None.
+    let ws_for_budget = state.workspaces.find_by_id(&ws_id).await.ok().flatten();
+    if let Some(ws) = ws_for_budget {
+        super::budget::record_llm_call_usage(
+            &state,
+            &super::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %workspace_id,
+            "explorer-views/generate budget recording skipped: workspace not found"
+        );
+    }
 
     // Spec §2: the server validates the LLM's output against the view spec
     // grammar before sending `event: complete`. An invalid spec is reported
@@ -582,7 +634,7 @@ pub async fn generate_explorer_view(
     let mut complete = if grammar_ok {
         json!({
             "view_spec": llm_output.clone(),
-            "explanation": format!("Generated view for: {}", req.question),
+            "explanation": generated_view_explanation(&llm_output, &req.question),
         })
     } else {
         tracing::warn!(workspace_id = %workspace_id, "LLM produced invalid view spec");
@@ -594,6 +646,25 @@ pub async fn generate_explorer_view(
         if let Err(e) = validate_repo_ownership(&state, &workspace_id, &llm_output).await {
             tracing::warn!(workspace_id = %workspace_id, error = %e, "LLM view spec referenced foreign repo_id");
             complete = invalid_llm_view_response();
+        }
+    }
+    // Flow-layout backing (HSI §3): a "flow" view must be backed by real
+    // trace data on an MR in this workspace. The grammar already requires
+    // trace_source.mr_id; this enforces that the MR exists, belongs to the
+    // workspace, and currently has a captured trace. Anything else falls
+    // back to "graph" with an explanatory note — the client never receives
+    // a flow view that cannot animate.
+    if complete["view_spec"].is_object() {
+        let mut spec = complete["view_spec"].clone();
+        if enforce_flow_trace_backing(&state, &workspace_id, &mut spec).await {
+            let fallback_note =
+                "No trace data is available for this concept — showing the structural graph instead.";
+            let explanation = match complete["explanation"].as_str() {
+                Some(e) if !e.is_empty() => format!("{e} {fallback_note}"),
+                _ => fallback_note.to_string(),
+            };
+            complete["explanation"] = json!(explanation);
+            complete["view_spec"] = spec;
         }
     }
 
@@ -647,6 +718,194 @@ fn invalid_llm_view_response() -> serde_json::Value {
     })
 }
 
+/// One MR with trace data, injected into the generate prompt for flow-layout
+/// `trace_source` selection (HSI §3 "MR ID discovery for trace_source").
+#[derive(Serialize)]
+struct MrWithTrace {
+    mr_id: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spec_ref: Option<String>,
+    status: String,
+}
+
+/// Recent MRs in the workspace that have captured gate traces, newest first.
+/// This is the same `get_by_mr` lookup that serves `GET /merge-requests/:id/trace`
+/// (and the `?has_trace=true` filter on the workspace MR list), so the list
+/// the LLM sees cannot drift from what the trace endpoint would return.
+async fn recent_mrs_with_traces(
+    state: &AppState,
+    workspace_id: &str,
+    limit: usize,
+) -> Vec<MrWithTrace> {
+    let mrs = match state
+        .merge_requests
+        .list_by_workspace(&Id::new(workspace_id))
+        .await
+    {
+        Ok(mrs) => mrs,
+        Err(e) => {
+            tracing::warn!(workspace_id = %workspace_id, error = %e, "MR discovery lookup failed");
+            return Vec::new();
+        }
+    };
+    let mut mrs = mrs;
+    // "Recent MRs" ordering: newest updated first.
+    mrs.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+    let mut traced = Vec::new();
+    for mr in mrs {
+        let has_trace = state
+            .traces
+            .get_by_mr(&mr.id)
+            .await
+            .map(|t| t.is_some())
+            .unwrap_or(false);
+        if !has_trace {
+            continue;
+        }
+        traced.push(MrWithTrace {
+            mr_id: mr.id.to_string(),
+            title: mr.title,
+            spec_ref: mr.spec_ref,
+            status: serde_json::to_value(mr.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        });
+        if traced.len() >= limit {
+            break;
+        }
+    }
+    traced
+}
+
+/// Build the user prompt for view generation. The user's question is raw
+/// input, so it is framed as data after the server-derived context blocks
+/// (MR list, previous view definition) — never concatenated into the system
+/// prompt.
+fn build_generate_user_prompt(
+    question: &str,
+    previous_spec: Option<&serde_json::Value>,
+    traced_mrs: &[MrWithTrace],
+) -> String {
+    let mut prompt = String::new();
+    if traced_mrs.is_empty() {
+        prompt.push_str(
+            "Merge requests with trace data: none. Do not use layout \"flow\" — no trace data is available.\n\n",
+        );
+    } else {
+        prompt.push_str(
+            "Merge requests with trace data (the only valid mr_id values for a \"flow\" layout trace_source; match the user's question by title or spec_ref):\n",
+        );
+        for mr in traced_mrs {
+            match serde_json::to_string(mr) {
+                Ok(line) => {
+                    prompt.push_str(&line);
+                    prompt.push('\n');
+                }
+                Err(e) => {
+                    tracing::warn!(mr_id = %mr.mr_id, error = %e, "MR prompt serialization failed")
+                }
+            }
+        }
+        prompt.push('\n');
+    }
+    if let Some(prev) = previous_spec {
+        match serde_json::to_string_pretty(prev) {
+            Ok(prev_json) => {
+                prompt.push_str(
+                    "Previous view definition (the user's follow-up question refines this view — keep its subject, adjust data/layout/filters to answer it):\n",
+                );
+                prompt.push_str(&prev_json);
+                prompt.push_str("\n\n");
+            }
+            Err(e) => tracing::warn!(error = %e, "previous_spec serialization failed"),
+        }
+    }
+    prompt.push_str("User question: ");
+    prompt.push_str(question);
+    prompt
+}
+
+/// The explanation sent with `event: complete` — the LLM's own prose from the
+/// view spec's `explanation` (HSI §3: the view renders with the LLM's
+/// explanation as a sidebar annotation), falling back to `description`, then
+/// to a generic string so the field is always present.
+fn generated_view_explanation(llm_output: &serde_json::Value, question: &str) -> String {
+    for field in ["explanation", "description"] {
+        if let Some(text) = llm_output.get(field).and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    format!("Generated view for: {question}")
+}
+
+/// Server-side enforcement of the flow-layout trace backing (HSI §3): a
+/// `"flow"` layout is only forwarded when `data.trace_source.mr_id` names an
+/// MR that (a) exists, (b) belongs to this workspace, and (c) currently has
+/// a captured trace. Otherwise the spec is rewritten in place to a `"graph"`
+/// layout with `trace_source` removed — the "fall back to graph layout with
+/// explanation" the spec mandates when no trace data is available. Returns
+/// whether a fallback rewrite happened.
+async fn enforce_flow_trace_backing(
+    state: &AppState,
+    workspace_id: &str,
+    spec: &mut serde_json::Value,
+) -> bool {
+    if spec.get("layout").and_then(|l| l.as_str()) != Some("flow") {
+        return false;
+    }
+    let mr_id = spec
+        .pointer("/data/trace_source/mr_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let backed = match &mr_id {
+        Some(mr_id) => {
+            match state.merge_requests.find_by_id(&Id::new(mr_id)).await {
+                Ok(Some(mr)) if mr.workspace_id.as_str() == workspace_id => state
+                    .traces
+                    .get_by_mr(&mr.id)
+                    .await
+                    .map(|t| t.is_some())
+                    .unwrap_or(false),
+                Ok(Some(_)) => {
+                    // MR exists but belongs to another workspace — treat as
+                    // unbacked; do not confirm cross-workspace existence.
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        mr_id = %mr_id,
+                        "flow trace_source referenced MR in another workspace"
+                    );
+                    false
+                }
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(mr_id = %mr_id, error = %e, "flow trace_source MR lookup failed");
+                    false
+                }
+            }
+        }
+        None => false,
+    };
+    if backed {
+        return false;
+    }
+    tracing::warn!(
+        workspace_id = %workspace_id,
+        mr_id = ?mr_id,
+        "flow view without trace backing — falling back to graph layout"
+    );
+    if let Some(obj) = spec.as_object_mut() {
+        obj.insert("layout".to_string(), json!("graph"));
+        if let Some(data) = obj.get_mut("data").and_then(|d| d.as_object_mut()) {
+            data.remove("trace_source");
+        }
+    }
+    true
+}
+
 /// Validate that every `repo_id` referenced by the spec — the top-level data
 /// layer AND each `side-by-side` sub-view's own data layer — belongs to
 /// `workspace_id`. Prevents cross-workspace data leakage (spec requirement:
@@ -688,6 +947,9 @@ async fn validate_repo_ownership(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, MrWithTrace,
+    };
     use axum::{body::Body, http::Request};
     use http::StatusCode;
     use std::sync::Arc;
@@ -1283,5 +1545,405 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Generated views (HSI §3, task-089) ─────────────────────────────────
+
+    /// Seed an MR (with optional captured trace) directly into the test
+    /// state's repositories. Bypasses the HTTP create path so the workspace
+    /// under test need not exist in the workspace repo (agent/system tokens
+    /// pass membership checks for unknown workspaces).
+    async fn seed_mr(
+        state: &crate::AppState,
+        mr_id: &str,
+        workspace_id: &str,
+        title: &str,
+        with_trace: bool,
+    ) {
+        let mut mr = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new(mr_id),
+            gyre_common::Id::new("repo-gen"),
+            title,
+            "feat/x",
+            "main",
+            1000,
+        );
+        mr.workspace_id = gyre_common::Id::new(workspace_id);
+        mr.spec_ref = Some(
+            "specs/system/identity-security.md@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                .to_string(),
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+        if with_trace {
+            let trace = gyre_common::GateTrace {
+                id: gyre_common::Id::new(format!("trace-{mr_id}")),
+                mr_id: gyre_common::Id::new(mr_id),
+                gate_run_id: gyre_common::Id::new("gr-gen"),
+                commit_sha: "deadbeef".to_string(),
+                spans: vec![gyre_common::TraceSpan {
+                    span_id: format!("{mr_id}-span-1"),
+                    parent_span_id: None,
+                    operation_name: "POST /payments/retry".to_string(),
+                    service_name: "payment-api".to_string(),
+                    kind: gyre_common::SpanKind::Server,
+                    start_time: 1,
+                    duration_us: 100,
+                    attributes: Default::default(),
+                    input_summary: None,
+                    output_summary: None,
+                    status: gyre_common::SpanStatus::Ok,
+                    graph_node_id: None,
+                }],
+                captured_at: 1234,
+            };
+            state.traces.store(&trace).await.unwrap();
+        }
+    }
+
+    async fn generate(
+        app: axum::Router,
+        workspace: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace}/explorer-views/generate"
+                    ))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        if status == StatusCode::OK {
+            let sse = sse_body(resp).await;
+            (status, complete_event_payload(&sse))
+        } else {
+            (status, body_json(resp).await)
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_flow_layout_with_backed_trace_passes_through() {
+        // HSI §3: a "flow" view whose trace_source.mr_id names an MR in this
+        // workspace WITH a captured trace is forwarded as flow — the client
+        // animates particles along the span tree.
+        let state = crate::mem::test_state();
+        seed_mr(&state, "mr-traced", "ws-flow", "Retry payment flow", true).await;
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+                serde_json::json!({
+                    "name": "Payment retry flow",
+                    "data": {
+                        "concept": "retry",
+                        "node_types": ["Function"],
+                        "edge_types": ["Calls"],
+                        "depth": 3,
+                        "trace_source": {"mr_id": "mr-traced"}
+                    },
+                    "layout": "flow",
+                    "explanation": "Retry requests flow from the endpoint through the gateway."
+                }),
+            )),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, payload) = generate(
+            app,
+            "ws-flow",
+            r#"{"question":"How does a payment retry flow through the system?"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["view_spec"]["layout"], "flow", "payload: {payload}");
+        assert_eq!(
+            payload["view_spec"]["data"]["trace_source"]["mr_id"],
+            "mr-traced"
+        );
+        // The LLM's own explanation is forwarded (HSI §3 sidebar annotation).
+        assert_eq!(
+            payload["explanation"],
+            "Retry requests flow from the endpoint through the gateway."
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_flow_layout_without_trace_falls_back_to_graph() {
+        // HSI §3: "If no matching MR has trace data, the LLM responds with a
+        // graph layout" — enforced server-side, because the LLM cannot be
+        // trusted to know which MRs currently hold traces. The spec's
+        // trace_source.mr_id here names an MR with NO captured trace.
+        let state = crate::mem::test_state();
+        seed_mr(
+            &state,
+            "mr-untraced",
+            "ws-flow2",
+            "Retry payment flow",
+            false,
+        )
+        .await;
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+                serde_json::json!({
+                    "name": "Payment retry flow",
+                    "data": {
+                        "concept": "retry",
+                        "node_types": ["Function"],
+                        "edge_types": [],
+                        "depth": 3,
+                        "trace_source": {"mr_id": "mr-untraced"}
+                    },
+                    "layout": "flow",
+                    "explanation": "Retry path through the system."
+                }),
+            )),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, payload) = generate(
+            app,
+            "ws-flow2",
+            r#"{"question":"How does a payment retry flow through the system?"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            payload["view_spec"]["layout"], "graph",
+            "payload: {payload}"
+        );
+        assert!(
+            payload["view_spec"]["data"].get("trace_source").is_none(),
+            "fallback must strip trace_source: {payload}"
+        );
+        let explanation = payload["explanation"].as_str().unwrap();
+        assert!(
+            explanation.contains("No trace data is available"),
+            "explanation must state the fallback: {explanation}"
+        );
+        assert!(
+            explanation.starts_with("Retry path through the system."),
+            "LLM explanation is preserved, not replaced: {explanation}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_flow_layout_with_foreign_mr_falls_back_to_graph() {
+        // A hallucinated (or cross-workspace) mr_id must not leak the other
+        // workspace's trace data — the flow view falls back to graph without
+        // confirming the MR's existence in this workspace.
+        let state = crate::mem::test_state();
+        // The traced MR belongs to a DIFFERENT workspace.
+        seed_mr(
+            &state,
+            "mr-other-ws",
+            "ws-elsewhere",
+            "Other workspace MR",
+            true,
+        )
+        .await;
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+                serde_json::json!({
+                    "name": "Flow",
+                    "data": {
+                        "node_types": ["Function"],
+                        "edge_types": [],
+                        "depth": 1,
+                        "trace_source": {"mr_id": "mr-other-ws"}
+                    },
+                    "layout": "flow"
+                }),
+            )),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, payload) = generate(
+            app,
+            "ws-flow3",
+            r#"{"question":"Show me the request path"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            payload["view_spec"]["layout"], "graph",
+            "payload: {payload}"
+        );
+        assert!(
+            payload["view_spec"]["data"].get("trace_source").is_none(),
+            "foreign trace_source must be stripped: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_invalid_previous_spec() {
+        // Refinement context is validated against the same grammar before
+        // the LLM sees it — an invalid previous view is a client bug.
+        let app = app_with_llm_response(serde_json::json!({
+            "name": "ok",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "graph"
+        }));
+        let (status, _payload) = generate(
+            app,
+            "ws-refine",
+            r#"{"question":"just the middleware","previous_spec":{"layout":"flow"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn generate_forwards_previous_spec_to_llm() {
+        // The user prompt must carry the previous view definition so the LLM
+        // can refine it (asserted via the echo adapter: predict_json's echo
+        // response embeds the user prompt, which grammar validation then
+        // rejects — but the prompt text proves the injection happened).
+        let prev = serde_json::json!({
+            "name": "How auth works",
+            "data": {"concept": "auth", "node_types": [], "edge_types": [], "depth": 2},
+            "layout": "hierarchical"
+        });
+        let mrs = vec![MrWithTrace {
+            mr_id: "mr-7".to_string(),
+            title: "Auth middleware refactor".to_string(),
+            spec_ref: Some("specs/system/identity-security.md@x".to_string()),
+            status: "merged".to_string(),
+        }];
+        let prompt = build_generate_user_prompt("Just the middleware chain", Some(&prev), &mrs);
+        assert!(
+            prompt.contains("mr-7"),
+            "MR list must be injected for trace_source discovery: {prompt}"
+        );
+        assert!(
+            prompt.contains("Auth middleware refactor"),
+            "MR titles must be injected for matching: {prompt}"
+        );
+        assert!(
+            prompt.contains("specs/system/identity-security.md"),
+            "MR spec_refs must be injected for matching: {prompt}"
+        );
+        assert!(
+            prompt.contains("How auth works"),
+            "previous view definition must be injected for refinement: {prompt}"
+        );
+        assert!(
+            prompt.trim_end().ends_with("Just the middleware chain"),
+            "the question must terminate the prompt: {prompt}"
+        );
+
+        // No traced MRs → the prompt says so explicitly.
+        let empty = build_generate_user_prompt("How does auth work?", None, &[]);
+        assert!(
+            empty.contains("none"),
+            "empty MR list must be explicit: {empty}"
+        );
+        assert!(
+            empty.contains("Do not use layout \"flow\""),
+            "empty MR list must forbid flow layout: {empty}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_explanation_falls_back_to_description_then_generic() {
+        // The complete event's explanation comes from the LLM's spec:
+        // explanation → description → generic (in that order).
+        assert_eq!(
+            generated_view_explanation(
+                &serde_json::json!({"explanation": "from explanation", "description": "from desc"}),
+                "q"
+            ),
+            "from explanation"
+        );
+        assert_eq!(
+            generated_view_explanation(&serde_json::json!({"description": "from desc"}), "q"),
+            "from desc"
+        );
+        assert_eq!(
+            generated_view_explanation(&serde_json::json!({}), "my question"),
+            "Generated view for: my question"
+        );
+        // Whitespace-only explanations are treated as absent.
+        assert_eq!(
+            generated_view_explanation(&serde_json::json!({"explanation": "  "}), "q"),
+            "Generated view for: q"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_mrs_with_traces_only_returns_traced_and_newest_first() {
+        let state = crate::mem::test_state();
+        // Three MRs: two traced (different updated_at), one untraced.
+        let mut old = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new("mr-old"),
+            gyre_common::Id::new("repo-gen"),
+            "Older traced MR",
+            "feat/a",
+            "main",
+            100,
+        );
+        old.workspace_id = gyre_common::Id::new("ws-mrs");
+        old.updated_at = 100;
+        state.merge_requests.create(&old).await.unwrap();
+
+        let mut new = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new("mr-new"),
+            gyre_common::Id::new("repo-gen"),
+            "Newer traced MR",
+            "feat/b",
+            "main",
+            200,
+        );
+        new.workspace_id = gyre_common::Id::new("ws-mrs");
+        new.updated_at = 200;
+        state.merge_requests.create(&new).await.unwrap();
+
+        let mut untraced = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new("mr-untraced"),
+            gyre_common::Id::new("repo-gen"),
+            "Untraced MR",
+            "feat/c",
+            "main",
+            300,
+        );
+        untraced.workspace_id = gyre_common::Id::new("ws-mrs");
+        untraced.updated_at = 300;
+        state.merge_requests.create(&untraced).await.unwrap();
+
+        for mr_id in ["mr-old", "mr-new"] {
+            let trace = gyre_common::GateTrace {
+                id: gyre_common::Id::new(format!("trace-{mr_id}")),
+                mr_id: gyre_common::Id::new(mr_id),
+                gate_run_id: gyre_common::Id::new("gr-x"),
+                commit_sha: "abc".to_string(),
+                spans: vec![],
+                captured_at: 1,
+            };
+            state.traces.store(&trace).await.unwrap();
+        }
+
+        let traced = recent_mrs_with_traces(&state, "ws-mrs", 10).await;
+        let ids: Vec<&str> = traced.iter().map(|m| m.mr_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["mr-new", "mr-old"],
+            "newest first, untraced excluded"
+        );
+
+        // limit caps the result.
+        let capped = recent_mrs_with_traces(&state, "ws-mrs", 1).await;
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].mr_id, "mr-new");
+
+        // Another workspace's MRs are not visible.
+        let other = recent_mrs_with_traces(&state, "ws-other", 10).await;
+        assert!(other.is_empty());
     }
 }

@@ -114,6 +114,14 @@ pub async fn last_seen_middleware(
 
     // Extract user_id from auth context. Split+reassemble to use the extractor.
     let (mut parts, body) = req.into_parts();
+    // This middleware runs BEFORE `abac_middleware`, which owns impersonated
+    // action attribution for `/api/v1` routes (evaluated routes after policy
+    // evaluation, exempt/unresolved routes before the passthrough). Mark the
+    // request so the extraction below does not double-count the same call at
+    // the auth-resolution layer (identity-security.md §Impersonation).
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
     let user_id = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(auth) => auth.user_id.map(|id| id.as_str().to_owned()),
         Err(_) => None,
@@ -201,11 +209,18 @@ mod tests {
     }
 
     /// Build router with a very low rate limit for testing.
+    ///
+    /// The limiter's clock is frozen at a fixed unix second: the token bucket
+    /// can never refill mid-test by crossing a wall-clock second boundary, so
+    /// "first request OK, second 429" exhaustion is deterministic.
     fn rate_limited_app(rate: u64) -> Router {
         use crate::AppState;
         let base = test_state();
         let state = Arc::new(AppState {
-            rate_limiter: crate::rate_limit::RateLimiter::new(rate),
+            rate_limiter: crate::rate_limit::RateLimiter::with_clock(
+                rate,
+                Box::new(|| 1_700_000_000),
+            ),
             auth_token: base.auth_token.clone(),
             base_url: base.base_url.clone(),
             repos: base.repos.clone(),
@@ -243,6 +258,7 @@ mod tests {
             breaking_changes: base.breaking_changes.clone(),
             dependency_policies: base.dependency_policies.clone(),
             process_registry: base.process_registry.clone(),
+            spawned_backends: base.spawned_backends.clone(),
             agent_logs: base.agent_logs.clone(),
             agent_log_tx: base.agent_log_tx.clone(),
             quality_gates: base.quality_gates.clone(),
@@ -255,12 +271,14 @@ mod tests {
             storage: base.storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
+            spec_lifecycle_configs: base.spec_lifecycle_configs.clone(),
             attestation_store: base.attestation_store.clone(),
             chain_attestations: base.chain_attestations.clone(),
             key_bindings: base.key_bindings.clone(),
             trust_anchors: base.trust_anchors.clone(),
             trusted_issuers: base.trusted_issuers.clone(),
             remote_jwks_cache: base.remote_jwks_cache.clone(),
+            trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
             commit_signatures: base.commit_signatures.clone(),
             sigstore_mode: base.sigstore_mode.clone(),
             tunnel_store: base.tunnel_store.clone(),
@@ -271,6 +289,7 @@ mod tests {
             spec_links_store: base.spec_links_store.clone(),
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
+            budget_calls: base.budget_calls.clone(),
             search: base.search.clone(),
             tenants: base.tenants.clone(),
             workspaces: base.workspaces.clone(),
@@ -283,6 +302,7 @@ mod tests {
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
+            rollout_policies: base.rollout_policies.clone(),
             messages: base.messages.clone(),
             message_dispatch_tx: base.message_dispatch_tx.clone(),
             agent_inbox_max: base.agent_inbox_max,
@@ -294,6 +314,7 @@ mod tests {
             ws_connections: base.ws_connections.clone(),
             ws_connection_counter: base.ws_connection_counter.clone(),
             ws_connection_workspaces: base.ws_connection_workspaces.clone(),
+            ws_connection_users: base.ws_connection_users.clone(),
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),
@@ -305,6 +326,7 @@ mod tests {
             user_tokens: base.user_tokens.clone(),
             secrets: base.secrets.clone(),
             judgment_ledger: base.judgment_ledger.clone(),
+            orchestrator_registry: base.orchestrator_registry.clone(),
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),

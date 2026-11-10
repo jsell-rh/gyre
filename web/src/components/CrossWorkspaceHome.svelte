@@ -268,9 +268,9 @@
     loadWorkspaces().then(() => {
       loadDecisions();
       loadBriefings();
+      loadSpecs();
       loadActivity();
     });
-    loadSpecs();
     loadAgentRules();
     loadBudgetSummary();
     loadStats();
@@ -282,7 +282,8 @@
     decisionsError = null;
     try {
       let data = await api.myNotifications();
-      data = Array.isArray(data) ? data : (data?.items ?? []);
+      // Server shape: { notifications: [...] } (users.rs get_my_notifications).
+      data = Array.isArray(data) ? data : (data?.notifications ?? []);
       // Exclude dismissed and resolved items
       data = data.filter(n => !n.dismissed_at && !n.resolved_at);
       data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
@@ -308,13 +309,50 @@
     }
   }
 
+  // loadSpecs is called after loadWorkspaces completes so the Specs section is
+  // scoped to the workspaces the caller can access (Spec §10): fetch per
+  // workspace (the server honors ?workspace_id=) and merge, instead of one
+  // unscoped list that would include inaccessible workspaces.
   async function loadSpecs() {
     specsLoading = true;
     specsError = null;
     try {
-      // All specs across all workspaces (no workspace_id filter)
-      const data = await api.specsForWorkspace(null);
-      specs = Array.isArray(data) ? data : (data?.items ?? []);
+      const results = await Promise.allSettled(
+        workspaces.map(async (ws) => {
+          const data = await api.specsForWorkspace(ws.id);
+          const rows = Array.isArray(data) ? data : (data?.items ?? []);
+          // The scoped query already restricted rows to this workspace;
+          // backfill attribution for rows whose workspace_id/repo_id were
+          // never set so they cannot be misattributed elsewhere.
+          return rows.map(s => ({
+            ...s,
+            workspace_id: s.workspace_id ?? ws.id,
+            workspace_name: s.workspace_name ?? ws.name,
+          }));
+        })
+      );
+      const anyFulfilled = results.some((r) => r.status === 'fulfilled');
+      const firstRejected = results.find((r) => r.status === 'rejected');
+      if (!anyFulfilled && firstRejected) {
+        throw firstRejected.reason ?? new Error($t('cross_workspace.error_load_specs'));
+      }
+      // Ledger paths are globally unique; dedupe defensively across the
+      // per-workspace results.
+      const seen = new Set();
+      specs = results
+        .flatMap((r) => (r.status === 'fulfilled' ? r.value : []))
+        .filter((s) => {
+          const key = s.path ?? s.id;
+          if (key != null) {
+            if (seen.has(key)) return false;
+            seen.add(key);
+          }
+          return true;
+        });
+      // Stat-card counts derive from the same scoped list so the card and
+      // the section it drills into agree.
+      totalSpecs = specs.length;
+      pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending').length;
     } catch (e) {
       specsError = e?.message ?? $t('cross_workspace.error_load_specs');
     } finally {
@@ -406,22 +444,20 @@
   async function loadStats() {
     statsLoading = true;
     try {
-      const [reposData, specsData, agentsData, mrsData] = await Promise.allSettled([
+      // Specs counts are derived in loadSpecs from the per-workspace scoped
+      // results, so this only fetches the remaining aggregates.
+      const [reposData, agentsData, mrsData] = await Promise.allSettled([
         api.allRepos(),
-        api.getSpecs(),
         api.agents({ status: 'active' }),
         api.mergeRequests({ status: 'open' }),
       ]);
       const reposList = reposData.status === 'fulfilled' ? (Array.isArray(reposData.value) ? reposData.value : []) : [];
-      const specsList = specsData.status === 'fulfilled' ? (Array.isArray(specsData.value) ? specsData.value : (specsData.value?.items ?? [])) : [];
       const agentsList = agentsData.status === 'fulfilled' ? (Array.isArray(agentsData.value) ? agentsData.value : []) : [];
       const mrsList = mrsData.status === 'fulfilled' ? (Array.isArray(mrsData.value) ? mrsData.value : []) : [];
       allRepos = reposList;
       allAgents = agentsList;
       allMrs = mrsList;
       totalRepos = reposList.length;
-      totalSpecs = specsList.length;
-      pendingSpecs = specsList.filter(s => (s.approval_status ?? s.status) === 'pending').length;
       activeAgents = agentsList.length;
       openMrs = mrsList.filter(m => m.status === 'open').length;
       mergedMrs = mrsList.filter(m => m.status === 'merged').length;
@@ -589,9 +625,9 @@
       <span class="cwh-stat-label">Repos</span>
     </div>
     <button class="cwh-stat-card cwh-stat-card-btn" onclick={() => { document.getElementById('specs-heading')?.scrollIntoView({ behavior: 'smooth' }); }}>
-      <span class="cwh-stat-value">{statsLoading ? '...' : totalSpecs}</span>
+      <span class="cwh-stat-value">{specsLoading ? '...' : totalSpecs}</span>
       <span class="cwh-stat-label">Specs</span>
-      {#if !statsLoading && pendingSpecs > 0}
+      {#if !specsLoading && pendingSpecs > 0}
         <span class="cwh-stat-sub cwh-stat-warn">{pendingSpecs} awaiting approval</span>
       {/if}
     </button>

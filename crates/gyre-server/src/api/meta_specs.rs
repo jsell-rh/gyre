@@ -2,6 +2,8 @@
 //!
 //! GET  /api/v1/workspaces/{id}/meta-spec-set  — get workspace meta-spec set
 //! PUT  /api/v1/workspaces/{id}/meta-spec-set  — update (Admin only)
+//! GET  /api/v1/workspaces/{id}/meta-specs/rollout-policy — get rollout policy (§7)
+//! PUT  /api/v1/workspaces/{id}/meta-specs/rollout-policy — update (Admin only, §7)
 //! GET  /api/v1/meta-specs/{path}/blast-radius — blast radius for a meta-spec
 //! POST /api/v1/workspaces/{id}/meta-specs/preview — preview a draft meta-spec change
 //! GET  /api/v1/workspaces/{id}/meta-specs/preview/{preview_id} — poll preview status
@@ -69,6 +71,18 @@ pub struct UpdateMetaSpecSetRequest {
     pub standards: Vec<MetaSpecPinnedEntry>,
     #[serde(default)]
     pub process: Vec<MetaSpecPinnedEntry>,
+}
+
+/// Request body for PUT /api/v1/workspaces/{id}/meta-specs/rollout-policy
+/// (meta-spec-reconciliation.md §7). `strategy` is required; the other
+/// fields default to the workspace's current values so a partial update
+/// (e.g. `{"strategy": "immediate"}`) keeps the rest of the policy.
+#[derive(Deserialize)]
+pub struct UpdateRolloutPolicyRequest {
+    pub strategy: String,
+    pub max_concurrent_agents: Option<u32>,
+    pub priority: Option<String>,
+    pub auto_merge: Option<bool>,
 }
 
 /// An affected repo entry in a blast radius response.
@@ -226,6 +240,13 @@ pub async fn put_meta_spec_set(
     // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
     // bindings would let agents rewrite the rules they operate under (NEW-26).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-spec-set",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace meta-spec-set bindings".to_string(),
         ));
@@ -295,6 +316,125 @@ pub async fn put_meta_spec_set(
     }
 
     Ok((StatusCode::OK, Json(set)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/workspaces/{id}/meta-specs/rollout-policy  (§7)
+// ---------------------------------------------------------------------------
+
+pub async fn get_rollout_policy(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<gyre_domain::RolloutPolicy>, ApiError> {
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&Id::new(&workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
+
+    // Unset policy → spec default (§7: Rolling / Normal / auto_merge false).
+    let policy =
+        crate::reconciliation::get_workspace_rollout_policy(&state, &Id::new(&workspace_id)).await;
+    Ok(Json(policy))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/v1/workspaces/{id}/meta-specs/rollout-policy  (Admin only, §7)
+// ---------------------------------------------------------------------------
+
+pub async fn put_rollout_policy(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<UpdateRolloutPolicyRequest>,
+) -> Result<(StatusCode, Json<gyre_domain::RolloutPolicy>), ApiError> {
+    // Admin-only: the rollout policy governs how reconciliation proceeds for
+    // the whole workspace — same governance class as meta-spec-set bindings
+    // (NEW-26: non-Admin callers, including agents, must not be able to
+    // rewrite the rules that govern their own rollout).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-specs/rollout-policy",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace rollout policy".to_string(),
+        ));
+    }
+
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&Id::new(&workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
+
+    // Merge with the current (or default) policy so omitted fields keep
+    // their present values.
+    let current =
+        crate::reconciliation::get_workspace_rollout_policy(&state, &Id::new(&workspace_id)).await;
+
+    let strategy = gyre_domain::RolloutStrategy::parse(&req.strategy).ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "unknown strategy '{}': expected immediate, rolling, or background",
+            req.strategy
+        ))
+    })?;
+    let priority = match req.priority.as_deref() {
+        None => current.priority,
+        Some(p) => gyre_domain::ReconciliationPriority::parse(p).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "unknown priority '{p}': expected high, normal, or low"
+            ))
+        })?,
+    };
+    let max_concurrent_agents = req
+        .max_concurrent_agents
+        .unwrap_or(current.max_concurrent_agents);
+    if max_concurrent_agents == 0 {
+        return Err(ApiError::InvalidInput(
+            "max_concurrent_agents must be at least 1 — a rolling rollout with batch size 0 \
+             would never create a task"
+                .to_string(),
+        ));
+    }
+
+    let policy = gyre_domain::RolloutPolicy {
+        strategy,
+        max_concurrent_agents,
+        priority,
+        auto_merge: req.auto_merge.unwrap_or(current.auto_merge),
+    };
+
+    let json = serde_json::to_string(&policy)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize rollout_policy: {e}")))?;
+    state
+        .rollout_policies
+        .upsert(&Id::new(&workspace_id), &json)
+        .await?;
+
+    // §11-style observability: policy change is an auditable workspace event.
+    state
+        .emit_event(
+            Some(Id::new(workspace_id.clone())),
+            gyre_common::message::Destination::Workspace(Id::new(workspace_id.clone())),
+            gyre_common::message::MessageKind::Custom("rollout_policy_updated".to_string()),
+            Some(serde_json::json!({
+                "workspace_id": workspace_id,
+                "strategy": policy.strategy.as_str(),
+                "max_concurrent_agents": policy.max_concurrent_agents,
+                "priority": policy.priority.as_str(),
+                "auto_merge": policy.auto_merge,
+            })),
+        )
+        .await;
+
+    Ok((StatusCode::OK, Json(policy)))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +511,13 @@ pub async fn post_meta_spec_preview(
     let allowed = auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !allowed {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/meta-specs/preview",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "Admin or Developer role required to run meta-spec preview".to_string(),
         ));
@@ -700,6 +847,233 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Rollout policy endpoint tests (meta-spec-reconciliation.md §7)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_rollout_policy_returns_spec_default() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-default-ws").await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // §7: "Default: `Rolling` strategy, `Normal` priority, `auto_merge: false`".
+        assert_eq!(json["strategy"], "rolling");
+        assert_eq!(json["priority"], "normal");
+        assert_eq!(json["auto_merge"], false);
+        assert!(json["max_concurrent_agents"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_round_trips() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-put-ws").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"strategy":"immediate","max_concurrent_agents":3,"priority":"high","auto_merge":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["strategy"], "immediate");
+        assert_eq!(json["max_concurrent_agents"], 3);
+        assert_eq!(json["priority"], "high");
+        assert_eq!(json["auto_merge"], true);
+
+        // Read back through GET — the stored policy, not the request echo.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["strategy"], "immediate");
+        assert_eq!(json["max_concurrent_agents"], 3);
+        assert_eq!(json["priority"], "high");
+        assert_eq!(json["auto_merge"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_partial_update_keeps_other_fields() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-partial-ws").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"strategy":"background"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Omitted fields fall back to the current (default) values.
+        assert_eq!(json["strategy"], "background");
+        assert_eq!(json["priority"], "normal");
+        assert_eq!(json["auto_merge"], false);
+        assert!(json["max_concurrent_agents"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_requires_admin() {
+        // A Developer-role JWT must be rejected with 403 — the rollout policy
+        // governs reconciliation for the whole workspace (same governance
+        // class as meta-spec-set bindings, NEW-26).
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"policy-admin-ws","slug":"policy-admin-ws"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-policy-sub",
+                "preferred_username": "policy-developer",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                    ))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"strategy":"immediate"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_rollout_policy_rejects_invalid_values() {
+        let app = app();
+        let ws_id = create_workspace(&app, "policy-invalid-ws").await;
+
+        for (body, what) in [
+            (r#"{"strategy":"staged"}"#, "unknown strategy"),
+            (
+                r#"{"strategy":"rolling","priority":"urgent"}"#,
+                "unknown priority",
+            ),
+            (
+                r#"{"strategy":"rolling","max_concurrent_agents":0}"#,
+                "zero batch size (rolling rollout would stall forever)",
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!(
+                            "/api/v1/workspaces/{ws_id}/meta-specs/rollout-policy"
+                        ))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "must reject {what}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollout_policy_unknown_workspace_404() {
+        let app = app();
+        for method in ["GET", "PUT"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/v1/workspaces/00000000-0000-0000-0000-000000000000/meta-specs/rollout-policy")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"strategy":"immediate"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} on missing workspace"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Preview endpoint tests
     // -----------------------------------------------------------------------
 
@@ -1024,6 +1398,8 @@ pub async fn list_meta_specs_registry(
     // is ABAC-exempt, so the handler is the only authorization surface —
     // any authenticated agent must not enumerate cross-workspace governance.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may list the meta-specs registry".to_string(),
         ));
@@ -1103,6 +1479,8 @@ pub async fn create_meta_spec_registry(
     // surface): creating registry entries defines tenant-wide governance;
     // non-Admin callers must not mint meta-specs.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may create meta-specs registry entries".to_string(),
         ));
@@ -1172,6 +1550,13 @@ pub async fn update_meta_spec_registry(
     // the handler is the authorization surface). Without this gate, any
     // authenticated agent could edit governance prompts and reset approvals.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update meta-specs registry entries".to_string(),
         ));
@@ -1213,6 +1598,9 @@ pub async fn update_meta_spec_registry(
         ms.approved_at = None;
     }
     if let Some(required) = req.required {
+        // §2 Required vs Optional: only scope-level admins can change the
+        // required flag (either direction — both alter the injected set).
+        // The outer write gate already enforces this for every PUT.
         ms.required = required;
     }
     if let Some(status_str) = &req.approval_status {
@@ -1293,7 +1681,6 @@ pub async fn update_meta_spec_registry(
 // ---------------------------------------------------------------------------
 // DELETE /api/v1/meta-specs-registry/:id
 // ---------------------------------------------------------------------------
-
 pub async fn delete_meta_spec_registry(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -1302,11 +1689,26 @@ pub async fn delete_meta_spec_registry(
     // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
     // the handler is the authorization surface).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "DELETE /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete meta-specs registry entries".to_string(),
         ));
     }
     let rid = Id::new(&id);
+    // 404 before the binding check: deleting a nonexistent meta-spec is a
+    // client error, not a silent no-op.
+    state
+        .meta_specs
+        .get_by_id(&rid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
     let has_bindings = state
         .meta_spec_bindings
         .has_bindings_for(&rid)
@@ -1368,6 +1770,196 @@ pub async fn get_meta_spec_version(
             ApiError::NotFound(format!("version {version} of meta-spec '{id}' not found"))
         })?;
     Ok(Json(ver))
+}
+
+// ---------------------------------------------------------------------------
+// Spec-level binding management (agent-runtime spec §2 Spec-Level Binding)
+//
+// PUT    /api/v1/specs/:path/meta-spec-bindings — replace the binding set
+// GET    /api/v1/specs/:path/meta-spec-bindings — list current bindings
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SetSpecBindingsRequest {
+    /// The desired binding set. Missing meta-specs are unbound.
+    pub bindings: Vec<SetSpecBindingEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct SetSpecBindingEntry {
+    pub meta_spec_id: String,
+    pub pinned_version: u32,
+}
+
+/// Replace the full binding set for a spec (declarative, mirrors the UI's
+/// Meta-spec bindings panel which shows the whole selection at once).
+///
+/// Validation per spec: pinned version must exist in the meta-spec's history
+/// (or be the current version), and the meta-spec must exist. Required
+/// meta-specs need no binding (auto-injected); a binding for one is accepted
+/// but redundant — assembly dedups it.
+///
+/// Authorization: bindings are spec metadata AND prompt configuration —
+/// band 3 of `assemble_prompt_set` injects every bound meta-spec into every
+/// agent spawned for tasks under this spec, regardless of the caller's
+/// workspace. The gate therefore checks workspace membership, not just the
+/// JWT role: a global Admin may bind anything; otherwise the caller must be
+/// an Owner/Admin/Developer member of the workspace owning the spec (per its
+/// ledger entry). A spec with no workspace scope is admin-only. Each bound
+/// meta-spec must additionally be visible from that workspace: Global
+/// meta-specs always qualify, Workspace-scoped ones only in their own
+/// workspace.
+pub async fn put_spec_meta_spec_bindings(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(spec_path): Path<String>,
+    Json(req): Json<SetSpecBindingsRequest>,
+) -> Result<(StatusCode, Json<Vec<gyre_domain::MetaSpecBinding>>), ApiError> {
+    let spec_ws: Option<String> = state
+        .spec_ledger
+        .find_by_path(&spec_path)
+        .await
+        .map_err(ApiError::Internal)?
+        .and_then(|e| e.workspace_id);
+
+    let is_global_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_global_admin {
+        let ws_id = spec_ws.as_deref().ok_or_else(|| {
+            ApiError::Forbidden(
+                "spec is not scoped to a workspace; only tenant Admin may change its meta-spec bindings"
+                    .to_string(),
+            )
+        })?;
+        // Agent tokens have no user identity — never workspace members.
+        let user_id = auth.user_id.as_ref().ok_or_else(|| {
+            ApiError::Forbidden("agent tokens cannot change spec meta-spec bindings".to_string())
+        })?;
+        let member = state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &Id::new(ws_id))
+            .await
+            .map_err(ApiError::Internal)?;
+        match member.map(|m| m.role) {
+            Some(gyre_domain::WorkspaceRole::Owner)
+            | Some(gyre_domain::WorkspaceRole::Admin)
+            | Some(gyre_domain::WorkspaceRole::Developer) => {}
+            _ => {
+                return Err(ApiError::Forbidden(format!(
+                    "spec bindings require Developer membership in workspace '{ws_id}' (the workspace owning spec '{spec_path}')"
+                )));
+            }
+        }
+    }
+
+    let now = now_secs();
+
+    // Validate every entry before mutating anything.
+    for entry in &req.bindings {
+        let ms_id = Id::new(&entry.meta_spec_id);
+        let ms = state
+            .meta_specs
+            .get_by_id(&ms_id)
+            .await
+            .map_err(ApiError::Internal)?
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!("meta-spec '{}' not found", entry.meta_spec_id))
+            })?;
+        // Visibility: a Workspace-scoped meta-spec may only bind within
+        // its own workspace. Band 3 resolves bindings by spec_path alone,
+        // so binding a ws-A meta-spec to a ws-B (or unscoped) spec would
+        // inject its prompt into every agent for that spec — a
+        // cross-workspace prompt-injection leak.
+        if ms.scope == MetaSpecScope::Workspace && ms.scope_id.as_deref() != spec_ws.as_deref() {
+            let ms_ws = ms.scope_id.as_deref().unwrap_or("?");
+            let spec_ws_desc = match spec_ws.as_deref() {
+                Some(w) => format!("workspace '{w}'"),
+                None => "no workspace".to_string(),
+            };
+            return Err(ApiError::BadRequest(format!(
+                "meta-spec '{}' is scoped to workspace '{}' and cannot bind to spec '{}' ({})",
+                entry.meta_spec_id, ms_ws, spec_path, spec_ws_desc
+            )));
+        }
+        if entry.pinned_version > ms.version {
+            return Err(ApiError::BadRequest(format!(
+                "pinned version {} exceeds current version {} of meta-spec '{}'",
+                entry.pinned_version, ms.version, entry.meta_spec_id
+            )));
+        }
+        if entry.pinned_version != ms.version {
+            let exists = state
+                .meta_specs
+                .get_version(&ms_id, entry.pinned_version)
+                .await
+                .map_err(ApiError::Internal)?
+                .is_some();
+            if !exists {
+                return Err(ApiError::BadRequest(format!(
+                    "version {} of meta-spec '{}' not found in history",
+                    entry.pinned_version, entry.meta_spec_id
+                )));
+            }
+        }
+    }
+
+    // Replace the binding set: delete existing, insert the new set.
+    let existing = state
+        .meta_spec_bindings
+        .list_by_spec_id(&spec_path)
+        .await
+        .map_err(ApiError::Internal)?;
+    for old in existing {
+        state
+            .meta_spec_bindings
+            .delete(&old.id)
+            .await
+            .map_err(ApiError::Internal)?;
+    }
+
+    let mut created = Vec::with_capacity(req.bindings.len());
+    for entry in req.bindings {
+        let binding = gyre_domain::MetaSpecBinding {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            spec_id: spec_path.clone(),
+            meta_spec_id: Id::new(&entry.meta_spec_id),
+            pinned_version: entry.pinned_version,
+            created_at: now,
+        };
+        state
+            .meta_spec_bindings
+            .create(&binding)
+            .await
+            .map_err(ApiError::Internal)?;
+        created.push(binding);
+    }
+
+    // Pin updates clear the stale-pin dedup keys for this spec so a subsequent
+    // drift is re-notified (the human acted on the alert; a new drift deserves
+    // a new notification). Keys are `stale_pin:{spec_id}:{meta_spec_id}`.
+    let prefix = format!("stale_pin:{}:", spec_path);
+    if let Ok(keys) = state.kv_store.kv_list("meta_spec_stale_pins").await {
+        for (key, _) in keys {
+            if key.starts_with(&prefix) {
+                let _ = state.kv_store.kv_remove("meta_spec_stale_pins", &key).await;
+            }
+        }
+    }
+
+    Ok((StatusCode::OK, Json(created)))
+}
+
+/// GET /api/v1/specs/:path/meta-spec-bindings — list the spec's bindings.
+pub async fn get_spec_meta_spec_bindings(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedAgent,
+    Path(spec_path): Path<String>,
+) -> Result<Json<Vec<gyre_domain::MetaSpecBinding>>, ApiError> {
+    let bindings = state
+        .meta_spec_bindings
+        .list_by_spec_id(&spec_path)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(bindings))
 }
 
 // ---------------------------------------------------------------------------
@@ -2048,6 +2640,7 @@ mod registry_tests {
             )
             .await
             .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
         let id = body_json(create_resp).await["id"]
             .as_str()
             .unwrap()
@@ -2066,6 +2659,579 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// §2 + NEW-26: registry writes are scope-admin-gated, not just the
+    /// `required` flag. An agent token (Agent role, no user identity) must
+    /// get 403 on create, update (prompt rewrite), and delete — an agent
+    /// rewriting registry prompts could rewrite the rules it and every
+    /// other agent operate under.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_gate_rejects_non_admin() {
+        let state = test_state();
+        // Register an agent token — resolves to UserRole::Agent, no user_id.
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agt-required-gate",
+                "agt-secret-rq".to_string(),
+            )
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        // Create (no `required` flag at all) → 403: the write itself is
+        // governance, not just the flag.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer agt-secret-rq")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"p","scope":"Global","prompt":"x"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Create with required: true → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer agt-secret-rq")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"p","scope":"Global","prompt":"x","required":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Admin creates one; agent then attempts prompt rewrite → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"p2","scope":"Global","prompt":"x"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer agt-secret-rq")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"injected rules"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Agent attempts delete → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer agt-secret-rq")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Admin (global token) CAN set required.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"required":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["required"], true);
+    }
+
+    /// §2 Spec-Level Binding: PUT replaces the binding set, GET lists it,
+    /// invalid pins (version beyond current / nonexistent meta-spec) are 400.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_bindings_put_get_and_validation() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a meta-spec (admin) and bump it to v2.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:standard","name":"binding-std","scope":"Global","prompt":"v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ms_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{ms_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"v2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Pin v1 (historical) — valid.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"bindings":[{{"meta_spec_id":"{ms_id}","pinned_version":1}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["pinned_version"], 1);
+
+        // GET lists it.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+
+        // Pin v99 (beyond current v2) → 400.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"bindings":[{{"meta_spec_id":"{ms_id}","pinned_version":99}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nonexistent meta-spec → 400.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"bindings":[{"meta_spec_id":"00000000-0000-0000-0000-000000000000","pinned_version":1}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Replace with empty set → unbinds (GET returns []).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"bindings":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await.as_array().unwrap().len(), 0);
+    }
+
+    /// §2 Stale Pin Detection: a spec pinning an old version produces a
+    /// priority-6 MetaSpecDrift notification for workspace admins; the
+    /// dedup key prevents duplicate notifications on the next run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_pin_detection_creates_notification() {
+        use gyre_domain::meta_spec::{
+            MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
+        };
+
+        let state = test_state();
+
+        // Workspace + admin member to notify.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-stale-pin"),
+            gyre_common::Id::new("tenant-stale-pin"),
+            "ws-stale-pin".to_string(),
+            "Stale Pin WS".to_string(),
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let member = gyre_domain::WorkspaceMembership::new(
+            gyre_common::Id::new("mem-1"),
+            gyre_common::Id::new("user-stale-pin"),
+            gyre_common::Id::new("ws-stale-pin"),
+            gyre_domain::WorkspaceRole::Admin,
+            gyre_common::Id::new("user-stale-pin"),
+            1000,
+        );
+        state.workspace_memberships.create(&member).await.unwrap();
+
+        // Spec ledger entry so the binding's spec resolves to the workspace.
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "system/stale.md".to_string(),
+            title: "Stale".to_string(),
+            owner: "system".to_string(),
+            kind: None,
+            current_sha: "abc".to_string(),
+            approval_mode: "standard".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+            repo_id: None,
+            workspace_id: Some("ws-stale-pin".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        // Meta-spec at v2, spec pinned at v1.
+        let ms = MetaSpec {
+            id: gyre_common::Id::new("ms-stale"),
+            kind: MetaSpecKind::Standard,
+            name: "drifting-std".to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "v2 content".to_string(),
+            version: 2,
+            content_hash: "h2".to_string(),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_content_hash: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+        state
+            .meta_spec_bindings
+            .create(&MetaSpecBinding {
+                id: gyre_common::Id::new("bind-stale"),
+                spec_id: "system/stale.md".to_string(),
+                meta_spec_id: ms.id.clone(),
+                pinned_version: 1,
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        // Run detection.
+        crate::prompt_assembly::detect_stale_pins(&state)
+            .await
+            .unwrap();
+
+        // Notification created for the workspace admin.
+        let ws_id = gyre_common::Id::new("ws-stale-pin");
+        let user_id = gyre_common::Id::new("user-stale-pin");
+        let notifs = state
+            .notifications
+            .list_for_user(&user_id, Some(&ws_id), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        let drift: Vec<_> = notifs
+            .iter()
+            .filter(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift)
+            .collect();
+        assert_eq!(drift.len(), 1, "expected exactly one drift notification");
+        assert_eq!(drift[0].priority_rank, 6);
+        assert!(drift[0].title.contains("system/stale.md"));
+        assert!(drift[0].title.contains("v1"));
+        assert!(drift[0].title.contains("v2"));
+
+        // Second run: dedup — no additional notification.
+        crate::prompt_assembly::detect_stale_pins(&state)
+            .await
+            .unwrap();
+        let notifs2 = state
+            .notifications
+            .list_for_user(&user_id, Some(&ws_id), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        let drift2: Vec<_> = notifs2
+            .iter()
+            .filter(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift)
+            .collect();
+        assert_eq!(
+            drift2.len(),
+            1,
+            "dedup key must prevent duplicate notifications"
+        );
+    }
+
+    /// Review round 6 finding: `put_spec_meta_spec_bindings` previously
+    /// authorized only on the JWT role, with no check that the caller has
+    /// membership in the workspace owning the target spec. A Developer-role
+    /// JWT with no membership anywhere could bind a Global meta-spec to a
+    /// spec owned by another workspace — and assembly band 3 injects bound
+    /// prompts into every agent spawned for tasks under that spec. This test
+    /// pins the membership gate: non-member Developer → 403, member
+    /// Developer (of the owning workspace) → 200, agent token → 403.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_bindings_require_membership_in_owning_workspace() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::meta_spec::{
+            MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope,
+        };
+
+        let state = make_test_state_with_jwt();
+
+        // Workspace owning the victim spec.
+        let victim_ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bind-victim"),
+            gyre_common::Id::new("tenant-bind"),
+            "Victim WS".to_string(),
+            "bind-victim-slug".to_string(),
+            1000,
+        );
+        state.workspaces.create(&victim_ws).await.unwrap();
+
+        // Spec ledger entry scoped to the victim workspace.
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "system/victim-bind.md".to_string(),
+            title: "Victim".to_string(),
+            owner: "system".to_string(),
+            kind: None,
+            current_sha: "abc".to_string(),
+            approval_mode: "standard".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+            repo_id: None,
+            workspace_id: Some("ws-bind-victim".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        // Global meta-spec (bindable from any workspace per visibility rule).
+        let ms = MetaSpec {
+            id: gyre_common::Id::new("ms-bind-target"),
+            kind: MetaSpecKind::Standard,
+            name: "bindable-std".to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "bindable content".to_string(),
+            version: 1,
+            content_hash: "h1".to_string(),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_content_hash: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+
+        // Attacker: Developer role, member of NO workspace.
+        let mut attacker = gyre_domain::User::new(
+            gyre_common::Id::new("user-bind-attacker"),
+            "bind-attacker-sub",
+            "bind-attacker".to_string(),
+            1000,
+        );
+        attacker.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&attacker).await.unwrap();
+
+        let claims = serde_json::json!({
+            "sub": "bind-attacker-sub",
+            "preferred_username": "bind-attacker",
+            "email": "bind-attacker@example.com",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let attacker_token = sign_test_jwt(&claims, 3600);
+
+        let body = format!(
+            r#"{{"bindings":[{{"meta_spec_id":"{}","pinned_version":1}}]}}"#,
+            ms.id
+        );
+        let uri = "/api/v1/specs/system%2Fvictim-bind.md/meta-spec-bindings";
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Non-member Developer (role alone) → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {attacker_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Developer role alone must not bind meta-specs to another workspace's spec"
+        );
+
+        // Agent token (no user identity) → 403.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-bind", "agt-bind-secret".to_string())
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", "Bearer agt-bind-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent tokens cannot change spec meta-spec bindings"
+        );
+
+        // Member Developer of the owning workspace → 200.
+        state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new("mem-bind-member"),
+                gyre_common::Id::new("user-bind-member"),
+                gyre_common::Id::new("ws-bind-victim"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("user-bind-member"),
+                1000,
+            ))
+            .await
+            .unwrap();
+        let mut member = gyre_domain::User::new(
+            gyre_common::Id::new("user-bind-member"),
+            "bind-member-sub",
+            "bind-member".to_string(),
+            1000,
+        );
+        member.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&member).await.unwrap();
+        let claims = serde_json::json!({
+            "sub": "bind-member-sub",
+            "preferred_username": "bind-member",
+            "email": "bind-member@example.com",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let member_token = sign_test_jwt(&claims, 3600);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {member_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Developer member of the owning workspace must be able to set bindings"
+        );
     }
 
     // -- per-handler authorization (ABAC-exempt routes) ---------------------
