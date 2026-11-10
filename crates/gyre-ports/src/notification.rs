@@ -17,6 +17,7 @@ pub trait NotificationRepository: Send + Sync {
 
     /// List notifications for a user. Optionally filtered by workspace and priority range.
     /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
         user_id: &Id,
