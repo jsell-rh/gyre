@@ -271,7 +271,7 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
-            // Dependency breaking changes + policies (migration 000059, task-163)
+            // Dependency breaking changes + policies (migration 000060, task-163)
             "breaking_changes",
             "dependency_policies",
             // Raw-SQL tables (not in schema.rs but created by migrations)
