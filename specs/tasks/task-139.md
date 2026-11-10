@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb"]
+commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb", "98b0bfa32cfeb8b4ae22c0f2f3c0ca3519a5a565"]
 ---
 
 ## Spec Excerpt
@@ -177,3 +177,19 @@ inert-enforcement, dead-message-kinds, api-auth, and the other check-*
 scripts with output identical to the pristine baseline. Full workspace
 `cargo test --all`, all-target Clippy, and GitHub CI on the exact head
 remain with verification/publication.
+
+### Rebase onto main (merge commit 98b0bfa32c)
+
+Rebased the task branch onto main head bd49c7847 (task-117/task-109/
+task-205 lineage). Single textual conflict in `docs/api-reference.md`:
+kept the task-139 spec-policy row (with `require_signed_approval` and the
+advisory MR comment) and retained main's new
+`/api/v1/repos/{id}/settings/spec-lifecycle` row. No semantic conflicts:
+post-merge re-runs on this sandbox (merged head 98b0bfa32) — `cargo test
+-p gyre-server --lib` 1664/1664; `gyre-domain` 426 passed + 6 ignored;
+`gyre-adapters --lib` 448/448; integration `git_integration` 17/17,
+`api_integration` 66/66, `graph_integration` 38/38; frontend `vitest run
+src/__tests__/RepoSettings.test.js` 58/58; all 19 check-\* mechanical
+invariants PASS (migration versions unique — Diesel versions include the
+date prefix, so main's `2026-10-08-000059_spec_lifecycle_configs` and this
+task's `2026-11-09-000059_require_signed_approval` do not collide).
