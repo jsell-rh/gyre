@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
-commits: ["b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
+commits: ["b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df", "380c7d6cb545c542be9505656143c6fa4c26b6197"]
 ---
 
 ## Spec Excerpt
@@ -254,6 +254,69 @@ Remote verification must run the deferred Rust checks
 (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` §8 suite +
 `global_spec_approval_skips_unreadable_workspace_set`,
 `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib`).
+
+### Merge repair (round 8f042330, onto main `b5a872087`)
+
+Merged main `b5a872087` (task-108 impersonation, task-208, task-205,
+task-104 rounds; migrations 000056–000058) into the rebase-repair head.
+Two source conflicts plus one compile casualty, all resolved and — for
+the first time in this task's repair history — **verified with the full
+deferred Rust suites in-sandbox** (cargo/crates.io reachable this
+round):
+
+- **mem.rs AppState wiring** — main restructured the test AppState
+  literal: `agent_inbox_max`/`user_workspace_state` moved up beside
+  `wg_config`, and `meta_specs`/`meta_spec_bindings` now share
+  `meta_spec_binding_store` (`with_binding_store`/`with_store`) so the
+  meta-spec delete guard sees bindings written through the binding
+  repo (main's `delete_fails_when_binding_references_meta_spec`
+  contract test). Resolution keeps main's shared-store wiring (the
+  candidate's separate `.default()` stores would break that contract)
+  and adds this task's `tenant_meta_spec_sets` field beside
+  `meta_spec_sets` — both features coexist.
+- **prompt_assembly.rs (new from main, compile casualty)** — main's
+  agent-runtime §2 prompt assembly matched `MetaSpecScope`
+  exhaustively over Global/Workspace; this task's `Tenant` variant
+  made it non-exhaustive. Resolution: `scope_str` gains a `"tenant"`
+  arm, and required band 1 now also injects required **Tenant-scoped**
+  meta-specs of the task workspace's tenant (§8: tenant defaults apply
+  to every workspace in the tenant). Without this, a required
+  Tenant-scoped registry entry — creatable via this task's API —
+  would silently never inject into any agent prompt. The caller's
+  tenant is resolved from the task's workspace via
+  `workspaces.find_by_id`; lookup failure skips the tenant band with
+  a warn (no fabricated tenant identity). Dedup/order unchanged
+  (`seen_ids`, kind rank, stable tiebreak).
+- **api-reference.md** — the two registry rows merged: main's shape
+  (`content_hash`, filters, content-PUT version bump + archive,
+  DELETE 409 on bindings) combined with this task's Tenant scope +
+  `force` flag semantics.
+
+Test evidence at HEAD `380c7d6cb` (all run in this sandbox, cargo
+reachable):
+
+- `SKIP_WEB_BUILD=1 cargo check --workspace --all-targets` — clean.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1635 passed,
+  0 failed** (includes the §8 tenant suite, the set-PUT and
+  fail-closed killing tests, `global_spec_approval_skips_unreadable_workspace_set`,
+  main's prompt-assembly suite, and the meta-spec binding contract
+  tests on the resolved mem wiring).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — **414
+  passed, 0 failed** (the renumbered `000059_tenant_meta_spec_sets`
+  migration runs on a fresh DB alongside main's 000056–000058;
+  tenant-set repo roundtrip/independence).
+- `cargo fmt --all -- --check` — clean.
+- 19 mechanical invariant checks green (arch, abac-route-registry,
+  abac-exempt-handlers, migration-versions, migration-sql-portability,
+  mem-port-contracts, in-memory-state-stores, forged-scope-fields,
+  scope-literal-defaults, dead-message-kinds, inert-enforcement,
+  mcp-write-tools, byte-slice-truncation, fail-open-ref-resolution,
+  relative-path-defaults, lossy-secret-conversion,
+  fabricated-scope-defaults, forwarded-header-trust,
+  unbounded-external-http);
+  `check-task-commit-attribution` green (merge commit also recorded
+  in `commits:` frontmatter so review scoping covers the conflict
+  resolutions).
 
 ### Test evidence (at this rebase round, merged onto `fefde2946`; prior rounds below)
 
