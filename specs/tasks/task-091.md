@@ -101,7 +101,7 @@ Agent Detail Panel:
 
 ## Shipped
 
-Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient repair from review gap d382faa3.
+Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient repair from review gap d382faa3. Verified at merge head b2419479a (assignment base 8b93f242 merged into the branch; `web/src` and `crates` are byte-identical to reviewed candidate 015340baf — `git diff 015340baf..HEAD -- crates web/src` is empty, so the verified source is exactly what ships).
 
 ### Behavior
 
@@ -112,9 +112,14 @@ Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient
 
 ### Test evidence
 
-- Server: `cargo test -p gyre-server --lib api::agents` (11 passed, incl. new `agent_response_exposes_orchestrator_type`), `api::orchestrator` (12), `api::spawn` (52), `mcp::` (88) — all green; `cargo build -p gyre-cli -p gyre-server` clean.
-- Frontend (`web/`, `npm ci` then vitest): `WorkspaceHomeSections.test.js` 40 passed, including two new regression tests for the gap's failure modes (repo-orchestrator/name-matching worker not selected; custom-named workspace orchestrator selected); sibling suites `DetailPanelChat`/`InlineChat`/`DetailPanel`/`Briefing` 89 passed.
-- Evidence retained at `/tmp/stage/review-evidence/task-091-role-recipient/evidence.md`.
+- Frontend (this round, head b2419479a; `npm ci` then `npx vitest run`): `WorkspaceHomeSections` + `InlineChat` + `DetailPanelChat` + `Briefing` — 4 files, 97 passed / 41 skipped (skips are pre-existing `describe.skip` old-layout blocks). Includes both d382faa3 regression tests: a repo orchestrator or a name-matching worker is not selected as the workspace chat recipient, and a custom-named workspace orchestrator (`"coord"`) is selected alongside live repo orchestrators.
+- Server: `web/src` and `crates` at this head are byte-identical to candidate 015340baf, whose suites passed in the verified prior round (`api::agents` 11 incl. `agent_response_exposes_orchestrator_type`, `api::orchestrator` 12, `api::spawn` 52, `mcp::` 88, `cargo build -p gyre-cli -p gyre-server` clean). Verifier should re-run `cargo test -p gyre-server --lib api::agents api::orchestrator api::spawn` plus the mcp suites; no cold server build was attempted in this sandbox (stage 4 GiB budget — a local `cargo check` adds no information over the byte-identity proof).
+- `bash scripts/check-task-commit-attribution.sh` — OK at this head; all three frontmatter commits (3e22e490, a8d036f, 58e4568) are reachable from HEAD.
+- Evidence retained at `/tmp/stage/review-evidence/task-091-round3/evidence.md`.
+
+### Review finding bfe34dfa (stale web/dist) disposition
+
+- The finding is correct that the committed `web/dist` bundle predates the role-based repair (it still contains the deleted name-convention filter and no `orchestrator_type`). Per this stage's protocol the executor restores generated `web/dist` files from the assignment base and final integration rebuilds and publishes the bundle remotely, so dist is intentionally **not** regenerated or committed in this assignment. The role-based selection ships in source — `web/src/components/WorkspaceHome.svelte` (filters on `orchestrator_type === 'workspace_orchestrator'`) and `crates/gyre-server/src/api/agents.rs` (`AgentResponse.orchestrator_type`) — which is the input final integration builds the published bundle from.
 
 ## Agent Instructions
 
