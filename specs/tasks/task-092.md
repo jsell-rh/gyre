@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: [task-237]
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -63,22 +63,24 @@ Read `specs/system/human-system-interface.md` §7 "Conflict Prevention" for the 
 
 ## Shipped
 
-This round was a rebase repair: the pending merge of `59ff5d01` into the
-branch had unresolved conflicts in `web/dist/` build artifacts
-(rename/rename on the hashed elk bundle, content conflict in index.html).
-Resolved by rebuilding dist from the merged `web/src`
-(`npm ci` from the lockfile, then `vite build`) and committing the fresh
-output (merge commit `fdc44f29`). It also fixed a real test determinism
-bug the socket-restricted prior rounds could never expose (see below).
-All task-092 product behavior was already implemented in prior rounds
-(F1-F4 findings plus R3 fixes) and is unchanged.
+This round was a `requirements_changed` repair. The contract base moved to
+`078ec12a` (which gained, among other things, task-123's notification entity
+with a full type taxonomy and priority model — the same notification surface
+task-092's `SpecConflict` notifications ride on). The branch now carries the
+retained task-092 source checkpoint (`d79734869`, already reconciled into
+main) merged onto that base (merge commit `2c2cbc401`); because the
+checkpoint is an ancestor of the base, the merged tree is the current
+contract itself, so no source changes were required this round — the work
+was verifying that every task-092 behavior still holds against the changed
+base, not regenerating it.
 
-Behavior at HEAD (source-verified):
+Behavior at HEAD (source-verified against the merged tree):
 
 - **Presence editing context** — `UserPresence.editing_entity` (serde-skipped
-  when `None`) round-trips; server stores it in `PresenceEntry` keyed
-  `(user_id, session_id)`, derives `user_id` from the authenticated
-  connection, validates `session_id` against the Subscribe-established one.
+  when `None`) round-trips in `gyre-common/src/protocol.rs`; the server
+  stores it in `PresenceEntry` keyed `(user_id, session_id)`, derives
+  `user_id` from the authenticated connection, and validates `session_id`
+  against the Subscribe-established one.
 - **Warning banner** — `ConcurrentEditBanner` fetches
   `GET /workspaces/:id/presence` on editor open, stays live on
   `UserPresence`/`PresenceEvicted` WS messages, excludes self by session_id
@@ -92,50 +94,39 @@ Behavior at HEAD (source-verified):
   socket-close cleanup, 5-session cap eviction, 60s idle sweeper spawned from
   `main.rs`) call `broadcast_presence_departure`, so the warning disappears
   when the other editor leaves.
-- **Optimistic concurrency** — `save_spec` compares `base_sha` against the
-  spec ledger's `current_sha`; on mismatch returns 409 with
-  `{current_content, submitted_content, diff, current_sha}` and creates
-  `SpecConflict` notifications for the caller plus every other user editing
-  `spec:<path>` per the presence map; notification bodies persist the full
-  line diff so both Inboxes render `SpecDiffView` (§7 item 3). `overwrite`
-  bypasses the stale check.
+- **Optimistic concurrency** — `save_spec` (in `specs_assist.rs`) compares
+  `base_sha` against the spec ledger's `current_sha`; on mismatch returns
+  409 with `{current_content, submitted_content, diff, current_sha}` and
+  creates `SpecConflict` notifications for the caller plus every other user
+  editing `spec:<path>` per the presence map; notification bodies persist
+  the full line diff so both Inboxes render `SpecDiffView` (§7 item 3).
+  `overwrite` bypasses the stale check. The notification now flows through
+  task-123's taxonomy — `NotificationType::SpecConflict` carries priority 2 —
+  and the conflict-creation path is compatible with it (verified by
+  `save_spec_conflict_notifies_caller_and_concurrent_editor` at this head).
 - **Conflict UI** — `SpecConflictDialog` renders the side-by-side diff with
   Overwrite / Discard / Copy; `api.specsSave` surfaces 409 as `{conflict}`;
   `EditorSplit`/`DetailPanel` wire overwrite → `specsSave` with
   `overwrite: true`, discard → adopt server content.
 
-### This round's fix
-
-`ws_session_cap_eviction_rebroadcasts_departure` was flaky (~2 of 3 runs)
-now that this sandbox permits loopback sockets — prior rounds' socket
-restriction (ConnectionReset at first connect) had masked it. Root cause
-(confirmed by logging the observer's stream): the test seeded 5 concurrent
-WS sessions and drained the observer with ordered `expect_presence` calls,
-but cross-connection broadcast order is not guaranteed (each connection is
-an independent server task), so a later session's presence arrived while
-the drain waited for an earlier one and was consumed-and-discarded; that
-session's turn then timed out. The same reordering made the eviction target
-nondeterministic (`server_last_seen` follows server processing order, so
-`min_by_key` could evict a session other than the first-opened). Fixed in
-`3c5bdcd7` by interleaving seeding with observer confirmation — each
-session's presence broadcast is observed before the next session opens,
-which guarantees in-order drain and strictly increasing `server_last_seen`
-(insert completes before broadcast). Test-only change; no product code
-affected.
-
 ### Test evidence (this sandbox, saved under /tmp/stage/review-evidence/)
 
-- `cargo test -p gyre-server --lib specs_assist` — 21/21 ok (cold build,
+All probes run at the exact branch head `2c2cbc401`:
+
+- `cargo test -p gyre-server --lib specs_assist` — **21/21 ok** (cold build,
   `SKIP_WEB_BUILD=1`), including
   `save_spec_stale_base_sha_returns_409_with_diff`,
   `save_spec_conflict_notifies_caller_and_concurrent_editor`,
   `save_spec_overwrite_bypasses_stale_base_sha`.
-- `cargo test -p gyre-server --lib ws::` — **73 passed / 0 failed**, run
-  4x (once standalone, 3x repeated) — all loopback-socket tests now
-  genuinely execute in this sandbox; the previously flaky cap-eviction
-  test passed 10/10 isolated runs after the determinism fix.
-- `npm ci` (full, 169 packages) + `npm test` in `web/` — 65 files /
-  1616 passed / 0 failed (41 config-level skips), on the merged `web/src`
-  that the rebuilt `web/dist` was produced from.
+- `cargo test -p gyre-server --lib ws::` — **94 passed / 0 failed** (the
+  base gained loopback-socket tests since the prior round's 73), including
+  `ws_session_cap_eviction_rebroadcasts_departure` and
+  `ws_socket_close_rebroadcasts_departure`.
+- `npm ci` (full, lockfile versions) + `npm test` in `web/` — **99 files /
+  2010 passed / 0 failed** (41 config-level skips), including the task-092
+  suites `ConcurrentEditBanner.test.js`, `SpecConflictDialog.test.js`, and
+  the presence tests. The canvas/WebGL failures noted in earlier rounds
+  (ExplorerCanvas/FlowRenderer/ExplorerViewAskViewSpec) were fixed on main
+  in the meantime and pass at this head.
 
 Exact-head GitHub checks remain the independent reviewer's gate.
