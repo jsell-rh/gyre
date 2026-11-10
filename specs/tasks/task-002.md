@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-002.md
 coverage_sections: []
-commits: ["e970c9155c1d21c397baf35788e8b3531f1554b9"]
+commits: []
 ---
 
 ## Spec Excerpt
