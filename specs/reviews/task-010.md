@@ -69,3 +69,57 @@ Sweep for new findings:
 - All 1,843 tests pass (0 failures, 14 ignored).
 
 No new findings. **TASK-010 verified complete.**
+
+## R5 — 2026-11-10
+
+Reviewer: Independent review (pi runtime)
+Commit under review: `ce99ae317` (base `8729385d3`)
+
+### Scope
+
+Resolves durable finding fd72a1bf (§11 parity-table dotted tool names vs shipped
+snake_case surface) — the only open item after R1–R4. Delta: dotted-name aliases
+in the MCP server, the §11 spec-lifecycle table amendment (carried commit
+`5b06eded9`), docs/coverage updates, and 3 new tests.
+
+### Verification
+
+- **Alias dispatch** (`mcp.rs` tools/call): the normalization match
+  (`graph.concept`→`graph_concept`, `spec.assist`→`spec_assist`) runs BEFORE the
+  `needs_write` RBAC gate and before dispatch. Both aliased tools are read-only,
+  so gate membership is unchanged; a dotted-name call cannot bypass RBAC. With
+  the aliases, the server satisfies either revision of the §11 table — the
+  assigned requirement inputs (dotted names) are directly satisfiable via
+  `tools/call {"name":"graph.concept"}` / `{"name":"spec.assist"}`.
+- **tools/list advertising**: alias entries are cloned from the canonical
+  definitions (same inputSchema, derived description) — the two spellings cannot
+  drift. Verified by `mcp_tools_list_includes_dotted_parity_aliases`.
+- **Durable finding resolution**: closed via BOTH paths the finding prescribed —
+  (a) the spec-lifecycle amendment renaming the §11 table cells to the shipped
+  surface (publication is the controller's protected stage) and (b) server-side
+  dotted aliases, so the code contradicts neither spec text.
+- **Mechanical gates** (all run against the exact candidate):
+  `check-mcp-write-tools` OK (8 tools, all gated); `check-arch` OK;
+  `check-abac-route-registry` OK; `check-placeholder-stubs` OK;
+  `check-task-commit-attribution` OK; `check-mcp-wrapper-parity` violation set
+  (34) byte-identical to the assignment base after line-number normalization;
+  `check-cli-spec-parity` output byte-identical to base (pre-existing CLI
+  spec_assist SSE display issue, untouched by this diff — no CLI files changed).
+- **Compilation**: `cargo check -p gyre-server --lib` and `--tests` both clean
+  (the executor wrapper rejects gyre-server test codegen under the 4 GiB budget;
+  this is an infrastructure restriction, not a code defect). The full TASK-010
+  test command set for the independent verifier is recorded in
+  `/tmp/stage/review-evidence/summary.md`:
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- mcp_briefing
+  mcp_notifications mcp_trace mcp_graph_concept mcp_spec_assist mcp_tools_list`
+  (includes the three new alias tests).
+- **Test quality**: the new tests exercise the authenticated HTTP path through
+  the full router and assert on real handler output (manifest-projection node
+  membership, byte-identical dotted/canonical results, "repo not found" rather
+  than "Unknown tool") — causally tied to the production behavior, not
+  self-confirming.
+
+### Findings
+
+None. **TASK-010 verified complete** — all seven acceptance criteria hold, and
+durable finding fd72a1bf is closed.
