@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: [task-216]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -103,67 +103,74 @@ Read `specs/system/user-management.md` §User Entity through §User Preferences 
 ## Shipped
 
 The task-120 product surface — User entity profile fields
-(username/display_name/avatar_url/timezone/locale/preferences/last_login_at/
-updated_at), `UserPreferences` with Theme/UiDensity/DiffView/FeedScope,
-per-tenant unique immutable URL-safe username derived from SSO
-`preferred_username` on first login, server-side JSON preferences via
-`GET`/`PUT /api/v1/users/me` — is complete: six product commits plus the
-Round-1/2 repairs (rustfmt `7d53b6d2`, clippy derive-scoping `7752dd2e`,
-INTEGER→BIGINT `93913405`), the rebase repair (`c76b224d`/`7f00472c`),
-and the first version-collision renumber `000056 → 000057` (`50c48714`),
-all as reviewed in `specs/reviews/task-120.md` Round 2 (PASS).
+(username/display_name/avatar_url/timezone/locale/preferences/
+last_login_at/updated_at), `UserPreferences` with
+Theme/UiDensity/DiffView/FeedScope, per-tenant unique immutable URL-safe
+username derived from SSO `preferred_username` on first login,
+server-side JSON preferences via `GET`/`PUT /api/v1/users/me` — is
+complete on the current base, as reviewed in `specs/reviews/task-120.md`
+Round 2 (PASS): the twelve product commits in `commits:` (six feature
+commits plus the rustfmt/clippy/INTEGER→BIGINT/rebase/renumber repairs)
+and the merge repair `75d49d4c8` are all ancestors of this branch head;
+main integrated the task-120 candidate and then moved forward.
 
-**This round — merge repair (`75d49d4c8`):** merging main (`124a852be`)
-raised two source issues, both fixed:
+**This round — requirements-changed repair (base `cd752300c`):** the
+assignment base advanced past the previous merge-repair round (task-208
+amended `user-management.md` §"My Stuff" Views and removed
+`GET /api/v1/users/me/{agents,tasks,mrs}` end-to-end; migrations 000056
+through `2026-11-08-000058` landed). I verified the current task-120
+contract is genuinely satisfied by the retained source on this base —
+no re-implementation was needed because the retained product surface is
+fully contained in the base tree:
 
-1. **`sqlite/mod.rs` content conflict** — the conflicting hunk held two
-   independent regression tests (task-120's username-backfill guard and
-   main's task-102 `migration_000054_folds_legacy_path_pid_into_detail`).
-   Both are kept; neither semantics changed.
-2. **Second migration version collision** — main landed task-193's
-   `2026-10-08-000057_spec_approval_attestation` under Diesel version
-   `20261008000057`, colliding with the previously renumbered
-   `..._user_entity_profile_fields` (Diesel runs only one migration per
-   version, alphabetically first — ours would again be silently
-   dropped). Renumbered to the next unused sequence:
-   `2026-10-08-000058_user_entity_profile_fields` (SQL unchanged).
-   Updated the regression test's partition key to `20261008000058`
-   (renamed to `migration_000058_backfills_unique_url_safe_usernames`;
-   its pre-migration set now correctly includes main's 000056 and 000057)
-   and the 000057→000058 comments in `sqlite/mod.rs`, `schema.rs`, and
-   `auth.rs`.
+- Spec sections §User Entity / §Username vs Display Name / §User
+  Preferences are unchanged by the task-208 amendment (verified by
+  reading the current spec text against the task excerpt).
+- `gyre-domain/src/user.rs` carries every spec field and the exact
+  `UserPreferences` shape (Theme/default_workspace_id/
+  notification_channels/ui_density/code_font_size/diff_view/
+  activity_feed_scope) plus the `UserPreferencesPatch` partial-update
+  merge.
+- Migration `2026-10-08-000058_user_entity_profile_fields` is the
+  unique holder of Diesel version `20261008000058` on the current tree
+  (no second collision with main's later migrations).
+- `find_or_create_user` (auth.rs) derives the username from SSO
+  `preferred_username`, stamps `last_login_at`, never renames;
+  `find_by_username` port + SQLite adapter with
+  `username_immutable_on_update` rejection test are present.
+
+Concrete fixes this round (docs accuracy only — no product source
+changed):
+
+1. `specs/coverage/system/user-management.md` row 2 cited the
+   pre-second-renumber migration (000057) and the old regression-test
+   name; updated to 000058, the two-step renumber story (000056→000057
+   after task-180, →000058 after task-193), and
+   `migration_000058_backfills_unique_url_safe_usernames`, and replaced
+   the stale "Pending independent review" with the Round-2 PASS +
+   landed-on-main status. Row 3's stale `auth.rs:806-848` line
+   reference replaced with the `find_or_create_user` function
+   reference. Row 11's "Pending independent review" likewise updated.
 
 ### Verification
 
-- `bash scripts/check-migration-versions.sh` → OK (no duplicate versions).
-- `bash scripts/check-migration-sql-portability.sh` → OK.
-- `cargo test -p gyre-adapters --lib` → **370 passed, 0 failed** (12
-  ignored), including the renumbered
-  `migration_000058_backfills_unique_url_safe_usernames`, main's
-  `migration_000054_folds_legacy_path_pid_into_detail`,
-  `no_duplicate_migration_version_prefixes`,
-  `migrations_create_previously_shadowed_columns`, and
-  `migration_is_idempotent`.
-- `cargo test -p gyre-server --lib` → **1387 passed, 0 failed** (the
-  merge auto-merged many server files; this confirms they compile and
-  pass together with the user-entity surface).
-- `cargo check --workspace --all-targets` → clean.
-- `python3 scripts/check-clippy-diff.py HEAD^1` → changed lines clean;
-  `python3 scripts/check-rustfmt-diff.py HEAD^1` → clean.
-- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh`,
-  `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`,
-  `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`,
-  `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`,
-  `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`,
-  `check-inert-enforcement.sh`, `check-forwarded-header-trust.sh`,
-  `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`,
-  `check-non-atomic-creation.sh`, `check-forged-scope-fields.sh`, and
-  `check-task-commit-attribution.sh` → all OK on the merged tree.
+Focused probes on this exact head (evidence retained under
+`/tmp/stage/review-evidence`):
 
-Transport note (recorded per assignment): the prior round's listener
-probe was unsupported; this sandbox's `capabilities.json` now reports
-`tcp_listener_probe: supported`. No server-boot HTTP smoke was needed
-for this round's repair — the changes are storage-layer only and covered
-by the adapter test suite above. Host-side checks: `cargo test --all` +
-GitHub CI on this exact head.
+- `bash scripts/check-migration-versions.sh` → OK (no duplicate Diesel
+  versions on the merged migration set through 2026-11-08).
+- `bash scripts/check-migration-sql-portability.sh` → OK.
+- `cargo test -p gyre-adapters --lib
+  migration_000058_backfills_unique_url_safe_usernames` → 1 passed.
+- `cargo test -p gyre-adapters --lib user` → 21 passed, 0 failed
+  (includes `username_immutable_on_update`, `find_by_username`).
+- `cargo test -p gyre-server --lib api::users` → 18 passed, 0 failed
+  (includes `put_me_updates_display_name_and_preferences`,
+  `put_me_rejects_malformed_preferences`,
+  `my_stuff_endpoints_are_removed`).
+- `cargo test -p gyre-server --lib auth` → 71 passed, 0 failed
+  (find_or_create_user / username-derivation coverage).
+- `bash scripts/check-task-commit-attribution.sh` → OK.
+
+Host-side checks owned by verification: `cargo test --all`,
+architecture/Clippy gates, GitHub CI on this exact head.
