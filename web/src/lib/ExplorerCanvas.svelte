@@ -35,6 +35,18 @@
     governingSpecFor,
     buildTraceSteps,
   } from './causal-trace.js';
+  import {
+    SUCCESS_PARTICLE_COLOR,
+    TRAIL_FADE_MS,
+    rootSpanCases,
+    spanRootMap,
+    testCaseColor,
+    particlesAtTime,
+    nextSpanStart,
+    spansTraversingEdge,
+    nearestParticleToNode,
+    trailSegments,
+  } from './flow-particles.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -379,6 +391,9 @@
 
   let tooltipNode = $state(null);
   let tooltipPos = $state({ x: 0, y: 0 });
+  // Span id of the hovered trace particle (evaluative lens) — drives the
+  // I/O summary tooltip and the on-hover particle scale-up.
+  let hoveredParticleSpanId = $state(null);
 
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
@@ -972,9 +987,46 @@
 
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
-  let evalSpeed = $state(1.0); // Clamped to [0.25, 5.0] per spec
+  let evalSpeed = $state(1.0); // Clamped to [0.25, 10.0]: union of
+  //                           // explorer-canvas.md §4 (0.25x–5x) and
+  //                           // human-system-interface.md §3a (1x/10x).
   let evalScrubber = $state(0); // 0..1 normalized time position
-  let evalParticles = $state([]); // [{edgeKey, progress, span, color}]
+  let evalParticles = $state([]); // [{fromId, toId, progress, span, rootSpanId, caseIndex, color, glow}]
+  let evalTestFilter = $state(null); // Test selector (ui-layout.md §4): root
+  //                                 // span id to animate, null = all cases.
+
+  // Root spans are the test cases (ui-layout.md §4 "Multiple test cases"):
+  // each root span is one traced test request. `color` is the hue-shifted
+  // success-palette swatch used by the legend.
+  let evalRootCases = $derived.by(() => {
+    return rootSpanCases(traceData?.spans).map((c) => ({
+      ...c,
+      color: testCaseColor(SUCCESS_PARTICLE_COLOR, c.index),
+    }));
+  });
+  let evalSpanRoots = $derived.by(() => spanRootMap(traceData?.spans));
+  let evalCaseIndexByRoot = $derived.by(() => {
+    const m = new Map();
+    for (const c of evalRootCases) m.set(c.spanId, c.index);
+    return m;
+  });
+
+  // A new trace (different MR) invalidates the selected test case — reset
+  // the filter rather than animate nothing against a stale root span id.
+  $effect(() => {
+    const cases = evalRootCases;
+    if (evalTestFilter && !cases.some((c) => c.spanId === evalTestFilter)) {
+      evalTestFilter = null;
+    }
+  });
+
+  // Particle trail position history (ui-layout.md §4 "Trail": opacity decay
+  // over 200ms, 20px trail length). Keyed by span id; pruned by age inside
+  // trailSegments on every draw.
+  const particleTrails = new Map(); // spanId → [{x, y, t}]
+  function clearParticleTrails() {
+    particleTrails.clear();
+  }
 
   // Pre-compute span-to-graph-node mapping and edge call frequencies
   let traceEdgeFrequency = $derived.by(() => {
@@ -1048,53 +1100,55 @@
 
   function tickParticles(dt) {
     if (!traceSpanTimeline || !evalPlaying) return;
-    const { minTime, totalDuration, spans } = traceSpanTimeline;
-    const spanById = new Map();
-    for (const s of spans) spanById.set(s.span_id, s);
+    const { minTime, totalDuration } = traceSpanTimeline;
 
     // Advance scrubber: playback duration is proportional to actual trace duration.
     // Convert totalDuration (microseconds) to seconds, then clamp to [0.5s, 30s]
     // so very short traces don't flash by and very long traces don't drag.
     const traceSeconds = totalDuration / 1_000_000;
     const normalizedDuration = Math.max(0.5, Math.min(30.0, traceSeconds));
-    const clampedSpeed = Math.max(0.25, Math.min(5.0, evalSpeed));
-    const step = (dt / 1000) * clampedSpeed / normalizedDuration;
-    evalScrubber = Math.min(1, evalScrubber + step);
+    const clampedSpeed = Math.max(0.25, Math.min(10.0, evalSpeed));
+    // dt ≥ 0: a regressing rAF timestamp (jsdom mocks, background-tab
+    // throttling anomalies) must not rewind the scrubber below 0.
+    const step = Math.max(0, dt / 1000) * clampedSpeed / normalizedDuration;
+    evalScrubber = Math.min(1, Math.max(0, evalScrubber + step));
     if (evalScrubber >= 1) {
       evalPlaying = false; // Stop at end (single-play mode)
       evalScrubber = 1;
     }
 
-    const currentTime = minTime + evalScrubber * totalDuration;
-    const newParticles = [];
-
-    for (const span of spans) {
-      if (!span.graph_node_id || !span.parent_span_id) continue;
-      const parent = spanById.get(span.parent_span_id);
-      if (!parent?.graph_node_id) continue;
-
-      // Scope particles to drill level: only show particles where both
-      // endpoints are currently visible (in layoutNodeMap).
-      if (!layoutNodeMap.has(parent.graph_node_id) || !layoutNodeMap.has(span.graph_node_id)) continue;
-
-      const spanStart = span.start_time;
-      const spanEnd = span.start_time + span.duration_us;
-
-      if (currentTime >= spanStart && currentTime <= spanEnd) {
-        const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = (span.status ?? '').toLowerCase() === 'error';
-        newParticles.push({
-          fromId: parent.graph_node_id,
-          toId: span.graph_node_id,
-          progress: Math.min(1, Math.max(0, progress)),
-          span,
-          color: isError ? '#ef4444' : '#60a5fa',
-          glow: isError ? '#ef4444' : '#3b82f6',
-        });
-      }
-    }
-    evalParticles = newParticles;
+    evalParticles = computeParticlesAtTime(minTime + evalScrubber * totalDuration);
   }
+
+  // Shared particle resolution for live playback, paused scrubbing, and
+  // step-through: the same timestamp must produce the same positions on
+  // every path (ui-layout.md §4 "All particles freeze at their positions at
+  // that timestamp").
+  function computeParticlesAtTime(currentTime) {
+    if (!traceSpanTimeline) return [];
+    return particlesAtTime(traceSpanTimeline.spans, currentTime, {
+      visibleNodeIds: layoutNodeMap,
+      testFilter: evalTestFilter,
+      rootOf: evalSpanRoots,
+      caseIndexByRoot: evalCaseIndexByRoot,
+    });
+  }
+
+  // Paused interaction must still reposition particles: dragging the
+  // scrubber, changing the test filter, or stepping while paused all
+  // resolve particles at the (new) scrubber timestamp. Without this the
+  // particles stay at their last-played positions while the scrubber
+  // moves — the freeze-on-scrub contract broken.
+  $effect(() => {
+    if (lens !== 'evaluative' || evalPlaying) return;
+    const tl = traceSpanTimeline;
+    if (!tl) {
+      if (evalParticles.length > 0) evalParticles = [];
+      return;
+    }
+    evalParticles = computeParticlesAtTime(tl.minTime + evalScrubber * tl.totalDuration);
+    untrack(() => scheduleRedraw());
+  });
 
   // Redraw when highlighted span changes (evaluative tab click)
   $effect(() => {
@@ -1114,6 +1168,23 @@
     onLensChange('evaluative');
     evalScrubber = 0;
     evalPlaying = true;
+    clearParticleTrails();
+    scheduleRedraw();
+  }
+
+  /**
+   * HSI §3a step-through: advance to the next span start (span by span),
+   * pausing playback. Repeated steps walk the trace in execution order;
+   * stepping past the last span pins the scrubber at the end.
+   */
+  function stepTracePlayback() {
+    const tl = traceSpanTimeline;
+    if (!tl) return;
+    evalPlaying = false;
+    const currentTime = tl.minTime + evalScrubber * tl.totalDuration;
+    const next = nextSpanStart(tl.spans, currentTime, evalSpanRoots, evalTestFilter);
+    evalScrubber = next == null ? 1 : (next - tl.minTime) / tl.totalDuration;
+    clearParticleTrails();
     scheduleRedraw();
   }
 
@@ -3828,6 +3899,11 @@
   }
 
   function drawTraceParticles(ctx) {
+    const now = performance.now();
+    if (evalParticles.length === 0) {
+      particleTrails.clear();
+      return;
+    }
     for (const p of evalParticles) {
       const sln = layoutNodeMap.get(p.fromId);
       const tln = layoutNodeMap.get(p.toId);
@@ -3844,7 +3920,37 @@
       if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
 
       const isHighlighted = highlightedSpanId && p.span?.span_id === highlightedSpanId;
-      const radius = isHighlighted ? 8 + cam.zoom * 0.8 : 4 + cam.zoom * 0.5;
+      const isHovered = hoveredParticleSpanId && p.span?.span_id === hoveredParticleSpanId;
+      // ui-layout.md §4: 4px particles scale up on hover (base 4 → 6).
+      const radius = isHighlighted ? 8 + cam.zoom * 0.8
+        : isHovered ? 6 + cam.zoom * 0.5
+        : 4 + cam.zoom * 0.5;
+
+      // Trail (ui-layout.md §4: fading — opacity decay over 200ms, 20px
+      // trail length). trailSegments prunes the history in place and caps
+      // the polyline at TRAIL_LENGTH_PX; stationary points emit nothing so
+      // paused/scrub-frozen particles leave no trail.
+      let history = particleTrails.get(p.span.span_id);
+      if (!history) {
+        history = [];
+        particleTrails.set(p.span.span_id, history);
+      }
+      history.push({ x: px, y: py, t: now });
+      const segs = trailSegments(history, now);
+      if (segs.length > 0) {
+        ctx.save();
+        ctx.strokeStyle = p.color;
+        ctx.lineCap = 'round';
+        for (const sgm of segs) {
+          ctx.globalAlpha = sgm.alpha * 0.6;
+          ctx.lineWidth = Math.max(1, radius * 0.5);
+          ctx.beginPath();
+          ctx.moveTo(sgm.x1, sgm.y1);
+          ctx.lineTo(sgm.x2, sgm.y2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
 
       // Glow
       ctx.save();
@@ -3877,6 +3983,14 @@
       ctx.arc(px, py, radius * 0.4, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+    }
+
+    // Drop history for spans no longer animating — a finished span's trail
+    // expires with its last point and must not pin map entries forever.
+    for (const [spanId, hist] of particleTrails) {
+      if (hist.length === 0 || now - hist[hist.length - 1].t > TRAIL_FADE_MS) {
+        particleTrails.delete(spanId);
+      }
     }
   }
 
@@ -4472,6 +4586,30 @@
       tooltipPos = { x: e.clientX, y: e.clientY };
     }
 
+    // Particle hover (HSI §3a: hovering a span during playback shows the
+    // input/output summary in a tooltip; ui-layout.md §4: the particle
+    // scales up while hovered). Only when no node is under the cursor.
+    if (!hit && lens === 'evaluative' && !isPanning) {
+      const p = particleHitTest(e.clientX, e.clientY);
+      const newSpanId = p?.span?.span_id ?? null;
+      if (newSpanId !== hoveredParticleSpanId) {
+        hoveredParticleSpanId = newSpanId;
+        if (p) {
+          tooltipNode = spanTooltipNode(p.span);
+          tooltipPos = { x: e.clientX, y: e.clientY };
+          emitCanvasViewEvent(e, 'node', `span-${p.span.span_id}`, p.span);
+        } else {
+          tooltipNode = null;
+        }
+        scheduleRedraw();
+      } else if (p && tooltipNode) {
+        tooltipPos = { x: e.clientX, y: e.clientY };
+      }
+    } else if (hoveredParticleSpanId) {
+      hoveredParticleSpanId = null;
+      scheduleRedraw();
+    }
+
     // Edge hover detection (only when no node is hovered)
     if (!hit && !isPanning) {
       const edgeHover = edgeHitTest(e.clientX, e.clientY);
@@ -4487,7 +4625,7 @@
     }
 
     if (canvasEl) {
-      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId) ? 'pointer' : 'grab';
+      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId || hoveredParticleSpanId) ? 'pointer' : 'grab';
     }
 
     if (isPanning) {
@@ -4506,6 +4644,7 @@
   function onMouseLeave() {
     isPanning = false;
     hoveredNodeId = null;
+    hoveredParticleSpanId = null;
     tooltipNode = null;
     scheduleRedraw();
   }
@@ -4586,6 +4725,22 @@
     return null;
   }
 
+  // Span-shaped tooltip payload (HSI §3a: hover on a span shows the
+  // input/output summary). Rendered by the shared tooltip template with a
+  // dedicated span section.
+  function spanTooltipNode(span) {
+    return {
+      id: `span-${span.span_id}`,
+      name: span.operation_name ?? span.span_id,
+      node_type: 'span',
+      span_id: span.span_id,
+      duration_us: span.duration_us,
+      status: span.status,
+      input_summary: span.input_summary,
+      output_summary: span.output_summary,
+    };
+  }
+
   // Edge hit testing: find edge closest to click point within a threshold
   function edgeHitTest(clientX, clientY) {
     const rect = canvasEl?.getBoundingClientRect();
@@ -4660,6 +4815,13 @@
           }
         }
       }
+      // ui-layout.md §4 flow interaction: clicking a node during animation
+      // pauses playback — the detail panel (opened below) shows the span
+      // data for the particle currently at/nearest this node. The ▶ play
+      // badge above already returned for clicks that start playback.
+      if (lens === 'evaluative' && nodeSpanStats.has(hit.node.id) && evalPlaying) {
+        evalPlaying = false;
+      }
       // Shift+Click: multi-select for concept creation
       if (e.shiftKey) {
         const newSet = new Set(multiSelectedIds);
@@ -4694,6 +4856,22 @@
       };
       // Enrich with trace path data if a trace is active
       const enrichedNode = { ...hit.node };
+      if (lens === 'evaluative') {
+        // Span data for the particle at/nearest the clicked node (the
+        // click-node-during-animation payload from ui-layout.md §4).
+        const np = nearestParticleToNode(evalParticles, hit.node.id);
+        if (np) {
+          enrichedNode._activeSpan = {
+            span_id: np.span.span_id,
+            operation_name: np.span.operation_name,
+            duration_us: np.span.duration_us,
+            status: np.span.status,
+            input_summary: np.span.input_summary,
+            output_summary: np.span.output_summary,
+            progress: np.progress,
+          };
+        }
+      }
       if (tracePathOrder.size > 0) {
         const stepNum = tracePathOrder.get(hit.node.id);
         if (stepNum != null) {
@@ -4722,6 +4900,9 @@
       // No node hit — check for particle click (evaluative lens)
       const particleHit = particleHitTest(e.clientX, e.clientY);
       if (particleHit) {
+        // ui-layout.md §4: clicking a particle pauses playback before the
+        // span detail is shown.
+        if (evalPlaying) evalPlaying = false;
         // Show span detail in the detail panel
         const span = particleHit.span;
         onNodeDetail({
@@ -4755,6 +4936,16 @@
           file_path: edgeHit.source?.file_path,
           doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
         };
+        // ui-layout.md §4 "Click edge during animation": in the evaluative
+        // lens, list every span that traversed this edge with its timings.
+        if (lens === 'evaluative' && traceData?.spans?.length) {
+          const traversing = spansTraversingEdge(
+            traceData.spans,
+            edgeHit.source?.id,
+            edgeHit.target?.id,
+          );
+          if (traversing.length > 0) edgeInfo.traversing_spans = traversing;
+        }
         onNodeDetail(edgeInfo);
         emitCanvasViewEvent(e, 'edge', `${edgeHit.source?.id ?? '?'}->${edgeHit.target?.id ?? '?'}`, edgeInfo);
         selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
@@ -5927,6 +6118,20 @@
           {#if tooltipNode.spec_path}
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
           {/if}
+          {#if tooltipNode.node_type === 'span' && tooltipNode.span_id}
+            <div class="tooltip-span-io">
+              <span class="tooltip-span-meta">
+                {tooltipNode.duration_us < 1000 ? `${Math.round(tooltipNode.duration_us)}\u00B5s` : `${(tooltipNode.duration_us / 1000).toFixed(1)}ms`}
+                · {tooltipNode.status ?? 'ok'}
+              </span>
+              {#if tooltipNode.input_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">in</span> {tooltipNode.input_summary}</span>
+              {/if}
+              {#if tooltipNode.output_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">out</span> {tooltipNode.output_summary}</span>
+              {/if}
+            </div>
+          {/if}
           <div class="tooltip-eval">
             {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
             {#if tooltipNode.complexity != null || tooltipNode.churn_count_30d != null || tooltipNode.test_coverage != null}
@@ -6296,9 +6501,13 @@
       {traceData}
       {traceElapsedDisplay}
       {traceTotalDisplay}
+      rootCases={evalRootCases}
+      testFilter={evalTestFilter}
       onPlayToggle={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }}
-      onScrubberChange={(v) => { evalScrubber = v; scheduleRedraw(); }}
+      onScrubberChange={(v) => { evalScrubber = v; clearParticleTrails(); scheduleRedraw(); }}
       onSpeedChange={(v) => { evalSpeed = v; }}
+      onStep={() => { stepTracePlayback(); }}
+      onTestFilterChange={(id) => { evalTestFilter = id; clearParticleTrails(); scheduleRedraw(); }}
     />
   {/if}
 
@@ -6423,6 +6632,10 @@
   .tooltip-qname { font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-count, .tooltip-spec { font-size: 10px; color: #64748b; }
+  .tooltip-span-io { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  .tooltip-span-meta { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
+  .tooltip-span-line { font-size: 10px; color: #cbd5e1; font-family: 'SF Mono', Menlo, monospace; word-break: break-all; }
+  .tooltip-span-k { color: #60a5fa; font-weight: 600; margin-right: 4px; }
   .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
   .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }

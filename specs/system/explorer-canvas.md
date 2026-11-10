@@ -76,7 +76,7 @@ The Explorer canvas is a single interactive surface. The knowledge graph topolog
 - Node badges: span count, error rate, mean duration
 - Edge thickness: proportional to call frequency in traces
 - Failed spans: red glow on nodes, error particles
-- Playback controls: play/pause, scrubber, speed (0.25x–5x)
+- Playback controls: play/pause, step (span-by-span, HSI §3a), scrubber, speed (0.25x–10x — the union of this range and HSI §3a's 1x/10x/step-through), test-case selector (ui-layout.md §4)
 
 **Interaction**:
 - Everything from Structural lens still works (click, double-click, drill-down)
@@ -156,7 +156,7 @@ MoldableView
   │     ├── LensToggle (Structural / Evaluative / Observable)
   │     ├── ExplorerCanvas (SVG graph layer — always rendered)
   │     ├── EvaluativeOverlay (Canvas 2D particles — rendered when lens=evaluative)
-  │     │     └── PlaybackControls (play/pause, scrubber, speed)
+  │     │     └── PlaybackControls (play/pause, step, scrubber, speed, test selector)
   │     ├── NodeBadge (SVG overlay — metrics per node)
   │     └── Breadcrumb (drill-down path)
   ├── List tab (unchanged)
