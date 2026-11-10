@@ -45,3 +45,79 @@ All R1–R3 findings verified resolved. Systematic re-review of the full impleme
 - **MR reverts:** `revert()` updates `updated_at` (domain model line 117), filter sound ✓
 - **MCP parity:** delegates to shared `assemble_briefing`, three-step `since` resolution matches REST ✓
 - **Test coverage:** 10 dedicated unit tests + 3 integration tests + 4 MCP tests cover positive, negative, and edge cases ✓
+
+---
+
+## Independent Review (pipeline checkpoint)
+
+**Reviewer:** Independent review agent
+**Candidate:** `f8e99449ba5b7e485631b284d74e9a607f30e881` (base `078ec12a5745379c254fe7dd00261f02e28d86cb`)
+**Verdict:** `approved` — 0 findings
+
+### Scope of the candidate diff
+
+Base→candidate touches only `specs/tasks/task-013.md` (+52 lines): a `## Shipped`
+section with `###` subheadings, per the executor's contract-restoration
+instruction. The protected contract text (frontmatter through the Git Commits
+list) is byte-identical to the assignment (script-verified against the assigned
+body). No production code changed in the candidate itself.
+
+### Production-code verification (code rides the base)
+
+- Carrier claim verified: `d7940e857` (PR #627) is an ancestor of the assigned
+  base and carried the reviewed implementation into
+  `crates/gyre-server/src/api/graph.rs` (+863/−128).
+- `assemble_briefing` (graph.rs:1123) implements both sections with real
+  queries, no stubs: cross_workspace reads `spec_links_store` with the
+  directional filter `source_repo_id IN workspace AND target_repo_id NOT IN
+  workspace`, since-scoped by `created_at >= since OR stale_since >= since`,
+  repo-filter aware, `source_workspace_slug` extracted from `@slug/...`
+  target_display, `spec_path` = local affected spec. exceptions has three real
+  sources: failed gate results for workspace MRs with the inner
+  `finished_at >= since` filter, `SpecAssertionFailure` notifications filtered
+  to workspace + repo scope, and `Reverted` MRs with `reverted_at`/`updated_at
+  >= since`.
+- Field semantics verified against producers: assertion-failure
+  `source.entity_id` is set to the failing spec path by graph_extraction.rs
+  (:1408), so its use as `spec_path` is correct. Notification `created_at` is
+  epoch seconds — unit-consistent with `since`.
+- Wiring: REST route registered (api/mod.rs:984) with ABAC mapping
+  (abac_middleware.rs:455); repo filter validated against the path workspace
+  (404/Forbidden); MCP briefing resource delegates to the shared
+  `assemble_briefing` (mcp.rs:3115). Empty sections are `Vec` fields — always
+  serialized as `[]`.
+
+### Probe evidence
+
+- Focused probe at the candidate: `SKIP_WEB_BUILD=1 cargo test -p gyre-server
+  --lib briefing_` — 26 passed, 0 failed, exit 0
+  (`review-evidence/task-013-briefing-tests.log`).
+- Mutation probes (each restored; pristine sha256 verified, tree clean,
+  suite re-green after restore; logs: `review-evidence/mutation1-stale-since.log`,
+  `mutation2-gate-time-filter.log`, `mutation3-direction.log`):
+  1. Removed the `stale_since` disjunction →
+     `briefing_cross_workspace_stale_since_includes_recently_stale_link` FAILS
+     (exit 101).
+  2. Removed the gate-result inner `finished_at >= since` filter →
+     `briefing_exceptions_gate_failures_excludes_old_gate_results` FAILS
+     (exit 101).
+  3. Inverted the directional filter → 2 cross_workspace tests FAIL
+     (exit 101).
+  The tests are behavior-coupled, not self-confirming.
+- `scripts/check-task-commit-attribution.sh` passes (docs-only commits are not
+  product-surface; frontmatter `commits: []` is protected contract text).
+
+### Non-blocking observations
+
+- Assertion-failure sourcing uses `list_recent(200)` (the most generous cap of
+  the established pattern — sibling call sites use 10–100); the
+  `NotificationRepository` port offers no workspace+type+since-scoped query.
+  In deployments generating >200 notifications newer than an in-window
+  assertion failure, that failure would be omitted from the briefing
+  (under-report only; workspace filtering after fetch cannot leak). A future
+  port extension could remove the bound.
+- The flat response envelope (`entity_type`/`description` at item level, not
+  the spec's nested `sections` with `type`/`summary`) predates this task —
+  `completed`/`in_progress` already used `BriefingItem` at the assigned base —
+  and is documented in the HSI coverage matrix (row 45). Not in this task's
+  acceptance criteria.
