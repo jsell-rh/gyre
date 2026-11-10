@@ -100,28 +100,21 @@ When working on this task:
 
 ## Git Commits
 
-Authored and reviewed on the `feat/explorer-canvas` branch (R1–R4 in
-[specs/reviews/task-010.md](../reviews/task-010.md)):
-
-- `03109ab2a6d0ecc703b488c0c51cfca2adc3a68c` — feat(mcp): add HSI §11 parity resources and tools (TASK-010)
-- `0f4e3c1f3c00565bd13175d3ee9f72c2e0f1e479` — fix(mcp): address R1 findings — parity, dead param, edge filter (TASK-010)
-- `34efb85149c4d34d8e44cc117a0895aef0376ae6` — fix(mcp): extract shared assemble_concept_results, delegate from MCP handler (TASK-010)
-- `40c36207e2a9e2c6f5bd57836598b67a79f9438d` — fix(mcp): briefing since-resolution parity and stale doc comment (TASK-010)
-
-The surface landed on main via the squash merge `d7940e857` (PR #627,
-"feat(explorer): explorer canvas, loop tooling, spec coverage tracking").
-This round's spec amendment and task bookkeeping are committed on the
-assignment branch (see `git log` for this branch's tip).
+- `feat(mcp): add HSI §11 parity resources and tools (TASK-010)`
 
 ## Shipped
 
-All five HSI §11 parity surfaces are real production code at the assignment
-base — this assignment verified them against the acceptance criteria and
-closed the one remaining documented deviation (a spec-table naming drift,
-amended via spec lifecycle per the 2026-09-29 §11 coverage audit's
-prescription).
+Contract repair round (finding 799608cbdb): the prior checkpoint rewrote
+protected task text (the `## Git Commits` section body), so the executor
+restored the assigned task document. This round keeps the assigned contract
+byte-identical except the agent-owned `progress` frontmatter field, confines
+all progress notes to this section, and preserves the existing production
+fix unchanged (no product-surface files differ from the assignment base).
 
-### Behavior at base (verified this round)
+### Behavior at base (re-verified this round)
+
+All five HSI §11 parity surfaces are real production code at the assignment
+base, verified against the acceptance criteria:
 
 - `briefing://{workspace_id}` resource (mcp.rs `handle_resource_read`):
   three-step `since` resolution (explicit `?since=` →
@@ -143,23 +136,32 @@ prescription).
   prompt template → LLM call → diff validation) and returns the same
   diff/explanation shape.
 
-### This round's change: spec amendment
+The original delivery was authored and reviewed R1–R4 on the
+`feat/explorer-canvas` branch (see
+[specs/reviews/task-010.md](../reviews/task-010.md)) and landed on main via
+the squash merge `d7940e857` (PR #627).
 
-`specs/system/human-system-interface.md` §11 parity table previously named
-the tools `graph.concept`/`spec.assist` (dotted editorial shorthand) while
-the shipped MCP surface uses the repo-wide snake_case convention. Renaming
-the tools would break the established 25-tool naming convention and
-existing consumers, so per task rule 4 and the coverage audit's
-prescription, the table was amended to name the shipped tools
-(`graph_concept`, `spec_assist`) with a tool-naming note; coverage row 50
-records the closure.
+### This branch's change: spec amendment (5b06eded9)
+
+The 2026-09-29 §11 coverage audit left one documented deviation: the
+parity table named the MCP tools `graph.concept`/`spec.assist` (dotted
+editorial shorthand) while the shipped surface uses the repo-wide
+snake_case convention. Renaming the tools would break the established
+25-tool naming convention and existing consumers, so per task rule 4 the
+spec was amended to name the shipped tools (`graph_concept`, `spec_assist`)
+with a tool-naming note; the HSI coverage row records the closure. No
+product-surface files were touched on this branch.
 
 ### Test evidence
 
+At branch head `918d4fd11` (base `078ec12a5` + spec amendment),
+`SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`:
+
 - `cargo test -p gyre-server --lib -- mcp_briefing_resource
   mcp_notifications_resource mcp_trace_resource mcp_graph_concept
-  mcp_spec_assist mcp_tools_list` — 20 passed, 0 failed.
-- `cargo test -p gyre-server --lib mcp::` — 88 passed, 0 failed.
-- Evidence retained in /tmp/stage/review-evidence/task-010-focused-tests.txt
-  and task-010-mcp-module-tests.txt.
-- `scripts/check-task-commit-attribution.sh` — OK at this branch's tip.
+  mcp_spec_assist mcp_tools_list` — **20 passed, 0 failed**
+  (`task-010-r2-focused-tests.log`).
+- `cargo test -p gyre-server --lib mcp::` — **88 passed, 0 failed**
+  (`task-010-r2-mcp-module.log`).
+- `scripts/check-task-commit-attribution.sh` — OK at this branch's tip
+  (`task-010-r2-attribution.log`).
