@@ -100,23 +100,18 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**Repair round 11 (requirements changed): rebase the retained task-110
-source checkpoint onto base `cd752300c`, merge commit
-`cfd42842d2`.** The prior implementation (9 review rounds, 10/10
-acceptance criteria) was retained on checkpoint `8efdd1c07`; this round
-re-merges it onto the current contract. The merge brought the upstream
-task-208 spec amendment ("My Stuff" Views supersession) which deleted
-the `/api/v1/users/me/{agents,tasks,mrs}` routes, handlers, and ABAC
-mappings that the checkpoint still carried. Conflicts resolved in 4
-files: the three removed me-routes were dropped on both the router
-(`api/mod.rs`) and the ABAC registry (`abac_middleware.rs`) per the
-amended spec, while the task-110 surface was preserved intact
-(`GET /users/me/invitations` plus all tenant/workspace invitation
-routes); the exemption-file narrative conflict took the upstream text
-(entry list unchanged, 2 frozen entries); the coverage header merged
-the base's 2026-11-04 audit with task-110's implemented rows (merged
-counts verified against the table: 11 n/a, 18 task-assigned,
-7 implemented). No product behavior of the invitation flow changed.
+**Repair round 12 (requirements changed): merge the new base
+`3d87a1507` into the retained task-110 checkpoint, merge commit
+`bc4bc1090`.** The base carries the task-108/109/174 surface
+(admin impersonation, spec-lifecycle configuration, explorer view
+updates). The merge auto-resolved everywhere except one conflict in
+`crates/gyre-server/src/api/mod.rs`: both sides had inserted a new
+module declaration at the same alphabetical position (`invitations`
+from task-110, `impersonation` from the base). Resolution keeps both
+modules; the full route registrations, ABAC registry entries, and
+lib.rs pre-auth magic-link router for both surfaces were verified
+present at the merged head. No product behavior of the invitation
+flow changed.
 
 ### Shipped behavior (carried from prior rounds, re-verified at this head)
 
@@ -144,21 +139,32 @@ counts verified against the table: 11 n/a, 18 task-assigned,
   `transition_status` claim as accept, so a racing accept is never
   overwritten; expired tokens are rejected on accept (409 → Expired).
 
-### Test evidence (this head, merge commit `cfd42842d2`)
+### Test evidence (this head, merge commit `bc4bc1090`)
 
 - `cargo test -p gyre-server --lib api::invitations` — 26 passed / 0
   failed (lifecycle, TenantAdmin guard, cross-tenant 403, token
   CSPRNG+hash, cap, decline, expiry, SSO-link, username collisions).
+- `cargo test -p gyre-server --lib impersonation` — 15 passed / 0
+  failed (merged-in base surface, conflict-adjacent).
+- `cargo test -p gyre-server --lib spec_lifecycle` — 9 passed / 0
+  failed (merged-in base surface).
 - `cargo test -p gyre-adapters invitation` — 5 passed / 0 failed
   (roundtrips, pending-scope unique index, raced-duplicate dedupe,
   transition_status source-status guard).
-- `cargo test -p gyre-server --lib` — 1630 passed / 0 failed
-  (merge-validation across users/auth/abac after the task-208 route
-  removals met the task-110 additions).
-- `cargo test --workspace --no-run` — exit 0 (all targets compile).
+- `cargo test -p gyre-server --lib` — 1657 passed / 0 failed
+  (merge-validation: task-110 invitations coexist with the base's
+  impersonation/spec-lifecycle route additions).
+- `cargo test -p gyre-adapters` — 420 passed / 0 failed;
+  `gyre-domain` 452, `gyre-common` 120, `gyre-cli` 150 — all green.
+- `cargo check --workspace --all-targets` — exit 0.
 - Mechanical guards all green: migration versions, ABAC route
   registry, ABAC-exempt handlers, arch, mem port contracts, MCP write
-  tools, dead message kinds, fabricated scope defaults.
-- Evidence retained at `/tmp/stage/review-evidence/task-110-rebase.md`.
+  tools, dead message kinds, scope literal defaults, fabricated scope
+  defaults, inert enforcement, lossy secret conversion, forwarded
+  header trust, in-memory state stores, unbounded external HTTP,
+  migration SQL portability, forged scope fields, task commit
+  attribution.
+- Evidence retained at
+  `/tmp/stage/review-evidence/task-110-rebase-round12.md`.
 - web/dist untouched (executor restores from assignment base; remote
   rebuild owns publication).
