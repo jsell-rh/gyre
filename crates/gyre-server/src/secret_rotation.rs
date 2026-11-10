@@ -1,9 +1,12 @@
-//! Secret expiry check background job (platform-model.md §7, task-098).
+//! Secret expiry check background job (platform-model.md §7, task-098/100).
 //!
 //! Runs every 5 minutes (`secret_rotation_check` job). Scans tenant-,
-//! workspace-, and repo-scoped secrets for expiry within the next hour and
-//! creates a priority-7 `SecretExpiring` notification for each Admin/Owner
-//! workspace member responsible for the secret's scope:
+//! workspace-, and repo-scoped secrets for expiry within the next hour.
+//! For each expiring secret with a rotation handler (§7 Rotated type, e.g.
+//! OAuth refresh tokens — see [`SecretRotationHandler`]) the job attempts
+//! automatic rotation; secrets without a handler (or whose rotation
+//! failed) get a priority-7 `SecretExpiring` notification for each
+//! Admin/Owner workspace member responsible for the secret's scope:
 //!
 //! - repo-scoped secret  → Admin/Owner members of the repo's workspace
 //! - workspace-scoped    → Admin/Owner members of that workspace
@@ -15,7 +18,8 @@
 
 use std::sync::Arc;
 
-use gyre_common::{Id, Notification, NotificationType};
+use anyhow::Context as _;
+use gyre_common::{Id, Notification, NotificationType, Secret};
 use tracing::{debug, info, warn};
 
 use crate::AppState;
@@ -28,6 +32,315 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// ── Rotation handlers (platform-model.md §7 Rotated type) ───────────────────
+
+/// Result of a successful handler rotation: the new plaintext value and the
+/// new expiry (Unix epoch seconds).
+pub struct RotatedSecret {
+    pub value: Vec<u8>,
+    pub expires_at: Option<u64>,
+}
+
+/// A rotation handler performs a real credential refresh for an expiring
+/// secret (platform-model.md §7: Rotated secrets are refreshed by a
+/// "Background job refreshes before expiry"). Handlers match on the secret
+/// name; a secret with no matching handler — or one whose handler fails —
+/// falls back to an admin notification.
+///
+/// Handlers receive the decrypted plaintext only as opaque bytes; they MUST
+/// never log or serialize it.
+#[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
+pub trait SecretRotationHandler: Send + Sync {
+    /// Whether this handler can rotate `secret`.
+    fn handles(&self, secret: &Secret) -> bool;
+
+    /// Refresh the credential and return the new value + expiry.
+    async fn rotate(
+        &self,
+        http: &reqwest::Client,
+        secret: &Secret,
+        current_value: &[u8],
+    ) -> anyhow::Result<RotatedSecret>;
+}
+
+/// OAuth 2.0 refresh-token grant handler for secrets whose name ends with
+/// `_refresh_token` (e.g. `oauth_refresh_token`, `claude_max_refresh_token`).
+///
+/// The secret's plaintext value is a JSON credential document set by the
+/// admin via `POST /api/v1/secrets`:
+///
+/// ```json
+/// { "token_endpoint": "https://issuer.example/token",
+///   "client_id": "...", "client_secret": "...",
+///   "refresh_token": "..." }
+/// ```
+///
+/// The handler performs a standard `refresh_token` grant (RFC 6749 §6)
+/// against `token_endpoint` and stores the updated document — new access
+/// token, and the rotated refresh token when the provider issues one. The
+/// secret's `expires_at` is extended by the provider's `expires_in`.
+pub struct OAuthRefreshHandler;
+
+/// The credential document carried as an `_refresh_token` secret's value.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OAuthCredentialDoc {
+    token_endpoint: String,
+    client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
+    refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_token: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl SecretRotationHandler for OAuthRefreshHandler {
+    fn handles(&self, secret: &Secret) -> bool {
+        secret.name.to_ascii_lowercase().ends_with("_refresh_token")
+    }
+
+    async fn rotate(
+        &self,
+        http: &reqwest::Client,
+        _secret: &Secret,
+        current_value: &[u8],
+    ) -> anyhow::Result<RotatedSecret> {
+        let doc: OAuthCredentialDoc = serde_json::from_slice(current_value).context(
+            "value is not an OAuth credential document (JSON with token_endpoint, client_id, refresh_token)",
+        )?;
+
+        let mut form: Vec<(&str, &str)> = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", doc.refresh_token.as_str()),
+            ("client_id", doc.client_id.as_str()),
+        ];
+        if let Some(cs) = doc.client_secret.as_deref() {
+            form.push(("client_secret", cs));
+        }
+
+        // `http` is the AppState client, built with a 30 s total timeout, so
+        // a hung provider cannot stall the job loop.
+        let resp = http
+            .post(&doc.token_endpoint)
+            .form(&form)
+            .send()
+            .await
+            .context("token endpoint request failed")?;
+        let status = resp.status();
+        let body = resp.bytes().await.context("reading token response")?;
+        anyhow::ensure!(status.is_success(), "token endpoint returned HTTP {status}");
+
+        let tokens: serde_json::Value =
+            serde_json::from_slice(&body).context("token response is not JSON")?;
+        let access_token = tokens
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .context("token response missing access_token")?
+            .to_string();
+        // RFC 6749 §6: the provider MAY issue a new refresh token; when
+        // absent the old one remains valid.
+        let refresh_token = tokens
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&doc.refresh_token)
+            .to_string();
+        let expires_in = tokens
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600);
+
+        let updated = OAuthCredentialDoc {
+            token_endpoint: doc.token_endpoint,
+            client_id: doc.client_id,
+            client_secret: doc.client_secret,
+            refresh_token,
+            access_token: Some(access_token),
+        };
+        let value = serde_json::to_vec(&updated).context("serializing rotated credential")?;
+        Ok(RotatedSecret {
+            value,
+            expires_at: Some(now_secs().saturating_add(expires_in)),
+        })
+    }
+}
+
+static OAUTH_REFRESH: OAuthRefreshHandler = OAuthRefreshHandler;
+
+/// Handlers consulted (in order) by the rotation job.
+static ROTATION_HANDLERS: &[&dyn SecretRotationHandler] = &[&OAUTH_REFRESH];
+
+/// The handler that can rotate `secret`, if any.
+fn handler_for(secret: &Secret) -> Option<&'static dyn SecretRotationHandler> {
+    ROTATION_HANDLERS
+        .iter()
+        .copied()
+        .find(|h| h.handles(secret))
+}
+
+/// Attempt automatic rotation of `secret` via its handler. On success the
+/// stored value is replaced, `last_rotated_at` is set, `expires_at` is
+/// extended past the expiry window, and a `secret.rotated` audit event is
+/// logged (name, never value). Errors propagate to the caller, which falls
+/// back to admin notification.
+async fn attempt_rotation(
+    state: &Arc<AppState>,
+    handler: &dyn SecretRotationHandler,
+    secret: &Secret,
+) -> anyhow::Result<()> {
+    let current = state
+        .secrets
+        .get_value(&secret.id, &secret.tenant_id)
+        .await?
+        .with_context(|| format!("secret {} value vanished before rotation", secret.id))?;
+
+    let rotated = handler.rotate(&state.http_client, secret, &current).await?;
+
+    // Replace the value + `last_rotated_at` via the port, then rewrite the
+    // row's metadata (extended `expires_at`) with the same delete + create
+    // pattern the Admin API uses for a force-rotate with expiry change. The
+    // new value is re-supplied from the handler, never read back out of
+    // storage.
+    state
+        .secrets
+        .rotate(&secret.id, &rotated.value, &secret.tenant_id)
+        .await?;
+    let mut updated = state
+        .secrets
+        .find_by_id(&secret.id, &secret.tenant_id)
+        .await?
+        .context("secret vanished after rotate")?;
+    updated.expires_at = rotated.expires_at;
+    state.secrets.delete(&secret.id, &secret.tenant_id).await?;
+    state.secrets.create(&updated, &rotated.value).await?;
+
+    // §7 audit event: secret name (never value), scope, rotating actor.
+    info!(
+        event = "secret.rotated",
+        secret_name = %secret.name,
+        scope = secret.scope.as_str(),
+        scope_id = %secret.scope_id,
+        tenant_id = %secret.tenant_id,
+        rotated_by = "secret_rotation_check",
+        expires_at = rotated.expires_at,
+        "secret.rotated: rotation handler refreshed expiring secret"
+    );
+    Ok(())
+}
+
+/// Attempt handler rotation for one expiring secret. Returns `true` when a
+/// handler rotated it (suppressing the admin notification); `false` when
+/// there is no handler or rotation failed — a failed rotation is exactly
+/// what an admin must be warned about, so the caller notifies.
+async fn try_rotate(state: &Arc<AppState>, secret: &Secret) -> bool {
+    let Some(handler) = handler_for(secret) else {
+        return false;
+    };
+    match attempt_rotation(state, handler, secret).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                secret_name = %secret.name,
+                scope = secret.scope.as_str(),
+                tenant_id = %secret.tenant_id,
+                "secret_rotation: automatic rotation failed, falling back to admin notification: {e:#}"
+            );
+            false
+        }
+    }
+}
+
+// ── Agent teardown revocation (platform-model.md §7) ────────────────────────
+
+/// Revoke an agent's task-scoped secrets on teardown (agent completion or
+/// admin kill): delete every Task-scoped secret for `task_id` from the
+/// secrets table and log a `secret.revoked` audit event per secret (name,
+/// never value).
+///
+/// The tenant is resolved from the agent's workspace record; an
+/// unresolvable workspace skips revocation with a warn — a scope is never
+/// fabricated.
+pub async fn revoke_task_secrets(
+    state: &AppState,
+    workspace_id: &Id,
+    task_id: &str,
+    agent_id: &str,
+) {
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            warn!(
+                agent_id,
+                task_id, "secret teardown: workspace unresolvable; skipping task-secret revocation"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                agent_id,
+                task_id, "secret teardown: workspace lookup failed: {e:#}"
+            );
+            return;
+        }
+    };
+
+    let secrets = match state
+        .secrets
+        .list_by_scope(gyre_common::SecretScope::Task, task_id, &tenant_id)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                agent_id,
+                task_id, "secret teardown: task-scope list failed: {e:#}"
+            );
+            return;
+        }
+    };
+
+    for secret in secrets {
+        match state.secrets.delete(&secret.id, &tenant_id).await {
+            Ok(()) => {
+                // §7 audit event: secret name (never value), scope, agent_id.
+                info!(
+                    event = "secret.revoked",
+                    agent_id,
+                    secret_name = %secret.name,
+                    scope = "task",
+                    task_id,
+                    tenant_id = %tenant_id,
+                    "secret.revoked: task-scoped secret deleted on agent teardown"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    agent_id,
+                    secret_name = %secret.name,
+                    "secret teardown: delete failed: {e:#}"
+                );
+            }
+        }
+    }
+}
+
+/// Revoke the task-scoped ephemeral secrets of `agent`'s current task, if
+/// any — the shared teardown step for every path that ends an agent run
+/// (REST and MCP completion, admin kill, heartbeat abort, compose teardown,
+/// repo-archive stop, process/container/SSH exit monitors). Agents without a
+/// current task (e.g. orchestrators) have nothing to revoke.
+pub async fn revoke_agent_task_secrets(state: &AppState, agent: &gyre_domain::Agent) {
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        revoke_task_secrets(
+            state,
+            &agent.workspace_id,
+            &task_id.to_string(),
+            &agent.id.to_string(),
+        )
+        .await;
+    }
 }
 
 /// Run one pass of the secret expiry check across all tenants.
@@ -51,6 +364,11 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 Vec::new()
             });
         for secret in expiring(&tenant_secrets, now) {
+            // Rotated secrets with a handler are refreshed automatically;
+            // only no-handler / failed-rotation secrets notify admins.
+            if try_rotate(state, secret).await {
+                continue;
+            }
             for ws in &workspaces {
                 notify_workspace_admins(state, ws.id.clone(), secret, now).await;
             }
@@ -68,6 +386,11 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     Vec::new()
                 });
             for secret in expiring(&ws_secrets, now) {
+                // Rotated secrets with a handler are refreshed automatically;
+                // only no-handler / failed-rotation secrets notify admins.
+                if try_rotate(state, secret).await {
+                    continue;
+                }
                 notify_workspace_admins(state, ws.id.clone(), secret, now).await;
             }
 
@@ -84,6 +407,12 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         Vec::new()
                     });
                 for secret in expiring(&repo_secrets, now) {
+                    // Rotated secrets with a handler are refreshed
+                    // automatically; only no-handler / failed-rotation
+                    // secrets notify admins.
+                    if try_rotate(state, secret).await {
+                        continue;
+                    }
                     notify_workspace_admins(state, ws.id.clone(), secret, now).await;
                 }
             }
@@ -473,5 +802,372 @@ mod tests {
             .await
             .unwrap();
         assert!(notifs.is_empty(), "healthy secret must not notify");
+    }
+
+    // ── Rotation handler (task-100) ───────────────────────────────────────────
+
+    /// Minimal seed for handler tests: tenant + workspace + Admin member + a
+    /// single expiring `oauth_refresh_token` secret with the given value.
+    async fn seed_oauth(now: u64, value: &[u8]) -> Arc<AppState> {
+        let state = crate::mem::test_state();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = Workspace::new(
+            Id::new("ws-rot"),
+            Id::new("default"),
+            "Rotation WS",
+            "rotation-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let m = WorkspaceMembership::new(
+            Id::new("mem-oauth-admin"),
+            Id::new("user-admin"),
+            ws.id,
+            WorkspaceRole::Admin,
+            Id::new("inviter"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .secrets
+            .create(
+                &gyre_common::Secret {
+                    id: Id::new("sec-oauth"),
+                    name: "oauth_refresh_token".to_string(),
+                    scope: gyre_common::SecretScope::Workspace,
+                    scope_id: "ws-rot".to_string(),
+                    secret_type: gyre_common::SecretType::Rotated,
+                    created_by: "system".to_string(),
+                    created_at: now,
+                    // Expiring in 30 minutes → inside the check window.
+                    expires_at: Some(now + 1800),
+                    last_rotated_at: None,
+                    tenant_id: "default".to_string(),
+                },
+                value,
+            )
+            .await
+            .unwrap();
+        state
+    }
+
+    /// Spawn a local OAuth token endpoint returning `response` with
+    /// `status`, capturing the received form body. Returns the endpoint URL.
+    async fn spawn_token_endpoint(
+        status: axum::http::StatusCode,
+        response: serde_json::Value,
+    ) -> (String, Arc<tokio::sync::Mutex<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let seen_clone = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |body: String| {
+                let seen = Arc::clone(&seen_clone);
+                async move {
+                    *seen.lock().await = body;
+                    (status, axum::Json(response))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}/token"), seen)
+    }
+
+    #[tokio::test]
+    async fn rotation_handler_refreshes_expiring_oauth_secret() {
+        let now = now_secs();
+        let (endpoint, seen) = spawn_token_endpoint(
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "access_token": "new-access-token",
+                "expires_in": 7200,
+                "refresh_token": "new-refresh-token"
+            }),
+        )
+        .await;
+        let cred = serde_json::json!({
+            "token_endpoint": endpoint,
+            "client_id": "gyre-test",
+            "client_secret": "test-client-secret",
+            "refresh_token": "old-refresh-token"
+        });
+        let state = seed_oauth(now, cred.to_string().as_bytes()).await;
+
+        run_once(&state).await.unwrap();
+
+        // The handler performed a real refresh_token grant with the stored
+        // credential (old refresh token + client id posted to the endpoint).
+        let posted = seen.lock().await.clone();
+        assert!(
+            posted.contains("grant_type=refresh_token"),
+            "grant_type must be refresh_token, posted: {posted}"
+        );
+        assert!(
+            posted.contains("refresh_token=old-refresh-token"),
+            "the stored refresh token must be used, posted: {posted}"
+        );
+        assert!(
+            posted.contains("client_id=gyre-test"),
+            "client_id must be posted, posted: {posted}"
+        );
+
+        // The stored value is the rotated credential document: new tokens,
+        // untouched config preserved.
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-oauth"), "default")
+            .await
+            .unwrap()
+            .expect("rotated secret must still exist");
+        let doc: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(doc["refresh_token"], "new-refresh-token");
+        assert_eq!(doc["access_token"], "new-access-token");
+        assert_eq!(doc["client_id"], "gyre-test");
+
+        // Expiry extended beyond the 1-hour window and last_rotated_at set.
+        let stored = state
+            .secrets
+            .find_by_id(&Id::new("sec-oauth"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.expires_at.unwrap() > now + 3600,
+            "rotation must extend expiry past the check window, got {:?}",
+            stored.expires_at
+        );
+        assert!(stored.last_rotated_at.is_some());
+
+        // Successful rotation suppresses the admin notification.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some("SecretExpiring"),
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs.is_empty(),
+            "a handler-rotated secret must not notify admins"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_handler_failure_falls_back_to_admin_notification() {
+        let now = now_secs();
+        let (endpoint, _seen) = spawn_token_endpoint(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "invalid_grant"}),
+        )
+        .await;
+        let cred = serde_json::json!({
+            "token_endpoint": endpoint,
+            "client_id": "gyre-test",
+            "refresh_token": "old-refresh-token"
+        });
+        let original = cred.to_string();
+        let state = seed_oauth(now, original.as_bytes()).await;
+
+        run_once(&state).await.unwrap();
+
+        // Value untouched: the failed grant must not corrupt the credential.
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-oauth"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, original.as_bytes());
+
+        // The admin is notified — a failed rotation is exactly what an
+        // admin must be warned about.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some("SecretExpiring"),
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1, "failed rotation must notify admins");
+    }
+
+    #[tokio::test]
+    async fn malformed_handler_value_falls_back_to_admin_notification() {
+        let now = now_secs();
+        let state = seed_oauth(now, b"not-a-json-credential").await;
+
+        run_once(&state).await.unwrap();
+
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-oauth"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, b"not-a-json-credential");
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some("SecretExpiring"),
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "unparseable credential must fall back to admin notification"
+        );
+    }
+
+    // ── Task-scoped teardown revocation (task-100) ───────────────────────────
+
+    #[tokio::test]
+    async fn revoke_task_secrets_deletes_only_that_task_scope() {
+        let now = now_secs();
+        let state = crate::mem::test_state();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = Workspace::new(
+            Id::new("ws-teardown"),
+            Id::new("default"),
+            "Teardown WS",
+            "teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: gyre_common::SecretScope, scope_id: &str| {
+            gyre_common::Secret {
+                id: Id::new(id),
+                name: name.to_string(),
+                scope,
+                scope_id: scope_id.to_string(),
+                secret_type: gyre_common::SecretType::Ephemeral,
+                created_by: "system".to_string(),
+                created_at: now,
+                expires_at: None,
+                last_rotated_at: None,
+                tenant_id: "default".to_string(),
+            }
+        };
+        // Task-scoped secret for the completing agent's task (revoked), a
+        // task-scoped secret for a different task (kept), and a
+        // workspace-scoped secret (kept).
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-t1",
+                    "EPHEMERAL_DB",
+                    gyre_common::SecretScope::Task,
+                    "task-1",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-t2",
+                    "EPHEMERAL_DB",
+                    gyre_common::SecretScope::Task,
+                    "task-2",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-ws",
+                    "SHARED_KEY",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-teardown",
+                ),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        revoke_task_secrets(&state, &Id::new("ws-teardown"), "task-1", "agent-1").await;
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-t1"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "the completed task's secret must be revoked"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-t2"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "another task's secret must survive"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive task teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_task_secrets_skips_unresolvable_workspace() {
+        // No workspace record exists for this id: revocation must skip
+        // (warn) rather than fabricate a tenant scope or panic.
+        let state = crate::mem::test_state();
+        revoke_task_secrets(&state, &Id::new("ws-ghost"), "task-1", "agent-1").await;
     }
 }

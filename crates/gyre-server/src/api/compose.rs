@@ -213,6 +213,11 @@ pub async fn compose_teardown(
                 let _ = agent.transition_status(AgentStatus::Dead);
                 agent.last_heartbeat = Some(now);
                 let _ = state.agents.update(&agent).await;
+
+                // Platform Model §7: compose teardown kills the agent —
+                // revoke its task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
             }
         }
     }

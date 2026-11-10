@@ -547,9 +547,6 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
-  myAgents: () => request('/users/me/agents'),
-  myTasks: () => request('/users/me/tasks'),
-  myMrs: () => request('/users/me/mrs'),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
