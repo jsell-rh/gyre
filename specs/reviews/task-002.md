@@ -154,3 +154,25 @@
 - [x] **F23 verified.** `completed_at` (main.rs:1037-1038) now calls `format_timestamp(completed_at)` instead of raw epoch interpolation. Matches `gyre trace` formatting pattern.
 
 - [x] **Full re-verification (R13):** Independent end-to-end check of all 6 CLI commands against HSI §11 spec signatures, server endpoint URLs (verified in `api/mod.rs` route registrations), response struct field names, SSE event-type discrimination, doc comments, and query parameter passthrough. All 23 findings from R1-R12 confirmed resolved. No new findings. `scripts/check-cli-spec-parity.sh` passes. `scripts/check-response-consumption.sh` flags only pre-existing gaps in non-TASK-002 endpoints.
+
+## R14 Findings (assignment review — candidate f90089f5a87de51d77598ff25818c1bf74077550 vs base 078ec12a5745379c254fe7dd00261f02e28d86cb)
+
+**Date:** 2026-04-08 (R14)  
+**Verdict:** approved — no findings
+
+**Scope of the candidate diff:** the six HSI parity commands were merged before this assignment's base (PR #627, R1–R13 fixes); the candidate diff touches only `scripts/check-cli-spec-parity.sh` (commit e970c9155) and `specs/tasks/task-002.md` (process commits restoring the assigned contract). CLI production code is byte-identical to base.
+
+### Independent evidence
+
+- **Six commands present and spec-conformant (HSI §11):** `Briefing { workspace: Option<String>, since: Option<u64> }`, flat `Inbox` with bare-list + `dismiss`/`resolve` subcommands, `Explore { concept, repo: Option, workspace: Option }`, `Trace { mr_id }`, `Spec::Assist`, `Divergence { workspace: Option }` (main.rs:133–204). All client wiring verified against real routes: `/api/v1/merge-requests/:id/trace` (api/mod.rs:370), `/api/v1/notifications/:id/dismiss|resolve` (mod.rs:879/883, resolve sends a JSON body), divergence passes `notification_type=ConflictingInterpretations` server-side, spec-assist client discriminates `complete`/`error`/`partial` SSE events.
+- **Tests:** `cargo test -p gyre-cli` → 149 unit + 1 integration pass, including all 18 HSI command tests and the formatting-helper tests (`parse_priority_range_*`, `format_age_*`, `format_timestamp_*`).
+- **Parity-gate false-positive claim confirmed:** the base script (git show 078ec12a5) run on the clean candidate tree exits 1 with exactly six spurious findings — `op`/`path`/`content` (nested diff-op fields) each reported twice (the duplicate comes from the comment line at client.rs:1017 mentioning `"complete"`). The old Check 10 compared nested diff-op accesses against the complete event's top-level field set (`{diff, explanation}`) — a genuine category error.
+- **Repaired script:** `scripts/check-cli-spec-parity.sh` exits 0 on the clean tree.
+- **Detection-strength mutation test:** reintroducing the original task-012 R2 F6 flaw (`op["text"]` in the spec-assist display loop, main.rs:1334) makes the repaired script exit 1 with a precise finding naming the field, client fn, server construction site, and display line. Tree restored (git status clean after restore).
+- **Other gates:** `check-response-consumption.sh` exit 0; `check-task-commit-attribution.sh` exit 0.
+- **Task-document contract:** current `specs/tasks/task-002.md` is the assigned contract verbatim (frontmatter through the R6 commit line, byte-compared against the assignment) with only a `## Shipped` appendix — exactly what the durable contract finding required.
+
+### Observations (non-blocking)
+
+- The receiver-scoping in repaired Check 10 means a future call site whose return value is not bound via `let x = ... fn(...)` (e.g., `for op in api.fn(...).await?` directly, or passing the result to a helper) would skip the field comparison (`CLI_FIELDS=""`). This is documented in the script comment, consistent with the lint's "not exhaustive" charter and the task-099 Check 7 precision-repair precedent, and the primary flaw class (wrong field on the event receiver) is provably still detected.
+- The `/tmp/stage/review-evidence/task002-contract-repair-probes.txt` path cited in the Shipped notes is an ephemeral implementer-environment path, not a repo artifact.
