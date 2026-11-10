@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222"]
+commits: ["c6b520a1de330410641f3ac17386c2136d590676", "5482ae4f1cbbc58fb0c867a2cd45e9436e94b9b5", "e5b481de02a551664a7bece73d7423fc0be6df30", "013a871a444b20079a21ea01843ddd36540b9222", "79331c4264dd96cdd0ac84178f5a34f78d7415b8", "1ffe1397ff4d28e4bd0c94997465b90bd6622827"]
 ---
 
 ## Spec Excerpt
@@ -126,14 +126,16 @@ round-5 base merge `d9e7785`, the round-6 base merge
 `4ef962e48`, the round-7 base merge `37a8193cf`, the
 round-8 clippy repair `5482ae4f1`, the round-9 SSH
 name-validation repair `c6b520a1d`, and the round-10 base merge
-`e28d79994` carry the work
+`e28d79994`, and the round-11 base merge `79331c426` +
+meta-spec test repair `1ffe1397f` carry the work
 below. Evidence is saved
 under `/tmp/stage/review-evidence/` (per-round subdirectories;
 rounds 4–6 in `round4/`, `round5-merge-repair/`, and
 `round6-merge-repair/`; round 7 in `round7-merge-repair/`; round 8
 in `round8-clippy-repair/`; round 9 in
 `round9-ssh-name-orphan/`; round 10 in
-`round10-merge-repair/`).
+`round10-merge-repair/`; round 11 in
+`round11-merge-repair/`).
 
 ### Behavior
 
@@ -383,6 +385,39 @@ task-177 rendering + task-099/140 process/spec-approval upstream):
   files auto-merged; `web/dist` kept as auto-merged (executor
   restores dist from the assignment base).
 
+Round 11 (`79331c426` + `1ffe1397f`, rebase repair — base merge
+`b5a872087`, task-108 admin impersonation + task-116 meta-spec
+prompt delivery + meta-spec repository split upstream):
+
+- **Rebase repair plus one base-test adaptation.** The two content
+  conflicts were both additive and resolved by keeping BOTH sides'
+  additions: `lib.rs` keeps HEAD's `mem_workspace_store`
+  (compute-target delete guard) beside base's
+  `mem_meta_spec_binding_store`; `api/spawn.rs`'s `effective_work_dir`
+  takes the base's task-106 shape (prefer the agent's jj workspace
+  dir, else the plain-git worktree — HEAD's canonicalize-the-worktree
+  behavior is the base's else-if branch) with a combined comment; the
+  test-module imports are the union of both sides'. One auto-merge
+  semantic artifact fixed in `mem.rs` (the recurring round-5 shape):
+  base's new `test_state_with_jj_ops` /
+  `test_state_with_jj_and_git_ops` builders updated to the merged
+  3-tuple `shared_workspace_policy_pair` / 7-arg `test_state_inner`
+  with a paired `ws_store`.
+- **Base's task-116 meta-spec prompt-delivery test adapted to the
+  real kubernetes dispatch** (`1ffe1397f`): the test drove the spawn
+  through a Kubernetes-typed compute target whose `config.command`
+  ran a local dump script — relying on the pre-task-117 dispatch
+  where Kubernetes-typed targets fell through to the local
+  LocalTarget arm. Task-117's real Kubernetes backend dispatches
+  those targets to kubectl, so the local script never ran. Repaired
+  with the same process-boundary double the task-097 tests use
+  (round-2 precedent): a stub kubectl captures the Pod manifest that
+  production `build_pod_manifest` applies, and the assertions read
+  `GYRE_META_SPEC_SET_SHA` (must equal the response's
+  `meta_spec_set_sha`) and `GYRE_META_SPEC_PROMPT` (must contain the
+  seeded persona section) from `spec.containers[0].env`. Same
+  assertion strength, observed against real dispatch code.
+
 ### Test evidence
 
 All logs with exit codes under `/tmp/stage/review-evidence/`
@@ -482,5 +517,21 @@ All logs with exit codes under `/tmp/stage/review-evidence/`
   in-memory-state-stores, migration-versions,
   task-commit-attribution gates -> exit 0 (log in
   `round10-merge-repair/evidence.log`).
+- Round 11 (`79331c426` + `1ffe1397f`, merge repair): `cargo check -p
+  gyre-server --all-targets` -> exit 0 (also `gyre-cli`); full
+  `cargo test -p gyre-server --lib` -> **1627 passed, 0 failed**
+  (includes base's task-108/116 additions; `api::spawn` -> **52
+  passed** with the adapted meta-spec delivery test);
+  `cargo test -p gyre-adapters compute --lib` -> **39 passed,
+  0 failed** (4 ignored); web vitest `WorkspaceSettings.test.js` ->
+  **72 passed**; `cargo fmt --check` -> exit 0;
+  `check-clippy-diff.py` / `check-rustfmt-diff.py` against `HEAD^1`
+  -> "changed lines clean" (58 Rust files); arch,
+  abac-route-registry, abac-exempt-handlers, forged-scope-fields,
+  inert-enforcement, scope-literal-defaults,
+  fabricated-scope-defaults, mem-port-contracts,
+  in-memory-state-stores, migration-versions,
+  task-commit-attribution gates -> exit 0 (logs in
+  `round11-merge-repair/`).
 - `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
