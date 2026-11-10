@@ -133,3 +133,20 @@ Full `cargo test --all` and GitHub CI are owned by the verification stage.
 Note: check-cross-surface-parity, check-cli-spec-parity, and check-dependent-scope-resolution
 fail identically on base 18adceb68 (verified via git worktree); those are pre-existing findings
 outside this task's scope.
+
+### Verification (repair round)
+
+The executor restored the assigned task document after the checkpointed contract repair
+(protected-text change, no code finding); the production fix from 337447e39/467e577f5 —
+including the post-base-merge test repair a8c3af6f3 (merge 9b0d29134) — is preserved
+unchanged and re-verified on the current head:
+
+- Focused suites re-run green (SKIP_WEB_BUILD=1): gyre-domain `repo_access` 8/8,
+  gyre-server `workspace_ownership` 7/7, `api::repo_access` 4/4, `api::users` 22/22,
+  `git_http` 60/60.
+- Mechanical guards re-run PASS: check-arch, check-migration-versions,
+  check-migration-sql-portability, check-mem-port-contracts, check-abac-route-registry,
+  check-task-commit-attribution; `cargo fmt --all -- --check` clean.
+- Command transcripts and exit codes saved under /tmp/stage/review-evidence/.
+
+Full `cargo test --all` and GitHub CI remain owned by the verification stage.
