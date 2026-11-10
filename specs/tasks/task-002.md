@@ -86,17 +86,29 @@ When working on this task:
 6. Add tests following the existing test pattern
 7. On completion, update progress to `ready-for-review` and list git commits below
 
+## Git Commits
+
+- `feat(cli): add 6 HSI parity commands — briefing, inbox, explore, trace, spec assist, divergence`
+- `fix(cli): address R1 review findings — spec-signature conformance for all 6 HSI commands`
+- `fix(cli): address R2 review findings — notification_type filter, trace endpoint, repo inference`
+- `fix(cli): address R3 finding — send JSON body for inbox resolve POST`
+- `fix(cli): address R4 findings — stale help text, SSE event-type discrimination`
+- `fix(cli): address R5 findings — response field name/shape mismatch`
+- `fix(cli): address R6 findings — dead agent_name field access + stale doc comment`
+
 ## Shipped
 
 The six HSI parity commands (`gyre briefing`, `gyre inbox` with bare-list + `dismiss`/`resolve`, `gyre explore`, `gyre trace`, `gyre spec assist`, `gyre divergence`) are implemented and present at this branch's base via the merged PR #627 work, carrying every R1–R13 review fix: spec-signature conformance (optional `--workspace`, flat `gyre inbox`, git-remote repo inference for `spec assist`/`explore`), the `/merge-requests/:id/trace` endpoint with GateTrace formatting, `notification_type=ConflictingInterpretations` server-side filtering, JSON body on inbox resolve POST, SSE event-type discrimination in `spec_assist`, `body`/`entity_ref` field names in divergence output, and full `BriefingItem`/`completed_agents` field rendering (all 6 fields, `format_timestamp`, `cross_workspace`).
 
-### This assignment's repair
+### Assignment repairs
 
-The task's R13 verification gate `scripts/check-cli-spec-parity.sh` failed on the clean base tree: Check 10 compared the display loop's *nested* diff-op accesses (`d["op"]`, `d["path"]`, `d["content"]`) against the spec-assist complete event's *top-level* field set (`{diff, error, explanation}`): a category error producing six false positives that blocked the pre-commit gate. Repaired in commit `e970c9155` by scoping the check to receivers that actually hold complete-event values (the call's assignment variable and its loop variable), the same precision-repair pattern as task-099's Check 7 fix. Detection strength preserved via mutation test: reintroducing the original task-012 R2 F6 flaw (`op["text"]`) still fails the check with a precise finding.
+- **Parity gate false positive (commit `e970c9155`):** `scripts/check-cli-spec-parity.sh` Check 10 compared the display loop's *nested* diff-op accesses (`d["op"]`, `d["path"]`, `d["content"]`) against the spec-assist complete event's *top-level* field set (`{diff, error, explanation}`) — a category error producing six false positives that blocked the pre-commit gate on a clean tree. Repaired by scoping the check to receivers that actually hold complete-event values (the call's assignment variable and its loop variable), the same precision-repair pattern as task-099's Check 7 fix. Detection strength preserved via mutation test: reintroducing the original task-012 R2 F6 flaw (`op["text"]`) still fails the check with a precise finding.
+- **Task-document contract (this round):** a prior checkpoint had replaced the assigned `## Git Commits` section with progress notes, changing protected task text. The assigned contract is restored verbatim and these notes live under `## Shipped` appended after it; no production code changed.
 
 ### Test evidence
 
 - `cargo test -p gyre-cli`: 149 unit + 1 integration tests pass, including all 18 HSI command tests (`cli_briefing_*`, `cli_inbox_*`, `cli_explore_*`, `cli_trace_parses`, `cli_spec_assist_*`, `cli_divergence_*`).
-- `scripts/check-cli-spec-parity.sh`: passes on clean tree (exit 0); fails correctly on mutation (exit 1).
-- `scripts/check-response-consumption.sh`: passes (exit 0).
-- Evidence and mutation logs saved under `/tmp/stage/review-evidence/`.
+- `scripts/check-cli-spec-parity.sh`: exit 0 on clean tree.
+- `scripts/check-response-consumption.sh`: exit 0.
+- `scripts/check-task-commit-attribution.sh`: exit 0.
+- Probe log: `/tmp/stage/review-evidence/task002-contract-repair-probes.txt`.
