@@ -3024,7 +3024,7 @@ mod registry_tests {
             .filter(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift)
             .collect();
         assert_eq!(drift.len(), 1, "expected exactly one drift notification");
-        assert_eq!(drift[0].priority, 6);
+        assert_eq!(drift[0].priority_rank, 6);
         assert!(drift[0].title.contains("system/stale.md"));
         assert!(drift[0].title.contains("v1"));
         assert!(drift[0].title.contains("v2"));
