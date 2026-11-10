@@ -544,6 +544,23 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register meta_spec_stale_pin_check job (agent-runtime.md §2 Stale Pin
+    // Detection): compares spec-level binding pins against current versions.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_stale_pin_check".to_string(),
+                description: "Detects specs pinning old meta-spec versions and creates priority-6 \
+                     MetaSpecDrift notifications (agent-runtime §2)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+        )
+        .await;
+
     // Register secret expiry check job (every 5 minutes, platform-model.md §7)
     registry
         .register(
@@ -579,6 +596,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
             },
             |state| async move {
                 crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
+    // Register impersonation expiry job (runs every 30 seconds,
+    // identity-security.md §Impersonation): ends sessions past their TTL
+    // (emitting ImpersonationEnded) and expires stale approval requests.
+    registry
+        .register(
+            JobDefinition {
+                name: "impersonation_expiry".to_string(),
+                description: "Ends impersonation sessions past their TTL and expires \
+                     stale approval requests (identity-security.md §Impersonation)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::impersonation::expire_sessions(&state)
                     .await
                     .map(|_| ())
             },

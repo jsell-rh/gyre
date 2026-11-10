@@ -431,7 +431,7 @@ diesel::table! {
         spec_sha -> Text,
         approver_id -> Text,
         signature -> Nullable<Text>,
-        approved_at -> BigInt,
+        approved_at -> Nullable<BigInt>,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
         revocation_reason -> Nullable<Text>,
