@@ -78,7 +78,7 @@ pub async fn list_trust_anchors(
     Path(tenant_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<TrustAnchorResponse>>, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "GET /api/v1/tenants/:id/trust-anchors").await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),
@@ -95,7 +95,7 @@ pub async fn create_trust_anchor(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateTrustAnchorRequest>,
 ) -> Result<(StatusCode, Json<TrustAnchorResponse>), ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "POST /api/v1/tenants/:id/trust-anchors").await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),
@@ -141,7 +141,7 @@ pub async fn get_trust_anchor(
     Path((tenant_id, anchor_id)): Path<(String, String)>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<TrustAnchorResponse>, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "GET /api/v1/tenants/:id/trust-anchors/:aid").await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),
@@ -162,7 +162,7 @@ pub async fn update_trust_anchor(
     auth: AuthenticatedAgent,
     Json(req): Json<UpdateTrustAnchorRequest>,
 ) -> Result<Json<TrustAnchorResponse>, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "PUT /api/v1/tenants/:id/trust-anchors/:aid").await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),
@@ -204,7 +204,12 @@ pub async fn delete_trust_anchor(
     Path((tenant_id, anchor_id)): Path<(String, String)>,
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    require_admin(&auth)?;
+    require_admin(
+        &state,
+        &auth,
+        "DELETE /api/v1/tenants/:id/trust-anchors/:aid",
+    )
+    .await?;
     if auth.tenant_id != tenant_id {
         return Err(ApiError::Forbidden(
             "cannot access trust anchors for a different tenant".to_string(),
@@ -231,8 +236,13 @@ pub async fn delete_trust_anchor(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn require_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+async fn require_admin(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    endpoint: &str,
+) -> Result<(), ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(state, auth, "Admin", endpoint).await;
         return Err(ApiError::Forbidden(
             "trust anchor management requires Admin role".to_string(),
         ));

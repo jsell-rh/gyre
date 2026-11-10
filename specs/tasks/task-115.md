@@ -2,7 +2,7 @@
 title: "Implement spec approval signal chain & orchestrators"
 spec_ref: "agent-runtime.md §1 Agent Lifecycle"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "agent-runtime.md §The Model"
   - "agent-runtime.md §1. Agent Lifecycle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: []
+commits: ["1f50d0dc0574a01176f09d052a6812593f4d73ce", "86415e4bbe32a0e16de22cc5d9e08a43442c788d", "147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
 ---
 
 ## Spec Excerpt
@@ -89,3 +89,50 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
+
+## Shipped
+Rebase repair (merge commit `dac3c7e65`, onto base `b5a872087` —
+task-108 admin impersonation): auto-merge resolved every file except
+one content conflict in `.github/workflows/e2e.yml`, where both sides
+pin the e2e job to ubuntu-24.04. Merged the rationale comments into one
+— kept the base's E2E run-ID evidence (`42586542960`, browser-install
+failure on ubuntu-26.04) and the branch's chromium r1208→r1254
+visual-baseline risk — with `runs-on: ubuntu-24.04` unchanged. No
+source-code conflicts: the signal chain merged cleanly over task-108's
+auth/middleware/spawn changes.
+
+### Test evidence (head `dac3c7e65`)
+
+- `cargo test -p gyre-server --lib` -> **1636 passed, 0 failed**
+  (includes all 19 signal_chain tests, the api::orchestrator and
+  stale_agents suites, and the base's new impersonation tests).
+- `cargo build --all` -> clean.
+- Evidence: `/tmp/stage/review-evidence/task-115-rebase-b5a872087.txt`.
+- Full workspace suites, architecture checks, all-target Clippy, and
+  GitHub CI remain for the verification gate.
+
+### Prior rounds (context)
+
+Phases 1-3 of the signal chain: approve handler (ledger record + bus
+`SpecApproved` emission + `signal_chain::on_spec_approved` routing behind
+the base's mode-based approval resolution and Approved-transition gate),
+`OrchestratorRegistry` per-workspace/per-repo mutexes, spawn-on-demand
+workspace orchestrator with delegation + coordination tasks and
+cross-workspace p4 notifications, task scheduler distinguishing
+Delegation/Coordination/Implementation, repo orchestrator spawn with
+spec-pinned decomposition into ordered Implementation sub-tasks. Repair
+rounds: scheduler double-processing guards (cycle run lock, re-read after
+repo mutex, LLM latency bounds - `de294c12`), false bulk-ack of the
+orchestrator inbox, sub-task repo/workspace scoping, round-3 (`147d8259`:
+TaskRepository::create workspace_id restoration + empty-SHA spec_ref
+hard-fail), round-4 (`86415e4b`: duplicate migration version renumbered
+to `2026-10-10-000057_task_spec_ref`), rustfmt gate repair (`1f50d0dc0`),
+e2e runner pin (`787510310`, ubuntu-24.04 — Playwright 1.58.2 has no
+chromium build for ubuntu-26.04; an upgrade to 1.65.0 was rejected
+because it would move chromium r1208→r1254 and risk the committed
+visual baselines, which this sandbox cannot revalidate because every
+browser CDN is egress-blocked), and earlier rebase repairs (`88e97e0d`,
+`e4a8e9b8`, `1325137c8` merging base `fefde2946`), and the rebase onto
+base `774737638` (merge `e0408d527`, task-099 spawn-core/persona
+changes — signal chain adapted to the `&Arc<AppState>` + 3-tuple
+spawn-core contract and fail-closed orchestrator persona resolution).

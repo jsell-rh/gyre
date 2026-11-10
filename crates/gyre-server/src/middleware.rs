@@ -114,6 +114,14 @@ pub async fn last_seen_middleware(
 
     // Extract user_id from auth context. Split+reassemble to use the extractor.
     let (mut parts, body) = req.into_parts();
+    // This middleware runs BEFORE `abac_middleware`, which owns impersonated
+    // action attribution for `/api/v1` routes (evaluated routes after policy
+    // evaluation, exempt/unresolved routes before the passthrough). Mark the
+    // request so the extraction below does not double-count the same call at
+    // the auth-resolution layer (identity-security.md §Impersonation).
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
     let user_id = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(auth) => auth.user_id.map(|id| id.as_str().to_owned()),
         Err(_) => None,
@@ -250,6 +258,7 @@ mod tests {
             breaking_changes: base.breaking_changes.clone(),
             dependency_policies: base.dependency_policies.clone(),
             process_registry: base.process_registry.clone(),
+            spawned_backends: base.spawned_backends.clone(),
             agent_logs: base.agent_logs.clone(),
             agent_log_tx: base.agent_log_tx.clone(),
             quality_gates: base.quality_gates.clone(),
@@ -262,6 +271,7 @@ mod tests {
             storage: base.storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
+            spec_lifecycle_configs: base.spec_lifecycle_configs.clone(),
             attestation_store: base.attestation_store.clone(),
             chain_attestations: base.chain_attestations.clone(),
             key_bindings: base.key_bindings.clone(),
@@ -304,6 +314,7 @@ mod tests {
             ws_connections: base.ws_connections.clone(),
             ws_connection_counter: base.ws_connection_counter.clone(),
             ws_connection_workspaces: base.ws_connection_workspaces.clone(),
+            ws_connection_users: base.ws_connection_users.clone(),
             traces: base.traces.clone(),
             otlp_config: base.otlp_config.clone(),
             conversations: base.conversations.clone(),
@@ -315,6 +326,7 @@ mod tests {
             user_tokens: base.user_tokens.clone(),
             secrets: base.secrets.clone(),
             judgment_ledger: base.judgment_ledger.clone(),
+            orchestrator_registry: base.orchestrator_registry.clone(),
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
