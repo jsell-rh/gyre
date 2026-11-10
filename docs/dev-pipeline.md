@@ -34,6 +34,16 @@ behavior and debug assertions remain enabled) to reduce memory and workspace
 footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
 assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
 memory. Compute choices and the triggering evidence remain in the ledger.
+For Kubernetes-backed workers, the scoped namespace's Container LimitRanges must
+permit the 8 GiB fallback. Before running a compute stage, the harness checks
+every applicable maximum against that task/stage's requested memory. A mismatch
+reports `sandbox_admission` with the LimitRange name and requested/allowed sizes,
+then waits five minutes before checking again. It creates no sandbox, releases
+compute admission and the verification lane, and does not count a code failure.
+Correcting the namespace policy resumes work automatically; default workers stay
+at 4 GiB. Failed or incomplete policy reads retry without allocating compute.
+Aggregate ResourceQuota and node shortages remain separate capacity constraints;
+the preflight does not raise either quota or worker memory.
 Build workspaces need 30 GiB persistent disk; this is separate from worker RAM.
 With the scoped Kubernetes runtime context configured, the harness verifies
 gateway ownership and PVC owner UID, expands only that sandbox's volume, and
