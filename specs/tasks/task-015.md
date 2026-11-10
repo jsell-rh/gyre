@@ -2,9 +2,9 @@
 title: "Flow Canvas — Animated Trace Visualization"
 spec_ref: "ui-layout.md §4 (Flow Layout), system-explorer.md §5 (Flow Traces), human-system-interface.md §3a (Test-Time Trace Capture — Explorer Visualization)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections: []
-commits: ["19136d8fa68871d99f7ac44f55855ac2b1a474d1", "06e0fd50ebf715a61872ba200b5edf4c66c1abdb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -129,83 +129,3 @@ When working on this task:
 ## Git Commits
 
 Implemented as part of HSI milestone PRs (pre-task-creation), integrated into ExplorerCanvas.svelte rather than as separate FlowCanvas.svelte component. Status updated to `complete` by project manager after code verification.
-
-## Shipped
-
-The flow layout now renders through a dedicated `FlowCanvas.svelte`
-(ui-layout.md §4): an SVG node/edge layer (clickable, keyboard-focusable,
-labelled) with a Canvas 2D particle overlay on top that switches to WebGL2
-above 100 concurrent particles. ExplorerCanvas delegates to FlowCanvas for
-`layout: "flow"` views (new `layout` prop, wired from ExplorerView's active
-generated-view layout) and keeps its chrome (toolbar, lens toggle,
-breadcrumb, search). The evaluative-lens particle path on non-flow views
-shares the same particle modules (`flow-particles.js`, `particle-layer.js`)
-and also switches to a WebGL2 overlay canvas above the 100-particle
-threshold, so both renderers honor the spec's rendering rule.
-
-Contract repair round: the executor restored the assigned task document
-after the previous round rewrote protected task text. This round keeps the
-assigned body byte-identical (acceptance checkboxes, Agent Instructions,
-and the Git Commits section above untouched), changes only the progress
-and commits frontmatter fields, and confines all progress notes to this
-Shipped section. The production fix (19136d8fa + the retained 06e0fd50e)
-is preserved unchanged on the branch.
-
-### Behavior
-
-- Nodes/edges: SVG `g[role=button]` / `path` elements; layer positions from
-  `flow-layout.js` (depth columns along directed edges, contains-edges
-  excluded from depth, cycle-safe longest-path depths); pan/zoom with
-  cursor-anchored wheel zoom; fit on layout change; camera focus requests
-  (detail-panel trace step clicks) honored.
-- Particles: resolved exclusively by `particlesAtTime`, so live playback,
-  paused scrubbing, step-through and the test-case filter all agree per
-  timestamp; 4px base (6px hovered), spec colors #3b82f6 / #ef4444 with
-  per-test-case hue shift + legend; fading trail (200ms decay, 20px cap)
-  via `trailSegments`.
-- Playback: Play/Pause, Step (advance to next filtered span start and
-  pause), speed 0.25x-10x, scrubber, test selector, all through the shared
-  PlaybackControls component; a generated flow view's `playbackRequest`
-  nonce auto-starts playback and switches the lens to evaluative.
-- Node badges (evaluative lens): span count, error rate, mean duration as
-  SVG chips; node hover shows the aggregate tooltip.
-- Interactions: node click during animation pauses and opens the detail
-  panel with the nearest particle's span (`_activeSpan`); particle click
-  pauses and shows the span detail; particle hover shows the I/O summary
-  tooltip; edge click lists the spans that traversed it with timings;
-  double-click drills (contains-children scope in-canvas via a scope bar,
-  repo-boundary drills delegated to the host shell).
-- WebGL2 switch (`particle-layer.js`): above 100 concurrent particles the
-  layer swaps its canvas element for a fresh WebGL2 one (a canvas keeps
-  the first context type it is given) and renders trail lines plus
-  glow/body/core points; it falls back to Canvas 2D when WebGL2 is
-  unavailable and switches back when the count drops to the threshold.
-- Spec reconciliation: explorer-canvas.md's component tree updated to the
-  implemented architecture (it previously claimed FlowCanvas merged into
-  EvaluativeOverlay, contradicting ui-layout.md §4's SVG + overlay
-  requirement).
-
-### Test evidence
-
-- `FlowCanvas.test.js` (13): SVG layer + overlay architecture, ExplorerCanvas
-  delegation for flow views (no duplicate playback bar), node badges,
-  freeze-on-scrub, test filter + legend, step-through, playbackRequest
-  auto-start, click-node pause + `_activeSpan` payload, particle hover
-  tooltip / click pause + span detail, edge traversing-spans payload,
-  double-click drill + scope-bar navigation, trail fade, and the >100
-  WebGL2 switch (with switch-back below the threshold).
-- `particle-layer.test.js` (7): 2D painter order/alphas (trail under body,
-  round cap, 0.6 trail alpha scale), threshold mode switch with fresh
-  canvas element per mode, WebGL2 unavailability fallback, clear in both
-  modes.
-- `flow-layout.test.js` (8): depth columns, longest-path diamond depths,
-  contains-edges excluded from depth, column stacking and deterministic
-  order, cycle safety, edge path shapes (forward bezier + backward
-  under-loop).
-- Full web suite at delivery: 104 files, 2075 passed, 41 skipped
-  (`vitest run`).
-- This repair round re-verified the preserved fix on the restored branch
-  (HEAD e3c377978): focused run of FlowCanvas / particle-layer /
-  flow-layout / flow-particles / ExplorerCanvas.flow — 5 files, 65 tests,
-  all passed (evidence: /tmp/stage/review-evidence/task-015-focused-vitest.txt).
-  No source changes were needed.
