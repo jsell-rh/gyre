@@ -136,6 +136,27 @@ pub struct Agent {
     /// `None` until the first push resolves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_level: Option<u8>,
+    /// Persona attached at spawn time (platform-model.md §3: orchestrators
+    /// run with their tier's persona). Workers may carry one too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<Id>,
+}
+
+/// Bootstrap workspace scope for entities constructed without an explicit
+/// workspace assignment.
+///
+/// This is the DOCUMENTED contract, not a fabricated fallback:
+/// hierarchy-enforcement.md §1 "Bootstrap Behavior" provisions a default
+/// workspace under the default tenant on first startup, and its migration
+/// strategy backfills tasks, agents, and merge requests into that
+/// workspace ("Same for tasks, agents, merge_requests"); its single-tenant
+/// note states construction-time scope defaults suffice while the default
+/// tenant is the only tenant. Constructors without a workspace parameter
+/// bind the entity to that provisioned bootstrap workspace; callers with a
+/// real workspace at hand MUST assign it explicitly (spawn paths do —
+/// e.g. spawn.rs sets `agent.workspace_id = repo.workspace_id`).
+fn bootstrap_workspace() -> Id {
+    Id::new("default")
 }
 
 impl Agent {
@@ -151,13 +172,14 @@ impl Agent {
             last_heartbeat: None,
             spawned_by: None,
             disconnected_behavior: DisconnectedBehavior::default(),
-            workspace_id: Id::new("default"),
+            workspace_id: bootstrap_workspace(),
             iteration: 0,
             loop_config: None,
             orchestrator_type: OrchestratorType::default(),
             repo_id: None,
             restart_on_failure: false,
             attestation_level: None,
+            persona_id: None,
         }
     }
 

@@ -75,6 +75,7 @@ struct AgentRow {
     repo_id: Option<String>,
     restart_on_failure: bool,
     attestation_level: Option<i32>,
+    persona_id: Option<String>,
 }
 
 impl AgentRow {
@@ -97,6 +98,7 @@ impl AgentRow {
             repo_id: self.repo_id.map(Id::new),
             restart_on_failure: self.restart_on_failure,
             attestation_level: self.attestation_level.map(|v| v.clamp(0, 255) as u8),
+            persona_id: self.persona_id.map(Id::new),
         })
     }
 }
@@ -119,6 +121,7 @@ struct NewAgentRow<'a> {
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
     attestation_level: Option<i32>,
+    persona_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -145,6 +148,7 @@ impl AgentRepository for PgStorage {
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
                 attestation_level: a.attestation_level.map(|v| v as i32),
+                persona_id: a.persona_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -163,6 +167,7 @@ impl AgentRepository for PgStorage {
                     agents::repo_id.eq(row.repo_id),
                     agents::restart_on_failure.eq(row.restart_on_failure),
                     agents::attestation_level.eq(row.attestation_level),
+                    agents::persona_id.eq(row.persona_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert agent")?;
@@ -259,6 +264,7 @@ impl AgentRepository for PgStorage {
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
                 agents::attestation_level.eq(a.attestation_level.map(|v| v as i32)),
+                agents::persona_id.eq(a.persona_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
             .context("update agent")?;
