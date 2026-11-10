@@ -142,6 +142,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/settings/spec-lifecycle",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),
@@ -380,6 +385,15 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // Tenant-scoped compute targets (agent-runtime spec §3):
+                // reads are tenant-member visible (handler enforces tenant
+                // scoping), mutations additionally require the Admin role
+                // in the handler body. Registered here rather than carried
+                // as exemption-file debt — the two stale exemption entries
+                // for these paths were removed when the routes landed in
+                // the resolver (check-abac-route-registry.sh shrinks).
+                RouteResourceMapping::api("/api/v1/compute-targets", "compute_target", None),
+                RouteResourceMapping::api("/api/v1/compute-targets/:id", "compute_target", None),
                 // ── Secrets (platform-model.md §7, task-098) ─────────────
                 // Admin-only: builtin-secret-admin-only (priority 860) denies
                 // every non-Admin role on the "secret" resource type; Admins
@@ -3802,6 +3816,7 @@ pub mod tests {
                 "repo-7",
                 None,
                 None,
+                None,
             )
             .unwrap();
         // Register it so the auth extractor resolves the agent identity.
@@ -4026,6 +4041,7 @@ pub mod tests {
                 "repo-1",
                 Some("repo-orchestrator"),
                 Some(3),
+                None,
             )
             .unwrap();
         let weak = state
@@ -4040,6 +4056,7 @@ pub mod tests {
                 "repo-1",
                 None,
                 Some(1),
+                None,
             )
             .unwrap();
         state

@@ -329,7 +329,10 @@ impl AgentSigningKey {
     /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
     /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
     /// real for every request the agent makes. Unlike orchestrator JWTs there
-    /// is no `orchestrator_type` claim.
+    /// is no `orchestrator_type` claim. `wl_image_hash` carries the resolved
+    /// image digest (agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_scoped(
         &self,
         agent_id: &str,
@@ -341,6 +344,7 @@ impl AgentSigningKey {
         repo_id: &str,
         persona: Option<&str>,
         attestation_level: Option<u8>,
+        wl_image_hash: Option<String>,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -365,7 +369,7 @@ impl AgentSigningKey {
             wl_compute_target: None,
             wl_stack_hash: None,
             wl_container_id: None,
-            wl_image_hash: None,
+            wl_image_hash,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
@@ -2997,6 +3001,52 @@ mod tests {
     }
 
     // -- Tenant resolution tests ----------------------------------------------
+
+    #[tokio::test]
+    async fn mint_with_workload_roundtrips_wl_image_hash_claim() {
+        // agent-runtime.md §3 (Nix-Based Image Build): the image hash is
+        // recorded in workload attestation via the `wl_image_hash` JWT
+        // claim. The spawn flow resolves the image digest before minting
+        // (the token must pre-exist the process) and passes it here — this
+        // test proves the claim survives real EdDSA sign → verify with the
+        // digest intact, so a verifier can reconstruct workload identity
+        // from the token alone.
+        let key = crate::auth::AgentSigningKey::generate();
+        let issuer = "https://gyre.example.com";
+
+        let token = key
+            .mint_with_workload(
+                "agt-img-1",
+                "task-9",
+                "orchestrator-1",
+                issuer,
+                3600,
+                Some(4242),
+                Some("worker-host".to_string()),
+                Some("container".to_string()),
+                Some("stackhash123".to_string()),
+                Some("abc123def".to_string()),
+                Some("sha256:9f2a7c1e".to_string()),
+            )
+            .expect("mint_with_workload must succeed");
+
+        let claims = key
+            .validate(&token, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:9f2a7c1e"));
+        assert_eq!(claims.wl_pid, Some(4242));
+        assert_eq!(claims.wl_hostname.as_deref(), Some("worker-host"));
+        assert_eq!(claims.wl_container_id.as_deref(), Some("abc123def"));
+
+        // The no-workload mint must leave the claim absent, not defaulted.
+        let bare = key
+            .mint("agt-img-2", "task-9", "orchestrator-1", issuer, 3600)
+            .expect("mint must succeed");
+        let bare_claims = key
+            .validate(&bare, issuer)
+            .expect("validate must verify the EdDSA signature");
+        assert_eq!(bare_claims.wl_image_hash, None);
+    }
 
     #[tokio::test]
     async fn jwt_tenant_id_extracted_from_claim() {
