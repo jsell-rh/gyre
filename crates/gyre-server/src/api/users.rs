@@ -2184,7 +2184,7 @@ mod tests {
             .api_keys
             .create(
                 &crate::auth::hash_api_key("dev-key-membership"),
-                &Id::new(dev_id),
+                &Id::new(dev_id.clone()),
                 "test",
             )
             .await
