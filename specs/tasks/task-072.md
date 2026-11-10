@@ -1,8 +1,8 @@
 ---
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
-depends_on: []
-progress: needs-revision
+depends_on: [task-222, task-231]
+progress: complete
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
@@ -13,12 +13,7 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits:
-  - a8d036f4
-  - ac3a99bf
-  - 2b34ae1f
-  - 144aa70c
-  - 547b5496
+commits: ["1eefe38c7d5c491efc245b65f34ce7f7e11c0432", "27aa0d50f795bd68c4d0bf8fa302a9e2aa4734b6", "acac2141783e3630f82911c9893820e8a468bc1e", "9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
 ---
 
 ## Spec Excerpt
@@ -67,3 +62,18 @@ The current extractors emit `Contains`, `Implements`, and basic `Calls` edges vi
 ## Agent Instructions
 
 Read `specs/system/lsp-call-graph.md` for full context. The Go binary already exists at `scripts/go-callgraph/` — do NOT rewrite it; integrate it. Follow the hexagonal architecture: port trait in `gyre-ports`, adapter in `gyre-adapters`, orchestration in `gyre-domain`. The `gyre-domain` crate MUST NOT import `gyre-adapters`. Check `crates/gyre-ports/src/lib.rs` for existing port patterns and `crates/gyre-domain/src/` for extraction pipeline code. The graph store is accessed via `GraphPort` — grep for existing usage patterns.
+
+## Shipped
+
+Two-pass call-graph pipeline (Pass 1 syntax + Pass 2 semantic `Calls` edges via the `CallGraphExtractor` port) with the Go CHA extractor integrated; review rounds R1-R3 findings fixed and verified (`specs/reviews/task-072.md`, R3 verdict "complete"). §11 prerequisites closed for Go: the server runtime image ships the Go toolchain plus the committed `go-callgraph` binary, wired via `GO_CALLGRAPH_BIN` (`Dockerfile` runtime stage, documented in `docs/server-config.md`).
+
+### This repair round (verification finding: checks.sh exit 1)
+
+The recorded verification failure was the diff-scoped Clippy gate (`check-clippy-diff.py`): the `create_edge` upsert-contract doc comment added by `286927ae` (graph.rs lines 23-25) landed inside the macro-expansion span of the pre-existing `async_trait` `double_must_use` warnings (every span starts at the `#[async_trait]` attribute and covers the trait body), producing the 22 gate findings in the controller log. Fixed in `1eefe38c`: the upsert contract doc moved to the trait-level doc above `#[async_trait]`, where no warning span reaches, and the method doc reverts to main's text verbatim. Comment-only diff — no behavior change, no verifier or exemption file touched, no lint suppression added.
+
+### Evidence (probes under /tmp/stage/review-evidence/)
+
+- `python3 scripts/check-clippy-diff.py ed57c723` (assigned base): exit 0 — "clippy: changed lines clean (6 Rust files, 1131 existing warnings outside changes)" (`clippy-diff-after-fix.txt`). Pre-fix reproduction at the same tree: exit 1 with the same 22 `crates/gyre-ports/src/graph.rs` findings as the controller log (`clippy-diff.txt`), confirming the diagnosis.
+- `python3 scripts/check-rustfmt-diff.py ed57c723` clean; `git diff --check ed57c723 HEAD` clean (no whitespace errors).
+- `bash scripts/check-arch.sh` and `bash scripts/check-task-commit-attribution.sh` exit 0 after recording `1eefe38c` via `dev-attribution.py` (the recorder diff adds only the new SHA; all prior entries retained).
+- The repair is comment-only, so the prior rounds' suite evidence stands unchanged for this surface: `cargo test -p gyre-domain call_graph_resolve` 16/16 ok; `go_extractor` 13/13 ok; `cargo test -p gyre-adapters call_graph` 3/3 ok; `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction` 22/22 ok (incl. `sync_go_repo_persists_calls_edges_in_graph_store`). The full `cargo clippy --all-targets --all-features` run behind the gate compiled every target (incl. test binaries) cleanly at the fixed tree.

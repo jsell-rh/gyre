@@ -98,6 +98,25 @@ pub struct GraphSummary {
     /// Count of nodes modified in the last 7 days (based on last_modified_at)
     #[serde(default)]
     pub recent_changes_7d: usize,
+    /// Call graph completeness metrics (lsp-call-graph.md §7–8): per-pass
+    /// `Calls`-edge counts and whether Pass 2 (semantic extraction) has
+    /// completed for the current graph state.
+    #[serde(default)]
+    pub call_graph: CallGraphMetrics,
+}
+
+/// Call graph completeness metrics for [`GraphSummary`]
+/// (specs/system/lsp-call-graph.md §7–8).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CallGraphMetrics {
+    /// Live `Calls` edges from Pass 1 (syntax analysis) — no Pass 2 metadata tag.
+    pub call_edges_pass1: usize,
+    /// Live `Calls` edges from Pass 2 (semantic, type-checker analysis) —
+    /// tagged with `gyre_common::call_graph::PASS2_EDGE_METADATA`.
+    pub call_edges_pass2: usize,
+    /// Whether Pass 2 has run and completed for the current graph state
+    /// (see [`is_call_graph_complete`]).
+    pub call_graph_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1725,11 +1744,74 @@ pub fn count_distinct_parent_modules(
 // ── Dry-run ──────────────────────────────────────────────────────────────────
 
 /// Run a complete dry-run of a view query, producing match counts and warnings.
+/// Whether a view query's result depends on `calls` edges
+/// (specs/system/lsp-call-graph.md §8) — focus/concept traversal along
+/// `calls`, a top-level `calls` edge filter, call-graph computed expressions
+/// (`$callers`/`$callees`/`$reachable` with `calls`), or call-count heat/badge
+/// metrics. These are the queries whose answers are unreliable while the
+/// call graph is incomplete.
+fn query_uses_calls_edges(query: &ViewQuery) -> bool {
+    let edge_list_has_calls =
+        |edges: &[String]| edges.iter().any(|e| e.eq_ignore_ascii_case("calls"));
+    let call_metric = |metric: &str| {
+        metric == "incoming_calls" || metric == "outgoing_calls" || metric == "call_count"
+    };
+
+    let scope_uses = match &query.scope {
+        Scope::Focus { edges, .. } => edge_list_has_calls(edges),
+        Scope::Concept { expand_edges, .. } => edge_list_has_calls(expand_edges),
+        Scope::Filter {
+            computed: Some(expr),
+            ..
+        } => {
+            expr.contains("$callers(")
+                || expr.contains("$callees(")
+                || (expr.contains("$reachable(") && expr.contains("calls"))
+        }
+        _ => false,
+    };
+    let emphasis_uses = query
+        .emphasis
+        .heat
+        .as_ref()
+        .is_some_and(|h| call_metric(&h.metric))
+        || query
+            .emphasis
+            .badges
+            .as_ref()
+            .and_then(|b| b.metric.as_ref())
+            .is_some_and(|m| call_metric(m));
+
+    scope_uses || emphasis_uses || edge_list_has_calls(&query.edges.filter)
+}
+
 pub fn dry_run(
     query: &ViewQuery,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     selected_node_id: Option<&str>,
+) -> DryRunResult {
+    // Call graph completeness unknown — callers that can determine it
+    // (MCP / explorer tools, which read the durable Pass 2 marker) use
+    // [`dry_run_with_call_graph`] so the incompleteness warning fires only
+    // on positive knowledge that Pass 2 has not completed.
+    dry_run_with_call_graph(query, nodes, edges, selected_node_id, None)
+}
+
+/// [`dry_run`] with explicit call graph completeness knowledge
+/// (specs/system/lsp-call-graph.md §8).
+///
+/// `call_graph_complete` is `Some(false)` when the caller knows Pass 2
+/// (semantic call extraction) has not completed for the current graph state,
+/// `Some(true)` when it has, and `None` when unknown. When the query
+/// traverses `calls` edges and the graph is known incomplete, a warning is
+/// emitted so blast-radius results are not mistaken for complete.
+pub fn dry_run_with_call_graph(
+    query: &ViewQuery,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+    call_graph_complete: Option<bool>,
 ) -> DryRunResult {
     let mut warnings = Vec::new();
 
@@ -1800,6 +1882,21 @@ pub fn dry_run(
                     .to_string(),
             );
         }
+    }
+
+    // lsp-call-graph.md §8: warn when the query traverses `calls` edges but
+    // Pass 2 (semantic extraction) has not completed for the current graph
+    // state. Pass 1 resolves only a fraction of call sites syntactically, so
+    // blast-radius/coupling results computed from partial call data
+    // underreport the true impact.
+    if call_graph_complete == Some(false) && query_uses_calls_edges(query) {
+        warnings.push(
+            "Call graph incomplete — blast radius may be underreported. Semantic call \
+             analysis (Pass 2) has not completed for this graph yet; `calls` edges reflect \
+             partial syntax-only data. Counts of callers/callees will grow once Pass 2 \
+             finishes."
+                .to_string(),
+        );
     }
 
     if result_set.is_empty() {
@@ -1873,7 +1970,7 @@ pub fn dry_run(
     let total_matched = result_set.len();
     let matched_node_names: Vec<String> = result_set
         .iter()
-        .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
+        .filter_map(|id| node_map.get(id).map(|n| n.name.clone()))
         .take(50)
         .collect();
     if total_matched > 50 {
@@ -2192,14 +2289,54 @@ pub fn dry_run(
 
 // ── Graph summary ────────────────────────────────────────────────────────────
 
+/// Whether the call graph is complete for the current graph state
+/// (specs/system/lsp-call-graph.md §8).
+///
+/// `pass2_completed_at` is the completion time of the last Pass 2 run
+/// (from the durable `CallGraphRunRecord` marker), or `None` when Pass 2 has
+/// never completed. The call graph is complete when Pass 2 completed at or
+/// after the most recent Pass 1 extraction: Pass 2 runs fire-and-forget after
+/// Pass 1 persists, so a `last_seen_at` newer than the marker means a fresh
+/// push landed whose call edges have not been semantically resolved yet.
+pub fn is_call_graph_complete(pass2_completed_at: Option<u64>, nodes: &[GraphNode]) -> bool {
+    let Some(completed_at) = pass2_completed_at else {
+        return false;
+    };
+    nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .map(|n| n.last_seen_at)
+        .max()
+        .is_none_or(|latest_seen| completed_at >= latest_seen)
+}
+
 /// Compute a condensed summary of a repo's knowledge graph.
 pub fn compute_graph_summary(
     repo_id: &str,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
+    call_graph_complete: bool,
 ) -> GraphSummary {
     let active_nodes: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
     let active_edges: Vec<&GraphEdge> = edges.iter().filter(|e| e.deleted_at.is_none()).collect();
+
+    // Call graph completeness (lsp-call-graph.md §7–8): split live `Calls`
+    // edges by provenance — Pass 1 (syntax, untagged) vs Pass 2 (semantic,
+    // tagged). Both passes emit the same `EdgeType::Calls` variant.
+    let call_edges_pass2 = active_edges
+        .iter()
+        .filter(|e| gyre_common::call_graph::is_pass2_calls_edge(e))
+        .count();
+    let call_edges_pass1 = active_edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls)
+        .count()
+        .saturating_sub(call_edges_pass2);
+    let call_graph = CallGraphMetrics {
+        call_edges_pass1,
+        call_edges_pass2,
+        call_graph_complete,
+    };
 
     // Count by type
     let mut node_counts: HashMap<String, usize> = HashMap::new();
@@ -2467,13 +2604,90 @@ pub fn compute_graph_summary(
         risk_indicators,
         anomaly_summary,
         recent_changes_7d,
+        call_graph,
     }
+}
+
+// ── Graph full-text search (explorer-implementation.md §9 `search` tool) ─────
+
+/// A node hit returned by [`search_graph_nodes`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSearchHit {
+    pub id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub node_type: String,
+    pub file_path: String,
+    pub spec_path: Option<String>,
+    /// Doc comment, truncated to 100 chars (char-boundary safe) so tool
+    /// payloads stay small.
+    pub doc_comment: Option<String>,
+}
+
+/// Case-insensitive substring search across the knowledge graph (§9 `search`):
+/// node name, qualified_name, file path, doc comment and spec path.
+/// Soft-deleted nodes are excluded. Hits are ranked most-relevant-first
+/// (exact name → name prefix → name substring → qualified_name → other field)
+/// and capped at `limit`.
+pub fn search_graph_nodes(query: &str, nodes: &[GraphNode], limit: usize) -> Vec<GraphSearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, GraphSearchHit)> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter_map(|n| {
+            let name = n.name.to_lowercase();
+            let qname = n.qualified_name.to_lowercase();
+            let rank = if name == needle {
+                0
+            } else if name.starts_with(&needle) {
+                1
+            } else if name.contains(&needle) {
+                2
+            } else if qname.contains(&needle) {
+                3
+            } else if n.file_path.to_lowercase().contains(&needle)
+                || n.spec_path
+                    .as_ref()
+                    .is_some_and(|s| s.to_lowercase().contains(&needle))
+                || n.doc_comment
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&needle))
+            {
+                4
+            } else {
+                return None;
+            };
+            Some((
+                rank,
+                GraphSearchHit {
+                    id: n.id.to_string(),
+                    name: n.name.clone(),
+                    qualified_name: n.qualified_name.clone(),
+                    node_type: node_type_str(&n.node_type).to_string(),
+                    file_path: n.file_path.clone(),
+                    spec_path: n.spec_path.clone(),
+                    doc_comment: n
+                        .doc_comment
+                        .as_ref()
+                        .map(|d| d.chars().take(100).collect::<String>()),
+                },
+            ))
+        })
+        .collect();
+    // Stable sort preserves store order within a relevance tier.
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.truncate(limit);
+    hits.into_iter().map(|(_, h)| h).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gyre_common::graph::*;
+    use gyre_common::view_query::{NarrativeStep, ViewCallout, ViewGroup};
     use gyre_common::Id;
 
     fn make_node(id: &str, name: &str, node_type: NodeType) -> GraphNode {
@@ -2988,7 +3202,7 @@ mod tests {
             make_edge("e1", "n2", "n3", EdgeType::Calls),
             make_edge("e2", "t1", "n2", EdgeType::Calls),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert_eq!(*summary.node_counts.get("type").unwrap_or(&0), 1);
         assert_eq!(*summary.node_counts.get("function").unwrap_or(&0), 3);
         assert_eq!(*summary.edge_counts.get("calls").unwrap_or(&0), 2);
@@ -4289,7 +4503,7 @@ mod tests {
             make_edge("e3", "f3", "t1", EdgeType::FieldOf),
             make_edge("e4", "f4", "t2", EdgeType::FieldOf),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert!(
             !summary.top_types_by_fields.is_empty(),
             "Should have top types"
@@ -4319,7 +4533,7 @@ mod tests {
             make_edge("e1", "t1", "n1", EdgeType::Calls),
             make_edge("e2", "t2", "n2", EdgeType::Calls),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert_eq!(summary.test_coverage.test_functions, 2);
         // Reachable: BFS from t1 reaches {t1,n1}; from t2 reaches {t2,n2}. Total = 4.
         assert_eq!(summary.test_coverage.reachable_from_tests, 4);
@@ -5490,6 +5704,874 @@ mod tests {
             errors.is_empty(),
             "Valid node_type='function' should pass, got: {:?}",
             errors
+        );
+    }
+
+    // ── §9 `search`: graph full-text search ─────────────────────────────────
+
+    #[test]
+    fn test_search_graph_nodes_matches_all_fields_excludes_deleted() {
+        let by_name = make_node("s1", "AuthService", NodeType::Type);
+        let mut by_doc = make_node("s2", "CacheLayer", NodeType::Type);
+        by_doc.doc_comment = Some("Handles token auth refresh".to_string());
+        let mut by_spec = make_node("s3", "LogWriter", NodeType::Function);
+        by_spec.spec_path = Some("specs/system/auth-lifecycle.md".to_string());
+        let mut by_file = make_node("s4", "Runner", NodeType::Function);
+        by_file.file_path = "src/auth/runner.rs".to_string();
+        let mut deleted = make_node("s5", "auth_removed", NodeType::Type);
+        deleted.deleted_at = Some(2000);
+
+        let nodes = vec![
+            by_doc.clone(),
+            by_spec.clone(),
+            by_file.clone(),
+            deleted,
+            by_name.clone(),
+        ];
+
+        let hits = search_graph_nodes("auth", &nodes, 10);
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(
+            !names.contains(&"auth_removed"),
+            "soft-deleted nodes must not be searchable, got {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec!["AuthService", "CacheLayer", "LogWriter", "Runner"],
+            "name match must outrank doc/spec/file matches"
+        );
+        // The name-ranked hit carries the node's own metadata.
+        let auth = hits.iter().find(|h| h.name == "AuthService").unwrap();
+        assert_eq!(auth.node_type, "type");
+        assert_eq!(auth.qualified_name, "pkg.AuthService");
+        let doc_hit = hits.iter().find(|h| h.name == "CacheLayer").unwrap();
+        assert!(doc_hit.doc_comment.as_deref().unwrap().contains("auth"));
+    }
+
+    #[test]
+    fn test_search_graph_nodes_limit_and_empty_query() {
+        let nodes: Vec<GraphNode> = (0..20)
+            .map(|i| {
+                make_node(
+                    &format!("t{i}"),
+                    &format!("auth_handler_{i}"),
+                    NodeType::Function,
+                )
+            })
+            .collect();
+        assert_eq!(search_graph_nodes("auth", &nodes, 5).len(), 5);
+        assert!(search_graph_nodes("   ", &nodes, 10).is_empty());
+        assert!(search_graph_nodes("nothing-matches-this", &nodes, 10).is_empty());
+    }
+
+    // ── §23 dry-run warnings (spec: empty scope, cluttered scope, broad groups,
+    // unresolved callouts/narrative) ──────────────────────────────────────────
+
+    fn base_query() -> ViewQuery {
+        ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        }
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_empty_scope() {
+        // Filter scope that matches nothing (name pattern not present).
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec![],
+            computed: None,
+            name_pattern: Some("does-not-exist".to_string()),
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
+            "expected empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_cluttered_scope() {
+        // Spec: scope >200 nodes warns "may be cluttered". Boundary: 200 is
+        // fine, 201 warns.
+        fn run(n: usize) -> DryRunResult {
+            let nodes: Vec<GraphNode> = (0..n)
+                .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+                .collect();
+            let query = base_query(); // Scope::All matches everything
+            dry_run(&query, &nodes, &[], None)
+        }
+        let at_limit = run(200);
+        assert_eq!(at_limit.matched_nodes, 200);
+        assert!(
+            !at_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("may be cluttered")),
+            "200 nodes is at the limit, must not warn, got: {:?}",
+            at_limit.warnings
+        );
+        let over_limit = run(201);
+        assert_eq!(over_limit.matched_nodes, 201);
+        assert!(
+            over_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 201 nodes - may be cluttered")),
+            "201 nodes must warn about clutter, got: {:?}",
+            over_limit.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_broad_group() {
+        // Group pattern "n" matches 25 node names via substring fallback —
+        // over the 20-node breadth threshold.
+        let nodes: Vec<GraphNode> = (0..25)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Persistence".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 25);
+        assert_eq!(result.groups_resolved.len(), 1);
+        assert_eq!(result.groups_resolved[0].matched, 25);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Group 'Persistence' matched 25 nodes - too broad")),
+            "expected too-broad-group warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_no_warning_for_small_group() {
+        let nodes: Vec<GraphNode> = (0..5)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Core".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.groups_resolved[0].matched, 5);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("too broad")),
+            "small group must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_reports_unresolved_callouts() {
+        let nodes = vec![
+            make_node("n1", "RealService", NodeType::Type),
+            make_node("n2", "OtherType", NodeType::Type),
+        ];
+        let mut query = base_query();
+        query.callouts = vec![
+            ViewCallout {
+                node: "RealService".to_string(),
+                text: "annotated".to_string(),
+                color: None,
+            },
+            ViewCallout {
+                node: "GhostNode".to_string(),
+                text: "missing".to_string(),
+                color: None,
+            },
+        ];
+        query.narrative = vec![
+            NarrativeStep {
+                node: "RealService".to_string(),
+                text: "starts here".to_string(),
+                order: None,
+            },
+            NarrativeStep {
+                node: "AlsoGhost".to_string(),
+                text: "never found".to_string(),
+                order: Some(1),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert_eq!(result.callouts_unresolved, vec!["GhostNode"]);
+        assert_eq!(result.narrative_resolved, 1);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved callouts: GhostNode")),
+            "expected unresolved-callout warning, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved narrative steps: AlsoGhost")),
+            "expected unresolved-narrative warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_top_functions_by_calls() {
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n2", "caller_b", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+            make_node("n4", "cold_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+            make_edge("e3", "n1", "n4", EdgeType::Calls),
+        ];
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
+        assert!(!summary.top_functions_by_calls.is_empty());
+        assert!(
+            summary.top_functions_by_calls[0].contains("hot_fn (2)"),
+            "hot_fn with 2 incoming calls should rank first, got: {:?}",
+            summary.top_functions_by_calls
+        );
+        assert!(
+            summary
+                .top_functions_by_calls
+                .iter()
+                .any(|f| f.contains("cold_fn (1)")),
+            "cold_fn should appear in top functions, got: {:?}",
+            summary.top_functions_by_calls
+        );
+    }
+
+    // ── Emphasis resolution tests (spec §30: highlight, heat, tiered_colors) ──
+
+    #[test]
+    fn test_heat_emphasis_incoming_calls_values() {
+        // Three callers invoke `hot`; `hot` invokes `sink`.
+        let nodes = vec![
+            make_node("a", "caller_a", NodeType::Function),
+            make_node("b", "caller_b", NodeType::Function),
+            make_node("c", "caller_c", NodeType::Function),
+            make_node("hot", "hot_fn", NodeType::Function),
+            make_node("sink", "sink_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "a", "hot", EdgeType::Calls),
+            make_edge("e2", "b", "hot", EdgeType::Calls),
+            make_edge("e3", "c", "hot", EdgeType::Calls),
+            make_edge("e4", "hot", "sink", EdgeType::Calls),
+            // Non-calls edges must not count toward incoming_calls
+            make_edge("e5", "a", "sink", EdgeType::Contains),
+        ];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "incoming_calls".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(result.node_metrics.get("hot").copied(), Some(3.0));
+        assert_eq!(result.node_metrics.get("sink").copied(), Some(1.0));
+        assert_eq!(result.node_metrics.get("a").copied(), Some(0.0));
+        assert_eq!(result.node_metrics.get("b").copied(), Some(0.0));
+        // Every matched node gets a metric entry (0.0 for uncalled)
+        assert_eq!(result.node_metrics.len(), 5);
+    }
+
+    #[test]
+    fn test_heat_emphasis_complexity_churn_test_coverage_values() {
+        let mut n1 = make_node("n1", "analyzed", NodeType::Function);
+        n1.complexity = Some(12);
+        n1.churn_count_30d = 7;
+        n1.test_coverage = Some(0.5);
+        let mut n2 = make_node("n2", "partial", NodeType::Function);
+        n2.complexity = None; // unanalyzed — excluded from complexity metric
+        n2.churn_count_30d = 3;
+        n2.test_coverage = None; // no coverage data — excluded from test_coverage metric
+
+        // complexity: only nodes with complexity data appear
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "complexity".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1.clone(), n2.clone()], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(12.0));
+        assert!(!result.node_metrics.contains_key("n2"));
+
+        // churn: every matched node has a churn count
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "churn".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1.clone(), n2.clone()], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(7.0));
+        assert_eq!(result.node_metrics.get("n2").copied(), Some(3.0));
+
+        // test_coverage: only nodes with coverage data appear
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "test_coverage".to_string(),
+            palette: "green-yellow-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1, n2], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(0.5));
+        assert!(!result.node_metrics.contains_key("n2"));
+    }
+
+    #[test]
+    fn test_heat_emphasis_test_fragility_counts_distinct_tests() {
+        // two tests reach `shared`; only one reaches `single`; none reach `orphan`.
+        let nodes = vec![
+            make_test_node("t1", "test_one"),
+            make_test_node("t2", "test_two"),
+            make_node("shared", "shared_fn", NodeType::Function),
+            make_node("single", "single_fn", NodeType::Function),
+            make_node("orphan", "orphan_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "t1", "shared", EdgeType::Calls),
+            make_edge("e2", "t2", "shared", EdgeType::Calls),
+            make_edge("e3", "t1", "single", EdgeType::Calls),
+        ];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "test_fragility".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(
+            result.node_metrics.get("shared").copied(),
+            Some(2.0),
+            "shared_fn is reached by 2 distinct tests"
+        );
+        assert_eq!(
+            result.node_metrics.get("single").copied(),
+            Some(1.0),
+            "single_fn is reached by 1 test"
+        );
+        assert_eq!(
+            result.node_metrics.get("orphan").copied(),
+            Some(0.0),
+            "orphan_fn is reached by no test"
+        );
+    }
+
+    #[test]
+    fn test_heat_emphasis_trace_metric_warns_and_zeroes() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Function)];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "span_duration".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &[], None);
+        // Trace metrics need OTLP runtime data — resolver must warn, not silently fake values
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("span_duration") && w.contains("OTLP")),
+            "expected OTLP trace-metric warning, got: {:?}",
+            result.warnings
+        );
+        assert_eq!(
+            result.node_metrics.get("n1").copied(),
+            Some(0.0),
+            "trace metric values are 0.0 placeholders, never fabricated"
+        );
+    }
+
+    #[test]
+    fn test_tiered_colors_emphasis_populates_node_depths() {
+        // Blast-radius style query (mirrors the system default view):
+        // focus $clicked, incoming calls, tiered_colors emphasis.
+        let nodes = vec![
+            make_node("n1", "target", NodeType::Function),
+            make_node("n2", "direct_caller", NodeType::Function),
+            make_node("n3", "transitive_caller", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n2", "n1", EdgeType::Calls),
+            make_edge("e2", "n3", "n2", EdgeType::Calls),
+        ];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$clicked".to_string(),
+            edges: vec!["calls".to_string()],
+            direction: "incoming".to_string(),
+            depth: 10,
+        };
+        query.emphasis.tiered_colors = Some(vec![
+            "#ef4444".to_string(),
+            "#f97316".to_string(),
+            "#eab308".to_string(),
+            "#94a3b8".to_string(),
+        ]);
+        let result = dry_run(&query, &nodes, &edges, Some("n1"));
+        assert_eq!(result.matched_nodes, 3);
+        // tiered_colors consumers color by BFS depth: clicked node = 0,
+        // direct caller = 1, transitive caller = 2.
+        assert_eq!(result.node_depths.get("n1").copied(), Some(0));
+        assert_eq!(result.node_depths.get("n2").copied(), Some(1));
+        assert_eq!(result.node_depths.get("n3").copied(), Some(2));
+    }
+
+    // ── Callout resolution edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_callout_prefix_match_resolves_without_warning() {
+        let nodes = vec![make_node("n1", "RealService", NodeType::Type)];
+        let mut query = base_query();
+        query.callouts = vec![ViewCallout {
+            node: "Real".to_string(), // prefix of RealService — not exact
+            text: "annotated".to_string(),
+            color: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert!(result.callouts_unresolved.is_empty());
+        assert!(
+            result.warnings.is_empty(),
+            "prefix match resolves cleanly (no precision warning), got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_callout_substring_match_resolves_with_precision_warning() {
+        let nodes = vec![make_node("n1", "RealService", NodeType::Type)];
+        let mut query = base_query();
+        query.callouts = vec![ViewCallout {
+            node: "Service".to_string(), // substring only — neither exact nor prefix
+            text: "annotated".to_string(),
+            color: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert!(result.callouts_unresolved.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("resolved via substring match")),
+            "substring callout resolution must warn for precision, got: {:?}",
+            result.warnings
+        );
+    }
+
+    // ── Narrative resolution tests (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_narrative_resolution_counts_resolved_steps() {
+        let nodes = vec![
+            make_node("n1", "Alpha", NodeType::Function),
+            make_node("n2", "BetaService", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "start here".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "BetaService".to_string(),
+                text: "then this".to_string(),
+                order: Some(2),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 2);
+        assert!(
+            result.warnings.is_empty(),
+            "fully resolved narrative must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_narrative_unresolved_steps_warn_with_names() {
+        let nodes = vec![make_node("n1", "Alpha", NodeType::Function)];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "resolves".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Ghost".to_string(),
+                text: "missing".to_string(),
+                order: Some(2),
+            },
+            NarrativeStep {
+                node: "Phantom".to_string(),
+                text: "also missing".to_string(),
+                order: Some(3),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 1);
+        let warning = result
+            .warnings
+            .iter()
+            .find(|w| w.contains("Unresolved narrative steps"));
+        assert!(
+            warning.is_some(),
+            "unresolved narrative steps must warn, got: {:?}",
+            result.warnings
+        );
+        let w = warning.unwrap();
+        assert!(
+            w.contains("Ghost"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            w.contains("Phantom"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            !w.contains("Alpha"),
+            "resolved steps must not be listed: {w}"
+        );
+    }
+
+    // ── $selected scope edge cases (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_selected_no_selection_warns_interactive_not_empty() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec![],
+            direction: "outgoing".to_string(),
+            depth: 5,
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("click a node")),
+            "$selected with no selection should show the interactive hint, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
+            "interactive scopes must not double-report as an empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_selected_with_selection_resolves_focus() {
+        let nodes = vec![
+            make_node("n1", "Root", NodeType::Function),
+            make_node("n2", "Child", NodeType::Function),
+            make_node("n3", "Unrelated", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec!["calls".to_string()],
+            direction: "outgoing".to_string(),
+            depth: 2,
+        };
+        let result = dry_run(&query, &nodes, &edges, Some("n1"));
+        assert_eq!(result.matched_nodes, 2, "selected node + outgoing callee");
+        assert!(result.matched_node_names.contains(&"Child".to_string()));
+        assert!(!result.matched_node_names.contains(&"Unrelated".to_string()));
+        assert!(result.warnings.is_empty());
+    }
+
+    // ── Highlight emphasis validation (spec §30: emphasis = highlight, heat, tiered_colors) ──
+
+    #[test]
+    fn test_highlight_emphasis_color_validation() {
+        // Invalid color in highlight.matched must be rejected by validate()
+        // with an error naming the highlight.matched field.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+            matched: Some(gyre_common::view_query::HighlightStyle {
+                color: Some("not-a-color".to_string()),
+                label: None,
+            }),
+        });
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("highlight.matched")),
+            "invalid highlight color must produce an error naming highlight.matched, got: {:?}",
+            errors
+        );
+
+        // Every accepted color form passes: hex, named CSS, rgb function.
+        for valid in ["#ef4444", "tomato", "rgb(255, 0, 0)"] {
+            let mut query = base_query();
+            query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+                matched: Some(gyre_common::view_query::HighlightStyle {
+                    color: Some(valid.to_string()),
+                    label: Some("Untested".to_string()),
+                }),
+            });
+            let errors = query.validate();
+            assert!(
+                errors.is_empty(),
+                "valid highlight color '{valid}' should pass, got: {:?}",
+                errors
+            );
+        }
+
+        // Highlight with no matched style is legal — nothing to validate.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight::default());
+        assert!(query.validate().is_empty());
+    }
+
+    // ── Group resolution edge case: patterns are scoped to the result set ──
+
+    #[test]
+    fn test_group_resolution_restricted_to_result_set() {
+        // A group pattern that also matches a node OUTSIDE the scope's result
+        // set must not pull that node into the group — groups are overlays on
+        // the scoped subgraph, not scope extensions.
+        let nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "auth_handler", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec!["type".to_string()],
+            computed: None,
+            name_pattern: None,
+        };
+        query.groups = vec![gyre_common::view_query::ViewGroup {
+            name: "auth".to_string(),
+            // Substring "auth" matches both nodes by name, but only n1 is in scope.
+            nodes: vec!["auth".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 1, "scope is types only");
+        assert_eq!(
+            result.groups_resolved[0].matched, 1,
+            "group must not include out-of-scope nodes"
+        );
+        assert!(result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.AuthService".to_string()));
+        assert!(!result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.auth_handler".to_string()));
+    }
+
+    // ── Narrative ordering: ordered annotations need unambiguous orders ──
+
+    #[test]
+    fn test_narrative_duplicate_order_rejected() {
+        // Narrative steps are ordered annotations; two steps claiming the same
+        // order are ambiguous and must be rejected by validate().
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(1),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Duplicate narrative step order")),
+            "duplicate narrative order must be rejected, got: {:?}",
+            errors
+        );
+
+        // Distinct orders validate cleanly.
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(2),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors.is_empty(),
+            "distinct narrative orders should validate, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_call_graph_metrics() {
+        // lsp-call-graph.md §7–8: `Calls` edges are the same EdgeType variant
+        // in both passes; provenance is the Pass 2 metadata tag.
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n2", "caller_b", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+        ];
+        let mut pass1_a = make_edge("e1", "n1", "n3", EdgeType::Calls);
+        pass1_a.metadata = None;
+        let mut pass1_b = make_edge("e2", "n2", "n3", EdgeType::Calls);
+        pass1_b.metadata = None;
+        let mut pass2 = make_edge("e3", "n1", "n3", EdgeType::Calls);
+        pass2.metadata = Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string());
+        let summary = compute_graph_summary("repo1", &nodes, &[pass1_a, pass1_b, pass2], false);
+        assert_eq!(summary.call_graph.call_edges_pass1, 2);
+        assert_eq!(summary.call_graph.call_edges_pass2, 1);
+        assert!(!summary.call_graph.call_graph_complete);
+
+        let complete = compute_graph_summary("repo1", &nodes, &[], true);
+        assert!(complete.call_graph.call_graph_complete);
+        assert_eq!(complete.call_graph.call_edges_pass1, 0);
+        assert_eq!(complete.call_graph.call_edges_pass2, 0);
+    }
+
+    #[test]
+    fn test_is_call_graph_complete() {
+        let mut nodes = vec![
+            make_node("n1", "foo", NodeType::Function),
+            make_node("n2", "bar", NodeType::Function),
+        ];
+        // No marker at all → Pass 2 never completed.
+        assert!(!is_call_graph_complete(None, &nodes));
+        // Marker at/after the latest Pass 1 persist (last_seen_at = 1000) → complete.
+        assert!(is_call_graph_complete(Some(1000), &nodes));
+        assert!(is_call_graph_complete(Some(2000), &nodes));
+        // Marker older than the latest extraction → a newer push landed whose
+        // call edges are not yet semantically resolved → incomplete.
+        assert!(!is_call_graph_complete(Some(999), &nodes));
+        // Soft-deleted nodes do not keep the graph permanently incomplete.
+        nodes[1].deleted_at = Some(1500);
+        nodes[1].last_seen_at = 5000;
+        assert!(is_call_graph_complete(Some(2000), &nodes));
+    }
+
+    #[test]
+    fn test_dry_run_call_graph_incomplete_warning() {
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n3", EdgeType::Calls)];
+        let blast_radius_query = ViewQuery {
+            scope: Scope::Focus {
+                node: "hot_fn".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "incoming".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+
+        // Known-incomplete + calls traversal → warning (spec §8).
+        let result =
+            dry_run_with_call_graph(&blast_radius_query, &nodes, &edges, None, Some(false));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "expected incompleteness warning, got: {:?}",
+            result.warnings
+        );
+
+        // Complete call graph → no warning.
+        let result = dry_run_with_call_graph(&blast_radius_query, &nodes, &edges, None, Some(true));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "complete call graph must not warn, got: {:?}",
+            result.warnings
+        );
+
+        // Unknown status (plain dry_run) → no warning: the warning requires
+        // positive knowledge that Pass 2 has not completed.
+        let result = dry_run(&blast_radius_query, &nodes, &edges, None);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "unknown status must not warn, got: {:?}",
+            result.warnings
+        );
+
+        // Known-incomplete but the query does not traverse calls edges →
+        // no warning (nothing call-graph-dependent in the result).
+        let containment_query = ViewQuery {
+            scope: Scope::Focus {
+                node: "hot_fn".to_string(),
+                edges: vec!["contains".to_string()],
+                direction: "incoming".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run_with_call_graph(&containment_query, &nodes, &edges, None, Some(false));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "non-calls query must not warn, got: {:?}",
+            result.warnings
         );
     }
 }

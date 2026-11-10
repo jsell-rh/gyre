@@ -5,13 +5,14 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tempfile
+import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parent.parent
 PROVIDER = "gyre-enmaas"
-MODEL = "enmaas-glm-5-3/rits/zai-org/glm-5-3"
+MODEL = "rits/zai-org/glm-5-3"
 
 
 def invoke(command, env, secret, timeout=60):
@@ -65,35 +66,35 @@ def already_exists(output):
 
 
 def smoke(env, secret):
-    # Match the worker's OMP config without writing to the user's home directory.
-    with tempfile.TemporaryDirectory(prefix="gyre-inference-") as directory:
-        config = Path(directory) / ".omp/agent"
-        config.mkdir(parents=True)
-        for name in ("models.yml", "config.yml"):
-            shutil.copyfile(ROOT / "docker/dev-worker" / name, config / name)
-        code, output = invoke(
-            [env.get("OMP", "omp"), "--model", MODEL, "--no-session", "--no-tools",
-             "--no-extensions", "--no-skills", "--no-rules", "--mode=json", "-p", "Reply with exactly: OK"],
-            {**env, "HOME": directory, "PI_CODING_AGENT_DIR": str(config)}, secret, timeout=120)
-        message = None
-        for line in output.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict) and event.get("type") == "message_end" and event.get("message", {}).get("role") == "assistant":
-                message = event["message"]
-        response = "".join(part.get("text", "") for part in (message or {}).get("content", [])
-                           if part.get("type") == "text").strip()
-        if code or not message or message.get("stopReason") in ("error", "aborted") or response != "OK":
-            diagnostic = (message or {}).get("errorMessage") or response or output[-2000:].strip()
-            raise RuntimeError(f"Pinned model smoke test failed: {diagnostic}")
-        print("Pinned GLM 5.3 smoke test: OK")
+    # Standalone credential verification; the controller's Fullsend canary
+    # separately proves the OpenShell route and Pi tool stream. No retired
+    # runtime, local model catalog, or files in the user's home are involved.
+    body = json.dumps({'model': MODEL, 'max_tokens': 1024,
+                       'messages': [{'role': 'user', 'content': 'Reply with exactly: OK'}]}).encode()
+    request = urllib.request.Request('https://api.enmaas.devshift.net/v1/chat/completions',
+        data=body, headers={'Authorization': 'Bearer ' + secret, 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            value = json.loads(response.read(1024 * 1024))
+    except (ValueError, UnicodeError):
+        raise RuntimeError('Pinned model smoke test failed: invalid response') from None
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        raise RuntimeError(f'Pinned model smoke test failed: HTTP {status}') from None
+    choices = value.get('choices') if isinstance(value, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    message = choice.get('message') if isinstance(choice, dict) else None
+    content = message.get('content') if isinstance(message, dict) else None
+    if (not isinstance(message, dict) or message.get('role') != 'assistant' or
+            not isinstance(content, str) or content.strip() != 'OK' or choice.get('finish_reason') != 'stop'):
+        raise RuntimeError('Pinned model smoke test failed: no complete OK response')
+    print('Pinned GLM 5.3 smoke test: OK')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--smoke", action="store_true", help="also test the pinned model with OMP")
+    parser.add_argument("--smoke", action="store_true", help="also test a complete response from the pinned endpoint")
     parser.add_argument("--smoke-only", action="store_true", help="test inference without changing gateway state")
     parser.add_argument("--github", action="store_true", help="also configure GitHub clone/fetch/push credentials")
     parser.add_argument("--github-only", action="store_true", help="configure only the GitHub provider")

@@ -1058,6 +1058,8 @@ pub struct CanvasState {
 /// Structured record of a user interaction on the canvas.
 /// Accepts both structured objects `{"action":"click","node":"Foo"}` and
 /// plain strings `"click:Foo(function)"` for backwards compatibility.
+/// `to_level` is set for zoom actions (view-query-grammar.md §10), `preset`
+/// for query-preset actions.
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractionRecord {
     pub action: String,
@@ -1065,6 +1067,10 @@ pub struct InteractionRecord {
     pub node: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_level: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 impl<'de> serde::Deserialize<'de> for InteractionRecord {
@@ -1096,12 +1102,16 @@ impl<'de> serde::Deserialize<'de> for InteractionRecord {
                         action: action.to_string(),
                         node,
                         detail,
+                        to_level: None,
+                        preset: None,
                     })
                 } else {
                     Ok(InteractionRecord {
                         action: v.to_string(),
                         node: None,
                         detail: None,
+                        to_level: None,
+                        preset: None,
                     })
                 }
             }
@@ -1117,12 +1127,18 @@ impl<'de> serde::Deserialize<'de> for InteractionRecord {
                     node: Option<String>,
                     #[serde(default)]
                     detail: Option<String>,
+                    #[serde(default)]
+                    to_level: Option<f64>,
+                    #[serde(default)]
+                    preset: Option<String>,
                 }
                 let inner = Inner::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(InteractionRecord {
                     action: inner.action,
                     node: inner.node,
                     detail: inner.detail,
+                    to_level: inner.to_level,
+                    preset: inner.preset,
                 })
             }
         }

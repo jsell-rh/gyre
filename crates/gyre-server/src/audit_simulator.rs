@@ -81,9 +81,9 @@ async fn run_simulation_tick(state: &AppState) -> anyhow::Result<()> {
 
         state.audit.record(&event).await?;
         // Broadcast the full envelope - SSE consumers get every field.
-        let _ = state.audit_broadcast_tx.send(
-            serde_json::to_string(&event).unwrap_or_default(),
-        );
+        let _ = state
+            .audit_broadcast_tx
+            .send(serde_json::to_string(&event).unwrap_or_default());
     }
 
     info!(

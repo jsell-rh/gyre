@@ -51,7 +51,9 @@ gyre bootstrap --dev
 
 # Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
 # specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
-gyre bootstrap --dev --starter-kit --repo-path ./myrepo
+# (required: --starter-kit without --repo-path is an error — the kit must land
+# at an explicit path, never a cwd-relative default)
+gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
 Steps performed in order: health check → create tenant → create admin user
@@ -128,6 +130,123 @@ gyre spec stale-links
 # List all active conflicts (specs with conflicts_with where both are approved)
 gyre spec conflicts
 ```
+
+---
+
+## Budget (platform-model.md §5)
+
+```bash
+# Current repo budget usage — resolves the repo's owning workspace
+# from the git remote (the budget governance boundary is the workspace;
+# there is no repo-level budget store)
+gyre budget show
+
+# Workspace-level usage (named workspace, or inferred from git remote)
+gyre budget show --workspace --workspace-name platform
+
+# Tenant-level usage summary (Admin only)
+gyre budget show --tenant
+
+# Set repo budget (the owning workspace's limits; Admin only)
+gyre budget set --llm-tokens 500000
+
+# Set workspace cost limit
+gyre budget set --workspace --llm-cost 100.00
+
+# Other limits: --max-agents, --max-agent-lifetime-secs
+# Omitted limits keep their current values (fetch-merge-put).
+```
+
+Notes:
+
+- Calls the real budget endpoints (`GET/PUT /api/v1/workspaces/:id/budget`,
+  `GET /api/v1/budget/summary`); setting limits requires the Admin role.
+- A limit exceeding the tenant ceiling surfaces the server's cascade error;
+  tenant-level limits cannot be set (no tenant-level set endpoint exists).
+- `--llm-cost` must be a finite non-negative amount (USD): NaN, Infinity,
+  and negative values are rejected before any request is sent (a non-finite
+  value would serialize as `null` and silently clear the limit). A finite
+  zero cap is valid and explicitly disables all spending for the day.
+
+---
+
+## Secrets (platform-model.md §7)
+
+```bash
+# Create (or update) a secret in the current workspace — workspace inferred
+# from the git remote (Admin only server-side)
+gyre secret set DATABASE_URL "postgres://user:pass@host/db"
+
+# Repo-scoped secret (workspace from --workspace-name or the git remote)
+gyre secret set --repo gyre DATABASE_URL "postgres://..."
+
+# Tenant-scoped rotated secret with an expiry (unix epoch seconds)
+gyre secret set --scope tenant --secret-type rotated --expires-at 1893456000 \
+  API_KEY "secret-value"
+
+# List secret metadata for a scope (names, types, rotation/expiry state —
+# values are never returned by the API)
+gyre secret list
+
+# Force-rotate a secret's value
+gyre secret rotate API_KEY "new-value"
+
+# Delete a secret by name
+gyre secret delete API_KEY
+```
+
+Notes:
+
+- Calls the real Admin API (`POST/GET /api/v1/secrets`,
+  `DELETE /api/v1/secrets/:id`, `POST /api/v1/secrets/:id/rotate`); every
+  operation requires the Admin role.
+- Secret values are write-only: they are sent on set/rotate and never
+  displayed or returned — the list response physically contains no value
+  field.
+- Scope selection: `--repo <name>` selects repo scope; `--scope tenant`
+  selects the caller's tenant; otherwise workspace scope via
+  `--workspace-name <slug>` or the git remote. `gyre secret delete/rotate`
+  are name-keyed and resolve the id via the scope's list.
+
+---
+
+## Search
+
+```bash
+# Simple full-text search across all entities
+gyre search "identity security"
+
+# Filter by entity type (spec, task, mr, commit, agent) — server-side
+gyre search "merge queue" --type spec
+
+# Filter by live status (task/mr/agent state) — client-side
+gyre search "ABAC" --type task --status in_progress
+
+# Workspace scope by slug — resolved server-side
+gyre search "budget" --workspace platform-team
+
+# Recency filter: relative (7d) or ISO date (2026-03-01)
+gyre search "auth.rs" --since 7d
+
+# Autocomplete for a title prefix
+gyre search --suggest "iden"
+
+# Cap result count (default 20, server max 100)
+gyre search "queue" --limit 5
+```
+
+Notes:
+
+- `--type` and `--workspace` are enforced by the server (`entity_type` /
+  `workspace_id` params on `GET /api/v1/search`).
+- `--status` and `--since` filter against the entity's live state
+  (fetched per-result from the task/MR/agent detail endpoints), because
+  the search index snapshots status at creation time. Results whose
+  live state cannot be resolved (spec/commit types, deleted entities)
+  are excluded and reported on stderr.
+- `--suggest` falls back to a title-prefix filter over regular search
+  results until the dedicated `/api/v1/search/suggest` endpoint lands
+  (task-153).
 
 ---
 

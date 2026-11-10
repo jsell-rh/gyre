@@ -67,6 +67,7 @@ vi.mock('../lib/api.js', () => ({
     approveSpec: vi.fn().mockResolvedValue({}),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
@@ -241,6 +242,33 @@ describe('Inbox', () => {
     });
   });
 
+  it('trust_suggestion: Increase Trust updates the workspace trust level and resolves', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-trust',
+        notification_type: 'trust_suggestion',
+        priority: 8,
+        title: 'Consider increasing trust level',
+        body: JSON.stringify({
+          gate_failures: 0,
+          mr_reverts: 0,
+          period_days: 30,
+          current_level: 'Guided',
+          suggested_level: 'Autonomous',
+        }),
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Consider increasing trust level/ });
+    await fireEvent.click(header);
+    const increaseBtn = await findByText('Increase Trust');
+    await fireEvent.click(increaseBtn);
+    await waitFor(() => {
+      expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', { trust_level: 'Autonomous' });
+      expect(api.resolveNotification).toHaveBeenCalledWith('notif-trust');
+    });
+  });
+
   it('calls approveSpec when Approve is clicked', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -358,5 +386,189 @@ describe('Inbox', () => {
     expect(removeCell.textContent).toContain('old server line');
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
+  });
+
+  // HSI §1.5 scope rows: workspace filter is server-side (?workspace_id=);
+  // repo filter is client-side on n.repo_id — notifications with repo_id NULL
+  // (trust suggestions, meta-spec drift) must stay invisible at repo scope.
+  describe('scope filtering (HSI §1.5)', () => {
+    it('passes workspace_id to the server at workspace scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalledWith({ workspace_id: 'ws-1' }));
+    });
+
+    it('fetches unfiltered at tenant scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { scope: 'tenant' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalled());
+      expect(api.myNotifications).toHaveBeenCalledWith({});
+    });
+
+    it('repo scope shows only notifications with matching repo_id', async () => {
+      api.myNotifications.mockResolvedValue([
+        makeNotification({ id: 'n-repo', repo_id: 'repo-1' }),
+        makeNotification({ id: 'n-other', repo_id: 'repo-2' }),
+        makeNotification({ id: 'n-ws', repo_id: null, notification_type: 'trust_suggestion', title: 'Consider increasing trust' }),
+      ]);
+      const { container } = render(Inbox, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      // The repo-scoped card renders; the other-repo and workspace-only cards do not.
+      await waitFor(() => expect(container.querySelectorAll('.inbox-card').length).toBe(1));
+      expect(container.textContent).toContain('Agent needs clarification');
+      expect(container.textContent).not.toContain('Consider increasing trust');
+      // Exactly one card body (one visible notification).
+      const cards = container.querySelectorAll('.inbox-card');
+      expect(cards.length).toBe(1);
+    });
+  });
+
+  it('renders spec assertion failure card with View Code / Update Spec actions (system-explorer §9)', async () => {
+    const assertNotif = makeNotification({
+      id: 'notif-assert',
+      notification_type: 'SpecAssertionFailure',
+      priority: 9,
+      title: 'Spec assertion failures: 2 assertion(s) failed',
+      body: JSON.stringify({
+        repo_id: 'repo-1',
+        spec_path: 'system/architecture.md',
+        commit_sha: 'abc123',
+        failures: [
+          { spec_path: 'system/architecture.md', line: 3, explanation: 'Found unwanted DependsOn edge to "gyre-adapters"' },
+        ],
+      }),
+      entity_ref: 'system/architecture.md',
+      repo_id: 'repo-1',
+    });
+    api.myNotifications.mockResolvedValue([assertNotif]);
+    const { findByText, findByRole, container } = render(Inbox);
+    // Card renders with the failure title.
+    expect(await findByText(/Spec assertion failures/)).toBeTruthy();
+    // PascalCase type is normalized so the danger styling + label apply.
+    await waitFor(() => {
+      expect(container.textContent).not.toContain('SpecAssertionFailure');
+    });
+    // Actions live in the expanded accordion body — expand the card first.
+    const header = await findByRole('button', { name: /Expand: Spec assertion failures/ });
+    await fireEvent.click(header);
+    // Both §9 actions are offered.
+    expect(await findByRole('button', { name: 'View Code' })).toBeTruthy();
+    expect(await findByRole('button', { name: 'Update Spec' })).toBeTruthy();
+  });
+
+  // ── Entity references in expanded items open the detail panel ─────────
+  // ui-layout.md §3 Inline Expansion: "clicking an entity reference within
+  // an expanded item (e.g. 'View Spec', agent name, MR link) opens the
+  // detail panel in Split layout".
+  describe('Entity references → detail panel (ui-layout.md §3)', () => {
+
+    it('View Spec button in an expanded agent_clarification card opens the spec detail panel', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { findByRole, container } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      await fireEvent.click(header);
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+      const viewSpec = await findByRole('button', { name: /view spec/i });
+      await fireEvent.click(viewSpec);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'spec' })
+      );
+    });
+
+    it('agent ref-link in an expanded card opens the agent detail panel', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { container, findByText } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByText('Agent needs clarification');
+      // Header is the accordion button (ancestor of the title text)
+      const card = header.closest('.accordion-item');
+      await fireEvent.click(card.querySelector('.accordion-header'));
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+
+      // The agent ref-link in the expanded body (spec ref-link renders first)
+      const agentLink = [...container.querySelectorAll('.ref-link')]
+        .find(l => l.textContent.toLowerCase().includes('agent'));
+      expect(agentLink).toBeTruthy();
+      await fireEvent.click(agentLink);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'agent', id: 'worker-8' })
+      );
+    });
+
+    it('MR ref-link in an expanded gate_failure card opens the MR detail panel', async () => {
+      api.myNotifications.mockResolvedValue([gateFailureNotif]);
+      const openDetailPanel = vi.fn();
+      const { container, findByText } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const title = await findByText('Gate failure: lint');
+      const card = title.closest('.accordion-item');
+      await fireEvent.click(card.querySelector('.accordion-header'));
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+      const mrLink = container.querySelector('.ref-link');
+      expect(mrLink).toBeTruthy();
+      await fireEvent.click(mrLink);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'mr', id: 'mr-uuid-42' })
+      );
+    });
+  });
+
+  // ── Review-round repair: header button structure ────────────────────
+  // The AccordionItem header is a real <button>. HTML's content model
+  // forbids interactive descendants of <button>, so quick links must not
+  // live inside the header snippet; they render as a sibling actions row.
+  describe('Header structure (no nested interactive elements)', () => {
+    const renderInbox = () => render(Inbox, {
+      context: new Map([['openDetailPanel', vi.fn()]]),
+    });
+
+    it('renders no interactive elements inside the accordion header button', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const { container, findByRole } = renderInbox();
+      await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      const headers = container.querySelectorAll('.accordion-header');
+      expect(headers.length).toBeGreaterThan(0);
+      headers.forEach(h => {
+        expect(h.querySelectorAll('button, a, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])').length).toBe(0);
+      });
+    });
+
+    it('quick links render in a sibling actions row and open the detail panel without toggling', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { container, findByRole } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      expect(container.querySelector('.card-body')).toBeNull();
+
+      const quickLinks = container.querySelectorAll('.card-quick-link');
+      expect(quickLinks.length).toBe(2); // spec + agent for this fixture
+      // Sibling of the header button (accordion-actions row), not inside it.
+      quickLinks.forEach(l => expect(header.contains(l)).toBe(false));
+      expect(quickLinks[0].closest('.accordion-actions')).toBeTruthy();
+
+      await fireEvent.click(quickLinks[0]);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'spec' })
+      );
+      // Clicking a quick link must not have expanded the card.
+      expect(container.querySelector('.card-body')).toBeNull();
+      expect(header.getAttribute('aria-expanded')).toBe('false');
+    });
+
+    it('header carries the card-header class from headerClass', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const { findByRole } = renderInbox();
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      expect(header.classList.contains('card-header')).toBe(true);
+      // The :global CSS rules that target it are guarded at compile time
+      // in AccordionScoping.test.js (node environment).
+    });
   });
 });

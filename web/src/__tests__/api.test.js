@@ -106,6 +106,45 @@ describe('api.js — auth header', () => {
     expect(url).toBe('/api/v1/merge-queue');
   });
 
+  it('api.repoStatus() calls /api/v1/repos/:id/status', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+    await api.repoStatus('repo-1');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos/repo-1/status');
+  });
+
+  it('api.repoStatus(id, { withGates: false }) skips gate execution', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+    await api.repoStatus('repo-1', { withGates: false });
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos/repo-1/status?gates=false');
+  });
+
+  it('api.pauseRepoQueue() PUTs to /api/v1/repos/:id/queue/pause with reason', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+    await api.pauseRepoQueue('repo-1', 'main is broken');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos/repo-1/queue/pause');
+    expect(options.method).toBe('PUT');
+    expect(JSON.parse(options.body)).toEqual({ reason: 'main is broken' });
+  });
+
+  it('api.resumeRepoQueue() PUTs to /api/v1/repos/:id/queue/resume', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+    await api.resumeRepoQueue('repo-1');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/v1/repos/repo-1/queue/resume');
+    expect(options.method).toBe('PUT');
+  });
+
   it('api.repos({ workspaceId }) calls /api/v1/repos?workspace_id=<id>', async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })

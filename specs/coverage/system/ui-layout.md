@@ -2,7 +2,7 @@
 
 **Spec:** [`system/ui-layout.md`](../../system/ui-layout.md)
 **Last audited:** 2026-09-29
-**Coverage:** 0/38
+**Coverage:** 1/38
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -18,7 +18,7 @@
 | 10 | Available Data | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
 | 11 | Output Format | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
 | 12 | Constraints | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
-| 13 | Editor Split | 3 | task-assigned | task-172 | Editor Split component |
+| 13 | Editor Split | 3 | implemented | task-172 | EditorSplit.svelte two-pane layout: editor+LLM chat left, Architecture (default)/Code Diff tabs right; Accept/Edit/Dismiss inline diff; editing→running→complete→iterate; DetailPanel pop-out with Back/Esc (single-Esc guard in DetailPanel.handleKeydown). Both production contexts: DetailPanel mounts context="spec"; MetaSpecs workspace view (§9 preview loop) mounts context="meta-spec" with targetSpecs/onpublish — one shared implementation, no parallel §9 client. Verified via EditorSplit.test.js + DetailPanel.test.js + MetaSpecs.test.js incl. real PreviewResponse shapes and honest 404-failure paths (2026-10-10) |
 | 14 | 3. Interaction Patterns | 2 | task-assigned | task-173 | Standardized patterns |
 | 15 | Scope Transitions | 3 | task-assigned | task-173 | Cross-fade, pushState |
 | 16 | Drill-Down (Entity Detail) | 3 | task-assigned | task-173 | Detail panel slide-in |

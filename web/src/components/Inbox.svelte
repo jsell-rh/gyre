@@ -7,6 +7,7 @@
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
+  import AccordionItem from '../lib/AccordionItem.svelte';
   import SpecDiffView from '../lib/SpecDiffView.svelte';
   import { toastError } from '../lib/toast.svelte.js';
 
@@ -27,6 +28,9 @@
   let filterType = $state('all');
   let actionStates = $state({});
   let workspaceMap = $state({});
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after the scope changed.
+  let loadGen = 0;
 
   // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
@@ -48,15 +52,31 @@
     // PascalCase variants from the server
     AgentCompleted: 'success',
     AgentFailed: 'danger',
-    SpecPendingApproval: 'warning',
+    SpecApprovalRequested: 'warning',
+    SpecPendingApproval: 'warning', // legacy rows
     SpecApproved: 'success',
     SpecRejected: 'danger',
     MrMerged: 'success',
     MrCreated: 'info',
     GateFailure: 'danger',
+    GatePassed: 'success',
     SuggestedSpecLink: 'default',
     TaskCreated: 'info',
-    BudgetWarning: 'warning',
+    AgentBudgetWarning: 'warning',
+    BudgetWarning: 'warning', // legacy rows
+    AgentBudgetExhausted: 'danger',
+    AgentEscalation: 'danger',
+    MergeQueuePaused: 'warning',
+    MergeQueueEscalation: 'danger',
+    MrReverted: 'danger',
+    BreakingChangeDetected: 'danger',
+    SpecDriftDetected: 'warning',
+    DependencyStale: 'info',
+    SecurityFinding: 'danger',
+    InvitationReceived: 'info',
+    MembershipChanged: 'info',
+    PersonaApprovalRequested: 'warning',
+    SystemAlert: 'warning',
   };
 
   // Human-readable type labels — derived from i18n
@@ -80,47 +100,71 @@
   }
 
   async function loadNotifications(isBackground = false) {
+    const gen = ++loadGen;
     try {
       if (!isBackground) loading = true;
       error = null;
-      let raw = await api.myNotifications();
+      // Scope narrowing (HSI §1.5 Inbox row): the workspace filter is
+      // server-side (?workspace_id=); tenant scope passes no filter and the
+      // server returns the queue across all workspaces the user belongs to.
+      const params = {};
+      if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
+      let raw = await api.myNotifications(params);
+      if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case
       const typeNormMap = {
         AgentCompleted: 'agent_completed',
         AgentFailed: 'agent_failed',
-        SpecPendingApproval: 'spec_approval',
+        SpecApprovalRequested: 'spec_approval',
+        SpecPendingApproval: 'spec_approval', // legacy rows
         SpecApproved: 'spec_approved',
         SpecRejected: 'spec_rejected',
         MrMerged: 'mr_merged',
         MrCreated: 'mr_created',
         MrNeedsReview: 'mr_needs_review',
         GateFailure: 'gate_failure',
+        GatePassed: 'gate_passed',
         SuggestedSpecLink: 'suggested_link',
         TaskCreated: 'task_created',
-        BudgetWarning: 'budget_warning',
+        AgentBudgetWarning: 'budget_warning',
+        BudgetWarning: 'budget_warning', // legacy rows
+        AgentBudgetExhausted: 'budget_exhausted',
+        AgentEscalation: 'agent_escalation',
+        MergeQueuePaused: 'merge_queue_paused',
+        MergeQueueEscalation: 'merge_queue_escalation',
+        MrReverted: 'mr_reverted',
+        BreakingChangeDetected: 'breaking_change_detected',
+        SpecDriftDetected: 'spec_drift_detected',
+        DependencyStale: 'dependency_stale',
+        SecurityFinding: 'security_finding',
+        InvitationReceived: 'invitation_received',
+        MembershipChanged: 'membership_changed',
+        PersonaApprovalRequested: 'persona_approval_requested',
+        SystemAlert: 'system_alert',
         SpecChanged: 'spec_changed',
         MetaSpecDrift: 'meta_spec_drift',
+        SpecAssertionFailure: 'spec_assertion_failure',
       };
       data = data.map(n => ({
         ...n,
         notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
       }));
 
-      // Client-side scope filtering
-      if (repoId) {
+      // Repo scope narrows client-side on repo_id: workspace-scoped
+      // notifications with repo_id NULL (trust suggestions, meta-spec drift)
+      // stay invisible at repo scope (HSI §1.5 Inbox row).
+      if (scope === 'repo' && repoId) {
         data = data.filter(n => n.repo_id === repoId);
-      } else if (workspaceId) {
-        data = data.filter(n => n.workspace_id === workspaceId);
       }
-
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
+      if (gen !== loadGen) return;
       error = e.message || $t('decisions.load_failed');
       notifications = [];
     } finally {
-      if (!isBackground) loading = false;
+      if (gen === loadGen && !isBackground) loading = false;
     }
   }
 
@@ -289,8 +333,28 @@
   }
 
   async function handleIncreaseTrust(n) {
-    goToWorkspaceSettings?.();
-    await handleDismiss(n);
+    const body = getBody(n);
+    // Suggested next level from the job's payload; fall back to the spec's
+    // example target (Autonomous) for notifications without a body.
+    const suggested = body.suggested_level || 'Autonomous';
+    if (!n.workspace_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'trust' } };
+    try {
+      await api.updateWorkspace(n.workspace_id, { trust_level: suggested });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.trust_increased') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.trust_increase_failed') },
+      };
+    }
   }
 
   function handleAdjustMetaSpec(n) {
@@ -376,74 +440,83 @@
             role="listitem"
             data-type={n.notification_type}
           >
-            <!-- Card header: always visible, click to expand/collapse -->
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div
-              class="card-header"
-              onclick={() => toggleExpand(n.id)}
-              role="button"
-              tabindex="0"
-              aria-expanded={isExpanded}
-              aria-controls="inbox-card-{n.id}"
-              aria-label="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(n.id); } }}
+            <!-- Card header: always visible, click to expand/collapse.
+                 AccordionItem (ui-layout.md §3 Inline Expansion) — the header
+                 is a real <button>; quick-link buttons inside call
+                 stopPropagation so they don't toggle. -->
+            <AccordionItem
+              id={n.id}
+              open={isExpanded}
+              ontoggle={toggleExpand}
+              headerClass="card-header"
+              ariaLabel="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
             >
-              <div class="card-header-left">
-                <span
-                  class="priority-badge"
-                  data-priority={n.priority}
-                  aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
-                >
-                  P{n.priority}
-                </span>
-                {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
-                <div class="card-header-text">
-                  <span class="card-title">{n.title}</span>
-                  {#if body.agent_id || body.mr_title || body.agent_name}
-                    <span class="card-subtitle">
-                      {#if body.agent_name}{body.agent_name}
-                      {:else if body.agent_id}{resolveEntityName('agent', body.agent_id)}{/if}
-                      {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
-                      {#if body.spec_path}
-                        ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
-                      {/if}
-                    </span>
-                  {:else if body.spec_path}
-                    <button class="card-subtitle card-subtitle-link" title={body.spec_path} onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }}>{body.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.spec_path}</button>
-                  {:else if body.meta_spec_path}
-                    <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.meta_spec_path}</span>
-                  {/if}
+              {#snippet header()}
+                <div class="card-header-left">
+                  <span
+                    class="priority-badge"
+                    data-priority={n.priority}
+                    aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
+                  >
+                    P{n.priority}
+                  </span>
+                  {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
+                  <div class="card-header-text">
+                    <span class="card-title">{n.title}</span>
+                    {#if body.agent_id || body.mr_title || body.agent_name}
+                      <span class="card-subtitle">
+                        {#if body.agent_name}{body.agent_name}
+                        {:else if body.agent_id}{resolveEntityName('agent', body.agent_id)}{/if}
+                        {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
+                        {#if body.spec_path}
+                          ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
+                        {/if}
+                      </span>
+                    {:else if body.spec_path}
+                      <span class="card-subtitle card-subtitle-ref" title={body.spec_path}>{body.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.spec_path}</span>
+                    {:else if body.meta_spec_path}
+                      <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.meta_spec_path}</span>
+                    {/if}
+                  </div>
                 </div>
-              </div>
-              <div class="card-header-right">
-                <!-- Quick entity jump buttons (visible without expanding) -->
-                {#if body.spec_path}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋</button>
+                <div class="card-header-right">
+                  <!-- Quick entity jump buttons live in the actions snippet
+                       (sibling of the header button) — see below. -->
+                  {#if isResolved}
+                    <Badge value={$t('decisions.status_resolved')} variant="success" />
+                  {/if}
+                  {#if scope === 'tenant' && n.workspace_id}
+                    <Badge value={workspaceMap[n.workspace_id] ?? entityName('workspace', n.workspace_id)} variant="default" />
+                  {/if}
+                  <Badge
+                    value={typeLabel(n.notification_type)}
+                    variant={TYPE_VARIANTS[n.notification_type] || 'default'}
+                  />
+                  <span class="card-age">{relativeTime(n.created_at)}</span>
+                  <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
+                </div>
+              {/snippet}
+              {#snippet actions()}
+                <!-- Quick entity jump buttons (visible without expanding).
+                     Rendered as a SIBLING of the header button via the
+                     actions snippet — HTML forbids interactive elements
+                     inside a <button>, and clicks here never toggle. -->
+                {#if body.spec_path || body.mr_id || body.agent_id}
+                  <div class="card-quick-links">
+                    {#if body.spec_path}
+                      <button class="card-quick-link" onclick={() => openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } })} title="View spec: {body.spec_path}">📋</button>
+                    {/if}
+                    {#if body.mr_id}
+                      <button class="card-quick-link" onclick={() => openDetail({ type: 'mr', id: body.mr_id, data: { repo_id: n.repo_id } })} title="View merge request">🔀</button>
+                    {/if}
+                    {#if body.agent_id}
+                      <button class="card-quick-link" onclick={() => openDetail({ type: 'agent', id: body.agent_id, data: { repo_id: n.repo_id } })} title="View agent">▶</button>
+                    {/if}
+                  </div>
                 {/if}
-                {#if body.mr_id}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'mr', id: body.mr_id, data: { repo_id: n.repo_id } }); }} title="View merge request">🔀</button>
-                {/if}
-                {#if body.agent_id}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'agent', id: body.agent_id, data: { repo_id: n.repo_id } }); }} title="View agent">▶</button>
-                {/if}
-                {#if isResolved}
-                  <Badge value={$t('decisions.status_resolved')} variant="success" />
-                {/if}
-                {#if scope === 'tenant' && n.workspace_id}
-                  <Badge value={workspaceMap[n.workspace_id] ?? entityName('workspace', n.workspace_id)} variant="default" />
-                {/if}
-                <Badge
-                  value={typeLabel(n.notification_type)}
-                  variant={TYPE_VARIANTS[n.notification_type] || 'default'}
-                />
-                <span class="card-age">{relativeTime(n.created_at)}</span>
-                <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
-              </div>
-            </div>
-
-            <!-- Expanded body (accordion — only one open at a time) -->
-            {#if isExpanded}
-              <div class="card-body" id="inbox-card-{n.id}">
+              {/snippet}
+              {#snippet children()}
+                <div class="card-body" id="inbox-card-{n.id}">
                 {#if body.message}
                   <blockquote class="card-message">"{body.message}"</blockquote>
                 {/if}
@@ -709,8 +782,9 @@
                     {/if}
                   </div>
                 {/if}
-              </div>
-            {/if}
+                </div>
+              {/snippet}
+            </AccordionItem>
           </div>
         {/each}
       </div>
@@ -848,7 +922,12 @@
     opacity: 0.7;
   }
 
-  .card-header {
+  /* Accordion header button (AccordionItem) carries the card-header look.
+     The button is authored INSIDE AccordionItem.svelte, so it never gets
+     this component's scoping hash class — the rules must be :global()
+     (scoped on the left, global on the class) or Svelte prunes them as
+     unused while the header renders unstyled. */
+  .inbox-card :global(.accordion-header.card-header) {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -864,7 +943,7 @@
     transition: background var(--transition-fast);
   }
 
-  .card-header:focus-visible {
+  .inbox-card :global(.accordion-header.card-header:focus-visible) {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
@@ -928,20 +1007,19 @@
     text-overflow: ellipsis;
   }
 
-  .card-subtitle-link {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-    font: inherit;
+  /* Spec subtitle reference (non-interactive span; the clickable spec
+     entry points are the actions quick-links and the expanded ref-links).
+     Styled as a link hint via the title attribute tooltip. */
+  .card-subtitle-ref {
     color: var(--color-link, var(--color-primary));
   }
 
-  .card-subtitle-link:hover {
-    text-decoration: underline;
+  .card-quick-links {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
   }
-
   .card-header-right {
     display: flex;
     align-items: center;
@@ -1145,9 +1223,10 @@
 
   @media (prefers-reduced-motion: reduce) {
     .inbox-card,
-    .card-header,
+    .card-quick-link,
     .ref-link,
-    .retry-btn { transition: none; }
+    .retry-btn,
+    .inbox-card :global(.accordion-header.card-header) { transition: none; }
   }
 
   /* ── Show more ─────────────────────────────────────────────────────── */

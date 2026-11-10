@@ -10,7 +10,7 @@ import sqlite3
 import time
 import uuid
 
-STAGES = ('triage', 'implement', 'review', 'verify', 'publish', 'cleanup')
+STAGES = ('triage', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
 
 
 class StaleClaim(RuntimeError):
@@ -50,6 +50,8 @@ class Store:
               name TEXT PRIMARY KEY, work TEXT REFERENCES work(id), token INTEGER,
               kind TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL,
               updated REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS priority_findings ON findings(task,generation,resolved_by,category);
+            CREATE INDEX IF NOT EXISTS resource_capacity ON resources(kind,state);
             CREATE TABLE IF NOT EXISTS events(
               id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, work TEXT,
               kind TEXT NOT NULL, detail TEXT NOT NULL, at REAL NOT NULL);
@@ -57,6 +59,11 @@ class Store:
             CREATE INDEX IF NOT EXISTS work_events ON events(work,kind);
         ''')
         (self.directory / 'pipeline.sqlite3').chmod(0o600)
+        # Serialize additive migration with other dispatcher/worker starts.
+        with self.transaction():
+            if 'ready_since' not in {row['name'] for row in self.db.execute('PRAGMA table_info(work)')}:
+                self.db.execute('ALTER TABLE work ADD COLUMN ready_since REAL NOT NULL DEFAULT 0')
+            self.db.execute('UPDATE work SET ready_since=? WHERE ready_since=0',(time.time(),))
         self.db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)', ('owner', json.dumps(uuid.uuid4().hex)))
 
     def close(self):
@@ -113,44 +120,178 @@ class Store:
         # new work, while discovery replay adopts the existing outcome.
         with self.transaction():
             self.db.execute('''INSERT OR IGNORE INTO work
-                (id,stage,task,generation,input_key,input,priority,created,updated)
-                VALUES(?,?,?,?,?,?,?,?,?)''',
+                (id,stage,task,generation,input_key,input,priority,created,updated,ready_since)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',
                             (uuid.uuid4().hex, stage, task, generation, key, encoded,
-                             priority, time.time(), time.time()))
-            self.db.execute("UPDATE work SET state='ready',updated=? WHERE stage=? AND task=? AND generation=? AND input_key=? AND state='obsolete' AND EXISTS(SELECT 1 FROM tasks WHERE name=? AND generation=?)",
-                            (time.time(), stage, task, generation, key, task, generation))
+                             priority, time.time(), time.time(),time.time()))
+            self.db.execute("UPDATE work SET state='ready',updated=?,ready_since=? WHERE stage=? AND task=? AND generation=? AND input_key=? AND state='obsolete' AND EXISTS(SELECT 1 FROM tasks WHERE name=? AND generation=?)",
+                            (time.time(),time.time(), stage, task, generation, key, task, generation))
             self.db.execute("UPDATE work SET input=?,updated=? WHERE stage=? AND task=? AND generation=? AND input_key=? AND state IN ('ready','retry')",
                             (encoded, time.time(), stage, task, generation, key))
             return self.db.execute('SELECT id FROM work WHERE stage=? AND task=? AND generation=? AND input_key=?',
                                    (stage, task, generation, key)).fetchone()['id']
 
-    def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None):
+    @staticmethod
+    def runtime_hold_key(task, stage, generation):
+        return f'runtime_hold:{task}:{stage}:{generation}'
+
+    def runtime_held(self, work):
+        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation'])))
+
+    def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
+              ident=None, capacity=None):
         now = time.time() if now is None else now
-        if concurrency < 1 or lease_seconds <= 0:
+        if concurrency < 0 or lease_seconds <= 0:
             raise ValueError('invalid claim limits')
         with self.transaction():
             expired = self.db.execute("SELECT id,task FROM work WHERE state='claimed' AND expires<=?", (now,)).fetchall()
             for row in expired:
-                self.db.execute("UPDATE work SET state='ready',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?", (now, row['id']))
+                self.db.execute("UPDATE work SET state='ready',token=token+1,owner=NULL,expires=NULL,updated=?,ready_since=? WHERE id=?", (now,now,row['id']))
                 self.event('lease_expired', {}, row['task'], row['id'])
             active = self.db.execute("SELECT count(*) FROM work WHERE stage=? AND state='claimed'", (stage,)).fetchone()[0]
             if active >= concurrency:
+                return None
+            compute = stage in ('triage', 'implement', 'review', 'verify') and capacity is not None
+            if compute and not self.admission_available(stage,capacity):
                 return None
             rows = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
                 ON t.name=w.task AND t.generation=w.generation
                 WHERE w.stage=? AND w.state IN ('ready','retry') AND w.retry_at<=?
                 AND (? IS NULL OR w.task=?)
-                AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed')
-                ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task)).fetchall()
-            row = next((row for row in rows if eligible is None or eligible(dict(row))), None)
+                AND (? IS NULL OR w.id=?)
+                AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed'
+                    AND (CASE WHEN w.stage='observe' THEN x.stage IN ('observe','publish')
+                         WHEN w.stage='publish' THEN 1 ELSE x.stage<>'observe' END))
+                ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task, ident, ident)).fetchall()
+            from .priority import sort_key, task_priority, PriorityError
+            rows=sorted((dict(row) for row in rows),key=lambda row:sort_key(self,row,now))
+            def valid_priority(row):
+                if row['stage'] not in ('triage','implement','review','verify'):
+                    return True
+                try:
+                    task_priority(self,self.task(row['task']))
+                    return True
+                except PriorityError:
+                    return False
+            row = next((row for row in rows
+                        if (not compute or not self.db.execute(
+                            "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        and not self.runtime_held(row)
+                        and self.integration_available(dict(row))
+                        and valid_priority(row)
+                        and (eligible is None or eligible(dict(row)))), None)
             if not row:
                 return None
             self.db.execute("UPDATE work SET state='claimed',token=token+1,owner=?,expires=?,updated=? WHERE id=?",
                             (owner, now + lease_seconds, now, row['id']))
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
-            self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner}, row['task'], row['id'])
+            if stage in ('verify','publish'):
+                candidate = self.task(claimed['task'])['data'].get('candidate')
+                if candidate:
+                    old = self.integration_lane()
+                    lane = {'task':claimed['task'], 'candidate':candidate, 'generation':claimed['generation'],
+                            'entered':old['entered'] if old else now}
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('integration_lane',json.dumps(lane)))
+                    if not old:
+                        self.event('integration_admitted',lane,claimed['task'],claimed['id'])
+            if compute:
+                name = self.admission_name(claimed['id'], claimed['token'])
+                self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                                (name, claimed['id'], claimed['token'], 'admission', 'intent', '{}', now))
+                self.event('admitted', {'resource': name, 'stage': stage}, claimed['task'], claimed['id'])
+            from .priority import info
+            self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner,
+                                  'priority':info(self,dict(row),now)}, row['task'], row['id'])
             return claimed
+
+    @staticmethod
+    def admission_name(ident, token):
+        return f'admission-{ident}-{token}'
+
+    def compute_resources(self):
+        """Cleanup debt occupies compute until fresh scoped runtime evidence says otherwise."""
+        context,namespace=self.setting('runtime_kube_context'),self.setting('runtime_namespace')
+        now=time.time()
+        result=[]
+        for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'"):
+            proof=json.loads(row['data']).get('compute_observation') or {}
+            released=(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
+                and proof.get('context')==context and proof.get('namespace')==namespace
+                and proof.get('work')==row['work'] and proof.get('token')==row['token']
+                and proof.get('absent') is True and 0<=now-proof.get('at',0)<180)
+            if not released:result.append(row)
+        return result
+
+    def compute_used(self):
+        return len(self.compute_resources())
+
+    def verification_reserve(self, capacity=None):
+        capacity=self.setting('slots',8) if capacity is None else capacity
+        return min(self.setting('verification_slots',1),max(0,capacity-1))
+
+    def admission_available(self, stage, capacity=None):
+        if stage not in ('triage','implement','review','verify'):
+            return True
+        capacity=self.setting('slots',8) if capacity is None else capacity
+        if self.compute_used() >= capacity:
+            return False
+        if stage == 'verify':
+            return True
+        verification={r['id'] for r in self.db.execute("SELECT id FROM work WHERE stage='verify'")}
+        used=sum(row['work'] not in verification for row in self.compute_resources())
+        return used < capacity-self.verification_reserve(capacity)
+
+    def ordered_ready(self):
+        from .priority import sort_key
+        now=time.time()
+        rows=[dict(row) for row in self.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') AND retry_at<=?",(now,))]
+        return sorted(rows,key=lambda row:sort_key(self,row,now))
+
+    def integration_waiting(self, data):
+        """A long external wait yields the lane, never the merge/check gates."""
+        ci = data.get('ci') or {}
+        # Green CI on an outdated branch needs our own base refresh. Parking
+        # it until GitHub becomes CLEAN deadlocks: only integration can do that.
+        if (ci.get('checks') == 'green' and ci.get('status') == 'policy_pending'
+                and ci.get('merge_state') == 'BEHIND'):
+            return False
+        return (ci.get('head') == data.get('published_head') and bool(ci.get('waiting_since'))
+                and ci.get('status') in ('pending','policy_pending','infrastructure')
+                and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
+
+    def integration_lane(self):
+        lane = self.setting('integration_lane')
+        if not lane:
+            return None
+        row = self.db.execute('SELECT generation,data FROM tasks WHERE name=?',(lane['task'],)).fetchone()
+        if not row:
+            return None
+        data = json.loads(row['data'])
+        ci = data.get('ci') or {}
+        if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
+                or data.get('repair') or data.get('delivered') or data.get('resolved')
+                or self.integration_waiting(data)
+                or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
+                or self.setting('task_paused:'+lane['task'],False)):
+            return None
+        return lane
+
+    def integration_available(self, work):
+        if work['stage'] not in ('verify','publish'):
+            return True
+        data = self.task(work['task'])['data']
+        ci = data.get('ci') or {}
+        if self.integration_waiting(data):
+            return False
+        # A new base must not silently bypass an unresolved source safety hold.
+        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'", (work['task'],work['generation'])):
+            if json.loads(row['input']).get('candidate') == data.get('candidate'):
+                return False
+        if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
+            return False
+        lane = self.integration_lane()
+        return lane is None or (lane['task'] == work['task'] and lane['generation'] == work['generation'])
 
     def _current(self, ident, token, now=None):
         row = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -187,34 +328,64 @@ class Store:
                                  finding.get('source'), finding['category'], json.dumps(finding), time.time()))
             self.db.execute("UPDATE work SET state='succeeded',result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (json.dumps(result), time.time(), ident))
+            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') in ('merged','environment_refresh')):
+                victims = self.db.execute("SELECT id,input FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
+                for victim in victims:
+                    if result.get('status')=='environment_refresh' and json.loads(victim['input']).get('base')==result.get('target_base'):
+                        continue
+                    self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
+                    self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
+            lane = self.setting('integration_lane')
+            refresh_idle=(result.get('status')=='environment_refresh' and not self.db.execute("SELECT 1 FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchone())
+            if lane and lane['task'] == row['task'] and (self.integration_lane() is None or refresh_idle):
+                self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             self.event('completed', result, row['task'], ident)
 
-    def retry(self, ident, token, reason, delay=None, count_failure=True):
+    def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
-            delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
-            self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
-                            (failures, time.time() + delay, json.dumps(reason), time.time(), ident))
-            self.event('retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            delay = min(self.setting('retry_max_seconds', 900), self.setting('retry_base_seconds', 5) * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
+            retry_at=time.time()+delay
+            self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
+                            ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
+            self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage'):
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                    (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
+            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning','sandbox_admission')):
+                lane=self.setting('integration_lane')
+                if lane and lane['task'] == row['task']:
+                    self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                    self.event('integration_released',{'reason':'verification safety failure needs attention'},row['task'],ident)
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
             self._current(ident, token)
+            admission = self.admission_name(ident, token)
+            admitted = kind == 'sandbox' and bool(self.db.execute(
+                "SELECT 1 FROM resources WHERE name=? AND kind='admission' AND state='intent'", (admission,)).fetchone())
+            def used():
+                return self.compute_used() - int(admitted) if kind == 'sandbox' else self.db.execute(
+                    "SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
+            def transfer():
+                if admitted:
+                    self.db.execute("UPDATE resources SET state='absent',updated=? WHERE name=?", (time.time(), admission))
             old = self.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
             if old:
                 if old['work'] != ident or old['token'] > token:
                     raise StaleClaim('resource belongs to another claim')
                 if old['state'] == 'absent':
-                    count = self.db.execute("SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
-                    if count >= limit:
+                    if not admitted and used() >= limit:
                         return False
                     self.db.execute("UPDATE resources SET token=?,state='intent',data=?,updated=? WHERE name=?",
                                     (token, json.dumps(data or {}), time.time(), name))
                     self.event('resource_reserved', {'name': name, 'kind': kind}, work=ident)
+                    transfer()
                     return True
                 if old['token'] < token:
                     self.db.execute('UPDATE resources SET token=?,updated=? WHERE name=?',
@@ -223,13 +394,14 @@ class Store:
                 if data:
                     self.db.execute('UPDATE resources SET data=? WHERE name=?',
                                     (json.dumps(json.loads(old['data']) | data), name))
+                transfer()
                 return old['state'] != 'absent'
-            count = self.db.execute("SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
-            if count >= limit:
+            if not admitted and used() >= limit:
                 return False
             self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
                             (name, ident, token, kind, 'intent', json.dumps(data or {}), time.time()))
             self.event('resource_reserved', {'name': name, 'kind': kind}, work=ident)
+            transfer()
             return True
 
     def resource_state(self, name, state, data=None):

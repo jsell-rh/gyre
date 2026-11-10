@@ -1,0 +1,3 @@
+base: worker.yaml
+agent: agents/triage.md
+role: triage

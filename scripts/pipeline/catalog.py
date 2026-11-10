@@ -76,23 +76,80 @@ def sync_checkout(store, checkout, revision=None):
 
 
 def discover(store, stage, base):
+    from .repairs import cached, probe, resolution, satisfied
     tasks = {task['name']: task for task in store.tasks()}
     graph = {name: task['data'].get('dependencies') or [] for name, task in tasks.items()}
     errors = contract.graph_errors(graph)
     selected = []
     for name, task in tasks.items():
         data = task['data']
-        if data.get('delivered'):
+        if satisfied(data):
             continue
+        if stage == 'observe':
+            from .ci import publication
+            published = publication(store,task)
+            if (published and published.get('candidate') == data.get('candidate') and not data.get('repair')):
+                selected.append(store.enqueue('observe',name,task['generation'],
+                    {'candidate':data['candidate'],'url':data['pr'],'published':published},priority=30000))
+            elif data.get('pr'):
+                selected.append(store.enqueue('observe',name,task['generation'],
+                    {'url':data['pr'],'priority_only':True},priority=30000))
+            continue
+        repair = data.get('repair') or {}
+        prerequisite = tasks.get(repair.get('prerequisite'))
+        reviewed = data.get('review') or {}
+        if (repair.get('category') == 'baseline' and prerequisite and satisfied(prerequisite['data'])
+                and data.get('candidate') and repair.get('source') == data['candidate']
+                and reviewed.get('approved') and reviewed.get('candidate') == data['candidate']):
+            # Its independently reviewed source did not fail. Only upstream's
+            # prerequisite did; reverify that source instead of asking a model
+            # to manufacture an unrelated change to clear a stale finding.
+            with store.transaction():
+                current = store.task(name)
+                if (current['generation'] == task['generation'] and current['data'].get('repair') == repair
+                        and not store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(name,)).fetchone()):
+                    data = current['data'] | {'repair': None, 'verified': None,
+                            'baseline_resolution': {'prerequisite':prerequisite['name'],
+                                'candidate':data['candidate'],'published_head':data.get('published_head'),'generation':task['generation'],
+                                'receipt':prerequisite['data'].get('resolved') or prerequisite['data'].get('delivered')}}
+                    store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),name))
+                    store.event('baseline_dependency_resolved', {'prerequisite':prerequisite['name'],
+                                'candidate':data['candidate']}, name)
+                    task['data'] = data
+        if (data.get('repair') or {}).get('shared_environment'):
+            continue  # Operational coordination must not rewrite product dependencies.
+        baseline_probe = probe(task)
+        if baseline_probe and (data.get('baseline_checked') or {}).get('base') != base:
+            receipt = cached(store,base,baseline_probe)
+            if receipt is not None:
+                with store.transaction():
+                    current = store.task(name)
+                    if (current['generation'] == task['generation'] and
+                            not store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(name,)).fetchone()):
+                        data = current['data'] | resolution(current,receipt)
+                        store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),name))
+                        task['data'] = data
+                        store.event('baseline_repair_resolved' if receipt['passed'] else 'baseline_reproduced',
+                                    {'base':base,'probe':baseline_probe,'receipt':receipt['artifact']},name)
+                if satisfied(data):
+                    continue
+            if stage == 'triage':
+                if (data.get('baseline_checked') or {}).get('base') != base:
+                    selected.append(store.enqueue('triage', name, task['generation'],
+                                {'base': base, 'baseline_probe': baseline_probe}, priority=20000))
+            if (data.get('baseline_checked') or {}).get('base') != base:
+                continue
         triaged = data.get('triaged') == task['generation']
         candidate = data.get('candidate')
         review = data.get('review') or {}
         verified = data.get('verified') or {}
         repair = data.get('repair')
-        deps_ready = name not in errors and all(tasks[dep]['data'].get('delivered') for dep in graph[name])
+        deps_ready = name not in errors and all(satisfied(tasks[dep]['data']) for dep in graph[name])
         inputs = None
         if stage == 'triage' and not triaged:
             inputs = {'error': errors.get(name) or data.get('metadata_error'), 'metadata': safe_metadata(task['body'])}
+            if (repair or {}).get('category') == 'fresh_start':
+                inputs['fresh_start_id'] = repair['id']
             if (inputs['error'] or inputs['metadata'].get('dependencies') is None or
                     not inputs['metadata'].get('title') or not inputs['metadata'].get('spec_ref')):
                 inputs['base'] = base
@@ -105,7 +162,8 @@ def discover(store, stage, base):
         elif stage == 'verify' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') == candidate and review.get('approved'):
                 if verified.get('candidate') != candidate or verified.get('base') != base:
-                    if not (data.get('pr') and verified.get('candidate') == candidate):
+                    from .ci import verification_ready
+                    if verification_ready(store,task,base):
                         inputs = {'candidate': candidate, 'base': base}
         elif stage == 'publish' and deps_ready and candidate and not repair:
             if verified.get('candidate') == candidate and (verified.get('base') == base or data.get('pr')):

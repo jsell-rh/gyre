@@ -1,13 +1,10 @@
 """Credential routing and pinned-model configuration checks; no external inference."""
 import importlib.util
 import json
-import os
+import io
+import urllib.error
 from pathlib import Path
-import select
-import shutil
 import subprocess
-import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
@@ -64,69 +61,41 @@ class InferenceTest(unittest.TestCase):
                 inference.configure({"ENMAAS_API_KEY": "test-only-key"}, "test-only-key")
         run.assert_called_once()
 
-    def test_smoke_accepts_only_successful_final_answer_and_ignores_status(self):
-        for answer, stop, code, succeeds in (("OK", "stop", 0, True),
-                                            ("Wrong", "stop", 0, False),
-                                            ("OK", "error", 0, False),
-                                            ("OK", "stop", 1, False)):
-            with self.subTest(answer=answer, stop=stop, code=code):
-                event = {"type": "message_end", "message": {"role": "assistant", "stopReason": stop,
-                         "content": [{"type": "text", "text": answer}]}}
-                output = json.dumps(event) + "\nWorking...\n"
-                with patch.object(inference, "invoke", return_value=(code, output)) as invoke:
+    def test_smoke_accepts_only_a_complete_pinned_response_without_runtime_or_catalog(self):
+        for answer, stop, succeeds in (("OK", "stop", True), ("Wrong", "stop", False),
+                                       ("OK", "length", False), ("OK", None, False)):
+            with self.subTest(answer=answer, stop=stop):
+                payload = {'choices': [{'finish_reason': stop,
+                           'message': {'role': 'assistant', 'content': answer}}]}
+                with patch.object(inference.urllib.request, 'urlopen',
+                                  return_value=io.BytesIO(json.dumps(payload).encode())) as opened:
                     if succeeds:
-                        inference.smoke({"ENMAAS_API_KEY": "test-only-key"}, "test-only-key")
+                        inference.smoke({}, 'test-only-key')
                     else:
-                        with self.assertRaisesRegex(RuntimeError, "smoke test failed"):
-                            inference.smoke({"ENMAAS_API_KEY": "test-only-key"}, "test-only-key")
-                self.assertIn("--mode=json", invoke.call_args.args[0])
+                        with self.assertRaisesRegex(RuntimeError, 'smoke test failed'):
+                            inference.smoke({}, 'test-only-key')
+                request = opened.call_args.args[0]
+                self.assertEqual(request.full_url, 'https://api.enmaas.devshift.net/v1/chat/completions')
+                self.assertEqual(json.loads(request.data)['model'], 'rits/zai-org/glm-5-3')
+                self.assertNotIn('test-only-key', request.data.decode())
+                self.assertEqual(request.get_header('Authorization'), 'Bearer test-only-key')
+
+    def test_smoke_rejects_http_errors_and_missing_choices(self):
+        failure = urllib.error.HTTPError('https://api.enmaas.devshift.net', 429, 'limited', {}, None)
+        with patch.object(inference.urllib.request, 'urlopen', side_effect=failure):
+            with self.assertRaisesRegex(RuntimeError, 'smoke test failed: HTTP 429'):
+                inference.smoke({}, 'test-only-key')
+        for payload in (b'{"choices":[]}', b'not-json',
+                        b'{"choices":[{"message":{"role":"assistant","content":null}}]}'):
+            with patch.object(inference.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
+                with self.assertRaisesRegex(RuntimeError, 'smoke test failed'):
+                    inference.smoke({}, 'test-only-key')
 
     def test_missing_export_version_prevents_profile_update(self):
         with patch.object(inference, "invoke", side_effect=[(1, "AlreadyExists"), (0, "id: gyre-enmaas\n")]) as invoke:
             with self.assertRaisesRegex(RuntimeError, "resource_version"):
                 inference.configure({}, "test-only-key")
         self.assertEqual(invoke.call_count, 2)
-
-    @unittest.skipUnless(shutil.which("omp"), "OMP is needed to validate its native model registry")
-    def test_omp_loads_pinned_provider_without_inference_or_model_discovery(self):
-        with tempfile.TemporaryDirectory(prefix="gyre-model-test-") as directory:
-            config = Path(directory) / ".omp/agent"
-            config.mkdir(parents=True)
-            for name in ("models.yml", "config.yml"):
-                shutil.copyfile(inference.ROOT / "docker/dev-worker" / name, config / name)
-            process = subprocess.Popen(
-                ["omp", "--mode", "rpc", "--model", inference.MODEL, "--no-session",
-                 "--no-extensions", "--no-skills", "--no-rules"],
-                env={**os.environ, "HOME": directory, "PI_CODING_AGENT_DIR": str(config),
-                     "ENMAAS_API_KEY": "test-only-api-key"},
-                text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            try:
-                process.stdin.write('{"type":"get_state"}\n')
-                process.stdin.flush()
-                state = None
-                deadline = time.monotonic() + 20
-                while time.monotonic() < deadline:
-                    if not select.select([process.stdout], [], [], max(0, deadline-time.monotonic()))[0]:
-                        break
-                    line = process.stdout.readline()
-                    if not line:
-                        break
-                    reply = json.loads(line)
-                    if reply.get("command") == "get_state":
-                        state = reply["data"]
-                        break
-                self.assertIsNotNone(state, "OMP did not return its selected model")
-            finally:
-                process.terminate()
-                process.communicate(timeout=5)
-            model = state["model"]
-            self.assertEqual(model["id"], "rits/zai-org/glm-5-3")
-            self.assertEqual(model["baseUrl"], "https://api.enmaas.devshift.net/v1")
-            self.assertEqual(model["api"], "openai-completions")
-            self.assertEqual((model["contextWindow"], model["maxTokens"]), (262144, 65536))
-            self.assertFalse(model["compat"]["supportsDeveloperRole"])
-            self.assertEqual(state["model"]["provider"], "enmaas-glm-5-3")
-            self.assertEqual(state["model"]["id"], "rits/zai-org/glm-5-3")
 
 
 if __name__ == "__main__":

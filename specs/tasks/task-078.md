@@ -3,10 +3,10 @@ title: "Explorer Phase 4 Polish — Streaming, Keyboard Shortcuts & Performance"
 spec_ref: "explorer-implementation.md §28"
 depends_on:
   - task-071
-progress: not-started
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §28 Phase 4: Polish"
-commits: []
+commits: ["293246b7cdc399e1313b7dd2981c4508b05c7715", "59e8fe82d4011bc48a33e47078d08f85a2d0d9a4"]
 ---
 
 ## Spec Excerpt
@@ -67,3 +67,71 @@ Phase 4 polish items from `explorer-implementation.md`:
 ## Agent Instructions
 
 This is primarily a frontend task. Start by reading the existing components: `web/src/lib/ExplorerCanvas.svelte`, `web/src/lib/ExplorerChat.svelte`, `web/src/components/ExplorerView.svelte`. Also read `crates/gyre-server/src/explorer_ws.rs` to understand the server-side message types. Many of these polish items may already be partially implemented — audit before adding. The spec says "Phase 4" which assumes Phases 1-3 are done. Check that the components render correctly with live data before polishing.
+
+## Shipped
+
+Audit + gap-fill of §28 Phase 4. Five of the six polish items were
+already shipped and tested by earlier explorer tasks (task-036,
+task-038, task-053, task-057, task-065, task-071); the audit confirmed
+each against production code and closed the one genuine gap: the
+>10k-node performance warning banner.
+
+### Round 2 (contract repair)
+
+The round-1 production fix is preserved unchanged (commit
+`293246b7cdc399e1313b7dd2981c4508b05c7715`). Round 1 had marked the
+acceptance-criteria checkboxes in this protected task document, which
+the executor reverted; this round re-verified the behavior at the
+exact head and re-recorded these notes without altering the protected
+checkbox text.
+
+### Behavior (audited in production code)
+
+- **Streaming**: `ExplorerChat` accumulates `text` chunks with
+  `done:false` into a live streaming bubble via reactive `$state`
+  (renders incrementally per chunk, not batched); `done:true`
+  finalizes. 65s no-chunk timeout and disconnect both finalize orphaned
+  streams.
+- **Status indicators**: header status dot + label
+  (Thinking.../Refining query.../Ready/Error/Disconnected) and a
+  thinking-indicator with animated dots and a Cancel button while
+  waiting.
+- **Keyboard shortcuts**: `Escape` clears the active view query via the
+  overlay cascade (spec editor → query editor → detail panel → query);
+  `/` focuses the chat input with `preventDefault`, suppressed while a
+  text input is focused.
+- **Responsive layout**: `@media (max-width: 768px)` stacks canvas and
+  chat; chat becomes a collapsible bottom sheet with a collapse bar
+  (canvas takes full width when collapsed); `chatCollapsed` resets when
+  the viewport widens past 1025px.
+- **Large-graph rendering**: viewport (frustum) culling, zoom-level LOD
+  label guards, edge bundling, and the rAF-throttled redraw loop keep
+  per-frame draw work bounded (verified by mutation-sensitive perf
+  tests on 10k/15k-node graphs).
+- **Performance warning banner** (gap closed this task):
+  `ExplorerView` shows a dismissible `role="status"` banner over the
+  canvas when the effective graph exceeds 10,000 nodes, naming the
+  actual node count. The dismissed state resets when a new repo graph
+  loads. Toolchain and performance warnings stack in a
+  `.canvas-warning-stack` wrapper (identical positioning to the
+  previous single-banner layout).
+- **Visual regression tests**: 14 committed Playwright baselines cover
+  zoom levels, filter presets, annotated view queries, blast radius,
+  and toolbar lenses.
+
+### Test evidence
+
+- `web/src/__tests__/ExplorerViewLargeGraph.test.js`: a 10,001-node
+  graph renders the banner (with the node count in its text) and the
+  dismiss button hides it; a 10,000-node graph renders no banner
+  (threshold boundary).
+- Focused re-runs at the exact head, all green:
+  ExplorerViewLargeGraph (2), ExplorerView-responsive +
+  ExplorerViewShortcuts + ExplorerChat-streaming (20),
+  ExplorerCanvas-performance + ExplorerViewDrillUrl + ExplorerChat
+  (133) — 155 tests total.
+- `cargo fmt --all --check` clean; no Rust changes shipped (only
+  `web/src/**` differs from the verified base), so the cargo test
+  surface is unaffected. Full workspace suites owned by verification.
+- Probe commands, exit codes, and the per-item audit table retained in
+  `/tmp/stage/review-evidence/task-078-focused-probes.md`.

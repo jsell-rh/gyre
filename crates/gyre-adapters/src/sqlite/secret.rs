@@ -145,6 +145,13 @@ fn load_encryption_key(conn: &mut SqliteConnection) -> Result<LessSafeKey> {
         // Auto-generate and persist so restarts can still decrypt stored secrets.
         let existing = kv_get(conn, KEY_NAMESPACE, KEY_KV_KEY)?;
         if let Some(hex_key) = existing {
+            tracing::warn!(
+                "secret encryption key: GYRE_SECRET_ENCRYPTION_KEY is not set; using the \
+                 auto-generated key persisted in the database. Encryption at rest is degraded \
+                 to obfuscation against an attacker who can read the database (the key sits \
+                 alongside the ciphertext in kv_store). Set GYRE_SECRET_ENCRYPTION_KEY to a \
+                 value managed outside the database."
+            );
             let bytes = hex::decode(&hex_key)
                 .map_err(|e| anyhow::anyhow!("persisted secret key is corrupt: {e}"))?;
             if bytes.len() != 32 {
@@ -154,6 +161,13 @@ fn load_encryption_key(conn: &mut SqliteConnection) -> Result<LessSafeKey> {
             arr.copy_from_slice(&bytes);
             arr
         } else {
+            tracing::warn!(
+                "secret encryption key: GYRE_SECRET_ENCRYPTION_KEY is not set and no key is \
+                 persisted yet; generated a random key and persisted it in the database. \
+                 Encryption at rest is degraded to obfuscation against an attacker who can \
+                 read the database (the key sits alongside the ciphertext in kv_store). Set \
+                 GYRE_SECRET_ENCRYPTION_KEY to a value managed outside the database."
+            );
             let rng = SystemRandom::new();
             let mut arr = [0u8; 32];
             rng.fill(&mut arr)
@@ -241,6 +255,17 @@ impl SecretRepository for SqliteStorage {
                 Ok(Some(decrypt_value(&key, &encrypted_value, &nonce)?))
             }
         }
+    }
+
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<Secret>> {
+        let mut conn = self.pool.get()?;
+        let row = secrets::table
+            .filter(secrets::id.eq(id.as_str()))
+            .filter(secrets::tenant_id.eq(tenant_id))
+            .select(SecretRow::as_select())
+            .first(&mut conn)
+            .optional()?;
+        Ok(row.map(SecretRow::into_secret).transpose()?)
     }
 
     async fn list_by_scope(

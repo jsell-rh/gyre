@@ -50,6 +50,7 @@
     wsStore = null,
     workspaceId = null,
     selfUserId = null,
+    oneditingentity = undefined,
   } = $props();
 
   let activeTab = $state('info');
@@ -220,6 +221,14 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
+      // While the EditorSplit pop-out is open it owns Escape (ui-layout.md
+      // §2: Back/Esc returns to the normal detail panel view). This panel
+      // div sits on the bubbling path BEFORE EditorSplit's window handler,
+      // so without this guard a single Escape fired with focus inside the
+      // panel (the normal case — the user was just editing the textarea)
+      // both closes the editor split AND pops detail history via onback()
+      // (the Esc double-fire). The split's own handler closes it.
+      if (showEditorSplit) return;
       e.preventDefault();
       // Escape goes back if there's history, otherwise closes
       if (onback) onback();
@@ -982,17 +991,20 @@
   let specWorkspaceId = $derived(workspaceId ?? entity?.data?.workspace_id ?? null);
   // Optimistic-concurrency token: the current_sha the editor loaded.
   let specBaseSha = $derived(specDetail?.current_sha ?? entity?.data?.current_sha ?? null);
-
   // Announce that this tab is editing the spec whenever the Edit tab is active
   // or the split editor is open; clear the announcement otherwise so other
-  // editors' warning banners disappear when we leave.
+  // editors' warning banners disappear when we leave. The entity is also
+  // reported upward (oneditingentity) so App's presence heartbeat re-sends
+  // the CURRENT editing entity on each 30s beat instead of clobbering it.
   $effect(() => {
     if (entity?.type !== 'spec' || !specWorkspaceId || !wsStore) return;
     const isEditing = activeTab === 'edit' || showEditorSplit;
     const editingEntity = isEditing ? specEditingEntity(entity.id) : null;
     sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity, view: 'specs' });
+    oneditingentity?.(editingEntity);
     return () => {
       sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity: null, view: 'specs' });
+      oneditingentity?.(null);
     };
   });
 
@@ -4905,7 +4917,7 @@
               <div class="trace-waterfall">
                 {#each spanTree as span}
                   {@const isRoot = span._depth === 0}
-                  {@const statusColor = span.status === 'error' ? 'var(--color-danger)' : span.graph_node_id ? 'var(--color-primary)' : 'var(--color-success)'}
+                  {@const statusColor = (span.status ?? '').toLowerCase() === 'error' ? 'var(--color-danger)' : span.graph_node_id ? 'var(--color-primary)' : 'var(--color-success)'}
                   <div class="trace-waterfall-row" class:trace-waterfall-root={isRoot} style="padding-left: {span._depth * 20 + 8}px">
                     <div class="trace-waterfall-info">
                       {#if span._depth > 0}<span class="trace-tree-guide" aria-hidden="true"></span>{/if}
@@ -5339,7 +5351,7 @@
     flex-direction: column;
     background: var(--color-surface);
     border-left: 1px solid var(--color-border);
-    transition: width var(--transition-normal) ease-out, min-width var(--transition-normal) ease-out;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
     flex-shrink: 0;
   }
 

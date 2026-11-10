@@ -32,7 +32,7 @@ class MergeMessageTest(unittest.TestCase):
             git(root, "commit", "-qm", "base")
             base = git(root, "rev-parse", "HEAD")
             git(root, "checkout", "-qb", "candidate")
-            task.write_text(task.read_text() + "\n## Shipped\n\n- Notifications persist across restarts.\n- Expired entries are removed.\n")
+            task.write_text(task.read_text() + "\n## Shipped\n\n### Behavior\n\n- Notifications persist across restarts.\n\n### Lifecycle\n\n- Expired entries are removed.\n\n## Implementation Plan\n\n- Do not ship this unfinished plan.\n")
             (root / "implementation.txt").write_text("implementation\n")
             git(root, "add", ".")
             git(root, "commit", "-qm", "implement")
@@ -47,7 +47,9 @@ class MergeMessageTest(unittest.TestCase):
             self.assertIn("Ship task-001: Add durable notifications", body)
             self.assertIn("Spec: messages.md §3", body)
             self.assertIn("- Notifications persist across restarts.", body)
+            self.assertIn("- Expired entries are removed.", body)
             self.assertNotIn("Implementation Plan", body)
+            self.assertNotIn("Do not ship this unfinished plan.", body)
 
 
 if __name__ == "__main__":

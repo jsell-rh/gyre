@@ -7,13 +7,13 @@ use gyre_ports::storage::StoragePort;
 use std::sync::Arc;
 use tracing::instrument;
 
-pub mod activity;
 pub mod agent;
 pub mod agent_commit;
 pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod budget;
+pub mod budget_call;
 pub mod chain_attestation;
 pub mod compute_target;
 pub mod container_audit;
@@ -36,12 +36,16 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
+pub mod search;
 pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;
+pub mod spec_assertion_results;
 pub mod spec_ledger;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -123,6 +127,10 @@ impl SqliteStorage {
             let mut conn = pool.get()?;
             conn.run_pending_migrations(MIGRATIONS)
                 .map_err(|e| anyhow::anyhow!("Diesel migration failed: {e}"))?;
+            // SQLite-only FTS5 search index (search.md §Index Schema). Dialect-
+            // specific DDL must not go in the shared diesel migrations dir — that
+            // dir is embedded and runs on PostgreSQL too, where fts5 breaks it.
+            search::ensure_fts_table(&mut conn)?;
         }
 
         Ok(Self {
@@ -234,6 +242,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "rollout_policies",
             "gate_traces",
             "trace_spans",
             "conversations",
@@ -302,6 +311,334 @@ mod tests {
         // Run twice — should not fail.
         SqliteStorage::new(path).unwrap();
         SqliteStorage::new(path).unwrap();
+    }
+
+    /// Regression guard for migration 000058 (task-120): the username
+    /// backfill must actually run on SQLite and must leave every legacy row
+    /// with a unique, URL-safe handle.
+    ///
+    /// The first version of this migration expressed the "contains a
+    /// character outside [a-z0-9_-]" predicate as one 39-deep nested
+    /// REPLACE(...) chain, which dies with "parser stack overflow" on both
+    /// the bundled and system SQLite — since `SqliteStorage::new` runs the
+    /// embedded migrations on every construction, that broke the default
+    /// deployment's startup entirely. The fix runs the deletion as
+    /// sequential depth-1 UPDATEs over a scratch column.
+    ///
+    /// This test builds a pre-000058 database (all migrations except 000058
+    /// applied, legacy rows inserted), applies 000058 alone, and asserts the
+    /// backfill semantics: sanitization of non-URL-safe and over-long
+    /// handles, empty-handle coverage, de-duplication, and the pass-2
+    /// collision hardening where a dedup suffix collides with a distinct
+    /// pre-existing handle. It fails on every regression class above.
+    ///
+    /// (The migration was originally numbered 000056; after main landed
+    /// task-180's `spec_assertion_results` under the same 000056 version,
+    /// Diesel would have silently dropped this one — alphabetically-first
+    /// wins — so it was renumbered to 000057. Main then landed task-193's
+    /// `spec_approval_attestation` under 000057, so it was renumbered
+    /// again to the next unused sequence, 000058.)
+    #[test]
+    fn migration_000058_backfills_unique_url_safe_usernames() {
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        // Apply every migration except 000058: the pre-migration state.
+        // (000056 here is task-180's spec_assertion_results and 000057 is
+        // task-193's spec_approval_attestation — different migrations that
+        // legitimately own those versions on main.)
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261008000058");
+        assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
+        use diesel::migration::MigrationConnection;
+        // run_migrations is the raw harness method — unlike
+        // run_pending_migrations (used by SqliteStorage::new) it does not
+        // set up __diesel_schema_migrations, so initialize the bookkeeping
+        // table first.
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Legacy rows exactly as a pre-000058 deployment would hold them
+        // (users: id, external_id, name NOT NULL; display_name from 000036
+        // left NULL so the backfill reads `name`).
+        use diesel::RunQueryDsl;
+        let long_name = "x".repeat(65);
+        for (id, ext, name, created) in [
+            ("u-alice-1", "ext-alice-1", "Alice Smith", 100),
+            ("u-alice-2", "ext-alice-2", "Alice Smith", 200),
+            ("u-jorg", "ext-jorg", "jörg", 300),
+            ("u-jsell-1", "ext-jsell-1", "jsell", 400),
+            ("u-jsell-2", "ext-jsell-2", "jsell", 500),
+            ("u-jsell-3", "ext-jsell-3", "jsell-2", 600),
+            ("u-empty", "", "", 700),
+            ("u-long", "ext-long", &long_name, 800),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO users (id, external_id, name, created_at, updated_at) \
+                 VALUES ('{id}', '{ext}', '{name}', {created}, {created})"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        // Run 000058 alone. Panics here on the original parser-overflow
+        // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
+        conn.run_migrations(&target).unwrap();
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in this repo on the same diesel version — see
+        // sqlite/search.rs), so the lint is scoped off for this row-carrier
+        // module instead. Nothing in here writes `field: field`
+        // initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Row {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) username: String,
+            }
+
+            // Defaults backfilled for rows predating the new columns.
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Defaults {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) timezone: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) locale: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) global_role: String,
+                #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+                pub(super) preferences: Option<String>,
+            }
+        }
+        use rows::{Defaults, Row};
+
+        let rows: Vec<Row> = diesel::sql_query("SELECT id, username FROM users")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<String, String> =
+            rows.into_iter().map(|r| (r.id, r.username)).collect();
+
+        let expected = [
+            // Backfill from display name, lowercased, separators mapped.
+            ("u-alice-1", "alice-smith"),
+            // Duplicate display names get a numeric suffix (dedup pass 1).
+            ("u-alice-2", "alice-smith-2"),
+            // Non-URL-safe names are replaced wholesale with "u-<id>"
+            // (sanitization must never leave a non-URL-safe handle).
+            ("u-jorg", "u-u-jorg"),
+            // Dedup pass 1: second "jsell" becomes "jsell-2".
+            ("u-jsell-1", "jsell"),
+            ("u-jsell-2", "jsell-2"),
+            // Dedup pass 2: u-jsell-2's "jsell-2" collides with the distinct
+            // pre-existing "jsell-2" handle; the later row is renamed to
+            // "<handle>-<row id>" so CREATE UNIQUE INDEX cannot fail.
+            ("u-jsell-3", "jsell-2-u-jsell-3"),
+            // Empty legacy name + empty external id: still caught, never
+            // persisted as "".
+            ("u-empty", "u-u-empty"),
+            // Over 64 chars: replaced with "u-<id>".
+            ("u-long", "u-u-long"),
+        ];
+        for (id, want) in expected {
+            let got = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("user {id} missing after migration"));
+            assert_eq!(got, want, "unexpected backfilled username for {id}");
+            assert!(
+                gyre_domain::User::validate_username(got).is_ok(),
+                "backfilled username {got:?} for {id} violates the URL-safe handle contract"
+            );
+        }
+        let mut handles: Vec<&String> = by_id.values().collect();
+        handles.sort();
+        let distinct = {
+            let mut d = handles.clone();
+            d.dedup();
+            d.len()
+        };
+        assert_eq!(
+            handles.len(),
+            distinct,
+            "backfilled usernames are not unique: {handles:?}"
+        );
+
+        let d: Defaults = diesel::sql_query(
+            "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
+        )
+        .load(&mut conn)
+        .unwrap()
+        .pop()
+        .expect("row u-alice-1");
+        assert_eq!(d.timezone, "UTC");
+        assert_eq!(d.locale, "en-US");
+        assert_eq!(d.global_role, "Member");
+        let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+    }
+
+    /// Task-102 F1 regression: migration 000054 folds legacy path/pid
+    /// rows into the envelope `detail` payload. The fold must be plain
+    /// portable SQL (CASE WHEN + string concatenation): this migrations
+    /// directory is embedded once and executed by BOTH storage backends,
+    /// and the previous json_patch/json_object form aborted PostgreSQL
+    /// deployments at startup. This test drives the REAL embedded up.sql
+    /// against seeded legacy rows — including JSON-hostile path values
+    /// (quote, backslash, newline, tab) and non-object details — and
+    /// asserts the folded payload parses back to exactly the merged
+    /// data (merge-patch semantics: NULL source values add no key, a
+    /// pre-existing key is never overwritten, a non-object target is
+    /// replaced by the folded object).
+    #[test]
+    fn migration_000054_folds_legacy_path_pid_into_detail() {
+        use diesel::sql_types::{Integer, Nullable, Text};
+        use diesel::RunQueryDsl;
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations below, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in sqlite/search.rs), so the lint is scoped off for this
+        // small row-carrier module instead. Nothing here writes
+        // `field: field` initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::{Nullable, Text};
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct FoldedRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) detail: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) agent_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) resource_type: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) resource_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) outcome: String,
+            }
+            #[derive(QueryableByName)]
+            pub(super) struct VersionRow {
+                #[diesel(sql_type = Text)]
+                pub(super) version: String,
+            }
+        }
+        use rows::{FoldedRow, VersionRow};
+
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+
+        // Re-create the pre-000054 legacy shape and seed representative rows.
+        diesel::sql_query("DROP TABLE audit_events")
+            .execute(&mut conn)
+            .unwrap();
+        diesel::sql_query(
+            "CREATE TABLE audit_events (\
+             id TEXT PRIMARY KEY NOT NULL, \
+             agent_id TEXT NOT NULL, \
+             event_type TEXT NOT NULL, \
+             path TEXT, \
+             details TEXT NOT NULL DEFAULT '{}', \
+             pid INTEGER, \
+             timestamp BIGINT NOT NULL)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let insert = "INSERT INTO audit_events \
+             (id, agent_id, event_type, path, details, pid, timestamp) \
+             VALUES (?, 'ag-1', 'file_access', ?, ?, ?, 1)";
+        let seed: &[(&str, Option<&str>, &str, Option<i32>)] = &[
+            ("both", Some("/etc/hosts"), r#"{"mode":"read"}"#, Some(1234)),
+            ("nulls", None, "{}", None),
+            ("pid_only", None, r#"{"k":1}"#, Some(77)),
+            ("hostile", Some("/tmp/we\"ird\\pa\nth\t"), "{}", None),
+            ("scalar", Some("/x"), "42", None),
+            ("existing_key", None, r#"{"path":"already","k":2}"#, None),
+        ];
+        for (id, path, details, pid) in seed {
+            diesel::sql_query(insert)
+                .bind::<Text, _>(id)
+                .bind::<Nullable<Text>, _>(path)
+                .bind::<Text, _>(details)
+                .bind::<Nullable<Integer>, _>(pid)
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        // Un-mark 000054 so the runner re-applies the real up.sql to the
+        // legacy rows (the same transition a deployed database makes).
+        let versions: Vec<VersionRow> = diesel::sql_query(
+            "SELECT version FROM __diesel_schema_migrations WHERE version LIKE '%000054%'",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(versions.len(), 1, "expected exactly one 000054 version row");
+        let deleted = diesel::sql_query("DELETE FROM __diesel_schema_migrations WHERE version = ?")
+            .bind::<Text, _>(&versions[0].version)
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(deleted, 1, "failed to un-mark migration 000054");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("portable 000054 up.sql must run (task-102 F1)");
+
+        let rows: Vec<FoldedRow> = diesel::sql_query(
+            "SELECT id, detail, agent_id, resource_type, resource_id, outcome FROM audit_events",
+        )
+        .load(&mut conn)
+        .unwrap();
+        let folded: std::collections::HashMap<String, serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.id.clone(),
+                    serde_json::from_str(&r.detail)
+                        .unwrap_or_else(|e| panic!("invalid folded JSON for {}: {e}", r.id)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            folded["both"],
+            serde_json::json!({"mode": "read", "path": "/etc/hosts", "pid": 1234})
+        );
+        assert_eq!(folded["nulls"], serde_json::json!({}));
+        assert_eq!(folded["pid_only"], serde_json::json!({"k": 1, "pid": 77}));
+        assert_eq!(
+            folded["hostile"],
+            serde_json::json!({"path": "/tmp/we\"ird\\pa\nth\t"})
+        );
+        // Merge-patch replaces a non-object target with the folded object.
+        assert_eq!(folded["scalar"], serde_json::json!({"path": "/x"}));
+        // A pre-existing key is never overwritten; nothing to fold keeps
+        // the legacy payload verbatim.
+        assert_eq!(
+            folded["existing_key"],
+            serde_json::json!({"path": "already", "k": 2})
+        );
+
+        for r in &rows {
+            assert_eq!(r.agent_id.as_deref(), Some("ag-1"));
+            assert_eq!(r.resource_type, "agent");
+            assert_eq!(r.resource_id.as_deref(), Some("ag-1"));
+            assert_eq!(r.outcome, "success");
+        }
     }
 
     /// Guard: detect duplicate migration version strings before they shadow each other.

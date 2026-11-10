@@ -24,13 +24,15 @@ let streamUnread = 0;
 let streamExpansion = "default";
 let errorText = "";
 let retryAllPending = false;
+let slotsDraft = null;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = String(value);
-    else if (key === "onclick") node.addEventListener("click", value);
+    else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value);
+    else if (typeof value === "boolean") { if (value) node.setAttribute(key, ""); }
     else node.setAttribute(key, value);
   }
   for (const child of children.flat()) if (child != null) node.append(child);
@@ -72,7 +74,7 @@ function updateAgentTimes() {
   });
 }
 function missingDeps(task) {
-  const merged = new Set((snapshot?.tasks || []).filter((t) => t.state === "merged").map((t) => t.name));
+  const merged = new Set((snapshot?.tasks || []).filter((t) => ["merged", "resolved"].includes(t.state)).map((t) => t.name));
   return (task.deps || []).filter((dep) => !merged.has(dep));
 }
 function state(task) { return task.state === "ready" && missingDeps(task).length ? "blocked" : task.state; }
@@ -94,12 +96,17 @@ async function post(path, body) {
   return result;
 }
 async function slots(value) {
-  try { await post("/api/slots", { value }); errorText = ""; await poll(); }
+  try { await post("/api/slots", { value }); slotsDraft = null; errorText = ""; await poll(); }
   catch (error) { errorText = String(error.message || error); render(); }
 }
 async function retry(name) {
   try { await post("/api/retry", { task: name }); errorText = ""; await poll(); }
   catch (error) { errorText = String(error.message || error); render(); }
+}
+
+async function setPriority(name, value) {
+  try { await post("/api/priority", { task: name, priority: value || null }); errorText = ""; await poll(); }
+  catch (error) { errorText = String(error.message || error); renderHealth(); }
 }
 async function retryAll() {
   if (retryAllPending) return;
@@ -111,6 +118,8 @@ async function retryAll() {
 }
 
 function renderHealth() {
+  // Polling must not replace the controls while someone is editing or applying.
+  if (document.activeElement?.closest("#sandbox-controls")) return;
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
@@ -123,12 +132,22 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
-    e("span", { class: "stepper" },
-      e("span", { text: "sandboxes " }),
-      e("button", { onclick: () => slots(Math.max(0, value - 1)), text: "−" }),
-      e("span", { class: "val", text: value }),
-      e("button", { onclick: () => slots(Math.min(1000, value + 1)), text: "+" }),
-      e("button", { onclick: () => slots(value === 0 ? 4 : 0), text: value === 0 ? "Resume" : "Drain" })),
+    e("form", { id: "sandbox-controls", class: "stepper", onsubmit: (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.namedItem("sandboxes");
+      if (!input.reportValidity()) return;
+      const requested = input.valueAsNumber;
+      document.activeElement?.blur();
+      slots(requested);
+    } },
+      e("label", { for: "sandbox-count", text: "sandboxes " }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(Math.max(0, value - 1)); }, text: "−" }),
+      e("input", { id: "sandbox-count", name: "sandboxes", class: "val", type: "number", min: 0, max: 1000, step: 1, required: true,
+        value: slotsDraft ?? value, oninput: (event) => { slotsDraft = event.target.value; },
+        onkeydown: (event) => { if (event.key === "Escape") { slotsDraft = null; event.target.blur(); renderHealth(); } } }),
+      e("button", { type: "submit", text: "Apply" }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(Math.min(1000, value + 1)); }, text: "+" }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(value === 0 ? 4 : 0); }, text: value === 0 ? "Resume" : "Drain" })),
     errorText || s.error ? e("span", { class: "dev-health-error", text: errorText || s.error }) : "",
   );
 }
@@ -207,11 +226,18 @@ function renderOverview() {
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Independent reconcilers" }),
     e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
-    ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} backing off · ${count.succeeded || 0} completed` })),
+    ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
+    e("p", { class: "muted", text: s.dispatch?.integration
+      ? `Final integration: ${s.dispatch.integration.task} owns verification, CI, and merge. Other candidates queue here; implementation and review remain parallel.`
+      : "Final integration admits one candidate at a time. Implementation and review remain parallel." }),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
+    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `Integration lane yielded while waiting for external CI or policy: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
+    gate.inference?.condition && gate.inference.condition !== "Ready" ? e("p", { class: "dev-health-error", text: `${gate.inference.condition} · ${gate.inference.expires > Date.now()/1000 ? `retry in ${until(gate.inference.expires)}` : "awaiting next probe"}` }) : null,
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
+    gate.gateway_auth?.using_cached ? e("p", { class: "muted", text: `Gateway refresh is retrying with backoff; cached login is still working. Next refresh ${until(gate.gateway_auth.retry_at)}.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
     e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion continues to consume capacity.` }),
+    e("p", { class: "muted", text: `${s.dispatch?.verification_reserved || 0} slot reserved for verification. Priority classes age while queued; running workers are not preempted.` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "implement").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && ["review", "verify"].includes(a.kind)).length} reviewing/verifying · ${s.slots ?? "—"} slots` }));
   const live = e("section", { class: "dev-panel" }, e("h2", { text: `Active attempts · ${active.length}` }),
@@ -240,7 +266,7 @@ function renderOverview() {
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));
 }
 
-const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "published", "merged", "all"];
+const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "published", "merged", "resolved", "all"];
 function matches(task) {
   const value = state(task);
   if (filter === "active" && !["running", "checking", "promoting"].includes(value)) return false;
@@ -256,13 +282,13 @@ function renderTasks() {
     onclick: () => { filter = name; renderTasks(); },
   })));
   const table = e("table", { class: "tasks" },
-    e("thead", {}, e("tr", {}, ["Task", "Title", "Controller state", "Progress", "PRs", "Attempts", "Last event"].map((name) => e("th", { text: name })))),
+    e("thead", {}, e("tr", {}, ["Task", "Title", "Controller state", "Priority", "Progress", "PRs", "Attempts", "Last event"].map((name) => e("th", { text: name })))),
     e("tbody", {}, tasks.map((task) => {
       const event = taskEvents(task.name)[0];
       const attempt = latestAttempt(task.name);
       return e("tr", { onclick: () => openTask(task.name) },
         e("td", { class: "id", text: task.name }), e("td", { class: "title", text: title(task) }),
-        e("td", {}, badge(state(task))), e("td", {}, badge(task.progress)),
+        e("td", {}, badge(state(task))), e("td", {}, badge(task.priority?.class || "normal")), e("td", {}, badge(task.progress)),
         e("td", {}, prLinks(task)),
         e("td", { text: task.attempts || 0 }),
         e("td", { class: "dev-last", text: event ? `${event.message} · ${ago(event.at)}` : attempt ? `${attempt.kind} ${attempt.state} · ${ago(attempt.started)}` : "—" }));
@@ -458,10 +484,16 @@ function renderDrawer() {
     return;
   }
   const attempts = (snapshot?.attempts || []).filter((a) => a.task === task.name);
+  const prioritySelect = e("select", { onchange: (event) => setPriority(task.name, event.target.value),
+    "aria-label": "Task priority class" },
+    e("option", { value: "", selected: task.priority?.source !== "operator", text: `Automatic / PR label (${task.priority?.class || "normal"})` }),
+    ...Object.keys(snapshot?.dispatch?.priority_classes || {}).map((name) =>
+      e("option", { value: name, selected: task.priority?.source === "operator" && task.priority?.class === name, text: name })));
   nodes.drawerBody.replaceChildren(...[
     e("div", { class: "dev-detail-grid" },
       e("span", { text: "Spec" }), e("span", { text: spec(task) || "—" }),
       e("span", { text: "Pull requests" }), prLinks(task),
+      e("span", { text: "Priority" }), prioritySelect,
       e("span", { text: "Shipped commit" }), mergeLink(task),
       e("span", { text: "Candidate" }), e("span", { class: "mono", text: task.candidate || "—" }),
       e("span", { text: "Seed" }), e("span", { class: "mono", text: task.seed || "—" }),

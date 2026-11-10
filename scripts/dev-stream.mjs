@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Turn OMP's live JSON events into bounded, readable events in the local
+// Turn Pi-compatible live JSON events into bounded, readable events in the local
 // attempt log. The dashboard ignores prompts and private thinking blocks.
 import { createInterface } from "node:readline";
 import { writeFileSync } from "node:fs";
@@ -58,7 +58,7 @@ try {
           if (["error", "aborted", "length"].includes(reason)) {
             flushText();
             emit("text", { error: true, text: `\nAgent ${reason}: ${event.message.errorMessage || "response did not complete"}\n` });
-            // OMP can exit zero after a provider stream stalls. A partial
+            // An agent can exit zero after a provider stream stalls. A partial
             // response (even one containing PASS) must not approve a review.
             process.exitCode = reason === "error" ? 82 : reason === "aborted" ? 130 : 1;
           } else {

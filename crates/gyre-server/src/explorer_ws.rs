@@ -93,9 +93,6 @@ async fn maybe_send_ping(
     Ok(())
 }
 
-/// Monotonic session ID counter for ordering sessions (oldest-first eviction).
-static SESSION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Per-session slot: stores a unique ID and a shutdown signal so we can evict
 /// the oldest session when a new connection arrives at the limit.
 struct SessionSlot {
@@ -104,11 +101,90 @@ struct SessionSlot {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
-/// Global per-user session tracker, keyed by (tenant_id, agent_id).
+/// Per-server explorer session registry, keyed by (tenant_id, agent_id).
 /// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
 /// Each user has a Vec of active SessionSlots, ordered oldest-first.
-static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+///
+/// Owned by `AppState`, NOT a process global: the per-user concurrent
+/// session limit is a property of a server instance, not of the OS process.
+/// Multiple `AppState` instances in one process (integration tests,
+/// embedding) must not evict each other's sessions - only sessions routed
+/// through the same instance compete for the same cap. This state is
+/// ephemeral by nature (WebSocket connections cannot outlive their server
+/// instance), so it is intentionally not port-backed.
+pub(crate) struct ExplorerSessionRegistry {
+    /// User key -> active session slots, ordered oldest-first.
+    sessions: std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>,
+    /// Monotonic session ID counter for ordering (oldest-first eviction).
+    next_session_id: std::sync::atomic::AtomicU64,
+}
+
+impl ExplorerSessionRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            next_session_id: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Register a new session for `user`, evicting (signalling) the oldest
+    /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
+    ///
+    /// A `max` of 0 is treated as 1: the registering session itself is always
+    /// admitted (with a literal 0 the eviction loop would `remove(0)` from an
+    /// empty slot list and panic the connection handler on every connect).
+    pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
+        let session_id = self
+            .next_session_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = sessions.entry(user.to_string()).or_default();
+        // Evict oldest sessions if at the limit.
+        while slots.len() >= max.max(1) {
+            let evicted = slots.remove(0);
+            info!(
+                user = %user,
+                evicted_session = evicted.id,
+                "Explorer WS: evicting oldest session to make room for new connection"
+            );
+            evicted.shutdown.notify_one();
+        }
+        slots.push(SessionSlot {
+            id: session_id,
+            shutdown: Arc::clone(&shutdown_notify),
+        });
+        (session_id, shutdown_notify)
+    }
+
+    /// Remove a session slot (idempotent; called from `SessionGuard::drop`).
+    pub(crate) fn unregister(&self, user: &str, session_id: u64) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slots) = sessions.get_mut(user) {
+            slots.retain(|s| s.id != session_id);
+            if slots.is_empty() {
+                sessions.remove(user);
+            }
+        }
+    }
+
+    /// Number of live sessions for `user` (tests).
+    #[cfg(test)]
+    fn live_count(&self, user: &str) -> usize {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(user)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+}
+
+impl Default for ExplorerSessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Maximum concurrent explorer sessions per user.
 /// Override with GYRE_EXPLORER_MAX_SESSIONS env var.
@@ -129,6 +205,39 @@ const MAX_TOOL_TURNS: usize = 8;
 /// Per spec: 3 dedicated refinement turns for the self-check loop.
 /// These are tracked independently from tool-use turns.
 const MAX_REFINEMENT_TURNS: usize = 3;
+
+/// Default model for the explorer's Claude Agent SDK subprocess
+/// (explorer-implementation.md §8: `process.env.GYRE_LLM_MODEL ||
+/// 'claude-sonnet-4-6'`). Only used when neither a workspace/tenant LLM
+/// config nor `GYRE_LLM_MODEL` is set. The native LlmPort fallback keeps the
+/// platform-wide gemini default — its Vertex AI transport cannot serve
+/// claude model names.
+const EXPLORER_SDK_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
+/// Explorer status protocol values (spec: explorer-implementation.md §6).
+/// The Status message's `status` field MUST be one of exactly these three
+/// values — the frontend status indicator maps only these (ExplorerChat.svelte);
+/// any other string is silently dropped and the indicator goes stale.
+const STATUS_THINKING: &str = "thinking";
+const STATUS_REFINING: &str = "refining";
+const STATUS_READY: &str = "ready";
+
+/// Normalize a status string from the SDK subprocess to the three-value
+/// status protocol. The bundled SDK script emits spec-conformant values, but
+/// the subprocess is swappable (`GYRE_EXPLORER_SDK_PATH`), so an alternate
+/// script's free-form statuses ("Analyzing...", "Synthesizing answer...")
+/// must not leak onto the wire off-contract. Unknown values map to `thinking`
+/// (the "agent is working" default).
+fn normalize_status(raw: &str) -> &'static str {
+    let lowered = raw.trim().to_lowercase();
+    if lowered.contains(STATUS_REFINING) {
+        STATUS_REFINING
+    } else if lowered.contains(STATUS_READY) {
+        STATUS_READY
+    } else {
+        STATUS_THINKING
+    }
+}
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
 /// Set high enough for deep conversational exploration (100 back-and-forth turns).
@@ -200,46 +309,24 @@ async fn handle_explorer_session(
     // rather than rejecting the new connection. This handles zombie sessions from
     // unclean disconnects (browser crash, tab close, navigation) gracefully.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
-    let session_id = SESSION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let (session_id, shutdown_notify) = state
+        .explorer_sessions
+        .register(&session_user, max_sessions_per_user());
 
     // Guard: remove this session's slot on drop (even if we return early or panic).
     struct SessionGuard {
+        registry: Arc<ExplorerSessionRegistry>,
         user_key: String,
         session_id: u64,
     }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
-            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slots) = sessions.get_mut(&self.user_key) {
-                slots.retain(|s| s.id != self.session_id);
-                if slots.is_empty() {
-                    sessions.remove(&self.user_key);
-                }
-            }
+            self.registry.unregister(&self.user_key, self.session_id);
         }
-    }
-
-    {
-        let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = sessions.entry(session_user.clone()).or_default();
-        // Evict oldest sessions if at the limit.
-        while slots.len() >= max_sessions_per_user() {
-            let evicted = slots.remove(0);
-            info!(
-                user = %session_user,
-                evicted_session = evicted.id,
-                "Explorer WS: evicting oldest session to make room for new connection"
-            );
-            evicted.shutdown.notify_one();
-        }
-        slots.push(SessionSlot {
-            id: session_id,
-            shutdown: Arc::clone(&shutdown_notify),
-        });
     }
     // Create guard immediately after registration so any subsequent panic cleans up.
     let _session_guard = SessionGuard {
+        registry: Arc::clone(&state.explorer_sessions),
         user_key: session_user,
         session_id,
     };
@@ -704,10 +791,17 @@ async fn handle_explorer_session(
                 }
 
                 // Send thinking status
-                send_status(&mut sender, "thinking").await;
+                send_status(&mut sender, STATUS_THINKING).await;
 
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
+
+                // Whether a user Message arrived while the agent was running.
+                // Such a message cannot be processed (the session is busy and the
+                // minimum message interval cannot have elapsed), so it must be
+                // answered with the rate-limit error once the run finishes —
+                // never silently dropped.
+                let mut message_during_run = false;
 
                 // Run the agent loop with conversation history, while
                 // concurrently listening for Cancel messages on the WebSocket.
@@ -762,8 +856,17 @@ async fn handle_explorer_session(
                                                 debug!(user = %auth.agent_id, "Queuing message during agent run");
                                                 queued_messages.push(client_msg);
                                             }
+                                            ExplorerClientMessage::Message { .. } => {
+                                                // A user message arrived while the
+                                                // previous one was still being processed.
+                                                // The sender is borrowed by the agent
+                                                // run, so remember it and reply with the
+                                                // rate-limit error after the run completes.
+                                                debug!(user = %auth.agent_id, "Message received during agent run");
+                                                message_during_run = true;
+                                            }
                                             _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
+                                                // Other message types ignored during agent run
                                             }
                                         }
                                     }
@@ -786,6 +889,20 @@ async fn handle_explorer_session(
                     && cache_time.elapsed() > std::time::Duration::from_secs(30)
                 {
                     cache_time = std::time::Instant::now();
+                }
+
+                // A user message arrived while this run was in flight. It was
+                // not processed (and must not trigger a back-to-back agent run),
+                // so answer it with the same rate-limit error the main-loop
+                // check produces. Without this, the message would silently
+                // vanish — the client would never learn it was dropped.
+                if message_during_run {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Please wait before sending another message.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serialize_msg(&err).unwrap_or_default()))
+                        .await;
                 }
 
                 match agent_result {
@@ -817,7 +934,7 @@ async fn handle_explorer_session(
 
                 // Include graph data age so the UI can display freshness
                 let age = cache_time.elapsed().as_secs();
-                send_status_full(&mut sender, "ready", None, Some(age)).await;
+                send_status_full(&mut sender, STATUS_READY, None, Some(age)).await;
             }
 
             ExplorerClientMessage::SaveView {
@@ -1695,9 +1812,11 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
 ///
 /// SDK is the default path when the script exists. Opt-out via `GYRE_EXPLORER_SDK=0`.
 /// Falls back to native LlmPort when the SDK script doesn't exist or is explicitly disabled.
+#[allow(clippy::too_many_arguments)]
 async fn run_explorer_agent_sdk(
     state: &AppState,
     repo_id: &str,
+    sdk_script_path: &str,
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -1716,12 +1835,231 @@ async fn run_explorer_agent_sdk(
     // Access to this code path is gated to admin-only users in run_explorer_agent()
     // to prevent privilege escalation (a read-only member would otherwise get
     // server-level graph access via the subprocess).
-    let token = &state.auth_token;
-    let system_prompt = build_system_prompt();
-    // Use workspace-scoped model resolution for consistent model selection
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(state, workspace_id, "explorer-agent").await;
+    let token = state.auth_token.clone();
+    // SDK prompt variant: no repo context is pre-loaded, so workflow step 1
+    // tells the agent to call graph_summary first (spec §10).
+    let system_prompt = build_system_prompt_for_sdk();
+    // Model resolution per spec §8: workspace/tenant config, then
+    // GYRE_LLM_MODEL, then the explorer-specific `claude-sonnet-4-6` default
+    // (NOT the platform-wide gemini default — the SDK serves claude models).
+    let (model, _) = crate::llm_helpers::resolve_llm_model_with_default(
+        state,
+        workspace_id,
+        "explorer-agent",
+        EXPLORER_SDK_DEFAULT_MODEL,
+    )
+    .await;
 
+    // Load the graph once for the server-mediated self-check (spec §11).
+    // Reused across all refinement rounds of this message turn.
+    let rid = Id::new(repo_id);
+    let graph: Option<(
+        Vec<gyre_common::graph::GraphNode>,
+        Vec<gyre_common::graph::GraphEdge>,
+    )> = match (
+        state.graph_store.list_nodes(&rid, None).await,
+        state.graph_store.list_edges(&rid, None).await,
+    ) {
+        (Ok(n), Ok(e)) => Some((n, e)),
+        _ => {
+            // The agent's own graph_query_dryrun MCP tool hits the same store,
+            // so it is likely failing too. Proceed without server-mediated
+            // refinement rather than dead-ending the turn; the gap is logged.
+            warn!(repo_id = %repo_id, "Explorer SDK self-check skipped: graph store unavailable");
+            None
+        }
+    };
+    let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
+
+    // Spec §11 self-check loop: extract the <view_query> from the agent's
+    // output, dry-run it server-side, and feed the result back for refinement.
+    // Capped at MAX_REFINEMENT_TURNS (3); when the cap is reached (or the
+    // warnings are resolved) the best version is sent to the frontend anyway.
+    let mut refinement_count = 0usize;
+    // Spec §11: best version across refinement rounds — fewest actionable
+    // warnings. A regressed refinement never replaces a better earlier
+    // attempt; the best one is what the frontend receives when the cap is
+    // reached. Tuples: (actionable warning count, query JSON, assistant text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
+    let mut current_question = user_question.to_string();
+    loop {
+        let (assistant_text, view_query) = run_sdk_subprocess_once(
+            repo_id,
+            sdk_script_path,
+            &current_question,
+            canvas_state,
+            sender,
+            conversation_history,
+            &model,
+            &system_prompt,
+            &server_url,
+            &token,
+            ping_interval,
+            &last_pong,
+            pong_timeout,
+        )
+        .await?;
+
+        // Record the exchange so subsequent messages (and refinement rounds)
+        // have full context. The assistant entry includes the emitted view
+        // query so later turns know what was applied to the canvas.
+        let assistant_full = match &view_query {
+            Some(q) => format!("{}\n\n<view_query>{}</view_query>", assistant_text, q),
+            None => assistant_text.clone(),
+        };
+        conversation_history.push(ConversationMessage {
+            role: "user".to_string(),
+            content: ConversationContent::Text(current_question.clone()),
+        });
+        conversation_history.push(ConversationMessage {
+            role: "assistant".to_string(),
+            content: ConversationContent::Text(assistant_full),
+        });
+
+        let Some(query_json) = view_query else {
+            // No view query in this round — nothing to self-check.
+            break;
+        };
+
+        let check_result = graph.as_ref().and_then(|(nodes, edges)| {
+            self_check_dry_run(&query_json, nodes, edges, selected_node_id)
+        });
+
+        match check_result {
+            Some(dr) => {
+                let actionable = actionable_dry_run_warnings(&dr, &query_json);
+                // Update the best-version tracker: strictly fewer actionable
+                // warnings wins; ties keep the earlier attempt.
+                let warning_count = actionable.len();
+                let better_than_best = best_view_query
+                    .as_ref()
+                    .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                if better_than_best {
+                    best_view_query =
+                        Some((warning_count, query_json.clone(), assistant_text.clone()));
+                }
+                if actionable.is_empty() || refinement_count >= MAX_REFINEMENT_TURNS {
+                    if !actionable.is_empty() {
+                        // Spec §11: cap reached — send the best version anyway.
+                        info!(
+                            refinements = refinement_count,
+                            warnings = actionable.len(),
+                            "Explorer SDK self-check cap reached; sending best version"
+                        );
+                    }
+                    // Spec §11: send the BEST version — when the cap is reached
+                    // with warnings outstanding, an earlier attempt with fewer
+                    // warnings wins over the current (possibly regressed) one.
+                    // On the clean path the current query IS the best.
+                    let (send_query, send_text) = match &best_view_query {
+                        Some((_count, q, t)) => (q.clone(), t.clone()),
+                        None => (query_json.clone(), assistant_text.clone()),
+                    };
+                    // Forward the finalized view query to the frontend, with the
+                    // agent's preceding text as the explanation.
+                    let view_msg = ExplorerServerMessage::ViewQuery {
+                        query: send_query,
+                        explanation: if send_text.is_empty() {
+                            None
+                        } else {
+                            Some(send_text)
+                        },
+                    };
+                    sender
+                        .send(Message::Text(serialize_msg(&view_msg).unwrap_or_default()))
+                        .await?;
+                    break;
+                }
+                refinement_count += 1;
+                if !send_status(sender, STATUS_REFINING).await {
+                    anyhow::bail!("WebSocket connection lost during SDK self-check");
+                }
+                current_question = format!(
+                    "The server-side dry-run of your view query returned warnings:\n{}\n\n{}\nRefine the view query to resolve the warnings and output the improved \
+                     <view_query> block.",
+                    actionable
+                        .iter()
+                        .map(|w| format!("- {}", w))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    self_check_feedback(&dr)
+                );
+                continue;
+            }
+            None => {
+                // self_check_dry_run returns None only when the query failed to
+                // deserialize into a ViewQuery (structurally invalid). Match the
+                // native path's policy: never forward an unparseable query to
+                // the frontend. If refinement budget remains, ask the agent to
+                // fix the structure; otherwise reject with a visible warning.
+                if graph.is_none() {
+                    // Graph store unavailable — self-check was skipped, not failed.
+                    warn!("Forwarding SDK view query without self-check (graph store unavailable)");
+                    let view_msg = ExplorerServerMessage::ViewQuery {
+                        query: query_json.clone(),
+                        explanation: if assistant_text.is_empty() {
+                            None
+                        } else {
+                            Some(assistant_text.clone())
+                        },
+                    };
+                    sender
+                        .send(Message::Text(serialize_msg(&view_msg).unwrap_or_default()))
+                        .await?;
+                    break;
+                }
+                if refinement_count < MAX_REFINEMENT_TURNS {
+                    refinement_count += 1;
+                    if !send_status(sender, STATUS_REFINING).await {
+                        anyhow::bail!("WebSocket connection lost during SDK self-check");
+                    }
+                    current_question =
+                        ("Your <view_query> block is not a valid view query — it failed to \
+                         parse against the View Query Grammar (wrong field names or types). \
+                         Output a corrected <view_query> block.")
+                            .to_string();
+                    continue;
+                }
+                warn!(
+                    "SDK view query failed to parse after {} refinements; rejecting",
+                    refinement_count
+                );
+                stream_text(
+                    sender,
+                    "\n\n*Warning: Generated view query had invalid structure and was not applied.*",
+                    true,
+                )
+                .await;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run one Claude Agent SDK subprocess invocation: spawn the script, stream
+/// its output to the WebSocket client, and return the accumulated assistant
+/// text plus the extracted view query (if any). Does NOT push to conversation
+/// history and does NOT forward the view query — both are the caller's
+/// (self-check loop's) responsibility, so the query can be dry-run and refined
+/// before the frontend ever sees it (spec §11).
+#[allow(clippy::too_many_arguments)]
+async fn run_sdk_subprocess_once(
+    repo_id: &str,
+    sdk_script_path: &str,
+    user_question: &str,
+    canvas_state: &gyre_common::view_query::CanvasState,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    conversation_history: &[ConversationMessage],
+    model: &str,
+    system_prompt: &str,
+    server_url: &str,
+    token: &str,
+    ping_interval: &mut tokio::time::Interval,
+    last_pong: &Arc<std::sync::Mutex<std::time::Instant>>,
+    pong_timeout: std::time::Duration,
+) -> anyhow::Result<(String, Option<serde_json::Value>)> {
     // Serialize conversation history for the SDK, preserving tool call context
     let history_json: Vec<serde_json::Value> = conversation_history
         .iter()
@@ -1765,13 +2103,16 @@ async fn run_explorer_agent_sdk(
         "history": history_json,
     });
 
-    let sdk_script = std::env::var("GYRE_EXPLORER_SDK_PATH")
-        .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
+    // Spawn the dispatch site's validated, canonicalized script path. Do NOT
+    // re-resolve GYRE_EXPLORER_SDK_PATH here: a relative default (e.g.
+    // "scripts/explorer-agent.mjs") would be resolved by the child `node`
+    // process against the server's CWD, diverging from the path the dispatch
+    // site validated (exe-dir-relative in installed layouts).
     // Clear environment and only pass needed variables to prevent
     // leaking DATABASE_URL, API keys, etc. to the subprocess.
     let mut child_cmd = tokio::process::Command::new("node");
     child_cmd
-        .arg(&sdk_script)
+        .arg(sdk_script_path)
         .env_clear()
         .env("GYRE_API_URL", &server_url)
         .env("GYRE_API_TOKEN", token)
@@ -1826,6 +2167,9 @@ async fn run_explorer_agent_sdk(
 
     // Accumulate assistant response text for conversation history
     let mut accumulated_text = String::new();
+    // Captured <view_query> from the subprocess output (forwarded by the
+    // caller's self-check loop, not here — spec §11)
+    let mut captured_view_query: Option<serde_json::Value> = None;
 
     if let Some(stdout) = child.stdout.take() {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1884,29 +2228,16 @@ async fn run_explorer_agent_sdk(
                                 }
                             }
                             "view_query" => {
+                                // Capture for the caller's self-check loop (spec §11)
+                                // instead of forwarding immediately — the query
+                                // must be dry-run and possibly refined first.
                                 if let Some(query) = msg.get("query") {
-                                    let explanation = msg
-                                        .get("explanation")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    let view_msg = ExplorerServerMessage::ViewQuery {
-                                        query: query.clone(),
-                                        explanation,
-                                    };
-                                    if sender
-                                        .send(Message::Text(
-                                            serialize_msg(&view_msg).unwrap_or_default().into(),
-                                        ))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break; // Client disconnected
-                                    }
+                                    captured_view_query = Some(query.clone());
                                 }
                             }
                             "status" => {
                                 if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
-                                    if !send_status(sender, status).await {
+                                    if !send_status(sender, normalize_status(status)).await {
                                         break; // Client disconnected
                                     }
                                 }
@@ -1956,25 +2287,108 @@ async fn run_explorer_agent_sdk(
         }
     }
 
-    // Add both user and assistant messages to conversation history
-    // so subsequent SDK messages have full context.
-    conversation_history.push(ConversationMessage {
-        role: "user".to_string(),
-        content: ConversationContent::Text(user_question.to_string()),
-    });
-    // Use the actual accumulated assistant text (not a placeholder)
-    // so multi-turn conversations have real context.
+    // Hand the accumulated text (placeholder when the subprocess produced
+    // nothing, so multi-turn context stays honest) and the captured view
+    // query back to the self-check loop.
     let assistant_text = if accumulated_text.is_empty() {
         "[No response from SDK subprocess]".to_string()
     } else {
         accumulated_text
     };
-    conversation_history.push(ConversationMessage {
-        role: "assistant".to_string(),
-        content: ConversationContent::Text(assistant_text),
-    });
+    Ok((assistant_text, captured_view_query))
+}
 
-    Ok(())
+/// Fallback when no LLM is configured — generate template-based view queries
+/// from simple keyword matching. Better than a dead-end "not configured" message.
+fn build_canvas_context_json(
+    canvas_state: &gyre_common::view_query::CanvasState,
+    cached_nodes: Option<&Vec<gyre_common::graph::GraphNode>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut ctx = serde_json::Map::new();
+    if let Some(ref sel) = canvas_state.selected_node {
+        // Enrich selected node context with graph data for better LLM reasoning
+        let mut node_ctx = json!({
+            "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
+            "type": sel.node_type,
+            "id": sel.id,
+        });
+        // Look up full node details from the graph cache
+        if let Some(graph_nodes) = cached_nodes {
+            if let Some(full_node) = graph_nodes.iter().find(|n| n.id.to_string() == sel.id) {
+                if !full_node.file_path.is_empty() {
+                    node_ctx["file_path"] = json!(full_node.file_path);
+                }
+                if full_node.line_start > 0 {
+                    node_ctx["line_start"] = json!(full_node.line_start);
+                }
+                if let Some(ref sp) = full_node.spec_path {
+                    node_ctx["spec_path"] = json!(sp);
+                }
+                if let Some(c) = full_node.complexity {
+                    node_ctx["complexity"] = json!(c);
+                }
+                if let Some(tc) = full_node.test_coverage {
+                    node_ctx["test_coverage"] = json!(tc);
+                }
+            }
+        }
+        ctx.insert("selected_node".to_string(), node_ctx);
+    }
+    // §10: the LLM receives the current zoom level. serde default is 0.0,
+    // which means "frontend did not send one" — omit rather than emit 0.
+    if canvas_state.zoom_level > 0.0 {
+        ctx.insert("zoom_level".to_string(), json!(canvas_state.zoom_level));
+    }
+    if !canvas_state.visible_tree_groups.is_empty() {
+        ctx.insert(
+            "visible_groups".to_string(),
+            json!(canvas_state.visible_tree_groups),
+        );
+    }
+    // §10: the active edge-type filter (e.g. "calls"), when set.
+    if let Some(ref filter) = canvas_state.active_filter {
+        if !filter.is_empty() {
+            ctx.insert("active_filter".to_string(), json!(filter));
+        }
+    }
+    if let Some(ref lens) = canvas_state.active_lens {
+        if !lens.is_empty() {
+            ctx.insert("active_lens".to_string(), json!(lens));
+        }
+    }
+    if !canvas_state.recent_interactions.is_empty() {
+        let last_10: Vec<_> = canvas_state
+            .recent_interactions
+            .iter()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|i| {
+                let mut m = serde_json::Map::new();
+                m.insert("action".to_string(), json!(i.action));
+                if let Some(ref node) = i.node {
+                    m.insert("node".to_string(), json!(node));
+                }
+                if let Some(ref detail) = i.detail {
+                    m.insert("detail".to_string(), json!(detail));
+                }
+                if let Some(to_level) = i.to_level {
+                    m.insert("to_level".to_string(), json!(to_level));
+                }
+                if let Some(ref preset) = i.preset {
+                    m.insert("preset".to_string(), json!(preset));
+                }
+                serde_json::Value::Object(m)
+            })
+            .collect();
+        ctx.insert("recent_interactions".to_string(), json!(last_10));
+    }
+    if let Some(ref aq) = canvas_state.active_query {
+        ctx.insert("active_query".to_string(), aq.clone());
+    }
+    ctx
 }
 
 /// Fallback when no LLM is configured — generate template-based view queries
@@ -2320,6 +2734,9 @@ async fn run_explorer_agent(
     // Validate SDK path: MUST exist and canonicalize to a known safe directory.
     // Reject non-existent paths to prevent TOCTOU attacks (file could be
     // replaced between validation and execution).
+    // `validated_sdk_script` is the canonicalized path that PASSED validation —
+    // it is what gets spawned, so execution cannot diverge from validation.
+    let mut validated_sdk_script: Option<String> = None;
     let sdk_path_valid = if let Ok(canonical) = sdk_path.canonicalize() {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -2330,7 +2747,11 @@ async fn run_explorer_agent(
             .unwrap_or(false);
         let in_usr = canonical.starts_with("/usr/");
         let in_nix = canonical.starts_with("/nix/");
-        in_exe_dir || in_usr || in_nix
+        let ok = in_exe_dir || in_usr || in_nix;
+        if ok {
+            validated_sdk_script = Some(canonical.to_string_lossy().into_owned());
+        }
+        ok
     } else {
         // Path doesn't exist — reject rather than allow unchecked execution
         false
@@ -2353,10 +2774,13 @@ async fn run_explorer_agent(
                 "Non-admin attempted SDK explorer path — falling through to native LLM"
             );
         } else {
-            send_status_with_path(sender, "thinking", Some("sdk")).await;
+            send_status_with_path(sender, STATUS_THINKING, Some("sdk")).await;
+            // `use_sdk` implies `sdk_path_valid`, which implies Some(canonical).
+            let sdk_script = validated_sdk_script.unwrap_or_default();
             return run_explorer_agent_sdk(
                 state,
                 repo_id,
+                &sdk_script,
                 user_question,
                 canvas_state,
                 sender,
@@ -2371,7 +2795,7 @@ async fn run_explorer_agent(
     }
 
     // Send agent path indicator for native LLM path
-    send_status_with_path(sender, "thinking", Some("native")).await;
+    send_status_with_path(sender, STATUS_THINKING, Some("native")).await;
 
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
@@ -2541,89 +2965,50 @@ async fn run_explorer_agent(
             .iter()
             .map(|(k, v)| format!("{}: {}", k, v))
             .collect();
+        // lsp-call-graph.md §8 (LLM Integration): tell the agent whether the
+        // call graph is complete so it knows when blast-radius, coupling, and
+        // dead-code questions can be answered confidently from `calls` edges.
+        let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+            state.kv_store.as_ref(),
+            &gyre_common::Id::new(repo_id),
+            nodes,
+        )
+        .await;
+        let pass2_call_edges = edges
+            .iter()
+            .filter(|e| gyre_common::call_graph::is_pass2_calls_edge(e))
+            .count();
+        let call_graph_note = if call_graph_complete {
+            format!(
+                "Call graph: COMPLETE — Pass 2 (semantic) extraction has finished, {pass2_call_edges} \
+                 resolved call edges. You can confidently answer blast-radius (\"what breaks if I \
+                 change X?\"), coupling (incoming/outgoing calls per module), and dead-code \
+                 (zero incoming calls, excluding RoutesTo entry points) questions from `calls` edges."
+            )
+        } else {
+            "Call graph: INCOMPLETE — Pass 2 (semantic) extraction has not completed for the \
+             current graph; `calls` edges are partial (syntax-only). Blast-radius and coupling \
+             answers may underreport: qualify them accordingly and prefer structural edges \
+             (implements, contains, governed_by) where possible."
+                .to_string()
+        };
         system_prompt.push_str(&format!(
-            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}",
+            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}\n{}",
             repo_id,
             nodes.len(),
             edges.len(),
             type_str.join(", "),
             edge_str.join(", "),
+            call_graph_note,
         ));
     }
     let tools = explorer_tool_definitions();
 
-    // Build user message with structured canvas context as JSON
-    // (structured format lets the LLM parse interaction sequences semantically)
-    let canvas_json = {
-        let mut ctx = serde_json::Map::new();
-        if let Some(ref sel) = canvas_state.selected_node {
-            // Enrich selected node context with graph data for better LLM reasoning
-            let mut node_ctx = json!({
-                "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
-                "type": sel.node_type,
-                "id": sel.id,
-            });
-            // Look up full node details from the graph cache
-            if let Some(ref graph_nodes) = cached_nodes {
-                if let Some(full_node) = graph_nodes.iter().find(|n| n.id.to_string() == sel.id) {
-                    if !full_node.file_path.is_empty() {
-                        node_ctx["file_path"] = json!(full_node.file_path);
-                    }
-                    if full_node.line_start > 0 {
-                        node_ctx["line_start"] = json!(full_node.line_start);
-                    }
-                    if let Some(ref sp) = full_node.spec_path {
-                        node_ctx["spec_path"] = json!(sp);
-                    }
-                    if let Some(c) = full_node.complexity {
-                        node_ctx["complexity"] = json!(c);
-                    }
-                    if let Some(tc) = full_node.test_coverage {
-                        node_ctx["test_coverage"] = json!(tc);
-                    }
-                }
-            }
-            ctx.insert("selected_node".to_string(), node_ctx);
-        }
-        if !canvas_state.visible_tree_groups.is_empty() {
-            ctx.insert(
-                "visible_groups".to_string(),
-                json!(canvas_state.visible_tree_groups),
-            );
-        }
-        if let Some(ref lens) = canvas_state.active_lens {
-            if !lens.is_empty() {
-                ctx.insert("active_lens".to_string(), json!(lens));
-            }
-        }
-        if !canvas_state.recent_interactions.is_empty() {
-            let last_10: Vec<_> = canvas_state
-                .recent_interactions
-                .iter()
-                .rev()
-                .take(10)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|i| {
-                    let mut m = serde_json::Map::new();
-                    m.insert("action".to_string(), json!(i.action));
-                    if let Some(ref node) = i.node {
-                        m.insert("node".to_string(), json!(node));
-                    }
-                    if let Some(ref detail) = i.detail {
-                        m.insert("detail".to_string(), json!(detail));
-                    }
-                    serde_json::Value::Object(m)
-                })
-                .collect();
-            ctx.insert("recent_interactions".to_string(), json!(last_10));
-        }
-        if let Some(ref aq) = canvas_state.active_query {
-            ctx.insert("active_query".to_string(), aq.clone());
-        }
-        ctx
-    };
+    // Structured canvas context for the LLM (<canvas_state> block). Carries
+    // the §10 interaction-context fields the spec says the LLM receives:
+    // selected_node, zoom_level, visible_groups, active_filter, active_lens,
+    // active_query, recent_interactions.
+    let canvas_json = build_canvas_context_json(canvas_state, cached_nodes.as_ref());
     let canvas_summary = if canvas_json.is_empty() {
         String::new()
     } else {
@@ -2768,6 +3153,12 @@ async fn run_explorer_agent(
     let mut refinement_count = 0;
     let mut tool_turn_count = 0;
     let mut view_query_sent = false;
+    // Spec §11 Self-Check Loop: track the best view query across refinement
+    // turns — the attempt with the fewest actionable dry-run warnings. If a
+    // later refinement regresses, this earlier version is what the frontend
+    // receives when the refinement cap is reached ("send the best version
+    // anyway"). Tuples: (actionable warning count, query JSON, clean text).
+    let mut best_view_query: Option<(usize, serde_json::Value, String)> = None;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
         // Send keepalive ping if the interval has elapsed (prevents
@@ -2788,21 +3179,9 @@ async fn run_explorer_agent(
 
         // Send a status update so the user sees feedback during LLM inference
         // (which can take 3-15 seconds). Without this the UI appears frozen.
-        let status_text = if tool_turn_count > 0 {
-            "Analyzing..."
-        } else {
-            "Thinking..."
-        };
-        let status_msg = ExplorerServerMessage::Status {
-            status: status_text.to_string(),
-            agent_path: None,
-            graph_data_age_secs: None,
-        };
-        let _ = sender
-            .send(Message::Text(
-                serialize_msg(&status_msg).unwrap_or_default().into(),
-            ))
-            .await;
+        // Both first-turn (thinking) and tool-turn (analyzing) phases map to
+        // the spec's "thinking" status — the working state before refinement.
+        let _ = send_status(sender, STATUS_THINKING).await;
 
         // Timeout on LLM calls to prevent blocking the session indefinitely.
         // If the client disconnects, subsequent send() calls will fail and break the loop.
@@ -2841,118 +3220,69 @@ async fn run_explorer_agent(
 
             // If a view query was found, perform server-enforced self-check
             if let Some(query_json) = view_query {
-                // Dry-run the query server-side, with validation first
-                let dry_run_result = if let Ok(query) =
-                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone())
-                {
-                    // Validate query before dry-run to prevent malformed queries
-                    let validation_errors = query.validate();
-                    let validation_warnings = query.warnings();
-                    if !validation_errors.is_empty() || !validation_warnings.is_empty() {
-                        let mut dr = gyre_domain::view_query_resolver::dry_run(
-                            &query,
-                            &nodes,
-                            &edges,
-                            selected_node_id,
+                // Dry-run the query server-side, with validation first.
+                // `None` = structurally invalid (failed to deserialize).
+                let dry_run_result =
+                    self_check_dry_run(&query_json, nodes, edges, selected_node_id);
+                let dry_run_result = match dry_run_result {
+                    Some(dr) => Some(dr),
+                    None => {
+                        warn!(
+                            "Failed to deserialize view query for self-check — rejecting invalid query"
                         );
-                        for err in validation_errors {
-                            dr.warnings.push(format!("Validation: {}", err));
-                        }
-                        for w in validation_warnings {
-                            dr.warnings.push(format!("Warning: {}", w));
-                        }
-                        Some(dr)
-                    } else {
-                        Some(gyre_domain::view_query_resolver::dry_run(
-                            &query,
-                            &nodes,
-                            &edges,
-                            selected_node_id,
-                        ))
+                        // Don't send unvalidated queries to the frontend.
+                        // Stream a warning with the raw JSON so the user can see what was attempted.
+                        let raw_preview = serde_json::to_string_pretty(&query_json)
+                            .unwrap_or_else(|_| query_json.to_string());
+                        // Truncate on a UTF-8 char boundary - a fixed byte index
+                        // would panic when byte 500 falls inside a multibyte
+                        // character (task-095 F4 flaw class).
+                        let truncated = if raw_preview.len() > 500 {
+                            format!(
+                                "{}...",
+                                crate::gate_executor::truncate_bytes(&raw_preview, 500)
+                            )
+                        } else {
+                            raw_preview
+                        };
+                        stream_text(
+                            sender,
+                            &format!(
+                                "\n\n*Warning: Generated view query had invalid structure and was not applied.*\n\n```json\n{}\n```",
+                                truncated
+                            ),
+                            true,
+                        ).await;
+                        break;
                     }
-                } else {
-                    warn!(
-                        "Failed to deserialize view query for self-check — rejecting invalid query"
-                    );
-                    // Don't send unvalidated queries to the frontend.
-                    // Stream a warning with the raw JSON so the user can see what was attempted.
-                    let raw_preview = serde_json::to_string_pretty(&query_json)
-                        .unwrap_or_else(|_| query_json.to_string());
-                    let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
-                    } else {
-                        raw_preview
-                    };
-                    stream_text(
-                        sender,
-                        &format!(
-                            "\n\n*Warning: Generated view query had invalid structure and was not applied.*\n\n```json\n{}\n```",
-                            truncated
-                        ),
-                        true,
-                    ).await;
-                    break;
                 };
 
                 if let Some(ref dr) = dry_run_result {
-                    // Collect actionable warnings. Include "may be cluttered"
-                    // warnings so the LLM knows when to narrow scope, but
-                    // downgrade them: only trigger refinement if there are
-                    // also non-clutter warnings or the result is very large.
-                    let actionable_warnings: Vec<&String> = dr
-                        .warnings
-                        .iter()
-                        .filter(|w| {
-                            // [info] prefixed warnings are informational — never trigger
-                            // refinement. These are inherent to the data model and cannot
-                            // be fixed by query changes (e.g., "SHA-based diff is approximate").
-                            if w.starts_with("[info]") {
-                                return false;
-                            }
-                            // Unfixable warnings: inherent to the data source, not
-                            // resolvable by query refinement. Skip to avoid wasting
-                            // a self-check turn.
-                            const UNFIXABLE_PREFIXES: &[&str] = &[
-                                "SHA-based diff shows an approximate",
-                                "Graph data truncated",
-                            ];
-                            if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
-                                return false;
-                            }
-                            // Validation errors are always actionable
-                            if w.starts_with("Validation:")
-                                || w.starts_with("Computed expression error:")
-                            {
-                                return true;
-                            }
-                            // "0 nodes" is actionable unless it's an interactive query
-                            if w.contains("matched 0 nodes") {
-                                return true;
-                            }
-                            // Clutter warnings are informational for All/TestGaps scopes
-                            if w.contains("may be cluttered") {
-                                let is_broad_scope = matches!(
-                                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(
-                                        query_json.clone()
-                                    ),
-                                    Ok(q) if matches!(q.scope,
-                                        gyre_common::view_query::Scope::All
-                                        | gyre_common::view_query::Scope::TestGaps
-                                    )
-                                );
-                                // Still report to LLM, but only trigger refinement for narrow scopes
-                                return !is_broad_scope;
-                            }
-                            true
-                        })
-                        .collect();
+                    // Collect actionable warnings (shared classifier — same
+                    // rules as the SDK self-check loop): [info] and
+                    // data-source-inherent warnings never trigger refinement;
+                    // validation errors, empty results, and narrow-scope
+                    // clutter do.
+                    let actionable_warnings: Vec<&String> =
+                        actionable_dry_run_warnings(dr, &query_json);
+                    // Update the best-version tracker: a query replaces the
+                    // incumbent only when it has strictly fewer actionable
+                    // warnings (ties keep the earlier attempt).
+                    let warning_count = actionable_warnings.len();
+                    let better_than_best = best_view_query
+                        .as_ref()
+                        .is_none_or(|(best_count, _, _)| warning_count < *best_count);
+                    if better_than_best {
+                        best_view_query =
+                            Some((warning_count, query_json.clone(), clean_text.clone()));
+                    }
                     if !actionable_warnings.is_empty() && refinement_count < MAX_REFINEMENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
                         // tool-use architecture for refinement (rather than a plain
                         // user text message which breaks the tool-use flow).
                         refinement_count += 1;
-                        send_status(sender, "refining").await;
+                        send_status(sender, STATUS_REFINING).await;
 
                         // Synthetic tool_use ID for the dry-run self-check
                         let synthetic_tool_id = format!("selfcheck_{}", refinement_count);
@@ -2973,12 +3303,7 @@ async fn run_explorer_agent(
                         });
 
                         // Tool result with the dry-run feedback
-                        let feedback = format!(
-                            "Dry-run FAILED. Please refine the <view_query>.\n\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}",
-                            dr.matched_nodes,
-                            dr.warnings,
-                            &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
-                        );
+                        let feedback = self_check_feedback(dr);
                         conversation_history.push(ConversationMessage {
                             role: "user".to_string(),
                             content: ConversationContent::Blocks(vec![ContentBlock::ToolResult {
@@ -2990,8 +3315,18 @@ async fn run_explorer_agent(
                     }
                 }
 
+                // Spec §11: send the BEST version. When the refinement cap
+                // is reached with warnings still outstanding, an earlier
+                // attempt with fewer warnings wins over the current (possibly
+                // regressed) one. On the clean path the current query IS the
+                // best (zero actionable warnings), so this is a no-op there.
+                let (send_query, send_text) = match &best_view_query {
+                    Some((_count, q, t)) => (q.clone(), t.clone()),
+                    None => (query_json.clone(), clean_text.clone()),
+                };
+
                 // Send finalized text done before view_query to avoid race
-                if !clean_text.is_empty() {
+                if !clean_text.is_empty() || !send_text.is_empty() {
                     let done_msg = ExplorerServerMessage::Text {
                         content: String::new(),
                         done: true,
@@ -3009,13 +3344,13 @@ async fn run_explorer_agent(
 
                 // Send the view query to the frontend, with the LLM's preceding
                 // text as explanation so the UI can show what the visualization reveals.
-                let explanation_text = if clean_text.is_empty() {
+                let explanation_text = if send_text.is_empty() {
                     None
                 } else {
-                    Some(clean_text.clone())
+                    Some(send_text.clone())
                 };
                 let view_msg = ExplorerServerMessage::ViewQuery {
-                    query: query_json.clone(),
+                    query: send_query,
                     explanation: explanation_text,
                 };
                 view_query_sent = true;
@@ -3065,7 +3400,7 @@ async fn run_explorer_agent(
             break;
         }
 
-        if !send_status(sender, "refining").await {
+        if !send_status(sender, STATUS_REFINING).await {
             break; // Client disconnected
         }
 
@@ -3120,17 +3455,9 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
-            // Notify the user that we're synthesizing the final answer
-            let status_msg = ExplorerServerMessage::Status {
-                status: "Synthesizing answer...".to_string(),
-                agent_path: None,
-                graph_data_age_secs: None,
-            };
-            let _ = sender
-                .send(Message::Text(
-                    serialize_msg(&status_msg).unwrap_or_default().into(),
-                ))
-                .await;
+            // Notify the user that we're synthesizing the final answer.
+            // Synthesis is the final refinement pass — spec status "refining".
+            let _ = send_status(sender, STATUS_REFINING).await;
             // Force one final response without tools so the LLM synthesizes.
             // Add a nudge to ensure a view query is emitted, not just text.
             let mut final_history = conversation_history.clone();
@@ -3183,23 +3510,43 @@ async fn execute_tool(
     nodes: &[gyre_common::graph::GraphNode],
     edges: &[gyre_common::graph::GraphEdge],
     selected_node_id: Option<&str>,
-    _state: &AppState,
+    state: &AppState,
 ) -> String {
     match tool_call.name.as_str() {
         "graph_summary" => {
-            let summary =
-                gyre_domain::view_query_resolver::compute_graph_summary(repo_id, nodes, edges);
+            // lsp-call-graph.md §8: completeness comes from the durable Pass 2
+            // marker so the agent knows whether call data is trustworthy.
+            let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+                state.kv_store.as_ref(),
+                &gyre_common::Id::new(repo_id),
+                nodes,
+            )
+            .await;
+            let summary = gyre_domain::view_query_resolver::compute_graph_summary(
+                repo_id,
+                nodes,
+                edges,
+                call_graph_complete,
+            );
             serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("Error: {e}"))
         }
         "graph_query_dryrun" => {
             let query_value = tool_call.input.get("query").cloned().unwrap_or_default();
             match serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_value) {
                 Ok(query) => {
-                    let result = gyre_domain::view_query_resolver::dry_run(
+                    let call_graph_complete =
+                        crate::graph_extraction::call_graph_complete_for_repo(
+                            state.kv_store.as_ref(),
+                            &gyre_common::Id::new(repo_id),
+                            nodes,
+                        )
+                        .await;
+                    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
                         &query,
                         nodes,
                         edges,
                         selected_node_id,
+                        Some(call_graph_complete),
                     );
                     serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -3402,8 +3749,7 @@ async fn execute_tool(
                 .input
                 .get("query")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
+                .unwrap_or("");
             let limit = tool_call
                 .input
                 .get("limit")
@@ -3411,33 +3757,7 @@ async fn execute_tool(
                 .unwrap_or(30)
                 .min(50) as usize; // Cap at 50 to limit conversation history bloat
 
-            let results: Vec<serde_json::Value> = nodes
-                .iter()
-                .filter(|n| n.deleted_at.is_none())
-                .filter(|n| {
-                    n.name.to_lowercase().contains(&query)
-                        || n.qualified_name.to_lowercase().contains(&query)
-                        || n.file_path.to_lowercase().contains(&query)
-                        || n.doc_comment
-                            .as_ref()
-                            .map_or(false, |d| d.to_lowercase().contains(&query))
-                        || n.spec_path
-                            .as_ref()
-                            .map_or(false, |s| s.to_lowercase().contains(&query))
-                })
-                .take(limit)
-                .map(|n| {
-                    json!({
-                        "id": n.id.to_string(),
-                        "name": n.name,
-                        "qualified_name": n.qualified_name,
-                        "node_type": format!("{:?}", n.node_type).to_lowercase(),
-                        "file_path": n.file_path,
-                        "spec_path": n.spec_path,
-                        "doc_comment": n.doc_comment.as_deref().map(|d| if d.len() > 100 { &d[..100] } else { d }),
-                    })
-                })
-                .collect();
+            let results = gyre_domain::view_query_resolver::search_graph_nodes(query, nodes, limit);
 
             format!(
                 "{} results:\n{}",
@@ -3449,15 +3769,23 @@ async fn execute_tool(
     }
 }
 
-fn build_system_prompt() -> String {
+/// Full system prompt body. `__WORKFLOW_STEP_1__` is substituted by
+/// [`build_system_prompt_with_workflow`] because the two agent paths start
+/// the spec §10 workflow differently: the native path pre-loads repo context
+/// into the prompt (step 1 becomes "skip graph_summary"), while the SDK
+/// subprocess has no pre-loaded context and must call the MCP tool first
+/// (spec §10 step 1 verbatim).
+fn build_system_prompt_body() -> String {
     r##"You are the Gyre Explorer agent. You help humans understand codebases they didn't write by generating interactive visualizations of the knowledge graph.
 
 ## Context
 User messages may include a <canvas_state> JSON block showing what's currently selected/visible:
 - "selected_node": { name, type, id } — the user clicked on this node, $selected resolves to it
+- "zoom_level": 2.3 — current canvas zoom level (how far the user has zoomed in)
 - "visible_groups": [...] — tree groups currently expanded on screen
+- "active_filter": "calls" — the currently active edge-type filter, when one is applied
 - "active_lens": "structural"|"evaluative" — current analysis mode
-- "recent_interactions": [{ action, node?, detail? }, ...] — the user's recent click/zoom/query history (up to 10 entries, newest last)
+- "recent_interactions": [{ action, node?, detail?, to_level?, preset? }, ...] - the user's recent click/zoom/query history (up to 10 entries, newest last). zoom_in/zoom_out carry to_level; query actions carry the preset name when one was used
 - "active_query": {...} — the currently applied view query
 
 ## $clicked vs $selected
@@ -3466,15 +3794,15 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
 ## Available Tools
-- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, and risk indicators.
-- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Always validate queries before sending.
+- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, risk indicators, and call_graph metrics (call_edges_pass1, call_edges_pass2, call_graph_complete — whether semantic call extraction has completed).
+- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Warns "Call graph incomplete — blast radius may be underreported" when the query traverses calls edges before semantic extraction completes. Always validate queries before sending.
 - graph_nodes: Query graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with details.
 - graph_edges: Query graph edges by source/target node ID or edge type. Returns up to 100 edges.
 - node_provenance: Returns creation and modification history for a specific node, including commit SHAs, authors, and timestamps. Use this to answer questions about who created/modified code and when.
 - search: Full-text search across the knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths.
 
 ## Workflow
-1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts
+__WORKFLOW_STEP_1__
 2. If you need specific nodes, call graph_nodes with a name_pattern
 3. If you need relationships, call graph_edges
 4. For provenance questions ("who created X?", "when was Y modified?"), call node_provenance
@@ -3489,6 +3817,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - Never invent node names — always verify via graph_nodes or search first
 - When explaining structure, cite the specific edge types connecting nodes
 - If you're unsure whether a node exists, search for it before referencing it
+- Check graph_summary's call_graph.call_graph_complete (and the Call graph note in the repo context) before answering call-dependent questions: blast radius ("what breaks if I change X?" — follow implements to implementors, then calls to all callers, then governed_by to affected specs), coupling (incoming/outgoing calls per module), and dead code (functions with zero incoming calls, excluding RoutesTo entry points). When the call graph is incomplete, qualify blast-radius/coupling answers as partial.
 - For provenance questions (who created/modified what, when), use node_provenance to get creation and modification history
 
 ## View Query Grammar
@@ -3562,6 +3891,35 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 - <view_query>{ ... JSON ... }</view_query> block"##.to_string()
 }
 
+/// Build the system prompt with the workflow's first step chosen by whether
+/// repo context is pre-loaded into the prompt (native LlmPort path) or must
+/// be fetched via the graph_summary MCP tool (Claude Agent SDK path).
+fn build_system_prompt_with_workflow(repo_context_preloaded: bool) -> String {
+    let step1 = if repo_context_preloaded {
+        // Native path: "## Current Repository Context" is appended to the
+        // system prompt by run_explorer_agent, so the summary is already
+        // in context and a graph_summary tool call is only needed for
+        // detailed rankings or refreshed counts.
+        "1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts"
+    } else {
+        // SDK path: nothing is pre-loaded — spec §10 workflow step 1 applies
+        // verbatim: understand the codebase before reasoning about it.
+        "1. Call graph_summary to understand the codebase structure"
+    };
+    build_system_prompt_body().replace("__WORKFLOW_STEP_1__", step1)
+}
+
+/// System prompt for the native LlmPort loop (repo context pre-loaded).
+fn build_system_prompt() -> String {
+    build_system_prompt_with_workflow(true)
+}
+
+/// System prompt for the Claude Agent SDK subprocess (no pre-loaded context —
+/// the agent must call graph_summary first per spec §10).
+fn build_system_prompt_for_sdk() -> String {
+    build_system_prompt_with_workflow(false)
+}
+
 /// Parse the LLM response to extract view query blocks from text.
 fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>) {
     let mut text_parts = Vec::new();
@@ -3593,6 +3951,102 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
     }
 
     (text_parts.join("\n\n"), view_query)
+}
+
+/// Returns the system default views seeded on first ListViews access.
+/// Delegates to saved_views::system_default_views() — single source of truth.
+/// Server-side self-check of an extracted view query (spec §11):
+/// deserialize → validate → dry-run against the graph.
+/// Returns `None` when the query JSON does not deserialize into a ViewQuery
+/// (structurally invalid — it must NOT be sent to the frontend). Otherwise
+/// returns the DryRunResult with any validation errors/warnings merged into
+/// `warnings` so they participate in the actionable-warning classification.
+fn self_check_dry_run(
+    query_json: &serde_json::Value,
+    nodes: &[gyre_common::graph::GraphNode],
+    edges: &[gyre_common::graph::GraphEdge],
+    selected_node_id: Option<&str>,
+) -> Option<gyre_domain::view_query_resolver::DryRunResult> {
+    let query =
+        serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()).ok()?;
+    let validation_errors = query.validate();
+    let validation_warnings = query.warnings();
+    let mut dr = gyre_domain::view_query_resolver::dry_run(&query, nodes, edges, selected_node_id);
+    for err in validation_errors {
+        dr.warnings.push(format!("Validation: {}", err));
+    }
+    for w in validation_warnings {
+        dr.warnings.push(format!("Warning: {}", w));
+    }
+    Some(dr)
+}
+
+/// Warnings from a dry-run that a refinement turn could actually fix.
+/// Informational ([info]), unfixable (data-source-inherent), and broad-scope
+/// clutter warnings never trigger refinement; everything else does.
+/// Shared by the native LlmPort loop and the SDK self-check loop so both
+/// paths classify identically.
+fn actionable_dry_run_warnings<'a>(
+    dr: &'a gyre_domain::view_query_resolver::DryRunResult,
+    query_json: &serde_json::Value,
+) -> Vec<&'a String> {
+    dr.warnings
+        .iter()
+        .filter(|w| is_actionable_warning(w, query_json))
+        .collect()
+}
+
+fn is_actionable_warning(w: &str, query_json: &serde_json::Value) -> bool {
+    // [info] prefixed warnings are informational — never trigger
+    // refinement. These are inherent to the data model and cannot
+    // be fixed by query changes (e.g., "SHA-based diff is approximate").
+    if w.starts_with("[info]") {
+        return false;
+    }
+    // Unfixable warnings: inherent to the data source, not
+    // resolvable by query refinement. Skip to avoid wasting
+    // a self-check turn.
+    const UNFIXABLE_PREFIXES: &[&str] = &[
+        "SHA-based diff shows an approximate",
+        "Graph data truncated",
+    ];
+    if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
+        return false;
+    }
+    // Validation errors are always actionable
+    if w.starts_with("Validation:") || w.starts_with("Computed expression error:") {
+        return true;
+    }
+    // "0 nodes" is actionable unless it is an interactive query
+    if w.contains("matched 0 nodes") {
+        return true;
+    }
+    // Clutter warnings are informational for All/TestGaps scopes
+    if w.contains("may be cluttered") {
+        let is_broad_scope = matches!(
+            serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()),
+            Ok(q) if matches!(
+                q.scope,
+                gyre_common::view_query::Scope::All | gyre_common::view_query::Scope::TestGaps
+            )
+        );
+        // Still report to LLM, but only trigger refinement for narrow scopes
+        return !is_broad_scope;
+    }
+    true
+}
+
+/// Feedback message injected back into the conversation when the self-check
+/// dry-run fails, telling the agent what went wrong so it can refine.
+/// Shared by the native LlmPort loop (as a synthetic tool result) and the SDK
+/// self-check loop (as the refinement-round question).
+fn self_check_feedback(dr: &gyre_domain::view_query_resolver::DryRunResult) -> String {
+    format!(
+        "Dry-run FAILED. Please refine the <view_query>.\n\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}",
+        dr.matched_nodes,
+        dr.warnings,
+        &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
+    )
 }
 
 /// Returns the system default views seeded on first ListViews access.
@@ -3715,6 +4169,26 @@ This shows all callers of TaskPort."#;
         assert!(prompt.contains("ALWAYS dry-run"), "missing ALWAYS dry-run");
     }
 
+    /// task-076 (lsp-call-graph.md §8): the explorer system prompt must
+    /// reference call graph availability so the agent knows when
+    /// blast-radius / coupling / dead-code questions are answerable.
+    #[test]
+    fn test_system_prompt_references_call_graph_availability() {
+        let prompt = build_system_prompt();
+        assert!(
+            prompt.contains("call_graph_complete"),
+            "prompt must point at graph_summary's call_graph.call_graph_complete field"
+        );
+        assert!(
+            prompt.contains("blast radius"),
+            "prompt must explain blast-radius use of the call graph"
+        );
+        assert!(
+            prompt.contains("Call graph incomplete"),
+            "prompt must document the dry-run incompleteness warning"
+        );
+    }
+
     #[test]
     fn test_max_agent_turns() {
         assert_eq!(
@@ -3728,6 +4202,54 @@ This shows all callers of TaskPort."#;
     }
 
     #[test]
+    fn test_status_values_match_spec_protocol() {
+        // Spec §6: status is exactly "thinking" | "refining" | "ready".
+        // The frontend (ExplorerChat.svelte) maps only these three strings —
+        // any other value is silently dropped and the indicator goes stale.
+        assert_eq!(STATUS_THINKING, "thinking");
+        assert_eq!(STATUS_REFINING, "refining");
+        assert_eq!(STATUS_READY, "ready");
+    }
+
+    #[test]
+    fn test_status_message_serializes_spec_values() {
+        // The Status wire message must carry exactly the spec value — verify
+        // end-to-end through the serializer, not just the constants.
+        for status in [STATUS_THINKING, STATUS_REFINING, STATUS_READY] {
+            let msg = ExplorerServerMessage::Status {
+                status: status.to_string(),
+                agent_path: None,
+                graph_data_age_secs: None,
+            };
+            let json = serialize_msg(&msg).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["type"], "status");
+            assert_eq!(parsed["status"], status);
+        }
+    }
+
+    #[test]
+    fn test_normalize_status_maps_known_values() {
+        // Bundled SDK script values pass through unchanged.
+        assert_eq!(normalize_status("thinking"), STATUS_THINKING);
+        assert_eq!(normalize_status("refining"), STATUS_REFINING);
+        assert_eq!(normalize_status("ready"), STATUS_READY);
+    }
+
+    #[test]
+    fn test_normalize_status_maps_off_contract_values() {
+        // Historical free-form literals and alternate-SDK values must never
+        // leak off-contract onto the wire — they map to a valid spec status.
+        assert_eq!(normalize_status("Analyzing..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Thinking..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Synthesizing answer..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Refining query..."), STATUS_REFINING);
+        assert_eq!(normalize_status("  READY "), STATUS_READY);
+        assert_eq!(normalize_status(""), STATUS_THINKING);
+        assert_eq!(normalize_status("something else"), STATUS_THINKING);
+    }
+
+    #[test]
     fn test_client_message_deserialization() {
         // Verify the server correctly deserializes the expected message format.
         let msg_json =
@@ -3737,6 +4259,68 @@ This shows all callers of TaskPort."#;
             ExplorerClientMessage::Message { text, canvas_state } => {
                 assert_eq!(text, "What is TaskPort?");
                 assert!((canvas_state.zoom_level - 1.5).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_canvas_state_section_10_full_deserialization() {
+        // The exact interaction-context shape from view-query-grammar.md §10:
+        // every field the frontend must send with each user message.
+        let msg_json = r#"{"type":"message","text":"what about this one?","canvas_state":{
+            "selected_node": {"id": "uuid-1", "name": "TaskPort", "node_type": "interface"},
+            "zoom_level": 2.3,
+            "visible_tree_groups": ["gyre-server", "gyre-domain"],
+            "active_filter": "calls",
+            "active_lens": "structural",
+            "active_query": {"type": "blast_radius", "node": "TaskPort"},
+            "recent_interactions": [
+                {"action": "click", "node": "TaskPort::find_by_id"},
+                {"action": "zoom_in", "to_level": 2.3},
+                {"action": "query", "preset": "blast_radius"}
+            ]
+        }}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::Message { canvas_state, .. } => {
+                let sel = canvas_state
+                    .selected_node
+                    .expect("selected_node must deserialize");
+                assert_eq!(sel.id, "uuid-1");
+                assert_eq!(sel.name, "TaskPort");
+                assert_eq!(sel.node_type, "interface");
+                assert!((canvas_state.zoom_level - 2.3).abs() < f64::EPSILON);
+                assert_eq!(
+                    canvas_state.visible_tree_groups,
+                    vec!["gyre-server", "gyre-domain"]
+                );
+                assert_eq!(canvas_state.active_filter.as_deref(), Some("calls"));
+                assert_eq!(canvas_state.active_lens.as_deref(), Some("structural"));
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["type"],
+                    "blast_radius"
+                );
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["node"],
+                    "TaskPort"
+                );
+                assert_eq!(canvas_state.recent_interactions.len(), 3);
+
+                let click = &canvas_state.recent_interactions[0];
+                assert_eq!(click.action, "click");
+                assert_eq!(click.node.as_deref(), Some("TaskPort::find_by_id"));
+                assert!(click.to_level.is_none() && click.preset.is_none());
+
+                let zoom = &canvas_state.recent_interactions[1];
+                assert_eq!(zoom.action, "zoom_in");
+                assert!((zoom.to_level.unwrap() - 2.3).abs() < f64::EPSILON);
+                assert!(zoom.node.is_none());
+
+                let query = &canvas_state.recent_interactions[2];
+                assert_eq!(query.action, "query");
+                assert_eq!(query.preset.as_deref(), Some("blast_radius"));
+                assert!(query.node.is_none());
             }
             _ => panic!("Expected Message variant"),
         }
@@ -3809,6 +4393,75 @@ This shows all callers of TaskPort."#;
             prompt.contains("EVERY claim must be traceable"),
             "System prompt should require grounded claims"
         );
+    }
+
+    #[test]
+    fn test_canvas_context_json_surfaces_section_10_fields() {
+        // The LLM boundary: every §10 field the spec says the LLM receives
+        // must survive into the <canvas_state> block. Regression guard for
+        // the silent drops of zoom_level and active_filter (deserialized
+        // correctly but never surfaced to the LLM).
+        let msg_json = r#"{"type":"message","text":"what about this?","canvas_state":{
+            "selected_node": {"id": "uuid-1", "name": "TaskPort", "node_type": "interface"},
+            "zoom_level": 2.3,
+            "visible_tree_groups": ["gyre-server", "gyre-domain"],
+            "active_filter": "calls",
+            "active_lens": "structural",
+            "active_query": {"type": "blast_radius", "node": "TaskPort"},
+            "recent_interactions": [
+                {"action": "click", "node": "TaskPort::find_by_id"},
+                {"action": "zoom_in", "to_level": 2.3},
+                {"action": "query", "preset": "blast_radius"}
+            ]
+        }}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        let canvas_state = match msg {
+            ExplorerClientMessage::Message { canvas_state, .. } => canvas_state,
+            _ => panic!("Expected Message variant"),
+        };
+        let ctx = build_canvas_context_json(&canvas_state, None);
+        let v = serde_json::Value::Object(ctx);
+
+        assert_eq!(v["zoom_level"], json!(2.3), "zoom_level must reach the LLM");
+        assert_eq!(
+            v["active_filter"],
+            json!("calls"),
+            "active_filter must reach the LLM"
+        );
+        assert_eq!(v["selected_node"]["name"], json!("TaskPort"));
+        assert_eq!(v["visible_groups"], json!(["gyre-server", "gyre-domain"]));
+        assert_eq!(v["active_lens"], json!("structural"));
+        assert_eq!(v["active_query"]["type"], json!("blast_radius"));
+        assert_eq!(v["recent_interactions"].as_array().unwrap().len(), 3);
+
+        // Empty/absent optionals are omitted, not emitted as nulls/zeros.
+        let bare: ExplorerClientMessage =
+            serde_json::from_str(r#"{"type":"message","text":"hi","canvas_state":{}}"#).unwrap();
+        let bare_state = match bare {
+            ExplorerClientMessage::Message { canvas_state, .. } => canvas_state,
+            _ => panic!("Expected Message variant"),
+        };
+        let bare_ctx = build_canvas_context_json(&bare_state, None);
+        assert!(bare_ctx.get("zoom_level").is_none());
+        assert!(bare_ctx.get("active_filter").is_none());
+        assert!(bare_ctx.get("active_lens").is_none());
+        assert!(bare_ctx.get("selected_node").is_none());
+    }
+
+    #[test]
+    fn test_system_prompt_documents_section_10_fields() {
+        let prompt = build_system_prompt();
+        for field in [
+            "zoom_level",
+            "active_filter",
+            "active_lens",
+            "selected_node",
+        ] {
+            assert!(
+                prompt.contains(field),
+                "system prompt must document the {field} canvas_state field"
+            );
+        }
     }
 
     // ── parse_view_query_from_text with malformed JSON ──────────────────────
@@ -3945,11 +4598,12 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 6, "Should have 6 system default views");
+        assert_eq!(defaults.len(), 7, "Should have 7 system default views");
 
         let expected_names = [
             "Architecture Overview",
             "Test Coverage Gaps",
+            "High-Risk Untested Code",
             "Hot Paths",
             "Blast Radius (click)",
             "Spec Coverage",
@@ -4267,5 +4921,106 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
+    }
+
+    // ── ExplorerSessionRegistry ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_registry_evicts_oldest_beyond_cap() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Fill up to the cap: sessions 0, 1, 2.
+        let (id0, _s0) = registry.register(user, 3);
+        let (id1, _s1) = registry.register(user, 3);
+        let (id2, _s2) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+
+        // 4th registration evicts the oldest (id0) and signals its shutdown.
+        let (_id3, _s3) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+        // The evicted session's Notify fires once; a permit is stored, so a
+        // later await on the evicted session's notify resolves immediately.
+        tokio::time::timeout(std::time::Duration::from_secs(1), _s0.notified())
+            .await
+            .expect("evicted session must be signalled");
+        // Live sessions are NOT signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "session 1 must not be signalled"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s2.notified())
+                .await
+                .is_err(),
+            "session 2 must not be signalled"
+        );
+        let _ = (id0, id1, id2);
+    }
+
+    #[tokio::test]
+    async fn session_registry_unregister_frees_slot_and_is_idempotent() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        let (id0, _s0) = registry.register(user, 2);
+        let (_id1, _s1) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Unregistering an unknown ID is a no-op.
+        registry.unregister(user, 999);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Release one slot; a new session now fits without eviction.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 1);
+        let (_id2, s2) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+        // The previously-live session (id1) must not have been signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "live session must not be signalled after an unregister+register"
+        );
+
+        // Double unregister is idempotent.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 2);
+        let _ = s2;
+    }
+
+    #[test]
+    fn session_registry_is_per_instance_not_process_global() {
+        // Two independent registries (one per AppState / test server) must not
+        // evict each other's sessions: this is the regression the integration
+        // binary caught (all 7 tests share the `default:system` user; a
+        // process-global map evicted live sessions across servers).
+        let reg_a = ExplorerSessionRegistry::new();
+        let reg_b = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Both registries fill to the cap concurrently.
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+
+        assert_eq!(reg_a.live_count(user), 3, "registry A keeps its sessions");
+        assert_eq!(reg_b.live_count(user), 3, "registry B keeps its sessions");
+    }
+
+    #[tokio::test]
+    async fn session_registry_zero_cap_admits_registering_session() {
+        // A 0 cap (misconfiguration) must not panic or spin: the registering
+        // session itself is admitted.
+        let registry = ExplorerSessionRegistry::new();
+        let (id, _s) = registry.register("t:a", 0);
+        assert_eq!(registry.live_count("t:a"), 1);
+        assert_eq!(id, 0);
     }
 }

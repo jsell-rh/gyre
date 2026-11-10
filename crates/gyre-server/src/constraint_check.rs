@@ -899,7 +899,7 @@ pub async fn evaluate_merge_constraints(
 ///   - 1: Workload attestation exists but no stack fingerprint (raw push)
 ///   - 2: Stack fingerprint present — self-reported via CLI
 ///   - 3: Stack fingerprint + container_id + image_hash — Gyre-managed runtime
-fn derive_attestation_level(
+pub(crate) fn derive_attestation_level(
     workload: Option<&crate::workload_attestation::WorkloadAttestation>,
 ) -> i64 {
     let Some(att) = workload else {
@@ -1353,15 +1353,25 @@ async fn create_violation_notifications(
         .await
         .unwrap_or_default();
 
-    // Resolve tenant_id from workspace.
-    let tenant_id = state
-        .workspaces
-        .find_by_id(workspace_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
+    // Resolve tenant_id from the workspace record; never fabricate a
+    // "default" tenant. On an unresolvable workspace, skip creating the
+    // notifications entirely (a fabricated tenant would silently re-target
+    // them) and warn — mirrors emit_reconciliation_completed.
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            warn!(
+                "create_violation_notifications: workspace {workspace_id} not found; skipping constraint violation notifications"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                "create_violation_notifications: failed to resolve workspace tenant for {workspace_id}: {e}"
+            );
+            return;
+        }
+    };
 
     let now = crate::api::now_secs() as i64;
 
@@ -1400,8 +1410,9 @@ async fn create_violation_notifications(
                 })
                 .to_string(),
             );
-            notif.repo_id = Some(repo_id.to_string());
-            notif.entity_ref = Some(format!("task:{task_id}"));
+            notif.source.entity_type = "task".to_string();
+            notif.source.repo_id = Some(Id::new(repo_id.to_string()));
+            notif.source.entity_id = format!("task:{task_id}");
 
             if let Err(e) = state.notifications.create(&notif).await {
                 warn!(
@@ -1587,6 +1598,20 @@ mod tests {
         );
     }
 
+    /// Seed a workspace so event/telemetry emissions can resolve the tenant
+    /// scope from the workspace record (task-099 F1: emissions skip when the
+    /// workspace does not exist instead of fabricating a tenant).
+    async fn seed_ws(state: &crate::AppState, workspace_id: &str) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(workspace_id),
+            Id::new("t1"),
+            workspace_id,
+            workspace_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
     /// Create a temporary git repository with two commits.
     ///
     /// Returns (tempdir, initial_commit_sha, second_commit_sha). The second
@@ -1703,11 +1728,13 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
 
         // Seed workspace meta-spec set and agent persona so build_agent_context
         // produces valid values matching the InputContent.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-1").await;
-
         // Store a SignedInput attestation with a constraint that FAILS when
         // the commit changes any file (the test commit adds a file, so
         // output.changed_files.size() > 0 → the constraint output.changed_files.size() == 0 fails).
@@ -1783,6 +1810,9 @@ mod tests {
     #[tokio::test]
     async fn emit_constraint_violations_creates_events() {
         let state = crate::mem::test_state();
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
         let ws_id = Id::new("ws-1");
 
         // Subscribe to broadcast before emitting.
@@ -1889,10 +1919,13 @@ mod tests {
             notifications[0].notification_type,
             NotificationType::ConstraintViolation
         );
-        assert_eq!(notifications[0].priority, 2);
+        assert_eq!(notifications[0].priority_rank, 2);
         assert!(notifications[0].title.contains("Constraint violation"));
         assert!(notifications[0].title.contains("path scope"));
-        assert_eq!(notifications[0].repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(
+            notifications[0].source.repo_id.as_ref().map(|r| r.as_str()),
+            Some("repo-1")
+        );
     }
 
     // ── Integration: merge-time constraint evaluation ─────────────────
@@ -1923,6 +1956,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -1961,7 +1995,9 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
         // Seed workspace meta-spec set and agent persona.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-merge-2").await;
 
@@ -1985,6 +2021,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2600,6 +2637,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2657,6 +2695,7 @@ mod tests {
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 

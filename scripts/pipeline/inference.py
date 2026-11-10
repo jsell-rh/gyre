@@ -33,10 +33,6 @@ def probe(secret):
         raise ValueError('inference response had no choices')
 
 
-def configure(secret):
-    helper('dev-inference').configure({**os.environ, 'ENMAAS_API_KEY': secret}, secret)
-
-
 def check(store):
     from .execution import Retry
     with (store.directory / 'inference.lock').open('a') as lock:
@@ -57,10 +53,7 @@ def check(store):
         if secret is not None:
             try:
                 probe(secret)
-                # A rotated local key must also replace the gateway's stored
-                # provider credential before any fresh worker is admitted.
-                if cached.get('configured_fingerprint') != fingerprint:
-                    configure(secret)
+                # Fullsend creates a fresh run-scoped provider with this key.
                 state = {'fingerprint': fingerprint, 'configured_fingerprint': fingerprint,
                          'condition': 'Ready', 'expires': now + 60, 'failures': 0}
                 store.set_setting('inference_health', state)

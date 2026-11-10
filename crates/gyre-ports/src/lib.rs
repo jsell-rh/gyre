@@ -3,7 +3,6 @@
 //! Ports are pure interfaces. Implementations live in `gyre-adapters`.
 //! Domain logic depends only on these traits, never on concrete adapters.
 
-pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
 pub mod analytics;
@@ -11,6 +10,7 @@ pub mod attestation_repo;
 pub mod audit;
 pub mod breaking_change;
 pub mod budget;
+pub mod budget_call;
 pub mod budget_usage;
 pub mod call_graph;
 pub mod chain_attestation;
@@ -41,13 +41,16 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
 pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event_repo;
+pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
+pub mod spec_lifecycle_repo;
 pub mod spec_policy_repo;
 pub mod storage;
 pub mod task;
@@ -61,14 +64,14 @@ pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
 
-pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
-pub use audit::{AuditQueryFilter, AuditRepository};
+pub use audit::{AuditQueryFilter, AuditRepository, CompressionStats};
 pub use breaking_change::BreakingChangeRepository;
 pub use budget::BudgetRepository;
+pub use budget_call::BudgetCallRepository;
 pub use budget_usage::BudgetUsageRepository;
 pub use call_graph::CallGraphExtractor;
 pub use chain_attestation::ChainAttestationRepository;
@@ -80,7 +83,7 @@ pub use dependency::DependencyRepository;
 pub use dependency_policy::DependencyPolicyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
-pub use jj_ops::{JjChange, JjOpsPort};
+pub use jj_ops::{JjChange, JjOpsPort, JjRebaseOutcome};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{
@@ -102,13 +105,18 @@ pub use push_gate::PushGateRepository;
 pub use quality_gate::{GateResultRepository, QualityGateRepository};
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
+pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
-pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
+pub use search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
 pub use spec_approval_event_repo::SpecApprovalEventRepository;
+pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
+pub use spec_lifecycle_repo::SpecLifecycleRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;

@@ -7,6 +7,12 @@ Run meaningful focused checks. A test that still passes with the relevant
 production behavior disabled is not proof. Save actual probe command, source,
 exit code, and output under /tmp/stage/review-evidence.
 
+If `/tmp/stage/review-resume.json` exists, read it first. It identifies saved
+notes and probe evidence from an interrupted review of this exact candidate.
+Continue from those artifacts after checking their relevance; no previous
+approval is carried forward. Save the review record incrementally, including
+unfinished probes, so interruption does not erase useful work.
+
 Use the smallest meaningful probe. Full workspace suites and all-target Clippy
 belong to verification. If a focused probe needs a listener, check whether the
 current sandbox permits it. Record concrete checks the verifier must run if an
@@ -17,6 +23,9 @@ For CI repair, inspect the retained original failure logs and artifacts under
 release build merely to inspect screenshots. If a server probe is needed after
 focused Rust tests, use the available debug build dependencies and rebuild the
 current web source; the older committed web bundle cannot prove current UI code.
+Use `/tmp/stage/bin/cargo` for Rust probes; workspace-wide invocations are
+rejected by the executor's wrapper. Do not bypass it through an absolute Cargo
+path. A cold focused compilation may take time; keep evidence of what ran.
 
 Do not modify production code, scripts, verifiers, unrelated tasks, or specs.
 Temporary experiments must be restored. Source edits invalidate review.

@@ -27,7 +27,7 @@
 # scripts/lossy-secret-conversion-exemptions.txt (path:line form,
 # frozen count). Fix by skipping the secret and logging a warning
 # naming the secret (not the value); never add entries.
-FROZEN_EXEMPTION_COUNT=1
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 

@@ -3,12 +3,12 @@ title: "Graph Summary & Dry-Run MCP Tools"
 spec_ref: "explorer-implementation.md §9, §22–23"
 depends_on:
   - task-062
-progress: not-started
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §9 MCP Tools Available to the Agent"
   - "explorer-implementation.md §22 Graph Summary MCP Tool"
   - "explorer-implementation.md §23 Dry-Run MCP Tool"
-commits: []
+commits: ["a11ba8d32859a9018ca74f9745d6b00d4ebe1aa0", "8cdde883b3bee190feee0d7effaa1483bf769272", "fb9893c2ba72120b64bd2d6a58d734f43a38a71b", "a212bc9a74de37e5385ad44f1fc3f571166d7b90", "2b2d923cbe53c6238c5f1b795f3d19193352b341", "9255a5762e01a4d858352f4db0ceafd9e15feffc", "1607616acc94607f01d1a6a21892759b99c553f6", "e194f1c8271c11372a6b3c5651c80f9afe9fa4ce", "7e3a2b05145b6294f130d65819449af6a4bc4b28", "d55bb16ff9e1d9becb80fd1b1856d5c294713076"]
 ---
 
 ## Spec Excerpt
@@ -94,6 +94,74 @@ Response shape:
 - [ ] `graph_query_dryrun` reports unresolved callouts
 - [ ] All 5 MCP tools (`graph_summary`, `graph_query_dryrun`, `graph_nodes`, `graph_edges`, `search`) are callable via MCP protocol
 - [ ] `cargo test --all` passes
+
+## Shipped
+
+All five §9 explorer agent tools (`graph_summary`, `graph_query_dryrun`,
+`graph_nodes`, `graph_edges`, `search`) are callable over the real MCP
+protocol path (JSON-RPC `tools/call` → `build_router` →
+`AuthenticatedAgent` extractor → dispatch in `crates/gyre-server/src/mcp.rs`),
+with the explorer SDK script allowlisting the matching `mcp__gyre__*` names
+and Bearer-token `mcpServers.gyre` config.
+
+- `graph_summary` (`mcp.rs` `handle_graph_summary` →
+  `gyre_domain::view_query_resolver::compute_graph_summary`) returns all six
+  §22 spec fields: `node_counts`, `edge_counts`, `top_types_by_fields`,
+  `top_functions_by_calls`, `modules`, `test_coverage`. `test_coverage` is a
+  real multi-source BFS from `test_node == true` nodes over outgoing `Calls`
+  edges (soft-deleted edges excluded via `build_adjacency`), proven against a
+  real graph store (`mcp_graph_summary_tool_call` asserts
+  test_functions=1, reachable=2, unreachable=1).
+- `graph_query_dryrun` (`handle_graph_query_dryrun` →
+  `view_query_resolver::dry_run_with_call_graph`) deserializes a real
+  `ViewQuery`, resolves
+  scope, groups, callouts, and narrative, returns the spec's
+  `{"query": …, "result": {DryRunResult}}` envelope, and generates all three
+  warning classes with tested boundary semantics: empty scope ("Scope matched
+  0 nodes"), >200-node cluttered scope (200 no-warn / 201 warns), >20-node
+  too-broad groups, and unresolved callouts (exact→prefix→substring callout
+  resolution with a precision warning on substring).
+- `search` is a domain-level ranked full-text search (`search_graph_nodes`:
+  name/qualified_name/file_path/spec_path/doc_comment, soft-deleted excluded,
+  char-boundary-safe truncation) shared by both the MCP handler and the
+  inline explorer fallback.
+- Read-only tools are outside the `needs_write` RBAC gate (Agent role not
+  required), matching their handler effects.
+
+Test evidence (2026-10-12 repair round, merge HEAD `a376cbbb` merging main
+`a884329d` (task-076) into the retained round-2 checkpoint `bf4b2e1a`;
+round-2 verdict in specs/reviews/task-068.md):
+
+- Requirements changed on main: `compute_graph_summary` gained the
+  `call_graph_complete` parameter and `dry_run` gained the
+  `dry_run_with_call_graph` variant backed by the durable Pass 2 KV marker
+  (lsp-call-graph.md §7–8). The merge resolution adopts that contract
+  everywhere task-068 owns: `handle_graph_summary` and
+  `handle_graph_query_dryrun` in `mcp.rs` and the inline explorer handlers
+  all source completeness via `graph_extraction::call_graph_complete_for_repo`
+  and pass it into the resolver, so the §22 summary now also reports the
+  `call_graph` metrics and the §23 dry-run warns "Call graph incomplete" on
+  calls-traversing queries before Pass 2 completes.
+- `cargo test -p gyre-domain view_query_resolver` → 127 passed, 0 failed
+  (task-068 tests updated to the 4-arg signature; task-076 call-graph
+  metrics/completeness tests kept green alongside).
+- `cargo test -p gyre-server --lib mcp` → 81 passed, 0 failed;
+  `mcp_graph` subset → 12 passed, 0 failed (in-process JSON-RPC through the
+  router, including tools/list registration assertions for all five tools
+  via `mcp_tools_list` and the two new task-076 metric/warning tool calls).
+- `python3 scripts/check-rustfmt-diff.py c9b0a6f9` → exit 0.
+- Static gates at the merge commit: arch, mcp-write-tools,
+  migration-versions, task-commit-attribution,
+  byte-slice-truncation (the stale explorer_ws.rs:2882 exemption entry was
+  dropped — main fixed the underlying slice via `truncate_bytes`) — all
+  pass; no new exemption entries.
+- TCP twins (`tests/graph_integration.rs`: `test_mcp_graph_summary`,
+  `test_mcp_graph_query_dryrun`, `test_mcp_graph_nodes`,
+  `test_mcp_graph_edges`, `test_mcp_graph_search`) cannot run in this
+  sandbox: loopback `accept()` is seccomp-blocked (errno 95, recorded in
+  `/tmp/stage/review-evidence/task-068-attempt523ba30e-sandbox.txt`; the twin
+  panics with `hyper IncompleteMessage` because `axum::serve` never accepts).
+  Host verification / exact-head GitHub CI must run these five twins.
 
 ## Agent Instructions
 

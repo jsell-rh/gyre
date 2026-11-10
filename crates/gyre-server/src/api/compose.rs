@@ -54,6 +54,10 @@ pub async fn compose_apply(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ComposeApplyResponse>), ApiError> {
+    // non-atomic-create:ok - per-item task+agent creation with compensating
+    // rollback: if the agent create fails, the already-created task for that
+    // item is deleted (see the rollback below), so a failed item leaves no
+    // partial records; earlier items are independent and intentionally stay.
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -113,7 +117,22 @@ pub async fn compose_apply(
             None
         };
 
-        state.agents.create(&agent).await?;
+        if let Err(agent_err) = state.agents.create(&agent).await {
+            // Compensating rollback: the task for this item was already
+            // created; leaving it behind would orphan a task assigned to an
+            // agent that does not exist. Delete it so a failed item leaves
+            // no partial records (earlier items are independent and stay).
+            if let Some(tid) = task_id.clone() {
+                if let Err(del_err) = state.tasks.delete(&Id::new(tid)).await {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        error = %del_err,
+                        "failed to delete task after agent creation failure in compose apply"
+                    );
+                }
+            }
+            return Err(agent_err.into());
+        }
 
         name_to_agent_id.insert(agent_spec.name.clone(), agent_id.to_string());
         agent_ids.push(agent_id.to_string());
@@ -194,6 +213,11 @@ pub async fn compose_teardown(
                 let _ = agent.transition_status(AgentStatus::Dead);
                 agent.last_heartbeat = Some(now);
                 let _ = state.agents.update(&agent).await;
+
+                // Platform Model §7: compose teardown kills the agent —
+                // revoke its task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
             }
         }
     }

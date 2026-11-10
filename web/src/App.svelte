@@ -2,6 +2,8 @@
   import './lib/design-system.css';
   import { isLoading, t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
+  import { createPresenceHeartbeat } from './lib/presence.js';
+  import { createLivenessTracker } from './lib/liveness.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -28,6 +30,10 @@
   let currentWorkspace = $state(null);
   let currentRepo = $state(null); // { id, name } | null
   let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
+  // Architecture tab sub-tab at repo scope: 'graph' | 'briefing'. Tracked in
+  // App state so the sidebar highlights Briefing while its sub-tab is active
+  // (ui-navigation.md §2; HSI §1.5 Briefing row — narrative for this repo).
+  let repoArchSubTab = $state('graph');
   // Cross-workspace sub-page: null = dashboard, 'settings' = /all/settings tenant admin
   let crossWorkspaceTab = $state(null);
   // Which sidebar section is active while at workspace_home scope. workspace_home
@@ -50,13 +56,43 @@
   // ── WebSocket ────────────────────────────────────────────────────────
   let wsStore = $state(null);
   let wsStatus = $state('disconnected');
+  // Spec entity this tab is actively editing (reported by the DetailPanel
+  // instances) — single source of truth for the heartbeat's editing_entity.
+  let activeEditingEntity = $state(null);
+  // HSI §3 liveness tracker — listens for RunStarted/RunFinished Telemetry
+  // bus messages on the workspace subscription and records the active runs
+  // the Explorer canvas glows. Shares the store's message listener bus.
+  let livenessTracker = null;
+  function setActiveEditingEntity(e) {
+    activeEditingEntity = e;
+  }
+  let presenceHeartbeat = null;
 
   $effect(() => {
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
+    // re-send (5s debounce), and disconnect on beforeunload. Without it the
+    // server idle-evicts this tab after 60s and other users lose the
+    // concurrent-editing warning.
+    presenceHeartbeat = createPresenceHeartbeat(store, {
+      getWorkspaceId: () => currentWorkspace?.id ?? null,
+      getView: () => presenceViewLabel,
+      getEditingEntity: () => activeEditingEntity,
+    });
+    // HSI §3 Layer 1: track RunStarted/RunFinished telemetry so the Explorer
+    // canvas can pulse nodes where agents are working. Task → spec_path
+    // resolution uses the task API (best-effort, non-blocking).
+    livenessTracker = createLivenessTracker(store, {
+      fetchTask: (taskId) => api.task(taskId),
+    });
     return () => {
       unsub();
+      presenceHeartbeat.destroy();
+      presenceHeartbeat = null;
+      livenessTracker.destroy();
+      livenessTracker = null;
       store.destroy();
       wsStore = null;
     };
@@ -69,6 +105,22 @@
     if (wsStore && typeof wsStore.subscribe === 'function' && currentWorkspace?.id) {
       wsStore.subscribe(currentWorkspace.id);
     }
+  });
+
+  // Current view label for presence (HSI §1: view changes trigger a presence
+  // update — sidebar nav click or scope transition).
+  let presenceViewLabel = $derived(
+    mode === 'repo'
+      ? repoTab
+      : mode === 'workspace_home'
+        ? workspaceActiveSection
+        : mode
+  );
+
+  // Leg 3 of the heartbeat contract: re-send presence when the view changes.
+  $effect(() => {
+    presenceViewLabel; // track view changes (nav click / scope transition)
+    presenceHeartbeat?.notifyViewChange();
   });
 
   // ── UI state ─────────────────────────────────────────────────────────
@@ -329,64 +381,121 @@
     if (repo.id) loadRepoDetail(repo.id);
   }
 
-  function goToRepoTab(tab) {
+  function goToRepoTab(tab, params) {
     repoTab = tab;
     entityDetail = null; // Clear entity detail when switching tabs
+    // Architecture sub-tab sync: params.subTab wins when targeting the
+    // architecture tab; leaving the tab resets to the Graph default.
+    if (tab === 'architecture' && params?.subTab) repoArchSubTab = params.subTab;
+    else if (tab !== 'architecture') repoArchSubTab = 'graph';
     fadeContent();
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
+    // Sub-tab deep-link params (e.g. Architecture → Briefing): same URL
+    // search-param convention as the Code tab. Applied after pushState so
+    // the param survives the canonical-URL replace.
+    if (params) {
+      const url = new URL(window.location.href);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      window.history.replaceState(window.history.state, '', url.toString());
+    } else if (tab === 'architecture' && repoArchSubTab === 'briefing') {
+      // Returning to the Architecture tab while the Briefing sub-tab is
+      // active: keep the ?subTab param so the URL matches the content.
+      const url = new URL(window.location.href);
+      url.searchParams.set('subTab', 'briefing');
+      window.history.replaceState(window.history.state, '', url.toString());
+    }
+  }
+
+  /** Update the Architecture tab's Graph|Briefing sub-tab (repo scope).
+   *  Single source of truth is App's `repoArchSubTab`, mirrored into the
+   *  ?subTab= URL param so deep links always match the rendered content. */
+  function setRepoArchSubTab(sub) {
+    repoArchSubTab = sub;
+    if (mode === 'repo' && repoTab === 'architecture') {
+      const url = new URL(window.location.href);
+      if (sub === 'briefing') url.searchParams.set('subTab', 'briefing');
+      else url.searchParams.delete('subTab');
+      window.history.replaceState(window.history.state, '', url.toString());
+    }
   }
 
   /** Navigate to a full-page entity detail view within repo mode.
-   *  Works from any mode — if currentRepo is not set, resolves it from data.repo_id / data.repository_id. */
+   *  Works from any mode — if currentRepo is not set, resolves it from data.repo_id / data.repository_id.
+   *  Cross-workspace entry (§10): when the entity's repo belongs to a different
+   *  workspace than the current one (e.g. an item clicked in the /all view),
+   *  switch currentWorkspace to the owning workspace first — the URL and every
+   *  subsequent query must reflect the actual owning scope, not the scope the
+   *  user happened to be browsing. currentWorkspace may be null (a full page
+   *  load at /all selects no workspace); the owning workspace is then resolved
+   *  from the caller's membership list, and an undeterminable owner surfaces
+   *  as an error rather than a silent no-op. */
   async function goToEntityDetail(entityType, entityId, data) {
-    if (!currentWorkspace) return;
     const d = data ?? {};
-    const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
-    // Capture previous mode before we change it (used in history state for back nav)
+    // Capture the mode before the switch below (used in history state for
+    // back-nav semantics: entity opened from workspace home returns there).
     const prevMode = mode;
+    const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
 
-    // If we're not in repo mode or the entity belongs to a different repo, resolve context
-    const entityRepoId = d.repo_id ?? d.repository_id;
-    if (!currentRepo && entityRepoId) {
-      // Resolve repo name from the ID so we can build the URL
+    // Resolve the entity's repo so its owning workspace can be determined.
+    // data.workspace_id wins when present; otherwise look the repo up.
+    let entityRepoId = d.repo_id ?? d.repository_id ?? null;
+    let entityRepo = null;
+
+    if (entityRepoId) {
+      entityRepo = await api.repo(entityRepoId).catch(() => null);
+    } else {
+      // No repo id supplied — resolve from the entity itself (task/agent/MR
+      // payloads carry repo_id / repository_id).
+      try {
+        if (entityType === 'task') {
+          entityRepoId = (await api.task(entityId).catch(() => null))?.repo_id ?? null;
+        } else if (entityType === 'agent') {
+          entityRepoId = (await api.agent(entityId).catch(() => null))?.repo_id ?? null;
+        } else if (entityType === 'mr') {
+          const mrData = await api.mergeRequest(entityId).catch(() => null);
+          entityRepoId = mrData?.repository_id ?? mrData?.repo_id ?? null;
+        }
+        if (entityRepoId) entityRepo = await api.repo(entityRepoId).catch(() => null);
+      } catch { /* best effort */ }
+    }
+
+    // Enter the owning workspace (§10 "opening an item must enter its actual
+    // owning scope"). The membership list is the source of truth — no
+    // fabricated scope identity. When currentWorkspace is null (page load
+    // directly at /all) or the item lives in another workspace, resolve the
+    // owner from membership; if no owning workspace can be determined,
+    // surface an error instead of silently doing nothing.
+    const ownerWsId = d.workspace_id ?? entityRepo?.workspace_id ?? null;
+    const targetWs = ownerWsId
+      ? (workspaces.find(w => w.id === ownerWsId) ?? null)
+      : currentWorkspace;
+    if (!targetWs) {
+      showToast('Workspace not found for this item', { type: 'error' });
+      return;
+    }
+    if (targetWs.id !== currentWorkspace?.id) {
+      currentWorkspace = targetWs;
+      try { localStorage.setItem('gyre_workspace_id', targetWs.id); } catch { /* private browsing */ }
+      loadWorkspaceData(targetWs.id);
+      currentRepo = null; // re-resolved below under the owning workspace
+    }
+
+    // Resolve the repo within the (possibly switched) owning workspace.
+    if (!currentRepo && entityRepo) {
+      currentRepo = { id: entityRepo.id, name: entityRepo.name };
+      if (currentWorkspace?.id) {
+        repoIdCache.set(`${currentWorkspace.id}:${entityRepo.name}`, entityRepo.id);
+      }
+    }
+    // Fallback: the repo may live in the current workspace but only its id
+    // was supplied — look it up there.
+    if (!currentRepo && entityRepoId && currentWorkspace?.id) {
       try {
         const repos = await api.workspaceRepos(currentWorkspace.id);
-        const repo = (repos ?? []).find(r => r.id === entityRepoId);
+        const repo = (Array.isArray(repos) ? repos : []).find(r => r.id === entityRepoId);
         if (repo) {
           currentRepo = { id: repo.id, name: repo.name };
           repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
-        } else {
-          // Fallback: try to get repo directly
-          const repoDetail = await api.repo(entityRepoId).catch(() => null);
-          if (repoDetail?.name) {
-            currentRepo = { id: entityRepoId, name: repoDetail.name };
-            repoIdCache.set(`${currentWorkspace.id}:${repoDetail.name}`, entityRepoId);
-          }
-        }
-      } catch { /* best effort */ }
-    }
-    // If we still don't have repo context, try to resolve from the entity itself
-    if (!currentRepo && !entityRepoId) {
-      try {
-        let resolvedRepoId = null;
-        if (entityType === 'task') {
-          const taskData = await api.task(entityId).catch(() => null);
-          resolvedRepoId = taskData?.repo_id;
-        } else if (entityType === 'agent') {
-          const agentData = await api.agent(entityId).catch(() => null);
-          resolvedRepoId = agentData?.repo_id;
-        } else if (entityType === 'mr') {
-          const mrData = await api.mergeRequest(entityId).catch(() => null);
-          resolvedRepoId = mrData?.repository_id ?? mrData?.repo_id;
-        }
-        if (resolvedRepoId) {
-          const repos = await api.workspaceRepos(currentWorkspace.id);
-          const repo = (Array.isArray(repos) ? repos : []).find(r => r.id === resolvedRepoId);
-          if (repo) {
-            currentRepo = { id: repo.id, name: repo.name };
-            repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
-            d.repo_id = repo.id;
-          }
         }
       } catch { /* best effort */ }
     }
@@ -502,6 +611,9 @@
   setContext('navigate', (view) => {
     // Legacy compat shim: map old nav items to new navigation
     if (view === 'profile') { goToProfile(); return; }
+    // Meta-specs at repo scope redirects to the workspace-scoped editor
+    // (HSI §1.5 Meta-specs row — meta-specs are workspace-scoped).
+    if (view === 'meta-specs') { goToAgentRules(); return; }
     // In repo mode, tab names switch the active tab instead of navigating away
     if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
@@ -520,12 +632,7 @@
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
-    if (params) {
-      const url = new URL(window.location.href);
-      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-      window.history.replaceState(window.history.state, '', url.toString());
-    }
-    goToRepoTab(tab);
+    goToRepoTab(tab, params);
   });
 
   // ── Detail panel (with navigation history stack) ──────────────────────
@@ -790,10 +897,13 @@
       // Repo mode: tabs are in-page; the drawer highlights the repo tab's
       // home section so the user sees where the tab lives on workspace home.
       if (repoTab === 'specs' || repoTab === 'tasks') return 'specs';
+      // Briefing sub-tab of the Architecture tab (ui-navigation.md §3 "Sub-tabs
+      // in the control bar: Graph | Briefing") maps to the Briefing section.
+      if (repoTab === 'architecture' && repoArchSubTab === 'briefing') return 'briefing';
       if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'repos';
       if (repoTab === 'decisions') return 'decisions';
       if (repoTab === 'settings') return 'settings';
-      return 'repos';
+      return 'repos'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
     }
     return 'decisions';
   });
@@ -814,10 +924,11 @@
         case 'specs':     goToRepoTab('specs'); return;
         case 'repos':     goToRepoTab('architecture'); return;
         case 'briefing':
-          // No repo-scoped briefing tab — go to workspace home Briefing section.
-          goToWorkspaceHome(currentWorkspace);
-          workspaceActiveSection = 'briefing';
-          scrollWorkspaceSection('briefing');
+          // Repo-scope Briefing: the Architecture tab's Briefing sub-tab
+          // (ui-navigation.md §2 supersedes HSI §1.5 here — "a sub-tab in
+          // the Architecture tab at repo scope"). Stays at repo scope;
+          // no escape to workspace home.
+          goToRepoTab('architecture', { subTab: 'briefing' });
           return;
         case 'agent-rules': goToAgentRules(); return;
         case 'settings':   goToRepoTab('settings'); return;
@@ -1625,13 +1736,16 @@
               {wsStore}
               workspaceId={currentWorkspace?.id ?? null}
               {selfUserId}
+              oneditingentity={setActiveEditingEntity}
             />
           {:else}
             <RepoMode
               workspace={currentWorkspace}
               repo={currentRepo}
               activeTab={repoTab}
+              archSubTab={repoArchSubTab}
               onTabChange={(tab) => goToRepoTab(tab)}
+              onArchSubTabChange={setRepoArchSubTab}
               workspaceBudget={workspaceBudget}
             />
           {/if}
@@ -1661,6 +1775,7 @@
       {wsStore}
       workspaceId={currentWorkspace?.id ?? null}
       {selfUserId}
+      oneditingentity={setActiveEditingEntity}
     />
     </div>
 

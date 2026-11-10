@@ -26,3 +26,43 @@ Findings:
 - [-] [process-revision-complete] **F3 (minor): `kind` and `status` serialize lowercase, diverging from the spec's JSON example.** Spec response example (HSI:499, 505): `"kind": "Server"`, `"status": "Ok"`. Implementation emits `"server"`/`"ok"` — `SpanKind::as_str`/`SpanStatus::as_str` return lowercase (`gyre-common/src/trace.rs:29,65`, serde `rename_all = "snake_case"`), used directly in the response (`api/traces.rs:87,93`). The wire format is consumer-visible (a UI or CLI matching the spec's example values would miss every span). Either emit the spec's casing in the API response or amend the spec example to lowercase; as it stands the implementation and spec example disagree on a checkable field value.
 
 Verifier note: `docs/api-reference.md:149-150` documents both routes and the ABAC exemption; the payload route's `gate_run_id` query parameter is undocumented there, consistent with F1(a) being an implementation-side invention rather than a documented API change.
+
+## Round 2 — revision verification (base 3214c982 → HEAD 13bc597)
+
+Independently re-checked each Round 1 finding against the current diff. All three repairs are real and enforced; no gate weakening, no deleted tests, no new exemptions (both task-owned exemption entries were **removed**, and `check-abac-exempt-handlers.sh` (89 handlers) and `check-unwritten-store-fields.sh` both pass without them).
+
+### F1 (payload endpoint signature + authorization) — closed
+
+- The invented required `gate_run_id` query parameter is gone (`SpanPayloadQuery` deleted; handler signature is `Path(span_id)` only, `api/traces.rs:152-156`). The handler resolves the containing trace by scanning MRs' traces — sound because storage caps one trace per MR — then calls `get_span_payload(&trace.gate_run_id, &span_id)`. Span_ids are globally unique across traces: the receiver prefixes them with their trace_id at ingestion (`otlp_receiver.rs:187-194`, tested at `:679`). The route now matches the spec's `GET /api/v1/trace-spans/:span_id/payload` exactly.
+- Per-handler authorization is real: span → trace → MR → `workspaces.find_by_id` → `workspace.tenant_id != auth.tenant_id` → 403 (`api/traces.rs:170-189`), the same cross-tenant guard pattern as `users.rs:354-357`. Missing workspace denies (404), not fail-open. In DB mode `state.traces`/`state.merge_requests` are default-tenant `store!` handles (no `with_tenant` exists anywhere in gyre-server), so this handler-level check is the actual enforcement — matching the house pattern for exempt handlers.
+- Hard tests (`api/traces.rs` tests, 6/6 pass): 200 with base64 payload decoding to the raw bytes, 401 unauthenticated, **403 cross-tenant** (fails if the guard is removed), 404 unknown span, 404 no-payload span, and replacement semantics (old span 404s after re-run, new span 200s).
+- `docs/api-reference.md` now documents both routes without the invented parameter, including the compound span_id format.
+
+### F2 (mem payloads never populated) — closed
+
+- `MemTraceRepository::store` now writes payload rows keyed `(gate_run_id, span_id)` with the **raw** (untruncated) summaries, mirroring `sqlite/trace.rs build_payload_blob` (empty-string side → None; span with neither side → no row) (`mem.rs:3564-3605`); drops the replaced trace's payload rows on re-run (PK-replace mirror) and truncates stored column-side summaries to 4KB on a char boundary — the mem adapter previously returned >4KB summaries where SQL adapters truncate. `delete_by_mr` removes payload rows with the trace (ON DELETE CASCADE mirror).
+- Tests (3/3 pass) kill the pre-fix bug: `store_populates_payloads_and_replacement_cascades` panics on pre-fix code (`.expect` on the never-inserted row); `store_truncates_stored_summaries_but_keeps_full_payload` pins 4KB column + 5000-byte payload; `promoted_trace_survives_delete_by_mr` pins the lifecycle contract.
+
+### F3 (kind/status casing) — closed
+
+- `SpanKind::as_str`/`SpanStatus::as_str` now emit PascalCase (`"Server"`, `"Ok"`) matching the spec's JSON example; serde uses variant names with `alias` accepting legacy lowercase; `parse` is case-insensitive so pre-fix lowercase DB rows still load (`gyre-common/src/trace.rs`). `assemble_gate_trace` serves `as_str()` to both REST and MCP — wire format now matches the spec example on both surfaces.
+- Consumer sweep: every span-status comparison in web is now case-insensitive or fed normalized values — DetailPanel:4908, ExplorerCanvas:791/870, FlowCanvas computeParticle:90-94, NodeDetailPanel:28/1539/1791/1802, MoldableView:132 (normalizes to lowercase). The two handoff items are consistent, not bugs: FlowRenderer:72 receives spans **only** from MoldableView (sole caller, `MoldableView.svelte:436-440`) which normalizes status to lowercase first; FlowCanvas:306's `particle.status` is an internally-set literal (`'error'`/`'ok'` at FlowCanvas:106) produced by the case-insensitive `computeParticle`. No `span.kind` string consumers exist in web (remaining `kind` comparisons are metaspec/milestone/message domains); `mcp.rs:4023`'s `"server"` is unrelated message-send rejection text.
+- Tests: 5/5 gyre-common (casing, round-trip, legacy parse, JSON alias); web 68/68 in DetailPanel + FlowRenderer suites, including PascalCase-red, legacy-lowercase-red, and non-error-no-ring cases that fail against the pre-fix lowercase-only comparisons.
+
+### Verification runs
+
+- `cargo test -p gyre-common --lib trace` — 5/5 ok.
+- `cargo test -p gyre-server --lib api::traces` — 6/6 ok.
+- `cargo test -p gyre-server --lib mem::trace_contract_tests` — 3/3 ok.
+- `cargo test -p gyre-server --lib otlp_receiver` — all non-listener tests ok, including the new `resolve_graph_linkage_resolves_http_function_db_spans` (HTTP→Endpoint via `http.route`, function→Function via `code.function`, DB→Module, unresolved→None). `grpc_receiver_accepts_export` hangs in this environment only: it binds a loopback listener (OpenShell disallows loopback listeners; host/GitHub run that gate), and it predates this task's diff (introduced 0944ecc0, before comparison base 3214c982) — environmental, not a regression.
+- `npx vitest run DetailPanel.test.js FlowRenderer.test.js` — 68/68 pass.
+- `scripts/check-abac-exempt-handlers.sh` OK (89 handlers, task exemptions removed); `scripts/check-unwritten-store-fields.sh` OK (exemption removed).
+
+### Minor (informational, non-blocking)
+
+- FlowRenderer:72 remains a lowercase-only comparison, safe via the MoldableView normalization contract (sole caller, documented in a comment at both ends). A future second caller passing raw API spans would need to normalize too.
+- If an OTLP span arrives with an empty trace_id (invalid per OTLP), its span_id falls back to bare span_hex, weakening global uniqueness; degenerate input only, deterministic first-match resolution, no cross-tenant bypass (the found MR's workspace is still checked).
+
+## Verdict
+
+All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**

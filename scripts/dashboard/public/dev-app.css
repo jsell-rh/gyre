@@ -5,7 +5,8 @@
   border-radius: 7px; padding: 4px 10px; cursor: pointer; font: inherit;
 }
 .stepper button:hover,.dev-action:hover,.dev-filters button:hover { border-color: var(--pf-info); }
-.stepper .val { min-width: 24px; text-align: center; color: var(--pf-text); font-weight: 700; }
+.stepper .val { width: 5.5em; box-sizing: border-box; text-align: center; color: var(--pf-text); background: var(--pf-surface-2); border: 1px solid var(--pf-border-strong); border-radius: 7px; padding: 4px; font: inherit; font-weight: 700; }
+.stepper .val:focus { outline: 2px solid var(--pf-info); outline-offset: 1px; }
 .dev-metrics { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 12px; margin-bottom: 20px; }
 .dev-coverage { display: grid; grid-template-columns: 105px minmax(0,1fr) 260px; align-items: center; gap: 22px; background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 12px; padding: 18px 22px; margin-bottom: 14px; }
 .dev-coverage-number { font-size: 29px; font-weight: 700; }

@@ -16,7 +16,7 @@
    *   repoId      — string | null
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
-  import { getContext, onDestroy } from 'svelte';
+  import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
@@ -27,7 +27,8 @@
   import Modal from '../lib/Modal.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import DiffSuggestion from '../lib/DiffSuggestion.svelte';
-  import { toastSuccess, toastError, toastInfo } from '../lib/toast.svelte.js';
+  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import EditorSplit from '../lib/EditorSplit.svelte';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -343,26 +344,16 @@
   let wsLoading   = $state(true);
   let wsError     = $state(null);
 
-  /** @type {'editing' | 'running' | 'complete'} */
-  let previewState = $state('editing');
-
   let wsMetaSpecs       = $state([]);   // all kinds, not just personas
   let selectedMsId      = $state('');
   let selectedMsContent = $state('');
 
   let targetSpecs       = $state([]);
-  let selectedSpecPaths = $state([]);
 
-  let previewId        = null;
-  let previewProgress  = $state([]);
-  let previewInterval  = null;
+  // True while the embedded EditorSplit's preview loop is running (§9
+  // State 2) — locks the persona selector above it.
+  let msLocked          = $state(false);
 
-  let impactTab        = $state('architecture');
-  let previewApiResult = $state(null);
-  let isSimulatedPreview = $state(false);
-
-  let wsSuggestions     = $state([]);
-  let wsNextSuggId      = 0;
   let publishSaving     = $state(false);
 
   async function loadWorkspaceData() {
@@ -391,95 +382,7 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
-    wsSuggestions = [];
-    previewState = 'editing';
-    stopPreview();
   }
-
-  function toggleSpec(path) {
-    if (selectedSpecPaths.includes(path)) {
-      selectedSpecPaths = selectedSpecPaths.filter(p => p !== path);
-    } else {
-      selectedSpecPaths = [...selectedSpecPaths, path];
-    }
-  }
-
-  function selectAll() { selectedSpecPaths = targetSpecs.map(s => s.path); }
-  function clearAll()  { selectedSpecPaths = []; }
-
-  const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
-
-  async function startPreview() {
-    // Clear any lingering interval from a prior preview run
-    stopPreview();
-    previewState = 'running';
-    previewProgress = selectedSpecPaths.map(path => ({ path, status: 'running' }));
-    previewApiResult = null;
-    isSimulatedPreview = false;
-
-    let usedPreviewId = null;
-    try {
-      const res = await api.previewPersona(workspaceId, {
-        persona_id: selectedMsId,
-        content: selectedMsContent,
-        spec_paths: selectedSpecPaths,
-      });
-      usedPreviewId = res?.preview_id ?? null;
-      if (res && !usedPreviewId) previewApiResult = res;
-    } catch { toastInfo($t('meta_specs.toast.preview_unavailable')); }
-
-    if (usedPreviewId) {
-      previewId = usedPreviewId;
-      pollPreview();
-    } else {
-      isSimulatedPreview = true;
-      simulatePreview();
-    }
-  }
-
-  function pollPreview() {
-    let elapsed = 0;
-    previewInterval = setInterval(async () => {
-      elapsed += 1500;
-      try {
-        const status = await api.previewPersonaStatus(workspaceId, previewId);
-        previewProgress = status.specs ?? previewProgress;
-        if (status.state === 'complete') {
-          previewApiResult = status;
-          isSimulatedPreview = false;
-          stopPreview();
-          previewState = 'complete';
-        }
-      } catch {
-        clearInterval(previewInterval);
-        isSimulatedPreview = true;
-        simulatePreview();
-      }
-      if (elapsed > 30000) { stopPreview(); previewState = 'complete'; }
-    }, 1500);
-  }
-
-  function simulatePreview() {
-    let i = 0;
-    previewInterval = setInterval(() => {
-      if (i < previewProgress.length) {
-        previewProgress = previewProgress.map((p, idx) =>
-          idx === i ? { ...p, status: 'complete' } : p
-        );
-        i++;
-      } else {
-        stopPreview();
-        previewState = 'complete';
-      }
-    }, 1200);
-  }
-
-  function stopPreview() {
-    if (previewInterval) { clearInterval(previewInterval); previewInterval = null; }
-  }
-
-  function cancelPreview() { stopPreview(); previewState = 'editing'; previewProgress = []; }
-  function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
 
   async function publish() {
     if (!selectedMsId || !workspaceId) return;
@@ -494,42 +397,11 @@
     }
   }
 
-  async function handleWsChatMessage(text) {
-    if (repoId) {
-      try {
-        const res = await api.specsAssist(repoId, { message: text, context: selectedMsContent });
-        if (res.ok) return res;
-      } catch { /* fall through */ }
-    }
-    try {
-      const res = await api.specsAssistGlobal({ persona_id: selectedMsId, message: text });
-      if (res.ok) return res;
-    } catch { /* fall through */ }
-
-    const id = `ws-suggestion-${wsNextSuggId++}`;
-    wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
-    return $t('meta_specs.toast.suggestion_added');
-  }
-
-  function wsAcceptSuggestion(s) {
-    selectedMsContent = selectedMsContent + '\n\n' + s.content;
-    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
-  }
-  function wsDismissSuggestion(id) { wsSuggestions = wsSuggestions.filter(s => s.id !== id); }
-  function wsEditSuggestion(s) {
-    selectedMsContent = selectedMsContent + '\n\n' + s.content;
-    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
-  }
-
   function handleRepoRedirect() {
     if (navigate && workspaceId) navigate('meta-specs', { scope: 'workspace', workspaceId });
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
-
-  // onDestroy guarantees cleanup even if the $effect cleanup is skipped
-  // (e.g. parent unmounts this component while a preview interval is active).
-  onDestroy(() => stopPreview());
 
   $effect(() => {
     if (scope === 'workspace' || scope === 'repo') {
@@ -537,12 +409,10 @@
     } else {
       loadTenantSpecs();
     }
-    return () => stopPreview();
   });
 </script>
 
 <svelte:window onkeydown={(e) => {
-  if (e.key === 'Escape' && previewState === 'running') cancelPreview();
   if (e.key === 'Escape' && createMode) createMode = false;
 }} onbeforeunload={(e) => {
   if (editDirty) { e.preventDefault(); return ''; }
@@ -577,175 +447,39 @@
       <div role="alert"><EmptyState title={$t('meta_specs.workspace.failed_to_load')} description={wsError} /></div>
       <button class="retry-btn" onclick={loadWorkspaceData}>{$t('common.retry')}</button>
     {:else}
-      <div class="split-layout" data-testid="preview-loop">
-        <!-- LEFT: Meta-spec editor -->
-        <div class="split-left">
-          <div class="editor-header">
-            <label class="persona-label" for="ms-select">{$t('meta_specs.workspace.meta_spec_label')}</label>
-            <select
-              id="ms-select"
-              class="persona-select"
-              value={selectedMsId}
-              onchange={(e) => onMsChange(e.target.value)}
-              disabled={previewState === 'running'}
-              aria-label={$t('meta_specs.workspace.persona_aria')}
-            >
-              {#each wsMetaSpecs as ms (ms.id)}
-                <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
-              {/each}
-            </select>
-          </div>
-
-          {#if previewState === 'running'}
-            <div class="persona-diff" role="region" aria-label={$t('meta_specs.workspace.diff_readonly_aria')}>
-              {#each selectedMsContent.split('\n') as line}
-                <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
-              {/each}
-            </div>
-          {:else}
-            <textarea
-              class="persona-textarea"
-              bind:value={selectedMsContent}
-              placeholder={$t('meta_specs.workspace.textarea_placeholder')}
-              aria-label={$t('meta_specs.workspace.textarea_aria')}
-              data-testid="persona-textarea"
-            ></textarea>
-
-            {#each wsSuggestions as s (s.id)}
-              <DiffSuggestion
-                suggestion={s}
-                onaccept={() => wsAcceptSuggestion(s)}
-                onedit={() => wsEditSuggestion(s)}
-                ondismiss={() => wsDismissSuggestion(s.id)}
-              />
+      <div class="preview-loop-wrap" data-testid="preview-loop">
+        <!-- §9 preview loop: the reusable EditorSplit (ui-layout.md §2) in
+             meta-spec context — the single production implementation of the
+             Editing → Preview Running → Preview Complete loop. -->
+        <div class="editor-header">
+          <label class="persona-label" for="ms-select">{$t('meta_specs.workspace.meta_spec_label')}</label>
+          <select
+            id="ms-select"
+            class="persona-select"
+            value={selectedMsId}
+            onchange={(e) => onMsChange(e.target.value)}
+            disabled={msLocked}
+            aria-label={$t('meta_specs.workspace.persona_aria')}
+          >
+            {#each wsMetaSpecs as ms (ms.id)}
+              <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
             {/each}
-
-            <InlineChat
-              recipient="meta-spec editor"
-              recipientType="spec-edit"
-              onmessage={handleWsChatMessage}
-            />
-
-            <div class="editor-actions">
-              {#if previewState === 'complete'}
-                <Button variant="secondary" onclick={iterate}>{$t('meta_specs.workspace.iterate')}</Button>
-              {:else}
-                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>{$t('meta_specs.workspace.preview')}</Button>
-              {/if}
-              <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? $t('meta_specs.workspace.publishing') : $t('meta_specs.workspace.publish')}</Button>
-            </div>
+          </select>
+          {#if publishSaving}
+            <span class="publishing-note" role="status">{$t('meta_specs.workspace.publishing')}</span>
           {/if}
         </div>
-
-        <!-- RIGHT: Spec selector / progress / impact -->
-        <div class="split-right">
-          {#if previewState === 'editing'}
-            <div class="spec-selector">
-              <div class="spec-selector-header">
-                <span class="spec-selector-title">{$t('meta_specs.workspace.preview_against')}</span>
-                <div class="spec-selector-shortcuts">
-                  <button class="link-btn" onclick={selectAll}>{$t('meta_specs.workspace.select_all')}</button>
-                  <button class="link-btn" onclick={clearAll}>{$t('meta_specs.workspace.clear')}</button>
-                </div>
-              </div>
-              <div class="spec-checklist">
-                {#each targetSpecs as spec (spec.path)}
-                  <label class="spec-check-item">
-                    <input type="checkbox" checked={selectedSpecPaths.includes(spec.path)} onchange={() => toggleSpec(spec.path)} />
-                    <span class="spec-check-path">{spec.path}</span>
-                  </label>
-                {:else}
-                  <p class="empty-specs">{$t('meta_specs.workspace.no_specs_available')}</p>
-                {/each}
-              </div>
-            </div>
-
-          {:else if previewState === 'running'}
-            <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-              <div class="progress-header" role="status">{$t('meta_specs.workspace.preview_running')}</div>
-              <div class="progress-list">
-                {#each previewProgress as item (item.path)}
-                  <div class="progress-item">
-                    <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
-                    <span class="progress-path">{item.path}</span>
-                    <span class="progress-status">{item.status === 'complete' ? $t('meta_specs.workspace.status_complete') : $t('meta_specs.workspace.agent_implementing')}</span>
-                  </div>
-                {/each}
-              </div>
-              <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewProgress.filter(p => p.status === 'complete').length, total: previewProgress.length } })}</div>
-              <Button variant="secondary" onclick={cancelPreview}>{$t('meta_specs.workspace.cancel_preview')} <kbd>Esc</kbd></Button>
-            </div>
-
-          {:else}
-            <div class="impact-panel" data-testid="preview-complete">
-              {#if isSimulatedPreview}
-                <div class="sim-banner" role="status">{$t('meta_specs.workspace.sim_banner')}</div>
-              {/if}
-              <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0"
-                onkeydown={(e) => {
-                  const tabs = ['architecture', 'code-diff'];
-                  const ids = ['impact-tab-arch', 'impact-tab-diff'];
-                  const idx = tabs.indexOf(impactTab);
-                  if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + 2) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                }}
-              >
-                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>{$t('meta_specs.workspace.architecture')}</button>
-                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} tabindex={impactTab === 'code-diff' ? 0 : -1} onclick={() => impactTab = 'code-diff'}>{$t('meta_specs.workspace.code_diff')}</button>
-              </div>
-              {#if isSimulatedPreview}
-                <div class="impact-content impact-unavailable" role="tabpanel" id={impactTab === 'architecture' ? 'impact-panel-arch' : 'impact-panel-diff'} aria-labelledby={impactTab === 'architecture' ? 'impact-tab-arch' : 'impact-tab-diff'}>
-                  <span class="impact-unavailable-label">{$t('meta_specs.workspace.preview_unavailable_label')}</span>
-                  {#if impactTab === 'architecture'}
-                    <div class="arch-diff">
-                      <div class="arch-line add">+ ErrorHandler module (payment-domain)</div>
-                      <div class="arch-line mod">~ ChargeService: +3 error result returns</div>
-                      <div class="arch-line ctx">= 45 types unchanged</div>
-                    </div>
-                  {:else}
-                    <div class="code-diff">
-                      {#each previewProgress as item (item.path)}
-                        <div class="code-diff-file">
-                          <div class="code-diff-path">{item.path}</div>
-                          <pre class="code-diff-body">--- original
-+++ modified
-@@ meta-spec applied @@</pre>
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-              {:else if impactTab === 'architecture'}
-                <div class="impact-content arch-diff" role="tabpanel" id="impact-panel-arch" aria-labelledby="impact-tab-arch">
-                  {#if previewApiResult?.architecture_diff?.length}
-                    {#each previewApiResult.architecture_diff as line}
-                      <div class="arch-line" class:add={line.startsWith('+')} class:mod={line.startsWith('~')} class:ctx={line.startsWith('=')}>{line}</div>
-                    {/each}
-                  {:else}
-                    <span class="impact-empty">{$t('meta_specs.workspace.no_arch_changes')}</span>
-                  {/if}
-                </div>
-              {:else}
-                <div class="impact-content code-diff" role="tabpanel" id="impact-panel-diff" aria-labelledby="impact-tab-diff">
-                  {#if previewApiResult?.specs_diff?.length}
-                    {#each previewApiResult.specs_diff as item (item.path)}
-                      <div class="code-diff-file">
-                        <div class="code-diff-path">{item.path}</div>
-                        <pre class="code-diff-body">{item.diff}</pre>
-                      </div>
-                    {/each}
-                  {:else}
-                    {#each previewProgress as item (item.path)}
-                      <div class="code-diff-file">
-                        <div class="code-diff-path">{item.path}</div>
-                        <pre class="code-diff-body">{$t('meta_specs.workspace.no_diff_available')}</pre>
-                      </div>
-                    {/each}
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
+        <div class="editor-split-host">
+          <EditorSplit
+            bind:content={selectedMsContent}
+            repoId={repoId}
+            specPath={selectedMsId}
+            context="meta-spec"
+            workspaceId={workspaceId}
+            targetSpecs={targetSpecs}
+            onpublish={publish}
+            onPreviewStateChange={(s) => (msLocked = s === 'preview_running')}
+          />
         </div>
       </div>
     {/if}
@@ -1519,6 +1253,16 @@
   .split-right { display: flex; flex-direction: column; gap: var(--space-4); position: sticky; top: var(--space-4); }
 
   .editor-header { display: flex; align-items: center; gap: var(--space-3); }
+
+  /* Workspace scope — §9 preview loop host (EditorSplit mount) */
+  .preview-loop-wrap { display: flex; flex-direction: column; gap: var(--space-4); flex: 1; }
+  .editor-split-host {
+    flex: 1; min-height: 560px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .publishing-note { font-size: var(--text-xs); color: var(--color-text-muted); }
   .persona-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-muted); white-space: nowrap; }
   .persona-select {
     flex: 1; padding: var(--space-1) var(--space-3);
@@ -1526,66 +1270,6 @@
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius); color: var(--color-text); font-size: var(--text-sm);
   }
-  .persona-textarea {
-    width: 100%; min-height: 280px; padding: var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius); color: var(--color-text);
-    font-family: var(--font-mono); font-size: var(--text-sm);
-    line-height: 1.6; resize: vertical; box-sizing: border-box;
-  }
-  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong); }
-  .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
-  .persona-diff {
-    min-height: 280px; padding: var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border); border-radius: var(--radius);
-    font-family: var(--font-mono); font-size: var(--text-sm); overflow-x: auto;
-  }
-  .diff-line { padding: 0 var(--space-1); line-height: 1.5; }
-  .diff-line.add { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
-  .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
-  .diff-line.ctx { color: var(--color-text-muted); }
-  .editor-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
-
-  .spec-selector { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
-  .spec-selector-header { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); }
-  .spec-selector-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
-  .spec-selector-shortcuts { display: flex; gap: var(--space-2); }
-  .link-btn { background: none; border: none; color: var(--color-link); font-size: var(--text-xs); cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body); }
-  .spec-checklist { max-height: 360px; overflow-y: auto; padding: var(--space-2) 0; }
-  .spec-check-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3); cursor: pointer; font-size: var(--text-sm); color: var(--color-text); transition: background var(--transition-fast); }
-  .spec-check-item:hover { background: var(--color-surface-elevated); }
-  .spec-check-path { font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .empty-specs { padding: 1rem 0.75rem; color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
-
-  .preview-progress { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
-  .progress-header { font-weight: 600; font-size: var(--text-base); }
-  .progress-list { display: flex; flex-direction: column; gap: var(--space-1); }
-  .progress-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
-  .progress-icon { font-size: 0.9rem; width: 1.2rem; text-align: center; }
-  .progress-path { font-family: var(--font-mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .progress-status { color: var(--color-text-muted); font-size: var(--text-xs); white-space: nowrap; }
-  .progress-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
-
-  .impact-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
-  .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
-  .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
-  .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
-  .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
-  .arch-diff { display: flex; flex-direction: column; gap: var(--space-1); }
-  .arch-line { padding: var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
-  .arch-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
-  .arch-line.mod { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
-  .arch-line.ctx { color: var(--color-text-muted); }
-  .code-diff { display: flex; flex-direction: column; gap: var(--space-3); }
-  .code-diff-file { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
-  .code-diff-path { padding: var(--space-1) var(--space-2); background: var(--color-surface-elevated); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); }
-  .code-diff-body { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
-  .impact-unavailable { display: flex; flex-direction: column; gap: var(--space-3); }
-  .impact-unavailable-label { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
-  .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); }
-  .sim-banner { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); margin: var(--space-3) var(--space-3) 0; }
 
   /* ── Delete confirm ── */
   .delete-confirm-text { font-size: var(--text-sm); color: var(--color-text); margin: 0 0 var(--space-4); }
@@ -1602,7 +1286,7 @@
   .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* ── Focus-visible ── */
-  .pill:focus-visible, .impact-tab:focus-visible, .editor-tab:focus-visible,
+  .pill:focus-visible, .editor-tab:focus-visible,
   .link-btn:focus-visible, .persona-select:focus-visible, .required-toggle:focus-visible,
   .sidebar-item:focus-visible, .kind-card:focus-visible, .version-node:focus-visible {
     outline: 2px solid var(--color-focus); outline-offset: 2px;
@@ -1611,7 +1295,7 @@
   .mono { font-family: var(--font-mono); }
 
   @media (prefers-reduced-motion: reduce) {
-    .spec-check-item, .pill, .impact-tab, .editor-tab, .link-btn, .required-toggle,
-    .sidebar-item, .kind-card, .persona-textarea, .spec-textarea { transition: none; }
+    .pill, .editor-tab, .link-btn, .required-toggle,
+    .sidebar-item, .kind-card, .spec-textarea { transition: none; }
   }
 </style>

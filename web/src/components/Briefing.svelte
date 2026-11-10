@@ -6,6 +6,7 @@
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
+  import AccordionItem from '../lib/AccordionItem.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import { toastInfo } from '../lib/toast.svelte.js';
 
@@ -50,6 +51,10 @@
   let sinceLabel = $state('');
   let workspaceMap = $state({});
 
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after scope/workspace changed.
+  let loadGen = 0;
+
   function sinceEpochForRange(range) {
     const now = Math.floor(Date.now() / 1000);
     switch (range) {
@@ -86,8 +91,8 @@
       !data.metrics
     );
   }
-
   async function load() {
+    const gen = ++loadGen;
     loading = true;
     error = null;
 
@@ -97,14 +102,28 @@
     try {
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
+        if (gen !== loadGen) return; // scope changed while loading
         briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+      } else if (scope === 'repo') {
+        // HSI §1.5 repo-scope Briefing row: same endpoint narrowed by
+        // ?repo_id= — every section only covers this repo. No workspace or
+        // repo id means the repo is unresolved: no fetch, empty state.
+        if (workspaceId && repoId) {
+          const raw = await api.getWorkspaceBriefing(workspaceId, since, repoId);
+          if (gen !== loadGen) return;
+          briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+        } else {
+          briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+        }
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
+        if (gen !== loadGen) return;
         const wsList = workspaces || [];
         workspaceMap = Object.fromEntries(wsList.map(w => [w.id, w.name ?? w.id]));
         const results = await Promise.allSettled(
           wsList.map(w => api.getWorkspaceBriefing(w.id, since).then(b => ({ ...b, _wsId: w.id })))
         );
+        if (gen !== loadGen) return;
         const merged = {
           completed: [],
           in_progress: [],
@@ -139,10 +158,11 @@
         };
         briefing = isEmpty(merged) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : merged;
       } else {
-        // Repo scope — no briefing endpoint yet; show empty state
+        // No workspace context and no repo scope — nothing to fetch.
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {
+      if (gen !== loadGen) return;
       if (e.message && e.message.includes('404')) {
         // 404: no briefing data yet — show empty state
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
@@ -153,7 +173,7 @@
         if (e.message) error = e.message;
       }
     } finally {
-      loading = false;
+      if (gen === loadGen) loading = false;
     }
   }
 
@@ -207,7 +227,21 @@
     }
     const trimmedHistory = chatHistory.slice(-20);
     chatHistory = [...chatHistory, { role: 'user', content: question }];
-    return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
+    // Repo scope narrows the Q&A to this repo (ui-navigation.md §2 Briefing
+    // sub-tab amends HSI §9: optional repo_id in the ask request body).
+    const body = { question, history: trimmedHistory };
+    if (scope === 'repo' && repoId) body.repo_id = repoId;
+    return api.briefingAsk(workspaceId, body);
+  }
+
+  // ── Section accordion (ui-layout.md §3 Inline Expansion) ──────────────
+  // Briefing sections expand inline below their header; only one section
+  // expanded at a time. Metrics and the Q&A chat are always visible (they
+  // are not list sections).
+  let expandedSection = $state('completed');
+
+  function toggleSection(id) {
+    expandedSection = expandedSection === id ? null : id;
   }
 
   function briefingChatAnswered(answer) {
@@ -286,241 +320,297 @@
       <!-- COMPLETED -->
       {#if briefing.completed?.length}
         <section class="briefing-section" data-testid="section-completed" aria-labelledby="briefing-completed">
-          <h2 class="section-heading" id="briefing-completed">
-            <span class="section-icon completed-icon" aria-hidden="true">✓</span>
-            {$t('briefing.section_completed')}
-          </h2>
-          {#each briefing.completed as item (item.id ?? item.title)}
-            <div class="section-item" data-testid="completed-item">
-              <div class="item-title">
-                <span class="item-icon completed-icon" aria-hidden="true">✓</span>
-                <span class="item-name">{item.title}</span>
-                {#if scope === 'tenant' && item.workspace_id}
-                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
-                {/if}
-                {#if item.spec_ref}
-                  <button
-                    class="entity-ref"
-                    onclick={() => handleViewSpec(item.spec_ref)}
-                    data-testid="spec-ref-link"
-                    aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
-                  >
-                    spec: {item.spec_ref}
-                  </button>
-                {/if}
+          <AccordionItem
+            id="completed"
+            headingId="briefing-completed"
+            headerClass="section-heading"
+            testId="section-toggle-completed"
+            open={expandedSection === 'completed'}
+            ontoggle={toggleSection}
+          >
+            {#snippet header()}
+              <span class="section-icon completed-icon" aria-hidden="true">✓</span>
+              {$t('briefing.section_completed')}
+              <span class="expand-icon" aria-hidden="true">{expandedSection === 'completed' ? '▲' : '▼'}</span>
+            {/snippet}
+            {#snippet children()}
+              <div class="section-body-list" id="briefing-section-completed-body">
+                {#each briefing.completed as item (item.id ?? item.title)}
+                  <div class="section-item" data-testid="completed-item">
+                    <div class="item-title">
+                      <span class="item-icon completed-icon" aria-hidden="true">✓</span>
+                      <span class="item-name">{item.title}</span>
+                      {#if scope === 'tenant' && item.workspace_id}
+                        <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                      {/if}
+                      {#if item.spec_ref}
+                        <button
+                          class="entity-ref"
+                          onclick={() => handleViewSpec(item.spec_ref)}
+                          data-testid="spec-ref-link"
+                          aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
+                        >
+                          spec: {item.spec_ref}
+                        </button>
+                      {/if}
+                    </div>
+                    <div class="item-detail">
+                      {#if item.mrs_merged != null}
+                        <span>{$t('briefing.mrs_merged', { values: { count: item.mrs_merged } })}</span>
+                      {/if}
+                      {#if item.decision}
+                        <span class="item-decision">
+                          {$t('briefing.decision_label', { values: { text: item.decision } })}
+                          {#if item.confidence}
+                            <span class="confidence-badge confidence-{item.confidence}">({$t('briefing.confidence', { values: { level: item.confidence } })})</span>
+                          {/if}
+                        </span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
-              <div class="item-detail">
-                {#if item.mrs_merged != null}
-                  <span>{$t('briefing.mrs_merged', { values: { count: item.mrs_merged } })}</span>
-                {/if}
-                {#if item.decision}
-                  <span class="item-decision">
-                    {$t('briefing.decision_label', { values: { text: item.decision } })}
-                    {#if item.confidence}
-                      <span class="confidence-badge confidence-{item.confidence}">({$t('briefing.confidence', { values: { level: item.confidence } })})</span>
-                    {/if}
-                  </span>
-                {/if}
-              </div>
-            </div>
-          {/each}
+            {/snippet}
+          </AccordionItem>
         </section>
       {/if}
 
       <!-- IN PROGRESS -->
       {#if briefing.in_progress?.length}
         <section class="briefing-section" data-testid="section-in-progress" aria-labelledby="briefing-inprogress">
-          <h2 class="section-heading" id="briefing-inprogress">
-            <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
-            {$t('briefing.section_in_progress')}
-          </h2>
-          {#each briefing.in_progress as item (item.id ?? item.title)}
-            <div class="section-item" data-testid="in-progress-item">
-              <div class="item-title">
-                <span class="item-icon inprogress-icon" aria-hidden="true">◐</span>
-                <span class="item-name">{item.title}</span>
-                {#if scope === 'tenant' && item.workspace_id}
-                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
-                {/if}
-                {#if item.spec_ref}
-                  <button
-                    class="entity-ref"
-                    onclick={() => handleViewSpec(item.spec_ref)}
-                    data-testid="spec-ref-link"
-                    aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
-                  >
-                    spec: {item.spec_ref}
-                  </button>
-                {/if}
-              </div>
-              <div class="item-detail">
-                {#if item.sub_specs_total}
-                  <span>{$t('briefing.sub_specs_progress', { values: { done: item.sub_specs_done ?? 0, total: item.sub_specs_total } })}</span>
-                {/if}
-                {#if item.active_agents}
-                  <span>{$t('briefing.agents_active', { values: { count: item.active_agents } })}</span>
-                {/if}
-              </div>
-              {#if item.uncertainties?.length}
-                <div class="uncertainties">
-                  {#each item.uncertainties as u}
-                    <div class="uncertainty-row">
-                      <span class="uncertainty-icon" aria-hidden="true">⚠</span>
-                      <button
-                        class="entity-ref agent-ref"
-                        onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
-                        data-testid="agent-ref-link"
-                        aria-label={$t('briefing.view_agent_label', { values: { id: u.agent_id } })}
-                      >
-                        {resolveEntityName('agent', u.agent_id)}
-                      </button>
-                      <span class="uncertainty-text">{$t('briefing.uncertain', { values: { text: u.text } })}</span>
+          <AccordionItem
+            id="in_progress"
+            headingId="briefing-inprogress"
+            headerClass="section-heading"
+            testId="section-toggle-in-progress"
+            open={expandedSection === 'in_progress'}
+            ontoggle={toggleSection}
+          >
+            {#snippet header()}
+              <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
+              {$t('briefing.section_in_progress')}
+              <span class="expand-icon" aria-hidden="true">{expandedSection === 'in_progress' ? '▲' : '▼'}</span>
+            {/snippet}
+            {#snippet children()}
+              <div class="section-body-list" id="briefing-section-in-progress-body">
+                {#each briefing.in_progress as item (item.id ?? item.title)}
+                  <div class="section-item" data-testid="in-progress-item">
+                    <div class="item-title">
+                      <span class="item-icon inprogress-icon" aria-hidden="true">◐</span>
+                      <span class="item-name">{item.title}</span>
+                      {#if scope === 'tenant' && item.workspace_id}
+                        <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                      {/if}
+                      {#if item.spec_ref}
+                        <button
+                          class="entity-ref"
+                          onclick={() => handleViewSpec(item.spec_ref)}
+                          data-testid="spec-ref-link"
+                          aria-label={$t('briefing.view_spec_label', { values: { ref: item.spec_ref } })}
+                        >
+                          spec: {item.spec_ref}
+                        </button>
+                      {/if}
                     </div>
-                  {/each}
-                </div>
-              {/if}
-              <div class="item-actions">
-                {#if item.uncertainties?.length}
-                  {#each item.uncertainties as u}
-                    <button
-                      class="action-btn"
-                      onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
-                      data-testid="respond-to-agent-btn"
-                    >
-                      {$t('briefing.respond_to', { values: { agent: resolveEntityName('agent', u.agent_id) } })}
-                    </button>
-                  {/each}
-                {/if}
-                {#if item.spec_ref}
-                  <button
-                    class="action-btn secondary"
-                    onclick={() => handleViewSpec(item.spec_ref)}
-                    data-testid="view-spec-btn"
-                  >
-                    {$t('briefing.view_spec')}
-                  </button>
-                {/if}
+                    <div class="item-detail">
+                      {#if item.sub_specs_total}
+                        <span>{$t('briefing.sub_specs_progress', { values: { done: item.sub_specs_done ?? 0, total: item.sub_specs_total } })}</span>
+                      {/if}
+                      {#if item.active_agents}
+                        <span>{$t('briefing.agents_active', { values: { count: item.active_agents } })}</span>
+                      {/if}
+                    </div>
+                    {#if item.uncertainties?.length}
+                      <div class="uncertainties">
+                        {#each item.uncertainties as u}
+                          <div class="uncertainty-row">
+                            <span class="uncertainty-icon" aria-hidden="true">⚠</span>
+                            <button
+                              class="entity-ref agent-ref"
+                              onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
+                              data-testid="agent-ref-link"
+                              aria-label={$t('briefing.view_agent_label', { values: { id: u.agent_id } })}
+                            >
+                              {resolveEntityName('agent', u.agent_id)}
+                            </button>
+                            <span class="uncertainty-text">{$t('briefing.uncertain', { values: { text: u.text } })}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                    <div class="item-actions">
+                      {#if item.uncertainties?.length}
+                        {#each item.uncertainties as u}
+                          <button
+                            class="action-btn"
+                            onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
+                            data-testid="respond-to-agent-btn"
+                          >
+                            {$t('briefing.respond_to', { values: { agent: resolveEntityName('agent', u.agent_id) } })}
+                          </button>
+                        {/each}
+                      {/if}
+                      {#if item.spec_ref}
+                        <button
+                          class="action-btn secondary"
+                          onclick={() => handleViewSpec(item.spec_ref)}
+                          data-testid="view-spec-btn"
+                        >
+                          {$t('briefing.view_spec')}
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
-            </div>
-          {/each}
+            {/snippet}
+          </AccordionItem>
         </section>
       {/if}
 
       <!-- CROSS-WORKSPACE -->
       {#if briefing.cross_workspace?.length}
         <section class="briefing-section" data-testid="section-cross-workspace" aria-labelledby="briefing-crossworkspace">
-          <h2 class="section-heading" id="briefing-crossworkspace">
-            <span class="section-icon cross-icon" aria-hidden="true">↔</span>
-            {$t('briefing.section_cross_workspace')}
-          </h2>
-          {#each briefing.cross_workspace as item (item.id ?? item.spec_ref)}
-            <div class="section-item" data-testid="cross-workspace-item">
-              <div class="item-title">
-                <span class="item-icon cross-icon" aria-hidden="true">↔</span>
-                <span class="item-name">{item.description ?? item.spec_ref}</span>
-                {#if scope === 'tenant' && item.workspace_id}
-                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
-                {/if}
-                {#if item.spec_ref}
-                  <button
-                    class="entity-ref"
-                    onclick={() => handleReviewChanges(item)}
-                    data-testid="spec-ref-link"
-                    aria-label={$t('briefing.review_changes_label', { values: { ref: item.spec_ref } })}
-                  >
-                    {item.spec_ref}
-                  </button>
-                {/if}
+          <AccordionItem
+            id="cross_workspace"
+            headingId="briefing-crossworkspace"
+            headerClass="section-heading"
+            testId="section-toggle-cross-workspace"
+            open={expandedSection === 'cross_workspace'}
+            ontoggle={toggleSection}
+          >
+            {#snippet header()}
+              <span class="section-icon cross-icon" aria-hidden="true">↔</span>
+              {$t('briefing.section_cross_workspace')}
+              <span class="expand-icon" aria-hidden="true">{expandedSection === 'cross_workspace' ? '▲' : '▼'}</span>
+            {/snippet}
+            {#snippet children()}
+              <div class="section-body-list" id="briefing-section-cross-workspace-body">
+                {#each briefing.cross_workspace as item (item.id ?? item.spec_ref)}
+                  <div class="section-item" data-testid="cross-workspace-item">
+                    <div class="item-title">
+                      <span class="item-icon cross-icon" aria-hidden="true">↔</span>
+                      <span class="item-name">{item.description ?? item.spec_ref}</span>
+                      {#if scope === 'tenant' && item.workspace_id}
+                        <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                      {/if}
+                      {#if item.spec_ref}
+                        <button
+                          class="entity-ref"
+                          onclick={() => handleReviewChanges(item)}
+                          data-testid="spec-ref-link"
+                          aria-label={$t('briefing.review_changes_label', { values: { ref: item.spec_ref } })}
+                        >
+                          {item.spec_ref}
+                        </button>
+                      {/if}
+                    </div>
+                    <div class="item-actions">
+                      <button
+                        class="action-btn"
+                        onclick={() => handleReviewChanges(item)}
+                        data-testid="review-changes-btn"
+                      >
+                        {$t('briefing.review_changes')}
+                      </button>
+                      <button
+                        class="action-btn secondary"
+                        onclick={() => handleDismiss(item)}
+                        data-testid="dismiss-btn"
+                        aria-label={$t('briefing.dismiss_label', { values: { description: item.description ?? item.spec_ref ?? '' } })}
+                      >
+                        {$t('common.dismiss')}
+                      </button>
+                    </div>
+                  </div>
+                {/each}
               </div>
-              <div class="item-actions">
-                <button
-                  class="action-btn"
-                  onclick={() => handleReviewChanges(item)}
-                  data-testid="review-changes-btn"
-                >
-                  {$t('briefing.review_changes')}
-                </button>
-                <button
-                  class="action-btn secondary"
-                  onclick={() => handleDismiss(item)}
-                  data-testid="dismiss-btn"
-                  aria-label={$t('briefing.dismiss_label', { values: { description: item.description ?? item.spec_ref ?? '' } })}
-                >
-                  {$t('common.dismiss')}
-                </button>
-              </div>
-            </div>
-          {/each}
+            {/snippet}
+          </AccordionItem>
         </section>
       {/if}
 
       <!-- EXCEPTIONS -->
       {#if briefing.exceptions?.length}
         <section class="briefing-section exceptions-section" data-testid="section-exceptions" aria-labelledby="briefing-exceptions">
-          <h2 class="section-heading" id="briefing-exceptions">
-            <span class="section-icon exception-icon" aria-hidden="true">✗</span>
-            {$t('briefing.section_exceptions')}
-          </h2>
-          {#each briefing.exceptions as item (item.id ?? item.mr_id)}
-            <div class="section-item exception-item" data-testid="exception-item">
-              <div class="item-title">
-                <span class="item-icon exception-icon" aria-hidden="true">✗</span>
-                {#if scope === 'tenant' && item.workspace_id}
-                  <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
-                {/if}
-                <span class="item-name">
-                  {$t('briefing.gate_failure')}
-                  {#if item.repo && item.mr_id}
-                    <button
-                      class="entity-ref mr-ref"
-                      onclick={() => handleViewDiff(item)}
-                      data-testid="mr-ref-link"
-                      aria-label={$t('briefing.view_mr_label', { values: { id: item.mr_id, repo: item.repo } })}
-                    >
-                      {item.repo} — {resolveEntityName('mr', item.mr_id)}
-                    </button>
-                  {:else}
-                    {item.description}
-                  {/if}
-                </span>
+          <AccordionItem
+            id="exceptions"
+            headingId="briefing-exceptions"
+            headerClass="section-heading"
+            testId="section-toggle-exceptions"
+            open={expandedSection === 'exceptions'}
+            ontoggle={toggleSection}
+          >
+            {#snippet header()}
+              <span class="section-icon exception-icon" aria-hidden="true">✗</span>
+              {$t('briefing.section_exceptions')}
+              <span class="expand-icon" aria-hidden="true">{expandedSection === 'exceptions' ? '▲' : '▼'}</span>
+            {/snippet}
+            {#snippet children()}
+              <div class="section-body-list" id="briefing-section-exceptions-body">
+                {#each briefing.exceptions as item (item.id ?? item.mr_id)}
+                  <div class="section-item exception-item" data-testid="exception-item">
+                    <div class="item-title">
+                      <span class="item-icon exception-icon" aria-hidden="true">✗</span>
+                      {#if scope === 'tenant' && item.workspace_id}
+                        <Badge value={workspaceMap[item.workspace_id] ?? item.workspace_id} variant="default" />
+                      {/if}
+                      <span class="item-name">
+                        {$t('briefing.gate_failure')}
+                        {#if item.repo && item.mr_id}
+                          <button
+                            class="entity-ref mr-ref"
+                            onclick={() => handleViewDiff(item)}
+                            data-testid="mr-ref-link"
+                            aria-label={$t('briefing.view_mr_label', { values: { id: item.mr_id, repo: item.repo } })}
+                          >
+                            {item.repo} — {resolveEntityName('mr', item.mr_id)}
+                          </button>
+                        {:else}
+                          {item.description}
+                        {/if}
+                      </span>
+                    </div>
+                    {#if item.description}
+                      <div class="item-detail exception-detail">{item.description}</div>
+                    {/if}
+                    <div class="item-actions">
+                      {#if item.mr_id}
+                        <button
+                          class="action-btn"
+                          onclick={() => handleViewDiff(item)}
+                          data-testid="view-diff-btn"
+                        >
+                          {$t('briefing.view_diff')}
+                        </button>
+                        <button
+                          class="action-btn secondary"
+                          onclick={() => handleViewOutput(item)}
+                          data-testid="view-output-btn"
+                        >
+                          {$t('briefing.view_output')}
+                        </button>
+                        <button
+                          class="action-btn secondary"
+                          onclick={() => openEntity('mr', item.mr_id, { action: 'override' })}
+                          data-testid="override-btn"
+                        >
+                          {$t('briefing.override')}
+                        </button>
+                        <button
+                          class="action-btn secondary"
+                          onclick={() => openEntity('mr', item.mr_id, { action: 'close' })}
+                          data-testid="close-mr-btn"
+                        >
+                          {$t('briefing.close_mr')}
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
-              {#if item.description}
-                <div class="item-detail exception-detail">{item.description}</div>
-              {/if}
-              <div class="item-actions">
-                {#if item.mr_id}
-                  <button
-                    class="action-btn"
-                    onclick={() => handleViewDiff(item)}
-                    data-testid="view-diff-btn"
-                  >
-                    {$t('briefing.view_diff')}
-                  </button>
-                  <button
-                    class="action-btn secondary"
-                    onclick={() => handleViewOutput(item)}
-                    data-testid="view-output-btn"
-                  >
-                    {$t('briefing.view_output')}
-                  </button>
-                  <button
-                    class="action-btn secondary"
-                    onclick={() => openEntity('mr', item.mr_id, { action: 'override' })}
-                    data-testid="override-btn"
-                  >
-                    {$t('briefing.override')}
-                  </button>
-                  <button
-                    class="action-btn secondary"
-                    onclick={() => openEntity('mr', item.mr_id, { action: 'close' })}
-                    data-testid="close-mr-btn"
-                  >
-                    {$t('briefing.close_mr')}
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
+            {/snippet}
+          </AccordionItem>
         </section>
       {/if}
 
@@ -564,8 +654,9 @@
         />
       {/if}
 
-      <!-- Q&A Chat (bottom) — only available with a workspace context -->
-      {#if scope === 'workspace' && workspaceId}
+      <!-- Q&A Chat (bottom) — workspace and repo scopes (ui-navigation.md §2:
+           repo Briefing sub-tab has the same "Ask a question" Q&A). -->
+      {#if (scope === 'workspace' || scope === 'repo') && workspaceId}
         <div class="chat-section" data-testid="briefing-chat">
           <InlineChat
             recipient="this briefing"
@@ -732,6 +823,31 @@
     background: var(--color-surface);
   }
 
+  /* Section accordion header (ui-layout.md §3 Inline Expansion): the
+     AccordionItem's header button carries the section-heading identity.
+     The button is authored INSIDE AccordionItem.svelte, so it never gets
+     this component's scoping hash class — the rules must be :global()
+     (scoped on the left, global on the class) or they silently never
+     match. `all: unset` in the component resets UA button styling; this
+     restores the heading look plus disclosure affordances. */
+  .briefing-section :global(.accordion-header.section-heading) {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-3) 0;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    text-align: left;
+  }
+  .briefing-section :global(.accordion-header.section-heading:hover) { color: var(--color-text); }
+
+  /* Base section-heading look for non-accordion headings (metrics h2). */
   .section-heading {
     display: flex;
     align-items: center;
