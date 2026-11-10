@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "98f7daf7314bc978ea988be89d51cc483c78dd1d"]
 ---
 
 ## Spec Excerpt
@@ -179,6 +179,21 @@ name/value pairing on `spec.containers[0].env` via `pod_env_map` — the
 persona assertion is now a full equality on the injected
 `GYRE_PROMPT_PERSONA` value. No production behavior changed; the §4.3
 injection code itself was untouched by the drift.
+
+### Review repair: coverage row 23 meta_spec_set_sha wording (98f7daf73)
+
+Review found that coverage row 23 still carried the pre-merge wording
+from 30fba783f: it claimed the spawn response's `meta_spec_set_sha` is
+"computed via `compute_meta_spec_set_sha`" (SHA-256 of the stored
+workspace set JSON) and that the test asserts that stored-set hash. Both
+claims were false after merge reconciliation 727befd94 switched to
+task-116's semantics — spawn.rs computes `prompt_set.set_sha`
+(`prompt_assembly::prompt_set_sha`, hash of the assembled prompt-set
+section metadata), null when the assembled set is empty, and the test
+asserts it matches the injected `GYRE_META_SPEC_SET_SHA` env var. Row 23
+now describes the actual semantics, matching the Shipped section above
+and docs/api-reference.md. Docs-only change; no production behavior or
+tests touched.
 
 ### Test evidence
 
