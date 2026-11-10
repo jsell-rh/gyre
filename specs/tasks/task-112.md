@@ -86,55 +86,60 @@ to the current default serialization; a dedicated regression drives the real
 000060 up.sql against flat-default/flat-custom/flat-in_app-false/nested/NULL
 rows.
 
-### Merge rounds (latest: 7edbddb4c, merge of main f7d61ef58)
+### Merge rounds (latest: ee154fffb, merge of assignment base cd752300c)
 
-Merge seams resolved across rounds (c4ebdc2d0, 6703a0353, and earlier):
-`api/spawn.rs` keeps both main's task-scoped secret revocation and our full
-§Agent Escalations chain (`notify_agent_escalation` subsumes the plain
-spawned_by notify); `git_http.rs` adopts main's hoisted workspace resolution
-(behavior identical — never fabricate a scope); `gyre-common/src/notification.rs`
-keeps both sides' appended `NotificationType` variants;
-`check-fabricated-scope-defaults.sh` takes main's lowered exemption count.
-This round's seam: main's task-116 added
-`NotificationType::PersonaChangePendingApproval`, breaking the exhaustive
-`for_notification_type` match — banded High (same pending-approval class as
-`SpecPendingApproval`), recorded in the spec's type→band table (footnote 2)
-and asserted in the dispatcher's band-membership test. Generated `web/dist`
-assets are restored from the assignment base by the executor and rebuilt
-remotely.
+Merge seams resolved across rounds (c4ebdc2d0, 6703a0353, 7edbddb4c, and
+earlier): `api/spawn.rs` keeps both main's task-scoped secret revocation and
+our full §Agent Escalations chain (`notify_agent_escalation` subsumes the
+plain spawned_by notify); `git_http.rs` adopts main's hoisted workspace
+resolution (behavior identical — never fabricate a scope);
+`gyre-common/src/notification.rs` keeps both sides' appended
+`NotificationType` variants. This round's seam: the assignment base
+cd752300c (task-208) deliberately removed the My Tasks/MRs/Agents profile
+endpoints — `users.rs` handlers and `api/mod.rs` routes dropped by the merge,
+with the import block conflict resolved to keep our
+`get_channel_preferences`/`update_channel_preferences` (required by the
+registered `/api/v1/notifications/preferences` route) and drop the now-dangling
+`get_my_agents`/`get_my_tasks`/`get_my_mrs` imports. No task-112 behavior
+touched. Generated `web/dist` assets are restored from the assignment base
+by the executor and rebuilt remotely.
 
 ### Review repair history
 
-- Findings 2facf1217 (commit 9558f4091, this round): the flat→nested channel
-  shape change had no data migration or serde compatibility for persisted
+- Findings 2facf1217 (commit 9558f4091): the flat→nested channel shape
+  change had no data migration or serde compatibility for persisted
   `users.preferences` JSON — silent defaults-reset on upgrade plus the
   failing 000058 backfill test in `gyre-adapters`. Repaired with the compat
-  `Deserialize` + migration 000060 described above; the full
-  `gyre-adapters` lib suite (the review's reproduce command) is green.
+  `Deserialize` + migration 000060 described above; the full `gyre-adapters`
+  lib suite (the review's reproduce command) is green.
 - Findings 63609fed (commit ea8dd97b7): changed-line rustfmt violations and
   a `clippy::let_and_return` in test helpers — fixed, no behavior changes.
 - Findings 07fd53c9 (commit 8269e9067): the numeric
   `NotificationPriority::from_band` threshold mapping made the §Agent
   Escalations "Urgent → Owners" step unreachable; replaced by the per-type
   `for_notification_type` mapping with the spec amendment table and the
-  full-path regression test. A dead channel-prefs defaults test now executes.
+  full-path regression test.
 
-### Test evidence (repair-round HEAD 9558f4091, this sandbox)
+### Test evidence (merge-round HEAD ee154fffb, this sandbox)
 
-- `cargo test -p gyre-adapters --lib`: 394 passed, 0 failed, 12 ignored —
-  the review's reproduce command, previously failing at
-  `sqlite::tests::migration_000058_backfills_unique_url_safe_usernames`.
-- `cargo test -p gyre-server --lib`: 1573 passed, 0 failed (full suite:
-  notification_dispatcher 16 incl. band membership with
-  PersonaChangePendingApproval → High, api::users 21 incl. channel-prefs
-  API tests, git_http 49, secret_rotation, notifications).
-- `cargo test -p gyre-domain --lib`: 444 passed (incl. the two new
-  flat-shape compat tests); `cargo test -p gyre-common --lib`: 116 passed.
-- `cargo fmt` clean and zero clippy warnings in the touched files
-  (remaining warnings are the pre-existing gyre-ports merged baseline).
+- `cargo test -p gyre-server --lib`: 1622 passed, 0 failed — full suite
+  green after the assignment-base merge (notification_dispatcher 16 incl.
+  band membership, api::users 22 incl. channel-prefs API round-trip,
+  notifications 13, spawn 62).
+- `cargo test -p gyre-adapters --lib`: 410 passed, 0 failed, 6 ignored —
+  incl. migration 000058 backfill and the 000060 channel-shape convergence
+  regressions.
+- `cargo test -p gyre-domain --lib`: 445 passed (incl. the flat-shape
+  compat tests); `cargo test -p gyre-common --lib`: 120 passed.
+- `cargo fmt` clean; `cargo check -p gyre-server` clean at the merge HEAD.
 - Text gates OK: migration-versions (000060 is the next unused sequence),
-  migration-sql-portability (REPLACE/LIKE only), arch, dead-message-kinds.
-- Evidence: `/tmp/stage/review-evidence/task-112-channel-shape-repair.txt`.
+  migration-sql-portability, arch, dead-message-kinds, abac-route-registry,
+  abac-exempt-handlers, mcp-write-tools, unbounded-external-http,
+  relative-path-defaults, fabricated-scope-defaults, scope-literal-defaults,
+  in-memory-state-stores, inert-enforcement, forged-scope-fields,
+  lossy-secret-conversion, forwarded-header-trust, fail-open-ref-resolution,
+  byte-slice-truncation, mem-port-contracts.
+- Evidence: `/tmp/stage/review-evidence/task-112-merge-round.txt`.
 
 **Standing sandbox restriction for remote verification** (infrastructure,
 not a code defect): `awk` is mawk-only, so the gawk-syntax gates
