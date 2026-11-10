@@ -133,7 +133,7 @@ async fn evaluate_workspace(
             let already_active = existing.iter().any(|n| {
                 n.notification_type == NotificationType::AbandonedBranch
                     && n.is_active()
-                    && n.entity_ref.as_deref() == Some(&mr_id_str)
+                    && n.source.entity_id == mr_id_str
             });
 
             if already_active {
@@ -171,8 +171,9 @@ async fn evaluate_workspace(
                 })
                 .to_string(),
             );
-            notif.entity_ref = Some(mr_id_str.clone());
-            notif.repo_id = Some(mr.repository_id.to_string());
+            notif.source.entity_type = "mr".to_string();
+            notif.source.entity_id = mr_id_str.clone();
+            notif.source.repo_id = Some(mr.repository_id.clone());
 
             if let Err(e) = state.notifications.create(&notif).await {
                 warn!(
@@ -316,8 +317,8 @@ mod tests {
             notifs
                 .iter()
                 .any(|n| n.notification_type == NotificationType::AbandonedBranch
-                    && n.entity_ref.as_deref() == Some("mr1")
-                    && n.repo_id.as_deref() == Some("repo1")),
+                    && n.source.entity_id == "mr1"
+                    && n.source.repo_id.as_ref().map(|r| r.as_str()) == Some("repo1")),
             "expected AbandonedBranch notification with entity_ref=mr1 and repo_id=repo1"
         );
     }
@@ -638,11 +639,19 @@ mod tests {
             workspace_id: Id::new("ws7"),
             user_id: Id::new("user7"),
             notification_type: NotificationType::AbandonedBranch,
-            priority: 9,
+            priority: gyre_common::NotificationPriority::Low,
+            priority_rank: 9,
             title: "Old abandoned branch notification".to_string(),
             body: None,
-            entity_ref: Some("mr7".to_string()),
-            repo_id: None,
+            source: gyre_common::NotificationSource {
+                entity_type: "mr".to_string(),
+                entity_id: "mr7".to_string(),
+                workspace_id: Id::new("ws7"),
+                repo_id: None,
+            },
+            action_url: None,
+            read: false,
+            read_at: None,
             resolved_at: None,
             dismissed_at: Some(now_i64 - 86400), // dismissed 1 day ago
             created_at: now_i64 - 172800,        // created 2 days ago
@@ -709,11 +718,19 @@ mod tests {
             workspace_id: Id::new("ws8"),
             user_id: Id::new("user8"),
             notification_type: NotificationType::AbandonedBranch,
-            priority: 9,
+            priority: gyre_common::NotificationPriority::Low,
+            priority_rank: 9,
             title: "Already notified about abandoned branch".to_string(),
             body: None,
-            entity_ref: Some("mr8".to_string()),
-            repo_id: Some("repo1".to_string()),
+            source: gyre_common::NotificationSource {
+                entity_type: "mr".to_string(),
+                entity_id: "mr8".to_string(),
+                workspace_id: Id::new("ws8"),
+                repo_id: Some(Id::new("repo1")),
+            },
+            action_url: None,
+            read: false,
+            read_at: None,
             resolved_at: None,
             dismissed_at: None,
             created_at: now_i64 - 86400, // created 1 day ago
@@ -741,7 +758,7 @@ mod tests {
             .iter()
             .filter(|n| {
                 n.notification_type == NotificationType::AbandonedBranch
-                    && n.entity_ref.as_deref() == Some("mr8")
+                    && n.source.entity_id == "mr8"
             })
             .count();
 

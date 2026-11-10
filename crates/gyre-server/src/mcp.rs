@@ -141,6 +141,7 @@ fn tool_definitions() -> Value {
                             "description": "Task IDs that must complete before this task starts. Takes precedence over order."
                         },
                         "spec_path": { "type": "string", "description": "Spec path this task implements (e.g. system/auth.md)" },
+                        "spec_ref": { "type": "string", "description": "Pinned approved spec blob this task implements: path@sha. Optional; when absent, decomposition uses the ledger's current SHA" },
                         "repo_id": { "type": "string", "description": "Repository ID this task belongs to" },
                         "workspace_id": { "type": "string", "description": "Workspace ID this task belongs to" }
                     },
@@ -730,6 +731,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
             .collect();
     }
     task.spec_path = get_str(args, "spec_path").map(|s| s.to_string());
+    task.spec_ref = get_str(args, "spec_ref").map(|s| s.to_string());
     if let Some(repo_id) = get_str(args, "repo_id") {
         task.repo_id = Id::new(repo_id);
     }
@@ -1009,6 +1011,9 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
                     });
                     if let Some(ref tt) = t.task_type {
                         v["task_type"] = json!(format!("{:?}", tt).to_lowercase());
+                    }
+                    if let Some(ref sr) = t.spec_ref {
+                        v["spec_ref"] = json!(sr);
                     }
                     if let Some(ref sp) = t.spec_path {
                         v["spec_path"] = json!(sp);
@@ -1683,7 +1688,8 @@ async fn create_uncertainty_notifications(
             &tenant_id,
             now,
         );
-        notif.entity_ref = Some(agent_id.to_string());
+        notif.source.entity_type = "agent".to_string();
+        notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
         if let Err(e) = state.notifications.create(&notif).await {
@@ -3829,6 +3835,7 @@ mod tests {
                 "scope": "agent",
                 "task_id": "task-1"
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3841,6 +3848,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3856,6 +3864,7 @@ mod tests {
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -5504,6 +5513,7 @@ mod tests {
             roles: vec![UserRole::Agent],
             tenant_id: "default".to_string(),
             jwt_claims: Some(claims),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         }
@@ -5699,6 +5709,7 @@ mod tests {
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };

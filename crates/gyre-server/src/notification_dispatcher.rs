@@ -132,8 +132,10 @@ pub async fn dispatch_with<S: HttpSender>(
                 "priority": notif.priority,
                 "title": notif.title,
                 "body": notif.body,
-                "entity_ref": notif.entity_ref,
-                "repo_id": notif.repo_id,
+                "entity_type": notif.source.entity_type,
+                "entity_id": notif.source.entity_id,
+                "repo_id": notif.source.repo_id,
+                "action_url": notif.action_url,
                 "created_at": notif.created_at,
             })
             .to_string();
@@ -188,7 +190,8 @@ async fn queue_email(state: &AppState, notif: &Notification) {
         "notification_type": notif.notification_type.as_str(),
         "priority": notif.priority,
         "body": notif.body,
-        "entity_ref": notif.entity_ref,
+        "entity_id": notif.source.entity_id,
+        "action_url": notif.action_url,
         "queued_at": notif.created_at,
     });
     let key = format!("{}:{}", notif.user_id.as_str(), notif.id.as_str());
@@ -314,8 +317,12 @@ pub async fn notify_agent_escalation(
             now,
         );
         notif.body = content.body.clone();
-        notif.entity_ref = content.entity_ref.clone();
-        notif.repo_id = content.repo_id.clone();
+        notif.source.entity_type = "agent".to_string();
+        notif.source.entity_id = content
+            .entity_ref
+            .clone()
+            .unwrap_or_else(|| agent.id.to_string());
+        notif.source.repo_id = content.repo_id.clone().map(Id::new);
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(
                 user_id = %user_id,
@@ -332,13 +339,17 @@ pub async fn notify_agent_escalation(
 /// owner (user-management.md §Who Gets Notified). No-op when the persona has
 /// no owner or the owner id is empty.
 pub async fn notify_persona_approval_requested(state: &AppState, persona: &gyre_domain::Persona) {
-    let Some(owner) = persona.owner.as_deref() else {
-        return;
-    };
-    let owner = owner.strip_prefix("user:").unwrap_or(owner);
-    if owner.is_empty() {
-        return;
+    // Recipients per user-management.md §Who Gets Notified: the persona's
+    // `owner`; when no owner is set, the workspace Admins/Owners (fallback
+    // so a Pending persona is never silently unassigned).
+    let mut recipients: Vec<Id> = Vec::new();
+    if let Some(owner) = persona.owner.as_deref() {
+        let owner = owner.strip_prefix("user:").unwrap_or(owner);
+        if !owner.is_empty() {
+            recipients.push(Id::new(owner.to_string()));
+        }
     }
+    let owner_missing = recipients.is_empty();
     // Workspace scope comes from the persona's scope; Tenant/Repo scopes
     // resolve to their entity's workspace when possible, else the
     // notification is skipped (never fabricated — see
@@ -360,12 +371,45 @@ pub async fn notify_persona_approval_requested(state: &AppState, persona: &gyre_
             .map(|r| r.workspace_id),
     };
     let Some(workspace_id) = scope_ws else {
-        tracing::warn!(
-            persona_id = %persona.id,
-            "persona-approval routing: cannot resolve workspace scope — skipping notification"
-        );
+        if owner_missing {
+            tracing::info!(
+                persona_id = %persona.id,
+                "persona-approval routing: no routable owner (no owner set, non-workspace scope)"
+            );
+        } else {
+            tracing::warn!(
+                persona_id = %persona.id,
+                "persona-approval routing: cannot resolve workspace scope — skipping notification"
+            );
+        }
         return;
     };
+    if owner_missing {
+        // No owner set: fall back to the workspace's Admins and Owners.
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&workspace_id)
+            .await
+            .unwrap_or_default();
+        recipients.extend(
+            members
+                .into_iter()
+                .filter(|m| {
+                    matches!(
+                        m.role,
+                        gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
+                    )
+                })
+                .map(|m| m.user_id),
+        );
+        if recipients.is_empty() {
+            tracing::info!(
+                persona_id = %persona.id,
+                "persona-approval routing: no owner and no workspace Admins/Owners — skipping notification"
+            );
+            return;
+        }
+    }
     let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
         Ok(Some(ws)) => ws.tenant_id.to_string(),
         _ => {
@@ -377,10 +421,22 @@ pub async fn notify_persona_approval_requested(state: &AppState, persona: &gyre_
             return;
         }
     };
+    for user_id in recipients {
+        notify_single_persona_approval(state, &workspace_id, user_id, persona, &tenant_id).await;
+    }
+}
+
+async fn notify_single_persona_approval(
+    state: &AppState,
+    workspace_id: &Id,
+    user_id: Id,
+    persona: &gyre_domain::Persona,
+    tenant_id: &str,
+) {
     crate::notifications::notify_rich(
         state,
-        workspace_id,
-        Id::new(owner.to_string()),
+        workspace_id.clone(),
+        user_id,
         NotificationType::PersonaApprovalRequested,
         format!("Persona '{}' requires your approval", persona.name),
         tenant_id,
@@ -393,6 +449,8 @@ pub async fn notify_persona_approval_requested(state: &AppState, persona: &gyre_
             .to_string(),
         ),
         Some(persona.id.to_string()),
+        None,
+        "persona",
         None,
     )
     .await;
@@ -441,6 +499,8 @@ pub async fn notify_merge_queue_paused(
             Some(body.clone()),
             Some(repo.id.to_string()),
             Some(repo.id.to_string()),
+            "repo",
+            None,
         )
         .await;
     }
@@ -479,7 +539,7 @@ pub async fn notify_agent_budget_warning(
             state,
             agent.workspace_id.clone(),
             user_id,
-            NotificationType::BudgetWarning,
+            NotificationType::AgentBudgetWarning,
             format!(
                 "Agent '{}' budget warning: {:.0}% of workspace budget used",
                 agent.name, usage_pct
@@ -487,6 +547,8 @@ pub async fn notify_agent_budget_warning(
             tenant_id,
             Some(body.clone()),
             Some(agent.id.to_string()),
+            None,
+            "agent",
             None,
         )
         .await;
@@ -524,11 +586,13 @@ pub async fn notify_agent_budget_exhausted(
             state,
             agent.workspace_id.clone(),
             user_id,
-            NotificationType::BudgetExhausted,
+            NotificationType::AgentBudgetExhausted,
             format!("Agent '{}' budget exhausted — agents stopping", agent.name),
             tenant_id,
             Some(body.clone()),
             Some(agent.id.to_string()),
+            None,
+            "agent",
             None,
         )
         .await;
@@ -603,6 +667,8 @@ pub async fn notify_security_finding(
             Some(body.clone()),
             entity_ref.clone(),
             repo_id.clone(),
+            "workspace",
+            None,
         )
         .await;
     }
@@ -641,7 +707,7 @@ mod tests {
         );
         // High: budget warning, gate failure.
         assert_eq!(
-            band(NotificationType::BudgetWarning),
+            band(NotificationType::AgentBudgetWarning),
             NotificationPriority::High
         );
         assert_eq!(
@@ -1143,9 +1209,9 @@ mod tests {
             NotificationType::PersonaApprovalRequested
         );
         assert_eq!(
-            owner_notifs[0].entity_ref.as_deref(),
-            Some("persona-1"),
-            "entity_ref must deep-link the persona"
+            owner_notifs[0].source.entity_id.as_str(),
+            "persona-1",
+            "source entity_id must deep-link the persona"
         );
 
         // Nobody else was notified (routing table: owner only).
@@ -1161,7 +1227,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persona_approval_requested_without_owner_is_noop() {
+    async fn persona_approval_requested_without_owner_or_admins_is_noop() {
         let state = test_state();
         let persona = gyre_domain::Persona::new(
             Id::new("persona-2"),
@@ -1171,14 +1237,16 @@ mod tests {
             "Review code.",
             1000,
         );
-        // owner: None (default).
+        // owner: None (default), and ws-1 has no Admin/Owner members → no
+        // routable recipient (merged fallback from main's task-123 routes
+        // ownerless personas to workspace Admins/Owners).
         notify_persona_approval_requested(&state, &persona).await;
         let all = state
             .notifications
             .list_for_user(&Id::new("reviewer"), None, None, None, None, 50, 0)
             .await
             .unwrap();
-        assert!(all.is_empty(), "no owner → no notification");
+        assert!(all.is_empty(), "no owner and no Admins/Owners → no notification");
     }
 
     #[tokio::test]
@@ -1218,7 +1286,10 @@ mod tests {
                 notifs[0].notification_type,
                 NotificationType::MergeQueuePaused
             );
-            assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-pause"));
+            assert_eq!(
+                notifs[0].source.repo_id.as_ref().map(|r| r.as_str()),
+                Some("repo-pause")
+            );
         }
         for user in ["dev-1", "viewer-1"] {
             let notifs = state
@@ -1254,7 +1325,10 @@ mod tests {
                 1,
                 "{user} must receive the budget warning (spawner + Admins)"
             );
-            assert_eq!(notifs[0].notification_type, NotificationType::BudgetWarning);
+            assert_eq!(
+                notifs[0].notification_type,
+                NotificationType::AgentBudgetWarning
+            );
         }
         let owner_notifs = state
             .notifications
@@ -1290,7 +1364,7 @@ mod tests {
             );
             assert_eq!(
                 notifs[0].notification_type,
-                NotificationType::BudgetExhausted
+                NotificationType::AgentBudgetExhausted
             );
         }
         let admin_notifs = state
@@ -1350,8 +1424,11 @@ mod tests {
                 NotificationType::SecurityFinding
             );
             assert_eq!(notifs[0].title, "[Critical] SQL injection in query builder");
-            assert_eq!(notifs[0].entity_ref.as_deref(), Some("mr-42"));
-            assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-1"));
+            assert_eq!(notifs[0].source.entity_id.as_str(), "mr-42");
+            assert_eq!(
+                notifs[0].source.repo_id.as_ref().map(|r| r.as_str()),
+                Some("repo-1")
+            );
         }
         // Non-privileged members must not be notified.
         for user in ["admin-1", "dev-1"] {

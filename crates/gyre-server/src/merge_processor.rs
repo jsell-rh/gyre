@@ -720,6 +720,8 @@ pub(crate) async fn trip_circuit_breaker(
             ),
             Some(mr_id.to_string()),
             Some(repo_id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -1119,6 +1121,8 @@ async fn warn_deep_chain(state: &AppState, depth: usize, workspace_id: &Id) {
             "default",
             Some(body_json.clone()),
             None,
+            None,
+            "workspace",
             None,
         )
         .await;
@@ -1637,6 +1641,8 @@ async fn rollback_atomic_group(
             Some(body_json.clone()),
             Some(failing_mr_id.to_string()),
             Some(repo.id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -3139,6 +3145,8 @@ async fn notify_escalation(
         ),
         Some(mr.id.to_string()),
         Some(repo.id.to_string()),
+        "mr",
+        None,
     )
     .await;
 }
@@ -3293,6 +3301,8 @@ pub(crate) async fn trigger_cascade_tests(
                 Some(body_json),
                 Some(dep_edge.source_repo_id.to_string()),
                 Some(merged_repo_id.to_string()),
+                "repo",
+                None,
             )
             .await;
         }
@@ -3419,6 +3429,8 @@ pub(crate) async fn report_cascade_test_result(
                 "default",
                 Some(body_json),
                 Some(task.repo_id.to_string()),
+                None,
+                "repo",
                 None,
             )
             .await;
@@ -4197,14 +4209,14 @@ mod tests {
 
         // Verify entity_ref and priority (F3).
         assert_eq!(
-            notif.entity_ref.as_deref(),
-            Some(repo_a.id.as_str()),
-            "entity_ref should be the repo_id"
+            notif.source.entity_id.as_str(),
+            repo_a.id.as_str(),
+            "source entity should be the repo_id"
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::CascadeTestFailed.default_priority(),
-            "priority should match CascadeTestFailed priority"
+            notif.priority_rank,
+            gyre_common::NotificationType::CascadeTestFailed.default_priority_rank(),
+            "priority rank should match CascadeTestFailed priority"
         );
 
         // Verify cascade_test_failed event was also emitted (F1).
@@ -4352,14 +4364,14 @@ mod tests {
 
         // Verify entity_ref and priority
         assert_eq!(
-            notif.entity_ref.as_deref(),
-            Some(repo_a.id.as_str()),
-            "entity_ref should be the dependent repo_id"
+            notif.source.entity_id.as_str(),
+            repo_a.id.as_str(),
+            "source entity should be the dependent repo_id"
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::CascadeTestTriggered.default_priority(),
-            "priority should match CascadeTestTriggered priority"
+            notif.priority_rank,
+            gyre_common::NotificationType::CascadeTestTriggered.default_priority_rank(),
+            "priority rank should match CascadeTestTriggered priority"
         );
     }
 
@@ -4732,11 +4744,11 @@ mod tests {
             gyre_common::NotificationType::DependencyChainTooDeep
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::DependencyChainTooDeep.default_priority(),
+            notif.priority_rank,
+            gyre_common::NotificationType::DependencyChainTooDeep.default_priority_rank(),
         );
         assert_eq!(
-            notif.priority, 7,
+            notif.priority_rank, 7,
             "DependencyChainTooDeep should be priority 7"
         );
         assert!(notif.title.contains("11 levels deep"));
@@ -5745,9 +5757,9 @@ mod tests {
 
         // Verify entity_ref.
         assert_eq!(
-            notifs_a[0].entity_ref.as_deref(),
-            Some(mr_second.id.as_str()),
-            "entity_ref should be the failing MR id"
+            notifs_a[0].source.entity_id.as_str(),
+            mr_second.id.as_str(),
+            "source entity should be the failing MR id"
         );
 
         // Check notifications for author-B.
@@ -6636,7 +6648,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -6957,7 +6969,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -7010,7 +7022,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -9946,5 +9958,82 @@ mod tests {
             "hold must name supervised trust, got: {:?}",
             entry.error_message
         );
+    }
+
+    /// user-management.md §Notification Entity: pausing a merge queue
+    /// notifies workspace Admins/Owners (MergeQueuePaused, High) with a deep
+    /// link to the repo — and nobody else.
+    #[tokio::test]
+    async fn pause_merge_queue_notifies_admins_and_owners() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-pause");
+        let ws = Workspace::new(
+            ws_id.clone(),
+            Id::new("tenant-1"),
+            "pause-ws",
+            "pause-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = create_repo_in_workspace(&state, "paused-repo", "ws-pause").await;
+
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-dev", WorkspaceRole::Developer),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                Id::new(uid),
+                ws_id.clone(),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        pause_merge_queue(&state, &repo, "post-merge validation failed").await;
+
+        for uid in ["user-admin", "user-owner"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(notifs.len(), 1, "{uid} must be notified");
+            let n = &notifs[0];
+            assert_eq!(
+                n.notification_type,
+                gyre_common::NotificationType::MergeQueuePaused
+            );
+            assert_eq!(
+                n.priority,
+                gyre_common::NotificationPriority::High,
+                "MergeQueuePaused is High per user-management.md"
+            );
+            assert_eq!(n.source.entity_type, "repo");
+            assert_eq!(n.source.entity_id, repo.id.as_str());
+            assert_eq!(
+                n.action_url.as_deref(),
+                Some("/workspaces/pause-ws/r/paused-repo"),
+                "deep link resolves through the workspace slug + repo name"
+            );
+        }
+        for uid in ["user-dev", "user-viewer"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .await
+                .unwrap();
+            assert!(
+                notifs.is_empty(),
+                "{uid} must not be notified for a queue pause"
+            );
+        }
     }
 }

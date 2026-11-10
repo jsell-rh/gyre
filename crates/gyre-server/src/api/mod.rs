@@ -63,6 +63,18 @@ pub mod version;
 pub mod workload;
 pub mod workspaces;
 
+/// Deserialize helper that keeps an explicit JSON `null` distinct from an
+/// absent field. serde collapses `null` to `None` inside `Option<Value>`,
+/// which would make a "clear this field" request indistinguishable from
+/// "leave it alone". Returns `Some(Value::Null)` for a present null so
+/// handlers can branch on the difference. Pair with `#[serde(default)]`.
+pub fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
     query_audit_events, record_audit_event, update_siem_target,
@@ -86,8 +98,9 @@ use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
     get_channel_preferences, get_judgments, get_me, get_my_notifications, get_notification_count,
     get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
-    remove_member, resolve_notification, update_channel_preferences, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    mark_notification_read, mark_notification_unread, remove_member, resolve_notification,
+    update_channel_preferences, update_me, update_member_role, update_notification_preferences,
+    update_team,
 };
 
 use crate::AppState;
@@ -235,6 +248,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/commits/:sha/signature",
             get(jj::get_commit_signature),
+        )
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature/verification",
+            get(jj::get_commit_signature_verification),
         )
         // Agents
         .route(
@@ -642,6 +659,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",
@@ -873,6 +892,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/notifications/preferences",
             get(get_channel_preferences).put(update_channel_preferences),
+        )
+        .route(
+            "/api/v1/notifications/:id/read",
+            post(mark_notification_read),
+        )
+        .route(
+            "/api/v1/notifications/:id/unread",
+            post(mark_notification_unread),
         )
         // Workspace members (M22.8)
         .route(

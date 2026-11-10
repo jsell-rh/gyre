@@ -300,7 +300,7 @@ impl NotificationPriority {
             | T::MrReverted
             | T::AgentNeedsClarification
             | T::MergeQueueEscalation
-            | T::BudgetExhausted
+            | T::AgentBudgetExhausted
             // Active impersonation of this user (identity-security.md
             // §Impersonation, merged from main's task-109): security alert
             // on the user's own account, priority 1.
@@ -309,40 +309,62 @@ impl NotificationPriority {
             // (spec examples), plus decisions/blocks that stall work soon:
             // approvals, rejections, conflicts, paused queue, failed groups.
             T::GateFailure
-            | T::BudgetWarning
-            | T::SpecPendingApproval
+            | T::AgentBudgetWarning
+            | T::SpecApprovalRequested
             | T::SpecRejected
             | T::ConstraintViolation
             | T::SpecConflict
             | T::PersonaApprovalRequested
             // Persona change awaiting spec-lifecycle approval (merged from
             // main's task-116): same pending-approval decision class as
-            // SpecPendingApproval / PersonaApprovalRequested.
+            // SpecApprovalRequested / PersonaApprovalRequested.
             | T::PersonaChangePendingApproval
             | T::MergeQueuePaused
             | T::CascadeTestFailed
             | T::AtomicGroupFailure
             // Impersonation consent request (identity-security.md
             // §Impersonation, merged from main's task-109): same
-            // pending-approval decision class as SpecPendingApproval.
+            // pending-approval decision class as SpecApprovalRequested.
             | T::ImpersonationRequest
             // Secret approaching expiry (platform-model.md §7, merged from
-            // main): same approaching-deadline class as BudgetWarning.
-            | T::SecretExpiring => Self::High,
+            // main): same approaching-deadline class as AgentBudgetWarning.
+            | T::SecretExpiring
+            // Agent failed and needs attention (user-management.md
+            // §Notification Entity, merged from main's unified taxonomy):
+            // High per the spec's level examples.
+            | T::AgentFailed
+            // Breaking change in a repo others depend on (merged from
+            // main): stalls dependent work soon.
+            | T::BreakingChangeDetected
+            // Platform-level system alert (merged from main): default High
+            // per the taxonomy's numeric rank 3.
+            | T::SystemAlert => Self::High,
             // Medium - needs attention eventually: spec drift (spec example),
             // stale-dependency-adjacent and review-arbitration items.
             T::MetaSpecDrift
             | T::CrossWorkspaceSpecChange
             | T::ConflictingInterpretations
             | T::DependencyChainTooDeep
-            | T::SpecAssertionFailure => Self::Medium,
+            | T::SpecAssertionFailure
+            // Spec drift detected by the spec patrol (merged from main's
+            // unified taxonomy): same drift class as MetaSpecDrift.
+            | T::SpecDriftDetected
+            // A dependency edge went stale (merged from main): needs
+            // attention eventually.
+            | T::DependencyStale => Self::Medium,
             // Low - informational (MR merged, gate passed - spec examples):
             // completions, suggestions, notices.
             T::AgentCompleted
             | T::TrustSuggestion
             | T::AbandonedBranch
             | T::SuggestedSpecLink
-            | T::CascadeTestTriggered => Self::Low,
+            | T::CascadeTestTriggered
+            // Informational notices from main's unified taxonomy: MR merged,
+            // gates passed, workspace invitations and membership changes.
+            | T::MrMerged
+            | T::GatePassed
+            | T::InvitationReceived
+            | T::MembershipChanged => Self::Low,
         }
     }
 }

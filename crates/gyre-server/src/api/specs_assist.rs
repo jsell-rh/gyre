@@ -253,6 +253,8 @@ async fn spec_conflict_response(
             Some(body.clone()),
             Some(spec_path.to_string()),
             Some(repo.id.to_string()),
+            "spec",
+            None,
         )
         .await;
     }
@@ -774,11 +776,13 @@ pub async fn save_spec(
             state.as_ref(),
             repo.workspace_id.clone(),
             recipient,
-            NotificationType::SpecPendingApproval,
+            NotificationType::SpecApprovalRequested,
             format!("Spec pending approval: {}", req.spec_path),
             &tenant_id,
             None,
             Some(mr_id.to_string()),
+            Some(repo.id.to_string()),
+            "mr",
             None,
         )
         .await;
@@ -1031,10 +1035,10 @@ mod tests {
         let notifs = state.notifications.list_recent(10).await.unwrap();
         let spec_notif = notifs
             .iter()
-            .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
-            .expect("SpecPendingApproval notification must be created");
-        assert_eq!(spec_notif.priority, 2);
-        assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
+            .find(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+            .expect("SpecApprovalRequested notification must be created");
+        assert_eq!(spec_notif.priority_rank, 2);
+        assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
     }
 
     #[tokio::test]
@@ -1743,6 +1747,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -1783,10 +1788,10 @@ mod tests {
                 1,
                 "user {uid} must get exactly one SpecConflict notification, got {notifs:?}"
             );
-            assert_eq!(conflict[0].priority, 2);
+            assert_eq!(conflict[0].priority_rank, 2);
             assert_eq!(
-                conflict[0].entity_ref.as_deref(),
-                Some("specs/system/conflict.md")
+                conflict[0].source.entity_id.as_str(),
+                "specs/system/conflict.md"
             );
             let body: serde_json::Value =
                 serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();

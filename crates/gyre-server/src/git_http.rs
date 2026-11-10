@@ -2189,8 +2189,9 @@ async fn process_persona_changes(
                                  human review.",
                                 repo.name
                             ));
-                            notif.entity_ref = Some(format!("persona:{slug}"));
-                            notif.repo_id = Some(repo.id.to_string());
+                            notif.source.entity_type = "persona".to_string();
+                            notif.source.entity_id = slug.clone();
+                            notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.notifications.create(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
@@ -2574,6 +2575,8 @@ async fn notify_cross_workspace_dependents(
                 dep_workspace.tenant_id.to_string(),
                 Some(body),
                 Some(changed_spec_path.to_string()),
+                None,
+                "spec",
                 None,
             )
             .await;
@@ -3812,12 +3815,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
@@ -7152,8 +7160,9 @@ mod tests {
             })
             .expect("owner must be notified");
         assert_eq!(notif.title, title);
-        assert_eq!(notif.entity_ref.as_deref(), Some("persona:security"));
-        assert_eq!(notif.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(notif.source.entity_type, "persona");
+        assert_eq!(notif.source.entity_id, "security");
+        assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
     }

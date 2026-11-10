@@ -15,6 +15,7 @@ pub mod audit;
 pub mod budget;
 pub mod budget_call;
 pub mod chain_attestation;
+pub mod commit_signature;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
@@ -597,8 +598,11 @@ mod tests {
 
         // Un-mark 000060 so the runner re-applies the real up.sql to the
         // seeded rows (the same transition a deployed database makes).
+        // Pinned to the exact version: the base also ships a distinct
+        // 20261009000060 (commit_signatures) whose version string must not
+        // match.
         let versions: Vec<VersionRow> = diesel::sql_query(
-            "SELECT version FROM __diesel_schema_migrations WHERE version LIKE '%000060%'",
+            "SELECT version FROM __diesel_schema_migrations WHERE version = '20261109000060'",
         )
         .load(&mut conn)
         .unwrap();

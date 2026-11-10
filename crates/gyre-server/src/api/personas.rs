@@ -147,14 +147,11 @@ pub async fn create_persona(
     // authenticated user's id — `auth.agent_id` is only the display name
     // for JWT/API-key auth (and "system" for the global dev token), which
     // is not a real user inbox. Callers without a user identity (dev/
-    // agent tokens) fall back to the "system" inbox so the approval
-    // request stays visible rather than dropped.
-    persona.owner = Some(
-        auth.user_id
-            .as_ref()
-            .map(|id| format!("user:{id}"))
-            .unwrap_or_else(|| "system".to_string()),
-    );
+    // agent tokens) leave the owner unset so the approval request routes
+    // to the workspace Admins/Owners (main's task-123 fallback) instead of
+    // a "system" inbox — the request stays visible to real approvers
+    // rather than a token-side inbox nobody reads.
+    persona.owner = auth.user_id.as_ref().map(|id| format!("user:{id}"));
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
@@ -699,5 +696,91 @@ mod tests {
             msg.contains("workspace"),
             "expected workspace-not-found error, got: {msg}"
         );
+    }
+
+    /// user-management.md §Notification Entity: creating a Pending persona
+    /// requests approval from the workspace Admins/Owners when no owner is
+    /// set (PersonaApprovalRequested).
+    #[tokio::test]
+    async fn create_pending_persona_requests_approval_from_workspace_admins() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let ws_id = Id::new("ws-pa");
+        let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), "pa-ws", "pa-ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                crate::api::new_id(),
+                Id::new(uid),
+                ws_id.clone(),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({
+            "name": "reviewer",
+            "slug": "reviewer",
+            "scope": { "kind": "Workspace", "id": "ws-pa" },
+            "system_prompt": "You review things.",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/personas")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for uid in ["user-admin", "user-owner"] {
+            let notifs = gyre_ports::NotificationRepository::list_for_user(
+                state.notifications.as_ref(),
+                &Id::new(uid),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(notifs.len(), 1, "{uid} must be asked to approve");
+            let n = &notifs[0];
+            assert_eq!(
+                n.notification_type,
+                gyre_common::NotificationType::PersonaApprovalRequested
+            );
+            assert_eq!(n.source.entity_type, "persona");
+            assert!(n.source.entity_id.starts_with("persona-") || !n.source.entity_id.is_empty());
+        }
+        let viewer_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-viewer"),
+            Some(&ws_id),
+            None,
+            None,
+            None,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(viewer_notifs.is_empty(), "Viewer is not an approver");
     }
 }

@@ -254,7 +254,8 @@ async fn notify_workspace_members(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(source_path.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = source_path.to_string();
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(
@@ -327,6 +328,8 @@ async fn notify_spec_owner_of_drift(state: &AppState, source_path: &str, target_
         tenant_id,
         Some(notif_body),
         Some(source_path.to_string()),
+        None,
+        "spec",
         None,
     )
     .await;

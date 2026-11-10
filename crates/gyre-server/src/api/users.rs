@@ -213,11 +213,23 @@ pub struct NotificationResponse {
     pub id: String,
     pub workspace_id: String,
     pub notification_type: String,
+    /// HSI §8 numeric rank (1 highest – 10 lowest). Kept numeric for the
+    /// Inbox UI's sort order and P-badge.
     pub priority: u8,
+    /// Four-level priority (user-management.md §Notification Entity):
+    /// Low / Medium / High / Urgent.
+    pub priority_level: String,
     pub title: String,
     pub body: Option<String>,
     pub entity_ref: Option<String>,
     pub repo_id: Option<String>,
+    /// Structured source kind ("agent", "mr", "spec", "gate", "budget",
+    /// "workspace", "system").
+    pub entity_type: String,
+    /// Deep link to the relevant page (user-management.md §Notification Entity).
+    pub action_url: Option<String>,
+    pub read: bool,
+    pub read_at: Option<i64>,
     pub resolved_at: Option<i64>,
     pub dismissed_at: Option<i64>,
     pub created_at: i64,
@@ -225,15 +237,25 @@ pub struct NotificationResponse {
 
 impl From<Notification> for NotificationResponse {
     fn from(n: Notification) -> Self {
+        let entity_id = n.source.entity_id.clone();
         Self {
             id: n.id.to_string(),
             workspace_id: n.workspace_id.to_string(),
             notification_type: n.notification_type.as_str().to_string(),
-            priority: n.priority,
+            priority: n.priority_rank,
+            priority_level: n.priority.as_str().to_string(),
             title: n.title,
             body: n.body,
-            entity_ref: n.entity_ref,
-            repo_id: n.repo_id,
+            entity_ref: if entity_id.is_empty() {
+                None
+            } else {
+                Some(entity_id)
+            },
+            repo_id: n.source.repo_id.as_ref().map(|r| r.as_str().to_string()),
+            entity_type: n.source.entity_type,
+            action_url: n.action_url,
+            read: n.read,
+            read_at: n.read_at,
             resolved_at: n.resolved_at,
             dismissed_at: n.dismissed_at,
             created_at: n.created_at,
@@ -349,6 +371,63 @@ pub async fn resolve_notification(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/v1/notifications/:id/read
+///
+/// Marks the notification read (stamps `read_at`). Per-handler auth: verifies
+/// notification belongs to caller AND caller.tenant_id matches
+/// (user-management.md §Notification Entity read state).
+pub async fn mark_notification_read(
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let notif_id = Id::new(id);
+    let notif = state
+        .notifications
+        .get(&notif_id, &user_id)
+        .await?
+        .ok_or(ApiError::NotFound("Notification not found".to_string()))?;
+    if notif.tenant_id != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant notification access denied".to_string(),
+        ));
+    }
+    state
+        .notifications
+        .mark_read(&notif_id, &user_id, true)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/notifications/:id/unread
+///
+/// Clears the read state (and `read_at`). Per-handler auth: verifies
+/// notification belongs to caller AND caller.tenant_id matches.
+pub async fn mark_notification_unread(
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let notif_id = Id::new(id);
+    let notif = state
+        .notifications
+        .get(&notif_id, &user_id)
+        .await?
+        .ok_or(ApiError::NotFound("Notification not found".to_string()))?;
+    if notif.tenant_id != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant notification access denied".to_string(),
+        ));
+    }
+    state
+        .notifications
+        .mark_read(&notif_id, &user_id, false)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── Workspace Members ───────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -397,17 +476,16 @@ pub async fn invite_member(
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
 
-    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action
-    // needed). Routed through notify_rich (the codebase's notification helper,
-    // which fans out to the recipient's configured channels per
-    // user-management.md §Delivery Channels): a notification is a courtesy
-    // side-effect, not a dependent record of the membership — its failure must
-    // not fail the invite, and notify_rich logs-and-continues internally.
+    // Notify the invited user (user-management.md §Notification Entity:
+    // InvitationReceived, Low — informational). Routed through notify_rich
+    // (the codebase's notification helper): a notification is a courtesy
+    // side-effect, not a dependent record of the membership — its failure
+    // must not fail the invite, and notify_rich logs-and-continues internally.
     crate::notifications::notify_rich(
         state.as_ref(),
         membership.workspace_id.clone(),
         membership.user_id.clone(),
-        NotificationType::TrustSuggestion,
+        NotificationType::InvitationReceived,
         format!(
             "You have been invited to workspace {}",
             membership.workspace_id
@@ -415,6 +493,8 @@ pub async fn invite_member(
         auth.tenant_id.clone(),
         None,
         None,
+        None,
+        "workspace",
         None,
     )
     .await;
@@ -476,6 +556,35 @@ pub async fn remove_member(
         .await?
         .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
     state.workspace_memberships.delete(&membership.id).await?;
+
+    // Notify the removed user (user-management.md §Notification Entity:
+    // MembershipChanged — Low, informational). Best-effort: the membership is
+    // already deleted; notification failure must not fail the removal. The
+    // tenant scope comes from the workspace lookup — skip rather than
+    // fabricate one when it cannot be resolved.
+    if let Ok(Some(ws)) = state.workspaces.find_by_id(&ws_id).await {
+        crate::notifications::notify_rich(
+            state.as_ref(),
+            ws_id.clone(),
+            uid.clone(),
+            NotificationType::MembershipChanged,
+            format!("Your membership in workspace '{}' was removed", ws.name),
+            ws.tenant_id.to_string(),
+            Some(
+                serde_json::json!({
+                    "workspace_id": ws_id.as_str(),
+                    "user_id": uid.as_str(),
+                })
+                .to_string(),
+            ),
+            Some(ws_id.to_string()),
+            None,
+            "workspace",
+            None,
+        )
+        .await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1171,7 +1280,7 @@ mod tests {
         let state = test_state();
         seed_notification(
             &state,
-            NotificationType::SpecPendingApproval,
+            NotificationType::SpecApprovalRequested,
             "Spec needs approval",
         )
         .await;
@@ -1191,8 +1300,116 @@ mod tests {
         let json = body_json(resp).await;
         let notifs = json["notifications"].as_array().unwrap();
         assert_eq!(notifs.len(), 1);
-        assert_eq!(notifs[0]["notification_type"], "SpecPendingApproval");
+        assert_eq!(notifs[0]["notification_type"], "SpecApprovalRequested");
         assert_eq!(notifs[0]["title"], "Spec needs approval");
+        // user-management.md §Notification Entity fields are exposed on the
+        // list response: four-level priority, structured source, deep link,
+        // and read state.
+        assert_eq!(notifs[0]["priority"], 2);
+        assert_eq!(notifs[0]["priority_level"], "Urgent");
+        assert_eq!(notifs[0]["entity_type"], "workspace");
+        assert_eq!(notifs[0]["read"], false);
+        assert!(notifs[0]["read_at"].is_null());
+        assert!(notifs[0]["action_url"].is_null());
+    }
+
+    /// POST /api/v1/notifications/:id/read marks the caller's notification
+    /// read (stamping read_at); POST .../unread clears both. The read state
+    /// is scoped to the owning user exactly like dismiss/resolve
+    /// (user-management.md §Notification Entity).
+    #[tokio::test]
+    async fn mark_notification_read_and_unread_endpoints() {
+        let state = test_state();
+        let notif_id = Id::new("notif-read-1");
+        let notif = Notification::new(
+            notif_id.clone(),
+            Id::new("ws-default"),
+            Id::new("system"), // matches the global test token's resolved user
+            NotificationType::GatePassed,
+            "All gates passed",
+            "default",
+            1_700_000_000,
+        );
+        state.notifications.create(&notif).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notifications/notif-read-1/read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let n = state
+            .notifications
+            .get(&notif_id, &Id::new("system"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n.read);
+        assert!(n.read_at.is_some(), "read must stamp read_at");
+
+        // Unread clears both — no stale read timestamp.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notifications/notif-read-1/unread")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let n = state
+            .notifications
+            .get(&notif_id, &Id::new("system"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!n.read);
+        assert!(n.read_at.is_none());
+
+        // Another user's notification is invisible: 404, no mutation.
+        let other = Notification::new(
+            Id::new("notif-read-2"),
+            Id::new("ws-default"),
+            Id::new("someone-else"),
+            NotificationType::GatePassed,
+            "Not yours",
+            "default",
+            1_700_000_000,
+        );
+        state.notifications.create(&other).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notifications/notif-read-2/read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let n = state
+            .notifications
+            .get(&Id::new("notif-read-2"), &Id::new("someone-else"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!n.read, "cross-user mark_read must not mutate");
     }
 
     #[tokio::test]
@@ -1243,7 +1460,7 @@ mod tests {
         .await;
         seed_notification(
             &state,
-            NotificationType::SpecPendingApproval,
+            NotificationType::SpecApprovalRequested,
             "Approve spec",
         )
         .await;

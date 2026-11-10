@@ -147,6 +147,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/undo", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/commits/:sha/signature/verification",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/dependencies/:dependency_id",
@@ -372,6 +377,15 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // Tenant-scoped compute targets (agent-runtime spec §3):
+                // reads are tenant-member visible (handler enforces tenant
+                // scoping), mutations additionally require the Admin role
+                // in the handler body. Registered here rather than carried
+                // as exemption-file debt — the two stale exemption entries
+                // for these paths were removed when the routes landed in
+                // the resolver (check-abac-route-registry.sh shrinks).
+                RouteResourceMapping::api("/api/v1/compute-targets", "compute_target", None),
+                RouteResourceMapping::api("/api/v1/compute-targets/:id", "compute_target", None),
                 // ── Secrets (platform-model.md §7, task-098) ─────────────
                 // Admin-only: builtin-secret-admin-only (priority 860) denies
                 // every non-Admin role on the "secret" resource type; Admins
@@ -397,6 +411,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
+                RouteResourceMapping::api("/api/v1/search/suggest", "search", None),
+                RouteResourceMapping::api("/api/v1/search/facets", "search", None),
                 RouteResourceMapping::api("/api/v1/admin/search/reindex", "admin", Some("write")),
                 // ── Tenants ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/tenants", "tenant", None),
@@ -516,6 +532,8 @@ impl ResourceResolver {
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
                 RouteResourceMapping::exempt("/api/v1/notifications/preferences"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/read"),
+                RouteResourceMapping::exempt("/api/v1/notifications/:id/unread"),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
@@ -1279,6 +1297,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin",
                 "realm_access": { "roles": ["admin"] }
@@ -1326,6 +1345,7 @@ pub mod tests {
 
         let token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -1801,6 +1821,7 @@ pub mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer",
                 "realm_access": { "roles": ["developer"] }
