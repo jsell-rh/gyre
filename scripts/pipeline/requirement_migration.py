@@ -51,7 +51,7 @@ def plan(store,root,change_revision=None):
         if not store.db.execute("SELECT 1 FROM events WHERE task=? AND kind='requirements_changed'",(task['name'],)).fetchone():continue
         if (data.get('repair') or {}).get('category') not in (None,'requirements_changed'):continue
         if store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(task['name'],)).fetchone():continue
-        receipt=None;equivalent=False;reason='No reconstructable confirmed merge receipt'
+        receipt=None;historical_body=None;equivalent=False;reason='No reconstructable confirmed merge receipt'
         for row in store.db.execute("SELECT * FROM work WHERE task=? AND stage IN ('observe','publish') AND state='succeeded' ORDER BY updated DESC",(task['name'],)):
             outcome=json.loads(row['result'] or '{}');inp=json.loads(row['input'])
             sha=outcome.get('sha') if outcome.get('status') == 'merged' else outcome.get('merged')
@@ -61,6 +61,7 @@ def plan(store,root,change_revision=None):
                 legacy,old,body=old_snapshot(root,sha,task['name'],registry)
                 if legacy!=row['generation']:
                     reason='Historical contract does not match the recorded merge generation';continue
+                historical_body=body
                 receipt={'sha':sha,'generation':row['generation'],'url':inp.get('url') or outcome.get('url'),
                          'reconstructed_from':row['id'],'source':'succeeded merge observation'}
                 equivalent=not old.get('errors') and not requirements.get('errors') and old['fingerprint']==requirements['fingerprint']
@@ -69,7 +70,7 @@ def plan(store,root,change_revision=None):
             except (subprocess.CalledProcessError,FileNotFoundError,ValueError) as exc:
                 reason='Historical evidence unavailable: '+type(exc).__name__
         results.append({'task':task['name'],'generation':task['generation'],'expected_data':data,
-                        'receipt':receipt,'equivalent':equivalent,'reason':reason})
+                        'historical_body':historical_body,'receipt':receipt,'equivalent':equivalent,'reason':reason})
     return results
 
 
@@ -80,11 +81,11 @@ def apply(store,entries):
             task=store.task(entry['task'])
             if (task['generation']!=entry['generation'] or task['data']!=entry['expected_data'] or
                     store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(task['name'],)).fetchone()):continue
-            data=task['data']|{'requirement_migration':{k:v for k,v in entry.items() if k!='expected_data'}}
+            data=task['data']|{'requirement_migration':{k:v for k,v in entry.items() if k not in ('expected_data','historical_body')}}
             if entry['receipt']:
                 data['previous_delivery']=entry['receipt']
                 store.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,unixepoch())',
-                    (task['name'],entry['receipt']['generation'],task['body'],json.dumps({'delivered':entry['receipt']})))
+                    (task['name'],entry['receipt']['generation'],entry['historical_body'],json.dumps({'delivered':entry['receipt']})))
             if entry['equivalent']:
                 data.update(delivered=entry['receipt']|{'generation':task['generation']},assessment_pending=None,repair=None)
             else:
@@ -106,7 +107,7 @@ def main():
     args=parser.parse_args();store=Store(args.state)
     try:
         entries=plan(store,args.checkout,args.change_revision)
-        print(json.dumps([{k:v for k,v in entry.items() if k!='expected_data'} for entry in entries],indent=2))
+        print(json.dumps([{k:v for k,v in entry.items() if k not in ('expected_data','historical_body')} for entry in entries],indent=2))
         if args.apply:print(json.dumps({'applied':apply(store,entries)}))
     finally:store.close()
 
