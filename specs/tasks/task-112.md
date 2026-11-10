@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["606ef649f571ca71badbe628ef025beecc3fdac4", "9558f4091bb2d0c01688e65a4cdb7d0c4b93f651", "ea8dd97b7841718662b84f6501435a10c04cb374", "8269e906749f6b995a429916c868d5c829cfe77a", "7601f79ab5fd116a7e22fb0a137b18fb895953bc"]
+commits: ["606ef649f571ca71badbe628ef025beecc3fdac4", "9558f4091bb2d0c01688e65a4cdb7d0c4b93f651", "ea8dd97b7841718662b84f6501435a10c04cb374", "8269e906749f6b995a429916c868d5c829cfe77a", "7601f79ab5fd116a7e22fb0a137b18fb895953bc", "08d3b94e012afdd848a17ecd66b78ec60a80e42f"]
 ---
 
 ## Shipped
@@ -90,7 +90,7 @@ to the current default serialization; a dedicated regression drives the real
 000060 up.sql against flat-default/flat-custom/flat-in_app-false/nested/NULL
 rows.
 
-### Merge rounds (latest: ee154fffb, merge of assignment base cd752300c)
+### Merge rounds (latest: 08d3b94e0, merge of assignment base 3d87a1507 / task-109)
 
 Merge seams resolved across rounds (c4ebdc2d0, 6703a0353, 7edbddb4c, and
 earlier): `api/spawn.rs` keeps both main's task-scoped secret revocation and
@@ -98,15 +98,45 @@ our full §Agent Escalations chain (`notify_agent_escalation` subsumes the
 plain spawned_by notify); `git_http.rs` adopts main's hoisted workspace
 resolution (behavior identical — never fabricate a scope);
 `gyre-common/src/notification.rs` keeps both sides' appended
-`NotificationType` variants. This round's seam: the assignment base
-cd752300c (task-208) deliberately removed the My Tasks/MRs/Agents profile
-endpoints — `users.rs` handlers and `api/mod.rs` routes dropped by the merge,
-with the import block conflict resolved to keep our
+`NotificationType` variants. The cd752300c (task-208) round: the base
+deliberately removed the My Tasks/MRs/Agents profile endpoints —
+`users.rs` handlers and `api/mod.rs` routes dropped by the merge, with the
+import block conflict resolved to keep our
 `get_channel_preferences`/`update_channel_preferences` (required by the
 registered `/api/v1/notifications/preferences` route) and drop the now-dangling
 `get_my_agents`/`get_my_tasks`/`get_my_mrs` imports. No task-112 behavior
 touched. Generated `web/dist` assets are restored from the assignment base
 by the executor and rebuilt remotely.
+
+This round (3d87a1507, task-109 spec-lifecycle + impersonation) resolved
+two seams beyond the notification.rs variant union:
+
+1. **Band table coverage:** the exhaustive
+   `NotificationPriority::for_notification_type` match in `gyre-domain`
+   needed arms for the base's new `ImpersonationRequest`/
+   `ImpersonationAlert` types (whose notifications fan out through our
+   `dispatch_to_channels` wiring). Banded High (pending-consent decision,
+   same class as `SpecPendingApproval`) and Urgent (active security alert
+   on the user's own account) respectively; both recorded in the
+   user-management.md §Notification Entity amendment table.
+2. **Duplicate Diesel migration version:** both branches independently took
+   version 20261008000059 — ours (`user_channel_preferences`) and the
+   base's (`spec_lifecycle_configs`). Diesel runs only one migration per
+   version; a fresh-database probe proved `spec_lifecycle_configs` was
+   silently dropped, which is exactly why task-109's
+   `get_put_traverse_sqlite_migration_end_to_end` test 500'd. Repaired by
+   renumbering ours to `2026-11-09-000061_user_channel_preferences` (next
+   unused sequence; the base's numbering is upstream-authoritative per the
+   task-095 F5 precedent) and fixing the stale `000057` header comment.
+   `check-migration-versions.sh` passes; the spec_lifecycle e2e test is
+   green again.
+
+Also this round: coverage rows 16–18 (our three sections) were still
+`task-assigned` because the task-208-branch audit ran on a branch that
+could not see task-112's implementation — marked `implemented` (pending
+independent review, task-120 convention), and user-management.md's stale
+"not yet implemented" gap table rows for channels/preferences (task-112)
+and impersonation (task-108) corrected.
 
 ### Review repair history
 
@@ -124,19 +154,24 @@ by the executor and rebuilt remotely.
   `for_notification_type` mapping with the spec amendment table and the
   full-path regression test.
 
-### Test evidence (merge-round HEAD ee154fffb, this sandbox)
+### Test evidence (merge-round HEAD 08d3b94e0, this sandbox)
 
-- `cargo test -p gyre-server --lib`: 1622 passed, 0 failed — full suite
-  green after the assignment-base merge (notification_dispatcher 16 incl.
-  band membership, api::users 22 incl. channel-prefs API round-trip,
-  notifications 13, spawn 62).
-- `cargo test -p gyre-adapters --lib`: 410 passed, 0 failed, 6 ignored —
-  incl. migration 000058 backfill and the 000060 channel-shape convergence
-  regressions.
-- `cargo test -p gyre-domain --lib`: 445 passed (incl. the flat-shape
-  compat tests); `cargo test -p gyre-common --lib`: 120 passed.
-- `cargo fmt` clean; `cargo check -p gyre-server` clean at the merge HEAD.
-- Text gates OK: migration-versions (000060 is the next unused sequence),
+- `cargo test -p gyre-server --lib`: 1649 passed, 0 failed — full suite
+green after the task-109 assignment-base merge (notification_dispatcher
+16 incl. band membership, api::users 22 incl. channel-prefs API
+round-trip, api::spawn 46, api::spec_lifecycle 9 incl. the
+previously-500ing migration e2e, impersonation 15). Before the migration
+renumber the same suite failed 1 test (spec_lifecycle e2e) — the fresh-DB
+duplicate-version drop.
+- `cargo test -p gyre-adapters --lib`: 414 passed, 0 failed, 6 ignored —
+incl. migration 000058 backfill, the 000060 channel-shape convergence
+regressions, and the no_duplicate_migration_version_prefixes guard.
+- `cargo test -p gyre-domain --lib`: 450 passed (incl. the flat-shape
+compat tests and the extended band table); `cargo test -p gyre-common
+--lib`: 120 passed.
+- `cargo fmt` clean; `cargo check -p gyre-common -p gyre-domain -p
+gyre-server` clean at the merge HEAD.
+- Text gates OK: migration-versions (000061 is the next unused sequence),
   migration-sql-portability, arch, dead-message-kinds, abac-route-registry,
   abac-exempt-handlers, mcp-write-tools, unbounded-external-http,
   relative-path-defaults, fabricated-scope-defaults, scope-literal-defaults,
