@@ -1,7 +1,54 @@
 """Per-task compute budgets. Escalation requires an observed OOM, never a timeout."""
 import json
+import re
+import subprocess
+from decimal import Decimal, InvalidOperation
 
 WORKSPACE_GIB=30
+
+
+def memory_bytes(value):
+    match=re.fullmatch(r'(.+?)(Ki|Mi|Gi|Ti|Pi|Ei|[numkKMGTPE])?',str(value))
+    if not match:raise ValueError('invalid Kubernetes memory quantity')
+    scales={'Ki':1024,'Mi':1024**2,'Gi':1024**3,'Ti':1024**4,'Pi':1024**5,'Ei':1024**6,
+            'n':Decimal('1e-9'),'u':Decimal('1e-6'),'m':Decimal('.001'),
+            'k':1000,'K':1000,'M':1000**2,'G':1000**3,'T':1000**4,'P':1000**5,'E':1000**6}
+    amount=Decimal(match[1])*scales.get(match[2],1)
+    if not amount.is_finite() or amount<0:raise ValueError('invalid Kubernetes memory quantity')
+    return amount
+
+
+def check_admission(execution):
+    """Detect deterministic namespace memory denials before creating resources."""
+    from .execution import Retry, Wait
+    store=execution.store
+    context,namespace=store.setting('runtime_kube_context'),store.setting('runtime_namespace')
+    if not context or not namespace:return  # Other compute backends have no Kubernetes policy.
+    execution.current()
+    budget=profile(store,execution.claim['task'],execution.claim['stage'])
+    try:
+        result=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,
+                               'get','limitranges','-o','json'],capture_output=True,text=True,timeout=10,check=True)
+        value=json.loads(result.stdout)
+        if value.get('metadata',{}).get('continue'):raise ValueError('incomplete LimitRange inventory')
+        constraints=[]
+        for item in value['items']:
+            for limit in item['spec']['limits']:
+                maximum=(limit.get('max') or {}).get('memory')
+                if limit['type']=='Container' and maximum is not None:
+                    constraints.append((item['metadata']['name'],maximum,memory_bytes(maximum)))
+    except (OSError,ValueError,KeyError,TypeError,InvalidOperation,subprocess.SubprocessError) as exc:
+        raise Retry('Cannot verify namespace memory policy; no sandbox created; retry scoped Kubernetes access') from exc
+    execution.current()
+    for name,maximum,amount in constraints:
+        if memory_bytes(budget['memory'])>amount:
+            error=Wait(f"Namespace {namespace} LimitRange {name} allows at most {maximum} per container; "
+                            f"this assignment requires {budget['memory']}. Correct the memory policy; automatic recheck in five minutes; no sandbox created")
+            error.category='sandbox_admission'
+            error.retry_delay=300
+            error.diagnostic={'context':context,'namespace':namespace,'limitrange':name,
+                              'requested':budget['memory'],'maximum':maximum,'stage':execution.claim['stage']}
+            raise error
 
 def profile(store, task, stage):
     memory = store.setting(f'compute_memory:{task}:{stage}', 4)
