@@ -300,7 +300,11 @@ impl NotificationPriority {
             | T::MrReverted
             | T::AgentNeedsClarification
             | T::MergeQueueEscalation
-            | T::BudgetExhausted => Self::Urgent,
+            | T::BudgetExhausted
+            // Active impersonation of this user (identity-security.md
+            // §Impersonation, merged from main's task-109): security alert
+            // on the user's own account, priority 1.
+            | T::ImpersonationAlert => Self::Urgent,
             // High - needs attention soon: gate failure, budget warning
             // (spec examples), plus decisions/blocks that stall work soon:
             // approvals, rejections, conflicts, paused queue, failed groups.
@@ -318,6 +322,10 @@ impl NotificationPriority {
             | T::MergeQueuePaused
             | T::CascadeTestFailed
             | T::AtomicGroupFailure
+            // Impersonation consent request (identity-security.md
+            // §Impersonation, merged from main's task-109): same
+            // pending-approval decision class as SpecPendingApproval.
+            | T::ImpersonationRequest
             // Secret approaching expiry (platform-model.md §7, merged from
             // main): same approaching-deadline class as BudgetWarning.
             | T::SecretExpiring => Self::High,

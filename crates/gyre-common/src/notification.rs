@@ -75,6 +75,13 @@ pub enum NotificationType {
     /// workspace Owner and tenant Admin are notified
     /// (user-management.md §Who Gets Notified).
     SecurityFinding,
+    /// Priority 2 — an admin requested to impersonate this user; the body
+    /// carries the approval code the user must submit to consent
+    /// (identity-security.md §Impersonation).
+    ImpersonationRequest,
+    /// Priority 1 — an admin began impersonating this user
+    /// (identity-security.md §Impersonation).
+    ImpersonationAlert,
     /// Priority 7 — a rotated secret approaches expiry (platform-model.md §7).
     SecretExpiring,
     /// Priority 2 — a repo-defined persona file changed on push and its
@@ -113,6 +120,8 @@ impl NotificationType {
             Self::MergeQueuePaused => "MergeQueuePaused",
             Self::BudgetExhausted => "BudgetExhausted",
             Self::SecurityFinding => "SecurityFinding",
+            Self::ImpersonationRequest => "ImpersonationRequest",
+            Self::ImpersonationAlert => "ImpersonationAlert",
             Self::SecretExpiring => "SecretExpiring",
             Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
         }
@@ -147,6 +156,8 @@ impl NotificationType {
             "MergeQueuePaused" => Some(Self::MergeQueuePaused),
             "BudgetExhausted" => Some(Self::BudgetExhausted),
             "SecurityFinding" => Some(Self::SecurityFinding),
+            "ImpersonationRequest" => Some(Self::ImpersonationRequest),
+            "ImpersonationAlert" => Some(Self::ImpersonationAlert),
             "SecretExpiring" => Some(Self::SecretExpiring),
             "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             _ => None,
@@ -182,6 +193,8 @@ impl NotificationType {
             Self::MergeQueuePaused => 3,
             Self::BudgetExhausted => 2,
             Self::SecurityFinding => 3,
+            Self::ImpersonationRequest => 2,
+            Self::ImpersonationAlert => 1,
             Self::SecretExpiring => 7,
             Self::PersonaChangePendingApproval => 2,
         }

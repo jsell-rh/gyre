@@ -22,6 +22,7 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod impersonation;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -47,6 +48,7 @@ pub mod search;
 pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod specs;
 pub mod specs_assist;
@@ -76,6 +78,9 @@ use compute::{
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
+use impersonation::{
+    approve_impersonation, deny_impersonation, end_impersonation, request_impersonation,
+};
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
@@ -185,6 +190,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
+        )
+        // Spec lifecycle configuration (spec-lifecycle.md §Configuration)
+        .route(
+            "/api/v1/repos/:id/settings/spec-lifecycle",
+            get(spec_lifecycle::get_spec_lifecycle).put(spec_lifecycle::set_spec_lifecycle),
         )
         // ABAC policies (G6)
         .route(
@@ -475,6 +485,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        // Admin user impersonation (identity-security.md §Impersonation).
+        // Approve/deny are called by the TARGET user (any role) and are
+        // ABAC-exempt with per-handler authorization — see
+        // api/impersonation.rs and abac_middleware.rs.
+        .route("/api/v1/admin/impersonate", post(request_impersonation))
+        .route(
+            "/api/v1/admin/impersonate/:request_id/approve",
+            post(approve_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id/deny",
+            post(deny_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id",
+            delete(end_impersonation),
+        )
         .route(
             "/api/v1/admin/agents/:id/kill",
             post(admin::admin_kill_agent),

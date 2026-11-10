@@ -20,6 +20,7 @@ pub mod graph_extraction;
 pub mod procfs_monitor;
 
 pub(crate) mod health;
+pub mod impersonation;
 pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
@@ -80,9 +81,9 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -304,6 +305,8 @@ pub struct AppState {
     pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
     /// Per-repo spec enforcement policies (persisted).
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
+    /// Per-repo spec lifecycle configuration (persisted).
+    pub spec_lifecycle_configs: Arc<dyn gyre_ports::SpecLifecycleRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
     /// Authorization provenance attestation chains (TASK-006).
@@ -402,6 +405,12 @@ pub struct AppState {
     /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
     /// connection_id → list of subscribed workspace IDs.
     pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
+    /// Verified user identity per connection — used for user-targeted
+    /// pushes (identity-security.md §Impersonation: notify the impersonated
+    /// user when online). connection_id → verified user_id. Connections
+    /// authenticated without a user identity (shared token, agent tokens)
+    /// are absent. Ephemeral connection state, not a durable store.
+    pub ws_connection_users: Arc<RwLock<HashMap<u64, String>>>,
     /// Gate-time OTel trace capture repository (HSI §3a).
     pub traces: Arc<dyn TraceRepository>,
     /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
@@ -652,6 +661,30 @@ async fn require_auth_middleware(
     match token {
         Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
+            // 1.5. Impersonation JWT (identity-security.md §Impersonation) —
+            //     the same validation as the auth extractor
+            //     (`FromRequestParts` step 1.5): EdDSA signature + active
+            //     session. Without this branch the token is rejected here
+            //     and impersonated calls never reach the API at all.
+            //     Attribution happens downstream in `abac_middleware`.
+            if t.starts_with("ey") {
+                if let Some(claims) = state
+                    .agent_signing_key
+                    .validate_impersonation_opt(t, &state.base_url)
+                {
+                    return match crate::impersonation::resolve_impersonation_auth(&claims, &state)
+                        .await
+                    {
+                        Some(_) => next.run(req).await,
+                        None => (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Impersonation session is not active",
+                        )
+                            .into_response(),
+                    };
+                }
+            }
+
             // Check per-agent tokens using constant-time compare.
             let valid = if let Ok(pairs) = state.kv_store.kv_list("agent_tokens").await {
                 pairs.iter().any(|(_, v)| auth::tokens_equal(v.as_str(), t))
@@ -1055,6 +1088,10 @@ pub fn build_state(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
         ),
+        spec_lifecycle_configs: store!(
+            dyn SpecLifecycleRepository,
+            mem::MemSpecLifecycleRepository::default()
+        ),
         attestation_store: store!(
             dyn AttestationRepository,
             mem::MemAttestationRepository::default()
@@ -1199,6 +1236,7 @@ pub fn build_state(
         ws_connections: Arc::new(RwLock::new(HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
+        ws_connection_users: Arc::new(RwLock::new(HashMap::new())),
         traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
         otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
         conversations: store!(

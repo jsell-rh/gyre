@@ -1,4 +1,4 @@
--- Migration 000057: Notification delivery channel preferences (task-112,
+-- Migration 000061: Notification delivery channel preferences (task-112,
 -- user-management.md §Delivery Channels). One row per user holding the
 -- serialized NotificationChannels config (email / webhook / slack).
 CREATE TABLE IF NOT EXISTS user_channel_preferences (

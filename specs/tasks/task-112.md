@@ -63,7 +63,11 @@ on Overseer escalation.
 per-handler auth; ABAC-exempt with documented self-scope invariant). PUT
 rejects `in_app: false` (spec: "can't disable") and non-absolute webhook/Slack
 URLs. Storage: `user_channel_preferences` table (migration
-`2026-10-08-000059_user_channel_preferences`; portable SQLite/PG SQL),
+`2026-11-09-000061_user_channel_preferences` (renumbered from 000059 in the
+2026-11 task-109 merge round — the assignment base independently landed
+`2026-10-08-000059_spec_lifecycle_configs`, and Diesel runs only one migration
+per version, silently dropping the other table on fresh databases; portable
+SQLite/PG SQL),
 `UserChannelPreferenceRepository` port with SQLite, Postgres, and mem
 adapters (all enforce the upsert contract).
 

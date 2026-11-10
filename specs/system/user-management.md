@@ -370,8 +370,8 @@ pub enum NotificationPriority {
 >
 > | Band | Notification types |
 > |---|---|
-> | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted |
-> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, PersonaChangePendingApproval², MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹ |
+> | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted, ImpersonationAlert³ |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, PersonaChangePendingApproval², MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹, ImpersonationRequest³ |
 > | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
 > | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
 >
@@ -395,6 +395,13 @@ pub enum NotificationPriority {
 > class as SpecPendingApproval and PersonaApprovalRequested — work continues
 > until the deadline, but the decision stalls progress soon, so it needs
 > attention soon rather than eventually.
+>
+> ³ ImpersonationRequest/ImpersonationAlert are defined by
+> identity-security.md §Impersonation; they are banded here (recorded
+> 2026-11, task-112 merge with main's task-109) as, respectively, the same
+> pending-consent decision class as SpecPendingApproval (High) and an active
+> security alert on the user's own account (Urgent — an admin is acting as
+> this user right now).
 
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"
@@ -711,8 +718,8 @@ The following features are **not yet implemented** (future milestones):
 | SCIM 2.0 provisioning endpoints (`/scim/v2/*`) | Spec in `identity-security.md`; no implementation |
 | Tenant invitation flow (`POST /api/v1/tenant/invite`) | Specced above; not yet implemented |
 | Session management (`GET/DELETE /api/v1/users/me/sessions`) | Specced above; not yet implemented |
-| Notification channels (email digest, Slack webhook) | Spec complete; backend delivery not implemented |
+| Notification channels (Slack webhook, generic webhook) | ✅ Implemented (task-112) — `NotificationDispatcher` fans out per-channel with `min_priority` filtering; HMAC-SHA256-signed webhooks, Slack incoming-webhook POST, durable email outbox queue. Email digest emission/SMTP transport remains task-113 |
 | User profile pages (`/@username`) | Specced; UI not built |
-| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | Specced; not yet implemented |
+| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | ✅ Implemented (task-112) — self-scope per-handler-authorized API over the `user_channel_preferences` table |
 | User deactivation (`PUT /api/v1/users/{id}/deactivate`) | Specced; not yet implemented |
-| Impersonation | Specced in `identity-security.md`; not yet implemented |
+| Impersonation | ✅ Implemented (task-108) — approval-gated flow, short-lived EdDSA impersonation JWT, full audit attribution; see `identity-security.md` coverage |

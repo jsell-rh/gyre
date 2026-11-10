@@ -1,2 +1,2 @@
--- Revert migration 000057.
+-- Revert migration 000061.
 DROP TABLE IF EXISTS user_channel_preferences;
