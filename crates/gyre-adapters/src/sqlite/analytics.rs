@@ -507,17 +507,23 @@ mod tests {
     #[tokio::test]
     async fn analytics_query_filtered_all_params() {
         let (_tmp, s) = setup();
+        // Cross-cutting seed: agents span workspaces (a1 in ws-1 and ws-2),
+        // workspaces span repos (ws-2 holds r1 and r2), and users span
+        // workspaces (u1 in ws-1 and ws-3). No scope predicate is redundant
+        // with another, so dropping any one predicate from query_filtered
+        // must change the result sets asserted below.
         let mk = |id: &str,
                   name: &str,
                   agent: Option<&str>,
                   ws: Option<&str>,
                   repo: Option<&str>,
+                  user: Option<&str>,
                   ts: u64| {
             AnalyticsEvent {
                 id: Id::new(id),
                 event_name: name.to_string(),
                 agent_id: agent.map(str::to_string),
-                user_id: None,
+                user_id: user.map(str::to_string),
                 session_id: None,
                 workspace_id: ws.map(str::to_string),
                 repo_id: repo.map(str::to_string),
@@ -527,13 +533,29 @@ mod tests {
         };
         AnalyticsRepository::record(
             &s,
-            &mk("f1", "mr.merged", Some("a1"), Some("ws-1"), Some("r1"), 100),
+            &mk(
+                "f1",
+                "mr.merged",
+                Some("a1"),
+                Some("ws-1"),
+                Some("r1"),
+                Some("u1"),
+                100,
+            ),
         )
         .await
         .unwrap();
         AnalyticsRepository::record(
             &s,
-            &mk("f2", "mr.merged", Some("a2"), Some("ws-2"), Some("r1"), 200),
+            &mk(
+                "f2",
+                "mr.merged",
+                Some("a1"),
+                Some("ws-2"),
+                Some("r1"),
+                None,
+                200,
+            ),
         )
         .await
         .unwrap();
@@ -541,35 +563,145 @@ mod tests {
             &s,
             &mk(
                 "f3",
-                "task.status_changed",
-                Some("a1"),
-                Some("ws-1"),
-                None,
+                "mr.merged",
+                Some("a2"),
+                Some("ws-2"),
+                Some("r2"),
+                Some("u2"),
                 300,
             ),
         )
         .await
         .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f4",
+                "mr.merged",
+                Some("a3"),
+                Some("ws-3"),
+                Some("r3"),
+                Some("u1"),
+                400,
+            ),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f5",
+                "task.status_changed",
+                Some("a4"),
+                Some("ws-4"),
+                Some("r4"),
+                Some("u3"),
+                500,
+            ),
+        )
+        .await
+        .unwrap();
 
-        // Prefix wildcard.
+        let ids = |out: &[AnalyticsEvent]| -> Vec<String> {
+            let mut v: Vec<String> = out.iter().map(|e| e.id.as_str().to_string()).collect();
+            v.sort();
+            v
+        };
+
+        // Event name: exact.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(
+            ids(&out),
+            vec!["f1", "f2", "f3", "f4"],
+            "exact event_name match"
+        );
+
+        // Event name: prefix wildcard.
         let f = AnalyticsQueryFilter {
             event_name: Some("mr.*".into()),
             ..AnalyticsQueryFilter::new()
         };
         let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
-        assert_eq!(out.len(), 2, "mr.* prefix match");
+        assert_eq!(ids(&out), vec!["f1", "f2", "f3", "f4"], "mr.* prefix match");
 
-        // Conjunctive scope filters.
+        // Each scope predicate individually. Because the seed is
+        // cross-cutting, each of these assertions fails if its predicate is
+        // dropped from query_filtered (the unfiltered set is all 5 events).
         let f = AnalyticsQueryFilter {
-            event_name: Some("mr.merged".into()),
+            agent_id: Some("a1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f2"], "agent a1 spans ws-1 and ws-2");
+
+        let f = AnalyticsQueryFilter {
             agent_id: Some("a2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "agent a2 only in ws-2");
+
+        let f = AnalyticsQueryFilter {
             workspace_id: Some("ws-2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(
+            ids(&out),
+            vec!["f2", "f3"],
+            "ws-2 holds two agents and two repos"
+        );
+
+        let f = AnalyticsQueryFilter {
+            workspace_id: Some("ws-3".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f4"], "ws-3 holds only f4");
+
+        let f = AnalyticsQueryFilter {
             repo_id: Some("r1".into()),
             ..AnalyticsQueryFilter::new()
         };
         let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, Id::new("f2"));
+        assert_eq!(ids(&out), vec!["f1", "f2"], "repo r1 spans ws-1 and ws-2");
+
+        let f = AnalyticsQueryFilter {
+            repo_id: Some("r2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "repo r2 holds only f3");
+
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f4"], "user u1 spans ws-1 and ws-3");
+
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "user u2 holds only f3");
+
+        // Conjunctive scope filters.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            agent_id: Some("a1".into()),
+            workspace_id: Some("ws-1".into()),
+            repo_id: Some("r1".into()),
+            user_id: Some("u1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1"], "all scope predicates conjunctive");
 
         // Inclusive since/until bounds.
         let f = AnalyticsQueryFilter {
@@ -578,8 +710,7 @@ mod tests {
             ..AnalyticsQueryFilter::new()
         };
         let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, Id::new("f2"));
+        assert_eq!(ids(&out), vec!["f2"], "inclusive since/until bounds");
 
         // Limit truncates, newest first.
         let f = AnalyticsQueryFilter {
@@ -588,7 +719,8 @@ mod tests {
         };
         let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].id, Id::new("f3"), "newest event first");
+        assert_eq!(out[0].id, Id::new("f5"), "newest event first");
+        assert_eq!(out[1].id, Id::new("f4"), "second-newest next");
     }
 
     // --- CostRepository tests ---
