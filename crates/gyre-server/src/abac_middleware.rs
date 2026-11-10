@@ -129,6 +129,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/settings/spec-lifecycle",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),
@@ -319,6 +324,20 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                // Admin user impersonation (identity-security.md §Impersonation).
+                // Request/end are admin-only (`admin` resource →
+                // builtin-admin-only-deny rejects non-Admin roles); the
+                // handlers additionally verify the Admin role and a real
+                // user identity. Approve/deny are ABAC-exempt: the TARGET
+                // user must call them and may hold any role (a ReadOnly
+                // target must still be able to consent or refuse);
+                // authorization is per-handler — the caller's verified
+                // user id must equal the request's target user, plus the
+                // one-time approval code on approve.
+                RouteResourceMapping::api("/api/v1/admin/impersonate", "admin", None),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/approve"),
+                RouteResourceMapping::exempt("/api/v1/admin/impersonate/:request_id/deny"),
+                RouteResourceMapping::api("/api/v1/admin/impersonate/:request_id", "admin", None),
                 // NEW-27 fix: all /api/v1/admin/* routes use resource_type="admin" so that
                 // builtin-admin-only-deny (priority 850) rejects non-Admin callers.
                 // Previously, kill/reassign used "agent" and compute-targets used
@@ -924,6 +943,69 @@ pub fn init_resolver() {
     RESOURCE_RESOLVER.get_or_init(ResourceResolver::new);
 }
 
+/// Identity-security.md §Impersonation: attribute calls made under an
+/// impersonation token even when they bypass policy evaluation — ABAC-exempt
+/// routes and unresolved patterns (previously these returned before the
+/// attribution block, leaving e.g. an impersonated read of the target's
+/// private notifications unattributed and uncounted).
+///
+/// Peeks the bearer token; any request that is not an active impersonation
+/// token passes through untouched (no behavior change). When it is one, the
+/// action is recorded (fire-and-forget) and the request is marked so the
+/// handler's own auth extraction does not double-count the same call.
+async fn record_impersonated_passthrough(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    surface: &'static str,
+) -> Request<Body> {
+    use axum::http::header::AUTHORIZATION;
+
+    let Some(token) = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return req;
+    };
+    if !token.starts_with("ey") {
+        return req;
+    }
+    // Cheap cryptographic pre-filter: only impersonation JWTs proceed to
+    // the session lookup.
+    let Some(claims) = state
+        .agent_signing_key
+        .validate_impersonation_opt(token, &state.base_url)
+    else {
+        return req;
+    };
+    let Some(auth) = crate::impersonation::resolve_impersonation_auth(&claims, &state).await else {
+        // Inactive session — the handler's auth extraction will reject it.
+        return req;
+    };
+
+    let (mut parts, body) = req.into_parts();
+    // Upstream middlewares (last_seen) may have marked the request to
+    // defer attribution to this middleware — for exempt/unresolved routes
+    // THIS branch is the attribution owner, so record regardless and mark
+    // the request so the handler's own auth extraction does not
+    // double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
+    if let Some(imp) = &auth.impersonation {
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            imp,
+            parts.method.as_str(),
+            parts.uri.path(),
+            true,
+            surface,
+        );
+    }
+    Request::from_parts(parts, body)
+}
+
 // ---------------------------------------------------------------------------
 // Middleware function
 // ---------------------------------------------------------------------------
@@ -949,17 +1031,36 @@ pub async fn abac_middleware(
     let (resource_type, action_override, exempt) =
         match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
             Some(m) => (m.resource_type, m.action_override, m.exempt),
-            None => return next.run(req).await,
+            None => {
+                // No policy evaluation, but the call is still attributed
+                // when made under an impersonation token
+                // (identity-security.md §Impersonation).
+                let req =
+                    record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
+                return next.run(req).await;
+            }
         };
 
-    // ABAC-exempt routes pass through immediately.
+    // ABAC-exempt routes pass through immediately — after impersonation
+    // attribution, so an impersonated read of the target's private
+    // notifications is still audited (identity-security.md §Impersonation:
+    // full audit trail of ALL actions taken during impersonation).
     if exempt {
+        let req = record_impersonated_passthrough(state.clone(), req, "abac-exempt").await;
         return next.run(req).await;
     }
 
     // Extract auth from request (splits and reconstructs).
     let method = req.method().clone();
     let (mut parts, body) = req.into_parts();
+
+    // Evaluated routes are attributed AFTER policy evaluation (with the
+    // decision outcome). Mark the request so the auth-resolution layer
+    // (`AuthenticatedAgent::from_request_parts`, called here and again by
+    // handler extractors) does not double-count the same call.
+    parts
+        .extensions
+        .insert(crate::impersonation::ImpersonationActionRecorded);
 
     let auth = match AuthenticatedAgent::from_request_parts(&mut parts, &state).await {
         Ok(a) => a,
@@ -1006,6 +1107,21 @@ pub async fn abac_middleware(
     // next request with no cache invalidation needed (TASK-077 review note).
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
+
+    // Identity-security.md §Impersonation: every API call made with an
+    // impersonation token is attributed to the impersonator in the audit
+    // trail and counted in the session's actions_taken. Fire-and-forget so
+    // the audit write never blocks the request.
+    if let Some(imp) = auth.impersonation.clone() {
+        crate::impersonation::spawn_record_impersonated_action(
+            &state,
+            &imp,
+            method.as_str(),
+            &pattern,
+            result.effect == PolicyEffect::Allow,
+            "abac",
+        );
+    }
 
     // Record decision to audit log.
     let decision = policy_engine::build_decision(
