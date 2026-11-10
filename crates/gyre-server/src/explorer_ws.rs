@@ -796,6 +796,13 @@ async fn handle_explorer_session(
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
 
+                // Whether a user Message arrived while the agent was running.
+                // Such a message cannot be processed (the session is busy and the
+                // minimum message interval cannot have elapsed), so it must be
+                // answered with the rate-limit error once the run finishes —
+                // never silently dropped.
+                let mut message_during_run = false;
+
                 // Run the agent loop with conversation history, while
                 // concurrently listening for Cancel messages on the WebSocket.
                 // This allows the user to cancel a slow query mid-flight.
@@ -849,8 +856,17 @@ async fn handle_explorer_session(
                                                 debug!(user = %auth.agent_id, "Queuing message during agent run");
                                                 queued_messages.push(client_msg);
                                             }
+                                            ExplorerClientMessage::Message { .. } => {
+                                                // A user message arrived while the
+                                                // previous one was still being processed.
+                                                // The sender is borrowed by the agent
+                                                // run, so remember it and reply with the
+                                                // rate-limit error after the run completes.
+                                                debug!(user = %auth.agent_id, "Message received during agent run");
+                                                message_during_run = true;
+                                            }
                                             _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
+                                                // Other message types ignored during agent run
                                             }
                                         }
                                     }
@@ -873,6 +889,20 @@ async fn handle_explorer_session(
                     && cache_time.elapsed() > std::time::Duration::from_secs(30)
                 {
                     cache_time = std::time::Instant::now();
+                }
+
+                // A user message arrived while this run was in flight. It was
+                // not processed (and must not trigger a back-to-back agent run),
+                // so answer it with the same rate-limit error the main-loop
+                // check produces. Without this, the message would silently
+                // vanish — the client would never learn it was dropped.
+                if message_during_run {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Please wait before sending another message.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serialize_msg(&err).unwrap_or_default()))
+                        .await;
                 }
 
                 match agent_result {
