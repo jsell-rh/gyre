@@ -151,31 +151,34 @@ MR detail view reads, so the graph cannot disagree with gate results.
   check-dead-message-kinds, check-migration-sql-portability,
   check-task-commit-attribution.
 
-### Round note (base-merge repair)
+### Round note (base-merge repairs)
 
 Original backend, policy API, drift evaluation, UI, and tests shipped in
-recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; the
-first base merge and the starvation review repair followed (commit
-8a99bd808: drift + policy evaluation moved into candidate selection,
-requeue-with-reason and continue, mirroring the trust-hold precedent).
+recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad, followed
+by the starvation review repair (commit 8a99bd808), the fefde2946 base
+merge and its attestation-ABAC test repair (commit 11a702b89).
 
-This round merged the assigned base fefde2946 (merge commit 936508da8).
-The three content conflicts — router (`api/mod.rs`), ABAC resolver
-(`abac_middleware.rs`), and `docs/api-reference.md` — were all the same
-additive shape (task-159's `merge-policy` routes vs the base's
-`meta-specs/rollout-policy` routes at the same location) and were resolved
-by keeping both sides. The base also made the merge-time attestation-ABAC
-evaluation enforcing (a Deny fails the queue entry), which broke the three
-drift tests that assert merges: their chain attestations evaluated against
-an empty policy store and hit the engine's default-deny. Repaired in commit
-11a702b89 by seeding the startup builtin policy set in those three tests,
-following the base's own
-`guided_workspace_merge_proceeds_with_startup_seeded_builtins` precedent:
-a deployed server always seeds builtins, and the drift MR's chain
-attestation is allowed by `builtin:attested-authorization` (priority 150,
-above the default-deny catch-all), so the §9 drift behavior — not the
-empty policy store — is what the tests exercise. No production code
-changed this round. Focused evidence logs are retained under
-/tmp/stage/review-evidence/task-159-merge-*.log. The acceptance-criteria
-checkboxes are left unchecked in the task body per the assigned contract;
-the criteria themselves are satisfied by the shipped behavior above.
+This round merged the assigned base b5a8720878 (task-108 admin
+impersonation, task-106 automatic jj rebase on branch movement, task-116
+prompt-set attestation wiring, task-140/205/208; merge commit 34b4b8ebc).
+The single content conflict — the tail of the `mod tests` block in
+`crates/gyre-server/src/merge_processor.rs` — was both sides appending
+test suites at the same anchor: task-159's §9 drift tests vs the base's
+task-106 rebase + task-116 attestation tests. Resolved by keeping both
+blocks intact. No production code changed this round; the base's
+production changes (including `meta_specs_used` attestation population
+and the jj rebase hook in `process_next`) auto-merged cleanly alongside
+task-159's selection-time drift hold.
+
+Evidence this round: `cargo test -p gyre-server --lib merge_processor` —
+90 passed (drift + strict-drift suites together with the base's
+rebase/attestation tests); focused drift/policy suites — 11 passed;
+`reconciliation::`/`merge_deps::`/`api::workspaces::` — 69 passed; full
+`cargo test -p gyre-server --lib` — 1633 passed, 0 failed
+(merge-correctness probe). check-arch, check-abac-route-registry,
+check-task-commit-attribution, check-inert-enforcement,
+check-migration-versions, check-dead-message-kinds green. Logs retained
+under /tmp/stage/review-evidence/task-159-*.log. The
+acceptance-criteria checkboxes are left unchecked in the task body per
+the assigned contract; the criteria themselves are satisfied by the
+shipped behavior above.
