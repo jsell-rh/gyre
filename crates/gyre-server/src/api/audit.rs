@@ -94,6 +94,26 @@ impl From<AuditEvent> for AuditEventResponse {
     }
 }
 
+/// Record a server-initiated audit event and broadcast it to SSE subscribers.
+///
+/// Shared emission path for every server-side audit event (task-104:
+/// observability.md §Audit Event Types source control + access control
+/// events). Recording is best-effort — a storage failure is logged and the
+/// requesting path continues; the audit trail must never take down the
+/// operation it observes.
+pub async fn emit_server_audit_event(state: &AppState, event: AuditEvent) {
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            error = %e,
+            event_type = event.event_type.as_str(),
+            "failed to record server-side audit event"
+        );
+    }
+    if let Ok(json) = serde_json::to_string(&AuditEventResponse::from(event)) {
+        let _ = state.audit_broadcast_tx.send(json);
+    }
+}
+
 /// Caller-scope validation (task-102 F2): the scoping fields on a recorded
 /// audit event must resolve within the caller's tenant. `agent_id` is bound
 /// server-side in the handler; letting `workspace_id`/`repo_id` pass through

@@ -711,6 +711,32 @@ async fn require_auth_middleware(
             {
                 return next.run(req).await;
             }
+            // task-104: AuthFailure audit event (observability.md §Audit
+            // Event Types) — the global gate rejected the presented token;
+            // the extractors never run for this request. Best-effort token
+            // classification: "ey" prefix = JWT-shaped credential.
+            let token_kind = if t.starts_with("ey") {
+                "agent_jwt"
+            } else {
+                "unknown"
+            };
+            let source_ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string());
+            let user_agent = req
+                .headers()
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            auth::record_auth_failure_for_middleware(
+                &state,
+                token_kind,
+                "invalid token",
+                source_ip,
+                user_agent,
+            )
+            .await;
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),

@@ -798,6 +798,7 @@ pub async fn create_user(
     // of route registry state - the global token bypasses ABAC as system,
     // and Developer-role users would pass developer-write-access otherwise.
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/users").await;
         return Err(ApiError::Forbidden(
             "only Admin role may create users".to_string(),
         ));
