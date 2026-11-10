@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
+  import FlowCanvas from './FlowCanvas.svelte';
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
@@ -47,6 +48,7 @@
     nearestParticleToNode,
     trailSegments,
   } from './flow-particles.js';
+  import { WEBGL_PARTICLE_THRESHOLD, drawParticles2D, ParticleLayer } from './particle-layer.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -56,6 +58,7 @@
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = $bindable('all'),
     lens = $bindable('structural'),
+    layout = 'graph', // active ViewSpec layout; 'flow' delegates rendering to FlowCanvas
     gateStatusBySpec = {},   // HSI §3 Evaluative lens: spec path → 'pass' | 'fail' (most recent gate results)
     specApprovals = [],     // HSI §3 Evaluative lens: spec approval ledger records
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
@@ -272,6 +275,29 @@
 
   // ── Canvas state ─────────────────────────────────────────────────────
   let canvasEl = $state(null);
+  // WebGL2 particle overlay host (ui-layout.md §4 "Rendering": >100
+  // concurrent particles switch to WebGL — a canvas element permanently
+  // keeps the first context type it is given, so the WebGL particle pass
+  // needs its own element above this component's 2D canvas).
+  let particleOverlayEl = $state(null);
+  let particleLayer = null; // created/destroyed by the effect below
+
+  // Flow-layout delegation (ui-layout.md §4): when the active layout is
+  // "flow", node/edge/particle rendering is delegated to FlowCanvas (SVG
+  // node/edge layer + Canvas 2D/WebGL2 particle overlay). This component
+  // keeps the chrome — toolbar, lens toggle, breadcrumb, search — and
+  // forwards interaction callbacks.
+  const isFlowLayout = $derived(layout === 'flow');
+
+  $effect(() => {
+    const el = particleOverlayEl;
+    if (!el) return;
+    particleLayer = new ParticleLayer(el, { className: 'particle-overlay-canvas' });
+    return () => {
+      particleLayer?.destroy();
+      particleLayer = null;
+    };
+  });
   let minimapEl = $state(null);
   let containerEl = $state(null);
   let W = $state(900);
@@ -1198,6 +1224,16 @@
     // for trace-backed flow views, but guard anyway: without spans there is
     // nothing to animate.
     if ((traceData?.spans?.length ?? 0) === 0) return;
+    if (isFlowLayout) {
+      // Flow layout delegates rendering — including playback start — to
+      // FlowCanvas; this component still owns the lens switch the request
+      // implies (trace particles render on the evaluative lens).
+      untrack(() => {
+        lens = 'evaluative';
+        onLensChange('evaluative');
+      });
+      return;
+    }
     untrack(() => startTracePlayback());
   });
 
@@ -1209,6 +1245,7 @@
   $effect(() => {
     const req = focusRequest;
     if (!req?.nodeId) return;
+    if (isFlowLayout) return; // FlowCanvas owns the camera in flow layout
     const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === req.nodeId);
     if (!ln) return; // not laid out yet — retried when layoutNodes changes
     untrack(() => zoomToNode(req.nodeId));
@@ -2694,9 +2731,19 @@
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
-    // Draw evaluative trace particles (above edges, below nodes)
+    // Draw evaluative trace particles (above edges, below nodes). Above
+    // the spec's >100-concurrent-particle threshold (ui-layout.md §4), the
+    // particle pass moves to the WebGL2 overlay; at or below it particles
+    // composite into this 2D context between edges and nodes.
     if (lens === 'evaluative' && evalParticles.length > 0) {
-      drawTraceParticles(ctx);
+      if (evalParticles.length > WEBGL_PARTICLE_THRESHOLD && particleLayer) {
+        drawTraceParticlesViaLayer();
+      } else {
+        if (particleLayer) particleLayer.clear();
+        drawTraceParticles(ctx);
+      }
+    } else if (particleLayer) {
+      particleLayer.clear();
     }
 
     // Draw view query group boundaries
@@ -3898,12 +3945,11 @@
     }
   }
 
-  function drawTraceParticles(ctx) {
-    const now = performance.now();
-    if (evalParticles.length === 0) {
-      particleTrails.clear();
-      return;
-    }
+  // Particle drawables shared by the in-canvas 2D path and the WebGL2
+  // overlay: screen positions, hover/highlight radii and trail segments.
+  // Trail history is updated here so both paths consume identical state.
+  function particleDrawables(now) {
+    const drawables = [];
     for (const p of evalParticles) {
       const sln = layoutNodeMap.get(p.fromId);
       const tln = layoutNodeMap.get(p.toId);
@@ -3936,53 +3982,19 @@
         particleTrails.set(p.span.span_id, history);
       }
       history.push({ x: px, y: py, t: now });
-      const segs = trailSegments(history, now);
-      if (segs.length > 0) {
-        ctx.save();
-        ctx.strokeStyle = p.color;
-        ctx.lineCap = 'round';
-        for (const sgm of segs) {
-          ctx.globalAlpha = sgm.alpha * 0.6;
-          ctx.lineWidth = Math.max(1, radius * 0.5);
-          ctx.beginPath();
-          ctx.moveTo(sgm.x1, sgm.y1);
-          ctx.lineTo(sgm.x2, sgm.y2);
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
+      const trail = trailSegments(history, now);
 
-      // Glow
-      ctx.save();
-      ctx.shadowColor = isHighlighted ? '#f59e0b' : p.glow;
-      ctx.shadowBlur = isHighlighted ? 20 : 10;
-      ctx.globalAlpha = isHighlighted ? 1.0 : 0.8;
-      ctx.fillStyle = isHighlighted ? '#f59e0b' : p.color;
-      ctx.beginPath();
-      ctx.arc(px, py, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-
-      // Highlight ring for selected span
-      if (isHighlighted) {
-        ctx.save();
-        ctx.globalAlpha = 0.6;
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px, py, radius + 4, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Core
-      ctx.save();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      drawables.push({
+        x: px,
+        y: py,
+        radius,
+        color: isHighlighted ? '#f59e0b' : p.color,
+        alpha: isHighlighted ? 1.0 : 0.8,
+        glowColor: isHighlighted ? '#f59e0b' : p.glow,
+        glowBlur: isHighlighted ? 20 : 10,
+        highlight: isHighlighted,
+        trail,
+      });
     }
 
     // Drop history for spans no longer animating — a finished span's trail
@@ -3992,6 +4004,24 @@
         particleTrails.delete(spanId);
       }
     }
+    return drawables;
+  }
+
+  function drawTraceParticles(ctx) {
+    if (evalParticles.length === 0) {
+      particleTrails.clear();
+      return;
+    }
+    drawParticles2D(ctx, particleDrawables(performance.now()));
+  }
+
+  // >100 concurrent particles (ui-layout.md §4 "Rendering"): the particle
+  // pass moves from this 2D context to the WebGL2 overlay canvas owned by
+  // particle-layer.js (which swaps its canvas element for a WebGL2 one —
+  // a canvas keeps the first context type it is given).
+  function drawTraceParticlesViaLayer() {
+    const drawables = particleDrawables(performance.now());
+    particleLayer.render(drawables, { width: W, height: H, dpr: window.devicePixelRatio || 1 });
   }
 
   function drawEdges(ctx) {
@@ -4789,6 +4819,29 @@
     const ev = viewEventFromDom(domEvent, entityType, entityId, data);
     ev.handled = true;
     dispatchViewEvent(canvasEl, ev);
+  }
+
+  // FlowCanvas node detail: keeps the canvas path's enrichment contract —
+  // graph nodes (not span/edge pseudo-nodes) update
+  // canvasState.selectedNode (LLM context, deep links) and the interaction
+  // trail before the host's detail callback opens the panel.
+  function onFlowNodeDetail(node) {
+    if (node?.id && node.node_type !== 'span' && node.node_type !== 'edge') {
+      trackInteraction(`click:${node.name ?? node.id}(${node.node_type ?? 'node'})`);
+      canvasState = {
+        ...canvasState,
+        selectedNode: {
+          id: node.id,
+          name: node.name ?? '',
+          node_type: node.node_type ?? '',
+          qualified_name: node.qualified_name ?? '',
+        },
+        zoom: cam.zoom,
+        breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
+        recent_interactions: recentInteractions,
+      };
+    }
+    onNodeDetail(node);
   }
 
   function onClick(e) {
@@ -6069,6 +6122,21 @@
         title={$t('explorer_treemap.empty_title')}
         description={$t('explorer_treemap.empty_desc')}
       />
+    {:else if isFlowLayout}
+      <!-- ui-layout.md §4 Flow Layout: ExplorerCanvas delegates to
+           FlowCanvas — an SVG node/edge layer (clickable, accessible) with
+           a Canvas 2D / WebGL2 particle overlay on top. -->
+      <FlowCanvas
+        {nodes}
+        {edges}
+        {traceData}
+        {lens}
+        {playbackRequest}
+        {highlightedSpanId}
+        {focusRequest}
+        onNodeDetail={onFlowNodeDetail}
+        onScopeDrill={onScopeDrill}
+      />
     {:else}
       <canvas
         bind:this={canvasEl}
@@ -6090,6 +6158,12 @@
         aria-label="Architecture explorer canvas"
         tabindex="0"
       ></canvas>
+
+      <!-- WebGL2 particle overlay (ui-layout.md §4: >100 concurrent
+           particles switch to WebGL; the overlay element is needed because
+           a canvas keeps the first context type it is given, and the main
+           canvas is 2D). -->
+      <div class="particle-overlay" bind:this={particleOverlayEl} aria-hidden="true"></div>
 
       <!-- Screen reader: announce selected node -->
       <div class="sr-only" aria-live="polite" aria-atomic="true">
@@ -6491,8 +6565,10 @@
     onDismiss={() => { observableBannerVisible = false; }}
   />
 
-  <!-- Evaluative trace playback overlay bar -->
-  {#if lens === 'evaluative'}
+  <!-- Evaluative trace playback overlay bar — hidden in the flow layout,
+       where FlowCanvas renders its own controls (ui-layout.md §4 control
+       bar belongs to the flow renderer). -->
+  {#if lens === 'evaluative' && !isFlowLayout}
     <PlaybackControls
       {evalPlaying}
       {evalScrubber}
@@ -6604,6 +6680,8 @@
   .treemap-stats { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
 
   .treemap-canvas-area { flex: 1; position: relative; overflow: hidden; min-height: 200px; }
+  .particle-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
 

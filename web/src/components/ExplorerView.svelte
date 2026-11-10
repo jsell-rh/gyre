@@ -155,8 +155,10 @@
    * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
    * render on the SVG canvas positioned by ELK, 'side-by-side' on the
    * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
-   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
-   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   * the shell's virtualized node list; 'graph'/'timeline' stay on the
+   * unified ExplorerCanvas (Canvas 2D + TimelineScrubber), and 'flow'
+   * stays on ExplorerCanvas too, which delegates its rendering to
+   * FlowCanvas (SVG nodes/edges + Canvas/WebGL particle overlay, §4).
    *
    * For the canvas-rendered layouts the ViewSpec is translated to a
    * ViewQuery the canvas renders (concept / node-type filters, callouts,
@@ -2231,6 +2233,7 @@
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
+                layout={activeLayout}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
