@@ -598,3 +598,73 @@ python3 scripts/prove-remote-verification.py --candidate HEAD
 This creates isolated proof state, uses one gateway sandbox, runs real gates,
 and cleans its temporary verified branch. It does not mark a product task
 delivered, publish a PR, or alter production slots.
+
+## Requirement inputs, shipped history, and change assessment
+
+`specs/task-spec-inputs.json` binds each task's `spec_ref` to explicit stable
+section IDs. A definition selects an exact Markdown heading breadcrumb (ATX,
+ignoring fenced code), or declares `document: true` when the entire document is
+intentionally required. Section subtrees inherit their ancestor introductions,
+not sibling sections. `shared` lists additional global inputs; GOAL and the
+normative task text are always included. Scheduling dependencies remain claim
+preconditions rather than coding requirements. Maintain selectors in the same PR
+as a heading rename; never silently retarget an ID or broaden a missing binding.
+New task references need an explicit registry binding. Missing/ambiguous references
+appear as `needs-triage` and cannot dispatch implementation.
+
+A scoped contract change fences old claims and discovers `assess` work. This is
+an independent, read-only Fullsend assignment through OpenShell, sharing the
+normal claim/admission/cleanup budget. Its structured report names the exact
+source and requirement fingerprint. Concrete gaps become durable
+`requirements_gap` findings for implementation. A no-gap decision must also pass
+the normal full deterministic verification in a 4 GiB remote sandbox before
+currentness is restored. Ambiguous evidence or failed checks require attention;
+they never silently close a task or request a speculative code rewrite.
+
+`task_history` preserves append-only contract/delivery snapshots. The cockpit
+counts historically confirmed shipments separately from current requirement
+satisfaction and shows assessment/triage conditions. Reassessment never invents
+a new shipped merge. Imported completion retains its original evidence level.
+
+Installing the fingerprint format alone preserves existing execution epochs,
+claims, candidates and receipts. For old whole-document invalidations, preview
+and then apply the guarded recovery plan:
+
+```bash
+PYTHONPATH=scripts /usr/bin/python3 -m pipeline.requirement_migration \
+  --state .gyre-pipeline --checkout .gyre-pipeline/source
+# Repeat with --apply after inspecting the plan.
+```
+
+Recovery verifies a recorded succeeded merge against main ancestry and its exact
+historical contract generation, then compares old/current scoped inputs. Only
+proven equivalent inputs restore currentness mechanically. Unproven or changed
+inputs go to assessment. The migration skips active claims and unrelated repair
+findings, rechecks its entire planned state transactionally, and retains all
+candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
+select completed speculative repairs whose recorded catalog source was that
+specific invalidation; it does not select arbitrary historical changes.
+
+A no-gap assessment also inspects the retained candidate's actual merge
+contribution. Reviewed source changes proceed through normal verification and
+publication; they are not retired merely because main meets the product contract.
+Ancestor checkpoints and task/review-note-only differences do not manufacture
+new coding work. This preserves useful guard or quality fixes discovered during
+an earlier repair without paying for another implementation round.
+
+Assessment is source inspection only: its build wrapper rejects builds/tests.
+All model stages defer gyre-server code generation to the independent verifier;
+server `cargo check` and explicit smaller-package probes remain available to
+implementation/review. This prevents the large test compiler and model heap from
+competing for the same 4 GiB. The verifier still runs the full required suites.
+
+Semantic spec conflicts are `needs-triage`, distinct from implementation failures.
+Their stage/generation hold survives unrelated main advances; a requirement
+change or explicit operator retry releases it. Evidence and conflicting findings
+remain attached to the attempt instead of provoking speculative implementation.
+
+During recovery, `requirements_recovery_revision` can name the original catalog
+revision. Source refresh then retries the guarded migration for deferred tasks
+as their existing claims finish. It does not fence active work or supersede
+unrelated repair findings; once handled, each task's migration marker makes the
+operation a no-op.

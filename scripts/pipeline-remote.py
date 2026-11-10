@@ -103,7 +103,7 @@ def main():
     # Returning to the same immutable candidate via detached HEAD is harmless.
     # Reattach without changing the tree or approving edits.
     reattach_candidate(branch, checkout)
-    if role in ('review', 'triage'):
+    if role in ('review', 'assess', 'triage'):
         guard = run('python3', str(STAGE / 'dev-review-guard.py'), 'check', str(before), check=False)
         source_valid = guard.returncode == 0
         valid = valid and source_valid
@@ -122,10 +122,11 @@ def main():
     outcome = {'stage': role, 'head': head, 'base': job['input']['base'], 'tree': git('rev-parse', 'HEAD^{tree}'),
                'agent_exit': 0 if success else 1, 'stream_exit': 0 if success else 1,
                'valid': valid, 'source_valid': source_valid, 'task_body': path.read_text()}
-    if role == 'review':
-        verdict = STAGE / 'verdict.json'
+    if role in ('review','assess'):
+        report = 'assessment' if role == 'assess' else 'verdict'
+        verdict = STAGE / (report + '.json')
         if verdict.exists():
-            outcome['verdict'] = json.loads(verdict.read_text())
+            outcome[report] = json.loads(verdict.read_text())
         else:
             outcome['valid'] = False
     record_outcome(outcome)
