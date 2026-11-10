@@ -5741,30 +5741,41 @@ exit 1\n"
     /// the script writes the injected `GYRE_META_SPEC_SET_SHA` on the first
     /// line and the raw multi-line `GYRE_META_SPEC_PROMPT` after it, atomically
     /// (temp file + rename) so the reader never observes a partial write.
+    /// Create a Kubernetes-typed compute target whose `kubectl_path` config
+    /// points at a test-written stub `kubectl` (same process-boundary double
+    /// as `create_env_dump_compute_target`): the stub captures the Pod
+    /// manifest the REAL kubernetes dispatch applies via stdin
+    /// (`kubectl apply -f -`) to `dump_path`; every other kubectl subcommand
+    /// exits 1. The manifest's `spec.containers[0].env` is the environment
+    /// the agent workload would receive, so `GYRE_META_SPEC_PROMPT` /
+    /// `GYRE_META_SPEC_SET_SHA` delivery is observed against real dispatch
+    /// code with no cluster dependency.
     async fn create_meta_prompt_dump_compute_target(
         app: Router,
         name: &str,
         dump_path: &str,
     ) -> (Router, String) {
-        let script_path = format!("{dump_path}.sh");
+        let stub_path = format!("{dump_path}.sh");
         let script = format!(
             "#!/bin/sh\n\
-             printf '%s\\n' \"$GYRE_META_SPEC_SET_SHA\" > '{dump_path}.tmp'\n\
-             printf '%s\\n' \"$GYRE_META_SPEC_PROMPT\" >> '{dump_path}.tmp'\n\
-             mv '{dump_path}.tmp' '{dump_path}'\n\
-             exit 0\n"
+# Stub kubectl: capture `apply -f -` manifests, fail everything else.\n\
+if [ \"$1\" = \"apply\" ]; then\n\
+  {{ cat; echo; }} > {dump_path}\n\
+  exit 0\n\
+fi\n\
+exit 1\n"
         );
-        std::fs::write(&script_path, script).expect("writing meta-prompt dump script");
+        std::fs::write(&stub_path, script).expect("writing kubectl stub");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod meta-prompt dump script");
+            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod kubectl stub");
         }
         let body = serde_json::json!({
             "name": name,
             "target_type": "Kubernetes",
-            "config": {"command": script_path},
+            "config": {"kubectl_path": stub_path},
             "is_default": false,
         });
         let resp = app
@@ -5792,11 +5803,12 @@ exit 1\n"
     /// Agent-runtime §2 server-side delivery (task-116 repair): the
     /// `container_env` injection of `GYRE_META_SPEC_PROMPT` /
     /// `GYRE_META_SPEC_SET_SHA` and the `meta_spec_set_sha` spawn-response
-    /// field are guarded here end-to-end. The env-dump compute target
-    /// observes the child process environment of a real spawn with a seeded
-    /// required meta-spec; removing the `container_env.insert` block, the
-    /// `render_system_prompt` call, or the response field fails this test
-    /// while the agent-runner suite alone stays green.
+    /// field are guarded here end-to-end. The stub-kubectl compute target
+    /// observes the Pod manifest of a real spawn with a seeded required
+    /// meta-spec (built by the production `build_pod_manifest` from the
+    /// production-resolved env); removing the `container_env.insert` block,
+    /// the `render_system_prompt` call, or the response field fails this
+    /// test while the agent-runner suite alone stays green.
     #[tokio::test]
     async fn spawn_delivers_meta_spec_prompt_to_agent_env() {
         use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
@@ -5862,12 +5874,14 @@ exit 1\n"
 
         let dump = wait_for_dump(&dump_path)
             .await
-            .expect("meta-prompt dump script should have written its output");
-        let mut lines = dump.splitn(2, '\n');
-        let env_sha = lines.next().unwrap_or_default().to_string();
-        let env_prompt = lines.next().unwrap_or_default().to_string();
+            .expect("kubectl stub should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
 
         // The env-var delivery must carry the same set the response attests.
+        let env_sha = env
+            .get("GYRE_META_SPEC_SET_SHA")
+            .expect("pod manifest must carry GYRE_META_SPEC_SET_SHA")
+            .to_string();
         assert_eq!(
             env_sha, resp_sha,
             "GYRE_META_SPEC_SET_SHA env var must match the spawn response's meta_spec_set_sha"
@@ -5875,6 +5889,10 @@ exit 1\n"
 
         // The rendered system prompt must contain the seeded meta-spec
         // section: kind, name, scope, version, and the prompt content.
+        let env_prompt = env
+            .get("GYRE_META_SPEC_PROMPT")
+            .expect("pod manifest must carry GYRE_META_SPEC_PROMPT")
+            .to_string();
         assert!(
             env_prompt.contains("# meta:persona — spawn-delivery-persona (scope: global, v1)"),
             "rendered prompt must contain the seeded persona section header:\n{env_prompt}"
