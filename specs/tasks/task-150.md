@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "010dad7980448cd43e2c62542c9ea318955b7c20"]
 ---
 
 ## Spec Excerpt
@@ -143,13 +143,25 @@ disclosure scenario from the finding (victim workspace in another tenant,
 the denial, plus bound-task, cross-repo, workspace-scoped-allow, and
 in-scope-render cases.
 
+### Verification repair: impersonation-field merge drift (010dad798)
+
+The candidate merged assignment base `b5a87208` (task-108 admin user
+impersonation), which added `AuthenticatedAgent::impersonation`. Three
+task-150 MCP prompt test initializers (`agent_auth_with_task` and the two
+user-token auths in the prompts suites) still constructed the struct
+without the field, failing the lib-test build with E0063, and
+`api/prompts.rs` had three rustfmt-dirty lines in the context-prompt
+containment error. Both fixed; `cargo fmt --check -p gyre-server` is clean
+and the focused suites pass (below). No production behavior changed.
+
 ### Test evidence
 
 Focused probes (logs under `/tmp/stage/review-evidence/`):
 
-- `cargo test -p gyre-server --lib -- api::spawn::tests:: mcp::tests::
-  prompt_assembly::` — **156 passed, 0 failed** (repair round, log
-  `task150-repair-focused-tests.log`), including:
+- `cargo test -p gyre-server --lib -- mcp::tests:: api::spawn::tests::
+  api::prompts::` — **151 passed, 0 failed** (this round, log
+  `task150-impersonation-merge-repair-tests.log`; full lib test target
+  compiles), including:
   `spawn_injects_all_four_system_prompts_with_persona` (env-dump compute
   target asserts all four `GYRE_PROMPT_*` vars with task title, spec ref,
   branch, workspace scope), `spawn_without_persona_injects_prompts_but_no_persona`,
