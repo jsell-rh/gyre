@@ -176,7 +176,7 @@ once-per-push `Option<Id>` workspace resolution that skips rather than
 fabricates scope on unresolvable repo rows; evidence
 `rebase-repair-7747376.md`).
 
-**Current round (merge commit `1705e2a56`):** merged assignment base
+**Round 4 (merge commit `1705e2a56`):** merged assignment base
 `402142b1` (task-106 jj rebase on target branch movement, task-116
 meta-spec prompt assembly, task-141 repo-defined persona push
 detection). One source conflict, in the `git_http.rs` diff-parser region:
@@ -200,25 +200,50 @@ All auto-merged overlap files (`api/mod.rs`, `abac_middleware.rs`,
 symbols. Evidence:
 `/tmp/stage/review-evidence/task-109/rebase-repair-402142b.md`.
 
+**Current round (assignment base `b5a872087`):** merged base bringing
+task-108 admin user impersonation, task-104 access/source-control audit
+event types (including `SpecChanged` emission from the post-receive
+hook), task-205 manifest-driven concept views, task-208 profile "My
+Stuff" removal. One source conflict, in the `git_http.rs` dedup block:
+this branch had wrapped the open-task dedup in the
+`config.dedup_open_tasks` gate (spec-lifecycle.md §Configuration), while
+the base had added a `SpecChanged` audit emission (`task_id: None`) to
+the dedup-skip path — the spec file changed on the default branch
+regardless of task dedup. Resolved as a union: keep the config gate and
+add the base's `emit_spec_changed_audit` call inside the skip branch.
+The `emit_spec_changed_audit` definition and its task-create/Err-path
+call sites auto-merged from the base. Added
+`spec_lifecycle_dedup_skip_still_records_spec_changed_audit` to cover
+the exact resolved hunk: a repeated push dedups to one task AND still
+records a `task_id`-null `SpecChanged` audit event on the skipped pass.
+`web/dist` taken from the assignment base (`git diff b5a872087 --
+web/dist` empty; regenerated-by-build.rs assets reverted). All
+auto-merged overlap files (`api/mod.rs`, `abac_middleware.rs`, `lib.rs`,
+`mem.rs`, `middleware.rs`, `api.js`, `docs/api-reference.md`) verified
+to carry both sides' symbols. Evidence:
+`/tmp/stage/review-evidence/task-109/rebase-repair-b5a8720.md`.
+
 ### Test evidence
 
 Earlier rounds recorded, at their then-heads: `npx vitest run
 RepoSettings.test.js` — 57/57 and `SecretsPanel.test.js` — 9/9;
 `classify_spec_change` — 6/6; clippy-diff clean.
 
-At the current merge head (`1705e2a56`) this sandbox instance had network
-and a cold cargo registry, so the focused Rust suites ran here, all exit 0:
-`cargo fmt --all --check`; `cargo check -p gyre-server --all-targets`;
-`cargo test -p gyre-server --lib spec_lifecycle` — 8/8 (6 API incl. the
-SQLite-backed migration traverse, plus 2 end-to-end hook tests against a
-real bare git repo); `cargo test -p gyre-server --lib parse_` — 59/59
-(covers the re-resolved parser: `parse_spec_changes_*` incl.
-custom-watched/ignored-override, and the base's `parse_persona_changes_*`);
-`cargo test -p gyre-server --lib persona` — 24/24 (task-141 persona push
-end-to-end suite); `push_modifying_spec_revokes_ledger_approvals` — ok
-(the prior round's decoupling test, re-checked against the merged tree);
-`cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4 against a real
-fresh SQLite DB; `cargo test -p gyre-domain --lib spec_lifecycle` — 5/5.
+At the previous merge head (`1705e2a56`): `cargo check -p gyre-server
+--all-targets`; `spec_lifecycle` — 8/8; `parse_` — 59/59; `persona` —
+24/24; adapters/domain `spec_lifecycle` — 4/4 and 5/5.
+
+At the current merge head (base `b5a872087` resolution) all focused Rust
+suites ran in this sandbox, exit 0: `cargo fmt --all --check`;
+`cargo check -p gyre-server`; `cargo test -p gyre-server --lib
+spec_lifecycle` — 9/9 (8 prior + the new dedup-skip audit test covering
+the resolved hunk); `cargo test -p gyre-server --lib parse_` — 61/61;
+`cargo test -p gyre-server --lib persona` — 39/39; `cargo test -p
+gyre-server --lib spec_changed` — 2/2 (incl. the base's end-to-end
+`push_spec_change_records_spec_changed_audit_event`);
+`push_modifying_spec_revokes_ledger_approvals` — ok; `cargo test -p
+gyre-adapters --lib spec_lifecycle` — 4/4 against a real fresh SQLite DB;
+`cargo test -p gyre-domain --lib spec_lifecycle` — 5/5.
 All mechanical gates exit 0: migration versions and SQL portability,
 arch, ABAC route registry, task commit attribution, ABAC exempt handlers,
 MCP write tools, dead message kinds, byte-slice truncation, relative-path
