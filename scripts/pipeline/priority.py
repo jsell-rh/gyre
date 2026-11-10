@@ -57,7 +57,7 @@ def task_priority(store, task):
         unresolved=store.db.execute("""SELECT 1 FROM findings WHERE task=? AND generation=?
             AND resolved_by IS NULL AND category IN ('ci','verification','rebase','review') LIMIT 1""",
             (task['name'],task['generation'])).fetchone()
-        name='repair' if finding.get('category') in REPAIRS or unresolved else 'normal'
+        name='repair' if finding.get('category') in REPAIRS or unresolved or data.get('ci_environment') else 'normal'
         source='automatic'
     validate(store,name)
     return {'class':name,'value':classes(store)[name],'source':source,'preemptionPolicy':'Never'}

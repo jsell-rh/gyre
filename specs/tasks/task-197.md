@@ -1,11 +1,11 @@
 ---
 title: "Materialize default Tenant entity on first-startup bootstrap"
 spec_ref: "hierarchy-enforcement.md §1 Bootstrap Behavior (§50-66)"
-depends_on: []
-progress: not-started
+depends_on: [task-225]
+progress: complete
 coverage_sections:
   - "hierarchy-enforcement.md §5"
-commits: []
+commits: ["2419125dd059894f7b106d45306133a5b1cf84d5", "71901c549c031a0a774ce71e87e9842bc7932048"]
 ---
 
 ## Spec Excerpt
@@ -110,3 +110,43 @@ Note: the demo `/admin/seed` path uses id `"default-tenant"` and name `"Default 
   early-return idempotency) rather than introducing a new pattern.
 - Skip formatters/linters/full-suite runs beyond the two commands above; the loop handles
   global validation.
+
+## Shipped
+
+`bootstrap_default_tenant` (crates/gyre-server/src/lib.rs) materializes the
+default Tenant row on startup: id `"default"` — the operative single-tenant
+scope every Diesel adapter filters on, so the row is the real tenant backing
+existing data, not an orphaned UUID (`deterministic_uuid` form is deferred
+multi-tenant work, spec §68-70). Fields per hierarchy-enforcement.md §1:
+name "Default", slug "default", `oidc_issuer: None`,
+`budget: Some(BudgetConfig::default())`, `max_workspaces: None`, `created_at:
+now()`. Early-return idempotency on `find_by_id`, `tracing::warn!` on create
+error — same convention as the other seed functions. Wired in main.rs
+immediately after `build_state` and before `seed_builtin_policies` so the
+tenant exists before any tenant-scoped seeding. The demo `/admin/seed` path
+and `POST /api/v1/tenants` are untouched.
+
+### Reconciliation round (requirements_changed repair)
+
+The retained source checkpoint (2bfa6bbb) was re-merged with the current
+base (4d6759a0). The task-197 implementation had already been absorbed
+into the mainline: the merge resolved to a tree identical to base with
+`bootstrap_default_tenant`, its main.rs wiring, and its test all intact;
+the candidate→HEAD diff contains only unrelated later work (presence
+eviction refactor, trusted proxies, meta-spec sweep) and nothing of
+task-197 was lost. No source changes were required this round. The
+coverage row (hierarchy-enforcement.md §5 Bootstrap Behavior) was updated
+from task-assigned to implemented to reflect the shipped behavior.
+
+### Verification (evidence: /tmp/stage/review-evidence/task-197-verification.md)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib bootstrap_default_tenant`
+  → 1 passed. The test builds an `AppState` over a fresh temp SQLite DB wired
+  to the real `SqliteStorage` `TenantRepository`, asserts `find_by_id("default")`
+  is `None` before bootstrap, then asserts the row exists with the spec field
+  values after, and that a second call leaves exactly one default tenant.
+- Hardness probe (re-run this round): replacing the bootstrap body with a
+  no-op makes that test FAIL (0 passed; 1 failed) — it verifies the
+  materialized row, not mirrored logic. Probe reverted; post-revert re-run
+  passes and the tree is clean.
+- `bash scripts/check-arch.sh` → passed.

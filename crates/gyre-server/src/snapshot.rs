@@ -130,6 +130,10 @@ pub async fn delete_snapshot(snapshot_id: &str) -> anyhow::Result<()> {
 /// Note: only replaces projects/agents/tasks that don't already exist.
 /// Returns a warning that server restart may be needed for full effect.
 pub async fn restore_snapshot(state: &AppState, snapshot_id: &str) -> anyhow::Result<String> {
+    // non-atomic-create:ok - best-effort restore of only-missing records
+    // (per the docstring): each record is restored independently, errors are
+    // intentionally tolerated per record, and re-running the restore picks
+    // up whatever a partial earlier run left missing.
     let dir = snapshot_dir();
     let path = dir.join(format!("{snapshot_id}.json"));
 

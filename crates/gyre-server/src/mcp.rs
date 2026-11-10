@@ -141,6 +141,7 @@ fn tool_definitions() -> Value {
                             "description": "Task IDs that must complete before this task starts. Takes precedence over order."
                         },
                         "spec_path": { "type": "string", "description": "Spec path this task implements (e.g. system/auth.md)" },
+                        "spec_ref": { "type": "string", "description": "Pinned approved spec blob this task implements: path@sha. Optional; when absent, decomposition uses the ledger's current SHA" },
                         "repo_id": { "type": "string", "description": "Repository ID this task belongs to" },
                         "workspace_id": { "type": "string", "description": "Workspace ID this task belongs to" }
                     },
@@ -411,7 +412,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_summary",
-                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.",
+                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats, and call_graph metrics (call_edges_pass1, call_edges_pass2, call_graph_complete — whether semantic call extraction (Pass 2) has completed, per lsp-call-graph.md §8).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -422,7 +423,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_query_dryrun",
-                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Use this to validate queries before sending to the frontend.",
+                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Warns 'Call graph incomplete — blast radius may be underreported' when the query traverses calls edges before semantic call extraction (Pass 2) has completed. Use this to validate queries before sending to the frontend.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -490,11 +491,11 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_concept",
-                "description": "Search the knowledge graph by concept name. Returns matching nodes with type, name, qualified_name, spec linkage, and connecting edges. Searches repo-scoped or workspace-scoped graphs.",
+                "description": "Project the knowledge graph through a named concept view (realized-model.md §4). The concept is resolved from the repo's specs/manifest.yaml concepts: block; returns the union of nodes matching its include patterns (types, traits, modules, endpoints, specs) with edges between matched nodes. Searches repo-scoped or workspace-scoped graphs (workspace scope unions per-repo projections).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "concept": { "type": "string", "description": "Concept name to search for (case-insensitive substring match)" },
+                        "concept": { "type": "string", "description": "Concept name (case-insensitive exact match on a manifest-defined concept)" },
                         "repo_id": { "type": "string", "description": "Repository ID (search within a single repo)" },
                         "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" }
                     },
@@ -730,6 +731,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
             .collect();
     }
     task.spec_path = get_str(args, "spec_path").map(|s| s.to_string());
+    task.spec_ref = get_str(args, "spec_ref").map(|s| s.to_string());
     if let Some(repo_id) = get_str(args, "repo_id") {
         task.repo_id = Id::new(repo_id);
     }
@@ -745,7 +747,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
 /// gyre_spawn_repo_orchestrator (task-093): workspace-orchestrator only.
 /// Target repo must belong to the caller's workspace.
 async fn handle_spawn_repo_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     args: &Value,
     auth: &AuthenticatedAgent,
 ) -> Value {
@@ -780,10 +782,12 @@ async fn handle_spawn_repo_orchestrator(
     )
     .await
     {
-        Ok((agent, token)) => tool_result(
+        Ok((agent, token, launch)) => tool_result(
             serde_json::to_string(&crate::api::orchestrator::SpawnOrchestratorResponse {
                 agent: crate::api::spawn::orchestrator_response(agent),
                 token,
+                launch_status: launch.launch_status,
+                launch_detail: launch.launch_detail,
             })
             .unwrap_or_default(),
         ),
@@ -968,7 +972,14 @@ async fn handle_spawn_worker(
         loop_config: None,
         conversation_sha: None,
     };
-    match crate::api::spawn::spawn_agent_core(state, req, auth).await {
+    match crate::api::spawn::spawn_agent_core(
+        state,
+        req,
+        auth,
+        "POST /mcp tools/call gyre_spawn_worker",
+    )
+    .await
+    {
         Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),
         Err(e) => tool_error(format!("Failed to spawn worker: {e}")),
     }
@@ -1001,6 +1012,9 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
                     if let Some(ref tt) = t.task_type {
                         v["task_type"] = json!(format!("{:?}", tt).to_lowercase());
                     }
+                    if let Some(ref sr) = t.spec_ref {
+                        v["spec_ref"] = json!(sr);
+                    }
                     if let Some(ref sp) = t.spec_path {
                         v["spec_path"] = json!(sp);
                     }
@@ -1013,7 +1027,7 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_update_task(state: &AppState, args: &Value) -> Value {
+async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> Value {
     let id_str = match require_str(args, "id") {
         Ok(s) => s.to_string(),
         Err(_) => return tool_error("missing required field: id"),
@@ -1052,7 +1066,23 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
     }
     task.updated_at = now_secs();
     match state.tasks.update(&task).await {
-        Ok(()) => tool_result(format!("Updated task {id_str}")),
+        Ok(()) => {
+            // meta-spec-reconciliation.md §11: ReconciliationCompleted /
+            // MetaSpecDriftResolved fire when the last open reconciliation /
+            // drift-review task for a workspace reaches terminal status. The
+            // shared hook also advances a §7 rolling rollout (next batch)
+            // before the completion check.
+            if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled)
+                && task.labels.iter().any(|l| {
+                    l == crate::reconciliation::RECONCILIATION_LABEL
+                        || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+                })
+            {
+                crate::reconciliation::on_reconciliation_task_terminal(state, &task.workspace_id)
+                    .await;
+            }
+            tool_result(format!("Updated task {id_str}"))
+        }
         Err(e) => tool_error(format!("Failed to update task: {e}")),
     }
 }
@@ -1146,7 +1176,11 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
         mr.workspace_id = repo.workspace_id.clone();
         let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
-            state, &rid, &repo.path, &source, &target,
+            state,
+            &rid,
+            &repo.path,
+            &source,
+            &repo.default_branch,
         )
         .await;
         if !lineage_deps.is_empty() {
@@ -1412,18 +1446,27 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             }
 
             // ── Telemetry for real-time dashboard ────────────────────────────────────
-            state.emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::AgentStatusChanged,
-                Some(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "idle",
-                    "reason": format!("Agent {} completed task", agent.name),
-                })),
-            );
+            state
+                .emit_telemetry(
+                    ws_id,
+                    gyre_common::message::MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": "idle",
+                        "reason": format!("Agent {} completed task", agent.name),
+                    })),
+                )
+                .await;
 
             match state.agents.update(&agent).await {
-                Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
+                Ok(()) => {
+                    // Platform Model §7: revoke task-scoped ephemeral secrets
+                    // on agent completion ("Secrets access revoked" at
+                    // teardown) — deletes Task-scoped secrets for the
+                    // agent's task and logs `secret.revoked` per secret.
+                    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+                    tool_result(format!("Agent {agent_id} marked complete"))
+                }
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),
             }
         }
@@ -1645,7 +1688,8 @@ async fn create_uncertainty_notifications(
             &tenant_id,
             now,
         );
-        notif.entity_ref = Some(agent_id.to_string());
+        notif.source.entity_type = "agent".to_string();
+        notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
         if let Err(e) = state.notifications.create(&notif).await {
@@ -2126,7 +2170,21 @@ async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
         Ok(e) => e,
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
-    let summary = gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
+    // lsp-call-graph.md §8: call graph completeness comes from the durable
+    // Pass 2 completion marker, not from edge counts (a toolchain-less run
+    // persists no edges and must not read as "complete").
+    let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+        state.kv_store.as_ref(),
+        &rid,
+        &nodes,
+    )
+    .await;
+    let summary = gyre_domain::view_query_resolver::compute_graph_summary(
+        &repo_id,
+        &nodes,
+        &edges,
+        call_graph_complete,
+    );
     tool_result(serde_json::to_string_pretty(&summary).unwrap_or_default())
 }
 
@@ -2155,7 +2213,20 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
 
-    let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
+    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
+        &query,
+        &nodes,
+        &edges,
+        selected,
+        Some(
+            crate::graph_extraction::call_graph_complete_for_repo(
+                state.kv_store.as_ref(),
+                &rid,
+                &nodes,
+            )
+            .await,
+        ),
+    );
     // §9: the dry-run tool response echoes the query alongside the preview
     // (`{"query": ..., "result": {...}}`); the `result` member carries the
     // §23 DryRunResult shape.
@@ -2451,34 +2522,42 @@ async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
 }
 
 /// MCP tool handler for `graph.concept` — delegates to the same shared
-/// `assemble_concept_results` function used by the REST handlers (HSI §11 parity).
+/// assembly functions the REST handlers use (HSI §11 parity): the named
+/// concept is resolved from the repo's spec manifest and the graph is
+/// projected through its include patterns.
 async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     let concept = match require_str(args, "concept") {
         Ok(c) => c.to_string(),
         Err(_) => return tool_error("missing required field: concept"),
     };
 
-    // Determine scope: repo_id or workspace_id.
-    let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
-        vec![repo_id.to_string()]
+    let response = if let Some(repo_id) = get_str(args, "repo_id") {
+        // Repo-scoped projection.
+        let repo = match state.repos.find_by_id(&Id::new(repo_id)).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return tool_error(format!("repo not found: {repo_id}")),
+            Err(e) => return tool_error(format!("failed to look up repo: {e}")),
+        };
+        crate::api::graph::assemble_concept_projection(state, &repo, &concept).await
     } else if let Some(workspace_id) = get_str(args, "workspace_id") {
-        let ws_id = Id::new(workspace_id);
-        match state.repos.list_by_workspace(&ws_id).await {
-            Ok(repos) => repos.into_iter().map(|r| r.id.to_string()).collect(),
-            Err(e) => return tool_error(format!("failed to list repos: {e}")),
-        }
+        // Workspace-scoped union of per-repo projections.
+        crate::api::graph::assemble_workspace_concept_projection(
+            state,
+            &Id::new(workspace_id),
+            &concept,
+        )
+        .await
     } else {
         return tool_error("provide either repo_id or workspace_id");
     };
 
-    // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
-    match crate::api::graph::assemble_concept_results(state, &repo_ids, &concept).await {
+    match response {
         Ok(response) => {
             let result =
                 serde_json::to_value(&response).unwrap_or_else(|e| json!({"error": e.to_string()}));
             tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
-        Err(_) => tool_error("concept search failed"),
+        Err(e) => tool_error(e.to_string()),
     }
 }
 
@@ -2616,21 +2695,57 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
     let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
 
-    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
+    // platform-model.md §Budget Tracking). The LlmPort does not return actual
+    // usage, so keep the existing estimate — ~4 chars per token for the
+    // prompts plus response overhead and a 3x reasoning multiplier — and
+    // split it into input/output for the per-call budget record so that
+    // input + output equals the estimate.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
-    let base_estimate = (estimated_input + 500) as f64;
-    let estimated_tokens = base_estimate * 3.0;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(auth.agent_id.clone()),
         None,
         "llm_query",
-        estimated_tokens,
+        base_estimate,
         "tokens",
         now_secs(),
     );
     if let Err(e) = state.costs.record(&cost_entry).await {
         tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
+    }
+
+    // Per-call budget record + workspace/tenant counter increment
+    // (platform-model.md §Budget Tracking). User-initiated query via MCP.
+    let ws_for_budget = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(ws) = ws_for_budget {
+        crate::api::budget::record_llm_call_usage(
+            state,
+            &crate::api::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: Some(repo.id.clone()),
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %repo.workspace_id,
+            "MCP spec_assist budget recording skipped: workspace not found"
+        );
     }
 
     // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
@@ -2663,6 +2778,123 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 }
 
 // ── MCP Resources ─────────────────────────────────────────────────────────────
+
+/// The resolved secret scope of an agent caller (platform-model.md §7).
+struct AgentSecretScope {
+    tenant_id: String,
+    workspace_id: String,
+    repo_id: String,
+    task_id: Option<String>,
+}
+
+/// Resolve the caller's secret scope for `secrets://` resources
+/// (platform-model.md §7).
+///
+/// Scope comes from the agent's JWT claims (workspace_id/repo_id for
+/// orchestrators, task_id for workers) plus the agent record, with the
+/// tenant resolved from the governing workspace — never a fabricated
+/// "default" tenant. Returns `None` when no agent identity/scope can be
+/// resolved (e.g. a user token): the resource is agent-scoped by spec.
+async fn agent_secret_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Option<AgentSecretScope> {
+    // Only Gyre-minted agent JWTs (or a resolvable agent record) carry an
+    // agent scope. User/Keycloak JWTs and global tokens have none.
+    let claims = auth.jwt_claims.as_ref().filter(|_| is_agent_jwt(auth));
+
+    let mut workspace_id: Option<String> = claims
+        .and_then(|c| c.get("workspace_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut repo_id: Option<String> = claims
+        .and_then(|c| c.get("repo_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let task_id: Option<String> = claims
+        .and_then(|c| c.get("task_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Fall back to the agent record (covers worker agents whose JWT carries
+    // only task_id: the governing workspace comes from the record, the repo
+    // from the task).
+    if workspace_id.is_none() || repo_id.is_none() {
+        if let Ok(Some(agent)) = state
+            .agents
+            .find_by_id(&Id::new(auth.agent_id.clone()))
+            .await
+        {
+            workspace_id = workspace_id.or(Some(agent.workspace_id.to_string()));
+            repo_id = repo_id.or_else(|| agent.repo_id.map(|r| r.to_string()));
+        }
+    }
+    if repo_id.is_none() {
+        if let Some(tid) = &task_id {
+            if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(tid.clone())).await {
+                workspace_id = workspace_id.or(Some(task.workspace_id.to_string()));
+                if !task.repo_id.to_string().is_empty() {
+                    repo_id = Some(task.repo_id.to_string());
+                }
+            }
+        }
+    }
+
+    let workspace_id = workspace_id?;
+    // Tenant comes from the governing workspace record — never fabricated.
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id.clone()))
+        .await
+        .ok()
+        .flatten()?;
+    Some(AgentSecretScope {
+        tenant_id: ws.tenant_id.to_string(),
+        workspace_id,
+        repo_id: repo_id.unwrap_or_default(),
+        task_id,
+    })
+}
+
+/// Collect secret METADATA (never values) across the scope cascade,
+/// nearest scope winning per name — mirrors `resolve_for_agent`'s scoping
+/// without decrypting anything.
+async fn collect_secret_metadata(
+    state: &AppState,
+    tenant_id: &str,
+    workspace_id: &str,
+    repo_id: &str,
+    task_id: Option<&str>,
+) -> anyhow::Result<Vec<gyre_common::Secret>> {
+    let mut targets: Vec<(gyre_common::SecretScope, String)> = vec![
+        (gyre_common::SecretScope::Tenant, tenant_id.to_string()),
+        (
+            gyre_common::SecretScope::Workspace,
+            workspace_id.to_string(),
+        ),
+    ];
+    if !repo_id.is_empty() {
+        targets.push((gyre_common::SecretScope::Repo, repo_id.to_string()));
+    }
+    if let Some(tid) = task_id {
+        targets.push((gyre_common::SecretScope::Task, tid.to_string()));
+    }
+    // Coarse → fine: finer entries overwrite same-name coarser ones.
+    let mut by_name: std::collections::HashMap<String, gyre_common::Secret> =
+        std::collections::HashMap::new();
+    for (scope, scope_id) in targets {
+        for s in state
+            .secrets
+            .list_by_scope(scope, &scope_id, tenant_id)
+            .await?
+        {
+            by_name.insert(s.name.clone(), s);
+        }
+    }
+    let mut secrets: Vec<gyre_common::Secret> = by_name.into_values().collect();
+    secrets.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(secrets)
+}
 
 fn resource_definitions() -> Value {
     json!({
@@ -2714,6 +2946,18 @@ fn resource_definitions() -> Value {
                 "description": "SDLC system trace for a merge request (HSI §3a). URI: trace://{mr_id}",
                 "mimeType": "application/json",
                 "uriTemplate": "trace://{mr_id}"
+            },
+            {
+                "uri": "secrets://names",
+                "name": "Secret Names",
+                "description": "Names of the secrets available to this agent (tenant → workspace → repo → task cascade). Values are never exposed: secrets are delivered as environment variables at spawn (platform-model.md §7).",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "secrets://status",
+                "name": "Secret Expiry Status",
+                "description": "Expiry status of the secrets available to this agent: [{name, scope, expires_at, last_rotated_at, status: active|expiring|expired}] (platform-model.md §7).",
+                "mimeType": "application/json"
             }
         ]
     })
@@ -2868,7 +3112,7 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             now_secs().saturating_sub(24 * 3600)
         };
         // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
-        match crate::api::graph::assemble_briefing(&state, workspace_id, since).await {
+        match crate::api::graph::assemble_briefing(state, workspace_id, since, None).await {
             Ok(briefing) => {
                 let briefing_json = serde_json::to_value(&briefing)
                     .unwrap_or_else(|e| json!({"error": e.to_string()}));
@@ -2961,6 +3205,70 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             Ok(None) => json!({"error": format!("no trace found for merge request: {mr_id}")}),
             Err(e) => json!({"error": format!("failed to load trace: {e}")}),
         }
+    } else if uri == "secrets://names" || uri == "secrets://status" {
+        // platform-model.md §7 MCP Integration: agents discover which secret
+        // NAMES they hold (values arrive as env vars at spawn, never via MCP).
+        match agent_secret_scope(state, auth).await {
+            Some(scope) => {
+                // Metadata-only cascade (tenant → workspace → repo → task,
+                // nearest scope wins) — mirrors resolve_for_agent's scoping
+                // but never touches secret values.
+                match collect_secret_metadata(
+                    state,
+                    &scope.tenant_id,
+                    &scope.workspace_id,
+                    &scope.repo_id,
+                    scope.task_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(secrets) => {
+                        let result = if uri == "secrets://names" {
+                            let names: Vec<&str> =
+                                secrets.iter().map(|s| s.name.as_str()).collect();
+                            json!(names)
+                        } else {
+                            let now = now_secs();
+                            let status: Vec<Value> = secrets
+                                .iter()
+                                .map(|s| {
+                                    let st = if s.is_expired(now) {
+                                        "expired"
+                                    } else if s
+                                        .expires_at
+                                        .map(|e| e.saturating_sub(now) <= 3600)
+                                        .unwrap_or(false)
+                                    {
+                                        "expiring"
+                                    } else {
+                                        "active"
+                                    };
+                                    json!({
+                                        "name": s.name,
+                                        "scope": s.scope.as_str(),
+                                        "expires_at": s.expires_at,
+                                        "last_rotated_at": s.last_rotated_at,
+                                        "status": st,
+                                    })
+                                })
+                                .collect();
+                            json!(status)
+                        };
+                        json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                            }]
+                        })
+                    }
+                    Err(e) => json!({"error": format!("failed to list secrets: {e}")}),
+                }
+            }
+            None => {
+                json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
+            }
+        }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
     }
@@ -3027,6 +3335,11 @@ pub async fn mcp_handler(
                     | "gyre_spawn_worker"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
+                // observability.md §Audit Event Types: role check rejects
+                // request — record rbac_denied so MCP-surface role denials are
+                // visible to the audit trail and SIEM forwarding.
+                crate::rbac::record_rbac_denied(&state, &auth, "Agent", "POST /mcp tools/call")
+                    .await;
                 return Json(JsonRpcResponse::err(
                     id,
                     PERMISSION_DENIED,
@@ -3443,6 +3756,68 @@ mod tests {
         assert!(has_role_at_least(&[UserRole::Admin], UserRole::Agent));
     }
 
+    #[tokio::test]
+    async fn mcp_write_tool_role_denial_records_rbac_denied_audit_event() {
+        // Review repair (task-104 round 10, finding aa4a2beed F1): the
+        // needs_write RBAC gate on MCP tools/call rejected role-insufficient
+        // callers with a JSON-RPC PERMISSION_DENIED while recording no
+        // rbac_denied audit event, so MCP-surface role denials were invisible
+        // to the audit trail and SIEM forwarding. A ReadOnly JWT calling a
+        // write tool must produce exactly one rbac_denied event carrying the
+        // spec'd detail fields (user_id, required_role, actual_role,
+        // endpoint) and outcome Blocked.
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::{AuditQueryFilter, AuditRepository};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::build_router(state.clone());
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": { "title": "must not be created" }
+                }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], PERMISSION_DENIED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("insufficient permissions"));
+
+        let events = AuditRepository::query(
+            &*state.audit,
+            &AuditQueryFilter {
+                event_type: Some("rbac_denied".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1, "one rbac_denied event");
+        let e = &events[0];
+        assert_eq!(e.detail["required_role"], "Agent");
+        assert_eq!(e.detail["actual_role"], "ReadOnly");
+        assert_eq!(e.detail["endpoint"], "POST /mcp tools/call");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+    }
+
     // ── is_agent_jwt detection ─────────────────────────────────────────────────
 
     #[test]
@@ -3458,6 +3833,7 @@ mod tests {
                 "task_id": "task-1"
             })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(is_agent_jwt(&auth_with_agent_scope));
 
@@ -3469,6 +3845,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!is_agent_jwt(&auth_global));
 
@@ -3483,6 +3860,7 @@ mod tests {
                 "realm_access": {"roles": ["developer"]}
             })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!is_agent_jwt(&auth_keycloak));
     }
@@ -3816,6 +4194,114 @@ mod tests {
         assert!(
             props.get("summary").is_some(),
             "gyre_agent_complete must advertise a 'summary' field in its inputSchema"
+        );
+    }
+
+    // ── agent_complete revokes task-scoped secrets (§7, task-100) ────────────
+
+    #[tokio::test]
+    async fn agent_complete_revokes_task_scoped_secrets() {
+        use gyre_common::{Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-teardown"),
+            Id::new("default"),
+            "Teardown WS",
+            "teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-teardown"), "teardown-agent", now);
+        agent.workspace_id = Id::new("ws-teardown");
+        agent.current_task_id = Some(Id::new("task-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        // Task-scoped ephemeral secret for the completing agent's task
+        // (must be revoked) and a workspace-scoped secret (must survive).
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 52,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": { "agent_id": "agent-teardown" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "agent completion must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive agent completion"
         );
     }
 
@@ -4818,8 +5304,12 @@ mod tests {
         );
         st.workspaces.create(&ws).await.unwrap();
 
-        // Create user + API key so auth.user_id is Some.
-        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        // Create user + API key so auth.user_id is Some. The user MUST carry
+        // a tenant binding (task-099 F1): the API-key path of the auth
+        // extractor fail-closes on users without one, so this test would
+        // get a 403 instead of a briefing without it.
+        let mut user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        user.tenant_id = Some(Id::new("default"));
         st.users.create(&user).await.unwrap();
         let raw_key = "gyre_test_briefing_key";
         st.api_keys
@@ -4978,6 +5468,247 @@ mod tests {
             .contains("no trace found"));
     }
 
+    // ── platform-model.md §7: secrets:// resources (task-098) ─────────────
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_secrets() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 140,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
+        assert!(uris.contains(&"secrets://names"));
+        assert!(uris.contains(&"secrets://status"));
+    }
+
+    fn agent_auth(agent_id: &str, workspace_id: &str, repo_id: Option<&str>) -> AuthenticatedAgent {
+        let mut claims = serde_json::json!({
+            "sub": agent_id,
+            "scope": "agent",
+            "task_id": agent_id,
+            "workspace_id": workspace_id
+        });
+        if let Some(r) = repo_id {
+            claims["repo_id"] = serde_json::json!(r);
+        }
+        AuthenticatedAgent {
+            agent_id: agent_id.to_string(),
+            user_id: None,
+            roles: vec![UserRole::Agent],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(claims),
+            deprecated_token_auth: false,
+            impersonation: None,
+        }
+    }
+
+    async fn seed_secret_state() -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-sec"),
+            Id::new("default"),
+            "MCP Secrets WS",
+            "mcp-secrets-ws",
+            1_700_000_000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let now = 1_700_000_000u64;
+        let mk = |id: &str,
+                  name: &str,
+                  scope: gyre_common::SecretScope,
+                  scope_id: &str,
+                  expires_at: Option<u64>| gyre_common::Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: gyre_common::SecretType::Rotated,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        // Tenant-wide secret.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-t",
+                    "API_KEY",
+                    gyre_common::SecretScope::Tenant,
+                    "default",
+                    None,
+                ),
+                b"tenant-value",
+            )
+            .await
+            .unwrap();
+        // Workspace secret — same name as the repo one, so nearest-scope-wins
+        // is observable.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-w",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    None,
+                ),
+                b"ws-value",
+            )
+            .await
+            .unwrap();
+        // Repo secret overriding the workspace name + an expiring one.
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-r",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Repo,
+                    "repo-mcp-sec",
+                    None,
+                ),
+                b"repo-value",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-e",
+                    "OAUTH_REFRESH",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    Some(now + 1800),
+                ),
+                b"expiring-value",
+            )
+            .await
+            .unwrap();
+        // Another workspace's secret — must be invisible.
+        let ws2 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-other"),
+            Id::new("default"),
+            "Other WS",
+            "mcp-other-ws",
+            now,
+        );
+        state.workspaces.create(&ws2).await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-x",
+                    "HIDDEN",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-other",
+                    None,
+                ),
+                b"other-value",
+            )
+            .await
+            .unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_names_returns_cascade_names_only() {
+        let state = seed_secret_state().await;
+        let auth = agent_auth("agent-mcp-sec", "ws-mcp-sec", Some("repo-mcp-sec"));
+        let result = handle_resource_read(&state, &auth, "secrets://names").await;
+        let text = result["contents"][0]["text"].as_str().unwrap();
+        assert!(result.get("error").is_none(), "unexpected error: {result}");
+        let names: Vec<String> = serde_json::from_str(text).unwrap();
+        assert_eq!(names, vec!["API_KEY", "DATABASE_URL", "OAUTH_REFRESH"]);
+        // Values never appear anywhere in the resource payload.
+        assert!(!result.to_string().contains("tenant-value"));
+        assert!(!result.to_string().contains("ws-value"));
+        assert!(!result.to_string().contains("repo-value"));
+        assert!(!result.to_string().contains("other-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_status_reports_expiry() {
+        let state = seed_secret_state().await;
+        // A secret expiring within 1h of real wall-clock now → "expiring".
+        let real_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state
+            .secrets
+            .create(
+                &gyre_common::Secret {
+                    id: Id::new("sec-soon"),
+                    name: "SOON_TOKEN".to_string(),
+                    scope: gyre_common::SecretScope::Workspace,
+                    scope_id: "ws-mcp-sec".to_string(),
+                    secret_type: gyre_common::SecretType::Rotated,
+                    created_by: "system".to_string(),
+                    created_at: real_now,
+                    expires_at: Some(real_now + 600),
+                    last_rotated_at: Some(real_now - 60),
+                    tenant_id: "default".to_string(),
+                },
+                b"soon-value",
+            )
+            .await
+            .unwrap();
+        let auth = agent_auth("agent-mcp-sec", "ws-mcp-sec", Some("repo-mcp-sec"));
+        let result = handle_resource_read(&state, &auth, "secrets://status").await;
+        let text = result["contents"][0]["text"].as_str().unwrap();
+        assert!(result.get("error").is_none(), "unexpected error: {result}");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+        let by_name: std::collections::HashMap<&str, &serde_json::Value> = entries
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap(), e))
+            .collect();
+        // OAUTH_REFRESH's seeded expiry (2023) is far in the past → "expired".
+        assert_eq!(by_name["OAUTH_REFRESH"]["status"], "expired");
+        assert_eq!(by_name["SOON_TOKEN"]["status"], "expiring");
+        assert_eq!(
+            by_name["SOON_TOKEN"]["last_rotated_at"].as_u64(),
+            Some(real_now - 60)
+        );
+        assert_eq!(by_name["API_KEY"]["status"], "active");
+        assert_eq!(by_name["DATABASE_URL"]["status"], "active");
+        assert!(by_name["OAUTH_REFRESH"]["expires_at"].is_u64());
+        assert!(!result.to_string().contains("expiring-value"));
+        assert!(!result.to_string().contains("soon-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_secrets_without_agent_scope_errors() {
+        let state = seed_secret_state().await;
+        // A user token (no agent JWT, no agent record) has no secret scope.
+        let auth = AuthenticatedAgent {
+            agent_id: "some-user".to_string(),
+            user_id: Some(Id::new("u-1")),
+            roles: vec![UserRole::Developer],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let result = handle_resource_read(&state, &auth, "secrets://names").await;
+        assert!(result["error"].as_str().unwrap().contains("agent identity"));
+    }
+
     // ── TASK-010: graph_concept tool ─────────────────────────────────────────
 
     #[tokio::test]
@@ -5022,10 +5753,186 @@ mod tests {
         assert!(text.contains("provide either repo_id or workspace_id"));
     }
 
-    #[tokio::test]
-    async fn mcp_graph_concept_with_repo_id() {
+    /// Create a real (non-bare) git repo at a tempdir with the given
+    /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+    fn init_concept_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.dev"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::create_dir_all(std::path::Path::new(&repo_path).join("specs")).unwrap();
+        std::fs::write(
+            std::path::Path::new(&repo_path).join("specs/manifest.yaml"),
+            manifest_yaml,
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "seed manifest"]);
+        (tmp, repo_path)
+    }
+
+    /// graph_concept must be a manifest-based concept-view projection, not a
+    /// substring search (HSI §11 parity with the REST concept endpoints).
+    /// Seeding: manifest defines the spec's Authentication concept; the graph
+    /// holds an Auth-named Type, an unrelated Type, a module under *::auth*,
+    /// an endpoint node, and a spec-governed node. The tool must return
+    /// exactly the concept-matching nodes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_graph_concept_manifest_projection_not_substring() {
+        const AUTH_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+      - modules: ["*::auth*"]
+      - endpoints: ["/api/v1/auth/*"]
+      - specs: ["identity-security.md"]
+"#;
+        let state = test_state();
+        // Workspace + repo pointing at a real git checkout with the manifest.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-concept"),
+            gyre_common::Id::new("tenant-1"),
+            "concept-ws",
+            "concept-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (_tmp, repo_path) = init_concept_manifest_repo(AUTH_MANIFEST);
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-concept"),
+            gyre_common::Id::new("ws-concept"),
+            "auth-service",
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Seed the graph: concept-matching + unrelated nodes.
+        let node = |name: &str,
+                    node_type: gyre_common::NodeType,
+                    qualified_name: &str,
+                    spec_path: Option<&str>|
+         -> gyre_common::graph::GraphNode {
+            gyre_common::graph::GraphNode {
+                id: gyre_common::Id::new(format!("node-{name}")),
+                repo_id: repo.id.clone(),
+                node_type,
+                name: name.to_string(),
+                qualified_name: qualified_name.to_string(),
+                file_path: format!("src/{name}.rs"),
+                line_start: 1,
+                line_end: 2,
+                visibility: gyre_common::graph::Visibility::Public,
+                doc_comment: None,
+                spec_path: spec_path.map(str::to_string),
+                spec_paths: vec![],
+                spec_confidence: gyre_common::graph::SpecConfidence::None,
+                last_modified_sha: "abc".to_string(),
+                last_modified_by: None,
+                last_modified_at: 0,
+                created_sha: "abc".to_string(),
+                created_at: 0,
+                complexity: None,
+                churn_count_30d: 0,
+                test_coverage: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+                test_node: false,
+                spec_approved_at: None,
+                milestone_completed_at: None,
+            }
+        };
+        let auth_type = node(
+            "JwtAuthProvider",
+            gyre_common::NodeType::Type,
+            "crates::JwtAuthProvider",
+            None,
+        );
+        let unrelated_type = node(
+            "Invoice",
+            gyre_common::NodeType::Type,
+            "crates::Invoice",
+            None,
+        );
+        let auth_module = node(
+            "auth",
+            gyre_common::NodeType::Module,
+            "gyre_domain::auth::tokens",
+            None,
+        );
+        let auth_endpoint = node(
+            "login",
+            gyre_common::NodeType::Endpoint,
+            "api::v1::auth::login",
+            None,
+        );
+        let governed = node(
+            "TokenStore",
+            gyre_common::NodeType::Type,
+            "crates::TokenStore",
+            Some("specs/system/identity-security.md"),
+        );
+        // "user_authentication_service" contains the case-insensitive
+        // substring "authentication" of the concept NAME (what the old
+        // substring implementation matched on) but matches none of the
+        // concept's case-sensitive include globs (`*Auth*` requires
+        // capital-A `Auth`; the qualified name avoids the `*::auth*`
+        // module prefix) — must be excluded (substring regression guard).
+        let substring_decoy = node(
+            "user_authentication_service",
+            gyre_common::NodeType::Type,
+            "crates::user_authentication_service",
+            None,
+        );
+        for n in [
+            auth_type.clone(),
+            unrelated_type,
+            auth_module,
+            auth_endpoint.clone(),
+            governed,
+            substring_decoy,
+        ] {
+            state.graph_store.create_node(n).await.unwrap();
+        }
+        // Endpoint route path in edge metadata (extractor convention).
+        let mut route_edge = gyre_common::graph::GraphEdge {
+            id: gyre_common::Id::new("edge-route"),
+            repo_id: repo.id.clone(),
+            source_id: auth_endpoint.id.clone(),
+            target_id: auth_type.id.clone(),
+            edge_type: gyre_common::graph::EdgeType::RoutesTo,
+            metadata: Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string()),
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+        };
+        route_edge.id = gyre_common::Id::new("edge-route");
+        state.graph_store.create_edge(route_edge).await.unwrap();
+
+        let app = crate::build_router(state.clone());
         let (status, json) = mcp_post(
-            app(),
+            app,
             json!({
                 "jsonrpc": "2.0",
                 "id": 132,
@@ -5033,8 +5940,8 @@ mod tests {
                 "params": {
                     "name": "graph_concept",
                     "arguments": {
-                        "concept": "auth",
-                        "repo_id": "repo-1"
+                        "concept": "Authentication",
+                        "repo_id": "repo-concept"
                     }
                 }
             }),
@@ -5044,9 +5951,150 @@ mod tests {
         assert!(!json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
-        assert!(result["nodes"].as_array().is_some());
-        assert!(result["edges"].as_array().is_some());
-        assert!(result["repo_id"].as_str().is_some());
+        assert_eq!(result["repo_id"].as_str().unwrap(), "repo-concept");
+        let names: Vec<&str> = result["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"JwtAuthProvider"),
+            "type glob must match: {names:?}"
+        );
+        assert!(names.contains(&"auth"), "module glob must match: {names:?}");
+        assert!(
+            names.contains(&"login"),
+            "endpoint glob must match: {names:?}"
+        );
+        assert!(
+            names.contains(&"TokenStore"),
+            "spec-governed node must match: {names:?}"
+        );
+        assert!(
+            !names.contains(&"user_authentication_service"),
+            "substring-matching node must be excluded — this is a concept projection, not a substring search: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Invoice"),
+            "unrelated node must be excluded: {names:?}"
+        );
+        assert_eq!(
+            result["nodes"].as_array().unwrap().len(),
+            4,
+            "exactly the 4 concept-matching nodes: {names:?}"
+        );
+        // Edge between matched endpoint and matched type is included.
+        assert_eq!(result["edges"].as_array().unwrap().len(), 1);
+
+        // Workspace scope: same projection, repo_id label reflects the union.
+        let state2 = state;
+        let app = crate::build_router(state2);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 133,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "Authentication",
+                        "workspace_id": "ws-concept"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 4);
+    }
+
+    /// An undefined concept name must be an error — the tool has no substring
+    /// fallback (parity with the REST 404).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_graph_concept_undefined_concept_is_error() {
+        const NO_CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+"#;
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-concept-2"),
+            gyre_common::Id::new("tenant-1"),
+            "concept-ws-2",
+            "concept-ws-2",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (_tmp, repo_path) = init_concept_manifest_repo(NO_CONCEPT_MANIFEST);
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-concept-2"),
+            gyre_common::Id::new("ws-concept-2"),
+            "other-service",
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = crate::build_router(state);
+        // "auth" is a substring of "Authentication" but no concept is
+        // defined in this repo's manifest — must error, not fall back.
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 134,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "repo-concept-2"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("not defined in the spec manifest"),
+            "error must name the undefined concept: {text}"
+        );
+    }
+
+    /// A repo that does not exist must be an explicit error, not a silent
+    /// empty result.
+    #[tokio::test]
+    async fn mcp_graph_concept_unknown_repo_is_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 135,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "nonexistent-repo"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo not found"), "got: {text}");
     }
 
     // ── TASK-068: §9 graph tools callable over MCP protocol ─────────────────
@@ -5260,6 +6308,240 @@ mod tests {
                 .iter()
                 .any(|w| w.as_str().unwrap().contains("Scope matched 0 nodes")),
             "empty scope must warn over MCP, got: {text}"
+        );
+    }
+
+    /// lsp-call-graph.md §7–8 (task-076): `graph_summary` must report
+    /// per-pass `Calls`-edge counts (Pass 2 edges carry the provenance
+    /// metadata tag) and call graph completeness from the durable Pass 2
+    /// marker in the KV store.
+    #[tokio::test]
+    async fn mcp_graph_summary_call_graph_metrics_tool_call() {
+        let state = test_state();
+        let t = graph_node("repo-t76", "test_foo", NodeType::Function);
+        let a = graph_node("repo-t76", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t76", "fn_b", NodeType::Function);
+        for n in [&t, &a, &b] {
+            state.graph_store.create_node(n.clone()).await.unwrap();
+        }
+        // Pass 1 (syntax) Calls edge: no metadata tag.
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: t.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        // Pass 2 (semantic) Calls edge: provenance tag.
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: b.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string()),
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        // No Pass 2 marker yet → call graph must read as incomplete.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 160,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t76" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(summary["call_graph"]["call_edges_pass1"], 1);
+        assert_eq!(summary["call_graph"]["call_edges_pass2"], 1);
+        assert_eq!(
+            summary["call_graph"]["call_graph_complete"], false,
+            "no Pass 2 marker → incomplete, got: {text}"
+        );
+
+        // Write a fresh Pass 2 completion marker (completed at/after the
+        // nodes' last_seen_at) → complete.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = gyre_common::CallGraphRunRecord {
+            completed_at: now,
+            duration_secs: 1.25,
+            edges_persisted: 1,
+            languages: vec![gyre_common::Language::Go],
+        };
+        state
+            .kv_store
+            .kv_set(
+                crate::graph_extraction::CALL_GRAPH_STATUS_NAMESPACE,
+                "repo-t76",
+                serde_json::to_string(&record).unwrap(),
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 161,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t76" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            summary["call_graph"]["call_graph_complete"], true,
+            "fresh Pass 2 marker → complete, got: {text}"
+        );
+        assert_eq!(summary["call_graph"]["call_edges_pass1"], 1);
+        assert_eq!(summary["call_graph"]["call_edges_pass2"], 1);
+    }
+
+    /// lsp-call-graph.md §8 (task-076): `graph_query_dryrun` must warn that
+    /// the blast radius may be underreported when a calls-traversing query
+    /// runs before Pass 2 (semantic extraction) has completed, and must not
+    /// warn once the completion marker is present.
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_call_graph_warning_tool_call() {
+        let state = test_state();
+        let a = graph_node("repo-t76", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t76", "fn_b", NodeType::Function);
+        state.graph_store.create_node(a.clone()).await.unwrap();
+        state.graph_store.create_node(b.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t76"),
+                source_id: b.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let blast_radius = json!({
+            "scope": {
+                "type": "focus",
+                "node": "fn_a",
+                "edges": ["calls"],
+                "direction": "incoming",
+                "depth": 5
+            }
+        });
+
+        // No marker → warning.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 162,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t76",
+                        "query": blast_radius
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            envelope["result"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Call graph incomplete")),
+            "calls query without Pass 2 marker must warn, got: {text}"
+        );
+
+        // Marker present and fresh → no warning.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = gyre_common::CallGraphRunRecord {
+            completed_at: now,
+            duration_secs: 0.5,
+            edges_persisted: 0,
+            languages: vec![],
+        };
+        state
+            .kv_store
+            .kv_set(
+                crate::graph_extraction::CALL_GRAPH_STATUS_NAMESPACE,
+                "repo-t76",
+                serde_json::to_string(&record).unwrap(),
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 163,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t76",
+                        "query": blast_radius
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            !envelope["result"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Call graph incomplete")),
+            "calls query with fresh Pass 2 marker must not warn, got: {text}"
         );
     }
 
@@ -5559,6 +6841,19 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
         }
+        // F2: orchestrator spawn requires an approved repo-orchestrator
+        // persona in the scope chain (tenant scope here, as bootstrap
+        // step 5 registers it).
+        let mut persona = gyre_domain::Persona::new(
+            gyre_common::Id::new("repo-orchestrator-persona"),
+            "repo-orchestrator",
+            "repo-orchestrator",
+            gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+            "test orchestrator persona",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
         state
     }
 

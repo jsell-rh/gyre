@@ -9,6 +9,8 @@ def eligible(store, work):
     data = task['data']
     stage = work['stage']
     inputs = work['input'] if isinstance(work['input'], dict) else json.loads(work['input'])
+    if store.runtime_held(work):
+        return False
     if task['generation'] != work['generation']:
         return False
     if stage == 'cleanup':
@@ -27,6 +29,9 @@ def eligible(store, work):
         return (not data.get('repair') and data.get('candidate') == inputs['candidate']
                 and data.get('pr') == inputs['url'] and publication(store,task) == inputs['published'])
     if stage in ('triage','implement','review','verify'):
+        repair=data.get('repair') or {}
+        if repair.get('shared_environment'):
+            return False
         from .priority import task_priority, PriorityError
         try:
             task_priority(store,task)
@@ -64,7 +69,7 @@ def eligible(store, work):
         return False
     if stage == 'verify':
         from .ci import verification_ready
-        if not verification_ready(store,task) or not store.integration_available(work):
+        if not verification_ready(store,task,inputs.get('base')) or not store.integration_available(work):
             return False
         verified = data.get('verified') or {}
         return verified.get('candidate') != candidate or verified.get('base') != inputs['base']

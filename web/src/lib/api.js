@@ -1,3 +1,5 @@
+import { captureLastSeenHeader } from './last-seen.js';
+
 const API_BASE = '/api/v1';
 const AUTH_TOKEN_KEY = 'gyre_auth_token';
 
@@ -41,6 +43,9 @@ async function request(path, options = {}) {
       },
       signal: controller.signal,
     });
+    // Cache the server's last-seen stamp (present only on tracked,
+    // workspace-scoped responses). Feeds the Change View's `since` value.
+    captureLastSeenHeader(res.headers);
     if (!res.ok) {
       if (res.status === 401) {
         throw new Error('Session expired — please re-authenticate.');
@@ -119,6 +124,14 @@ export const api = {
       body: JSON.stringify(data),
     }),
   mergeQueue: () => request('/merge-queue'),
+  // Repo main-branch health + merge queue pause state (platform-model.md §6).
+  // withGates: false skips post-merge gate execution server-side (pause state
+  // only) — use it when rendering many repos' pause state.
+  repoStatus: (id, { withGates = true } = {}) =>
+    request(`/repos/${id}/status${withGates ? '' : '?gates=false'}`),
+  pauseRepoQueue: (id, reason) =>
+    request(`/repos/${id}/queue/pause`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  resumeRepoQueue: (id) => request(`/repos/${id}/queue/resume`, { method: 'PUT' }),
   enqueue: (mrId, priority = 50) =>
     request('/merge-queue/enqueue', {
       method: 'POST',
@@ -153,6 +166,10 @@ export const api = {
   repoSpecPolicy: (id) => request(`/repos/${id}/spec-policy`),
   setRepoSpecPolicy: (id, policy) =>
     request(`/repos/${id}/spec-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
+  // Spec lifecycle config (spec-lifecycle.md §Configuration)
+  repoSpecLifecycle: (id) => request(`/repos/${id}/settings/spec-lifecycle`),
+  setRepoSpecLifecycle: (id, config) =>
+    request(`/repos/${id}/settings/spec-lifecycle`, { method: 'PUT', body: JSON.stringify(config) }),
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
@@ -429,10 +446,12 @@ export const api = {
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
     request(`/workspaces/${id}/meta-spec-set`, { method: 'PUT', body: JSON.stringify(data) }),
-  // Workspace briefing (TASK-205)
-  getWorkspaceBriefing: (id, since) => {
+  // Workspace briefing (TASK-205). repoId narrows every section to one repo
+  // (HSI §1.5 repo-scope Briefing: ?repo_id= server-side filter).
+  getWorkspaceBriefing: (id, since, repoId) => {
     const params = new URLSearchParams();
     if (since) params.set('since', String(since));
+    if (repoId) params.set('repo_id', repoId);
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
@@ -464,6 +483,18 @@ export const api = {
   setWorkspaceBudget: (id, data) =>
     request(`/workspaces/${id}/budget`, { method: 'PUT', body: JSON.stringify(data) }),
   budgetSummary: () => request('/budget/summary'),
+  // Secrets admin (platform-model.md §7 Admin API). Values are write-only:
+  // create/rotate send them; list returns metadata only.
+  secretsList: (scope, scopeId) => {
+    const p = new URLSearchParams({ scope });
+    if (scopeId) p.set('scope_id', scopeId);
+    return request(`/secrets?${p.toString()}`);
+  },
+  secretCreate: (data) =>
+    request('/secrets', { method: 'POST', body: JSON.stringify(data) }),
+  secretDelete: (id) => request(`/secrets/${id}`, { method: 'DELETE' }),
+  secretRotate: (id, data) =>
+    request(`/secrets/${id}/rotate`, { method: 'POST', body: JSON.stringify(data) }),
   costSummary: (since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
@@ -510,9 +541,6 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
-  myAgents: () => request('/users/me/agents'),
-  myTasks: () => request('/users/me/tasks'),
-  myMrs: () => request('/users/me/mrs'),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
@@ -621,6 +649,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ spec_path: specPath, content }),
     }),
+  getSpecAssertionResults: (repoId, specPath) =>
+    request(`/repos/${repoId}/specs/${encodeURIComponent(specPath)}/assertions`),
   specsAssist: (repoId, body) =>
     fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
   api: {
@@ -10,6 +10,11 @@ vi.mock('../lib/api.js', () => ({
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    getWorkspaceBriefing: vi.fn().mockResolvedValue({
+      completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null,
+    }),
   },
 }));
 
@@ -54,6 +59,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // Reset the jsdom URL so subTab deep-link tests do not leak state.
+  window.history.replaceState(null, '', '/');
 });
 
 describe('ExplorerView scope branching', () => {
@@ -95,5 +102,86 @@ describe('ExplorerView scope branching', () => {
     await waitFor(() => {
       expect(container.innerHTML).not.toContain('Architecture');
     });
+  });
+});
+
+describe('Architecture sub-tab control (repo scope, ui-navigation.md §3)', () => {
+  // Regression: a drawer Briefing click while the Architecture tab is
+  // already active must switch the rendered content, not just rewrite the
+  // ?subTab= URL param. App drives the sub-tab through the archSubTab prop
+  // (single source of truth); the URL param alone only seeds a fresh mount.
+  it('switches to Briefing content when the archSubTab prop changes to briefing', async () => {
+    const api = (await import('../lib/api.js')).api;
+    const props = {
+      scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+      archSubTab: 'graph',
+    };
+    const { container, rerender } = render(ExplorerView, { props });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-subtab-briefing"]')).toBeTruthy();
+    });
+    // Graph is the visible sub-tab; no Briefing content rendered.
+    expect(container.querySelector('[data-testid="arch-briefing"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="arch-subtab-briefing"]').classList.contains('active')
+    ).toBe(false);
+
+    // App state change after the drawer click (repoArchSubTab → 'briefing')
+    // must drive the content switch.
+    await rerender({ ...props, archSubTab: 'briefing' });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-briefing"]')).toBeTruthy();
+    });
+    // The Briefing sub-tab fetches the real repo-scoped narrative.
+    await waitFor(() => expect(api.getWorkspaceBriefing).toHaveBeenCalledWith('ws-1', null, 'repo-1'));
+  });
+
+  it('control-bar buttons report sub-tab changes to the parent', async () => {
+    const onArchSubTabChange = vi.fn();
+    const { container } = render(ExplorerView, {
+      props: {
+        scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+        archSubTab: 'graph',
+        onArchSubTabChange,
+      },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-subtab-graph"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="arch-subtab-briefing"]'));
+    expect(onArchSubTabChange).toHaveBeenCalledWith('briefing');
+    await fireEvent.click(container.querySelector('[data-testid="arch-subtab-graph"]'));
+    expect(onArchSubTabChange).toHaveBeenCalledWith('graph');
+  });
+
+  // Regression: the initial-read effect used to delete ?subTab from the URL
+  // after seeding the sub-tab, so a reload/copy of a deep-linked
+  // architecture?subTab=briefing URL silently reopened the Graph sub-tab.
+  // App's setRepoArchSubTab invariant requires the URL to keep matching the
+  // rendered sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing").
+  it('keeps the ?subTab deep-link param in the URL after the initial read', async () => {
+    window.history.replaceState(null, '', '/workspaces/ws-1/r/repo-1/architecture?subTab=briefing');
+    // App-mimicking onArchSubTabChange: setRepoArchSubTab mirrors the
+    // sub-tab into the ?subTab= URL param.
+    const onArchSubTabChange = vi.fn((sub) => {
+      if (sub === 'briefing') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('subTab', 'briefing');
+        window.history.replaceState(window.history.state, '', url.toString());
+      }
+    });
+    render(ExplorerView, {
+      props: {
+        scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+        onArchSubTabChange,
+      },
+    });
+    // The deep link seeds the Briefing sub-tab and is reported to the parent.
+    await waitFor(() => {
+      expect(onArchSubTabChange).toHaveBeenCalledWith('briefing');
+    });
+    // The URL still matches the rendered sub-tab, not stripped by the
+    // initial read, so reload/copy reopens Briefing.
+    expect(new URLSearchParams(window.location.search).get('subTab')).toBe('briefing');
   });
 });

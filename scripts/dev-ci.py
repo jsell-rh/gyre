@@ -23,11 +23,103 @@ def check_sets(pr):
     return pending, failed, infrastructure
 
 
+def reconcile_checks(run, url, head, pr):
+    """Resolve contradictory Actions statuses using source-bound terminal evidence.
+
+    A conclusion alone never overrides a pending check. Require its completed
+    job and completed current workflow attempt, on this exact PR head.
+    """
+    repo = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/\d+', url).group(1)
+    checks, evidence, workflows = [], [], {}
+    terminal = {'SUCCESS','FAILURE','NEUTRAL','SKIPPED','CANCELLED','TIMED_OUT','STALE','ERROR'}
+    for original in pr.get('statusCheckRollup') or []:
+        check = dict(original)
+        match = re.fullmatch(r'https://github.com/' + re.escape(repo) +
+                            r'/actions/runs/(\d+)/job/(\d+)', check.get('detailsUrl') or '')
+        if (match and check.get('status') != 'COMPLETED' and
+                check.get('conclusion') in terminal and check.get('completedAt')):
+            ident, job_id = map(int,match.groups())
+            if ident not in workflows:
+                workflows[ident] = json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+            workflow = workflows[ident]
+            job = json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_id}',timeout=30).stdout)
+            if (workflow.get('id') == ident and workflow.get('head_sha') == head
+                    and workflow.get('status') == 'completed' and workflow.get('conclusion')
+                    and job.get('id') == job_id and job.get('run_id') == ident
+                    and job.get('head_sha') == head and job.get('name') == check.get('name')
+                    and job.get('run_attempt') == workflow.get('run_attempt')
+                    and isinstance(job.get('run_attempt'),int)
+                    and job.get('completed_at') == check['completedAt']
+                    and (job.get('conclusion') or '').upper() == check['conclusion']):
+                check['status'] = 'COMPLETED'
+                evidence.append({'check':check['name'],'run':ident,'job':job_id,
+                                 'head':head,'attempt':job['run_attempt'],'conclusion':check['conclusion']})
+        checks.append(check)
+    return pr | {'statusCheckRollup':checks}, evidence
+
+
+def merge_conflict(pr):
+    return (pr.get('state') == 'OPEN' and pr.get('mergeStateStatus') == 'DIRTY'
+            and pr.get('mergeable') == 'CONFLICTING'
+            and bool(re.fullmatch(r'[a-f0-9]{40}',pr.get('baseRefOid') or '')))
+
+
+def setup_failure(run, repo, head, base, failed, logs):
+    """Recognize source-independent setup failures, using terminal Actions evidence.
+
+    An old green base run does not describe today's hosted runner. Never group
+    product-test failures or candidates that changed the relevant CI inputs.
+    """
+    workflows, platforms = set(), set()
+    for check in failed:
+        ident=run_id(check)
+        match=re.search(r'Error:\s*(?:ERROR:\s*)?Playwright does not support chromium on ([\w.-]+)',logs.get(ident,''))
+        job_match=re.fullmatch(r'https://github.com/'+re.escape(repo)+r'/actions/runs/(\d+)/job/(\d+)',check.get('detailsUrl') or '')
+        if not match or not job_match:return None
+        workflow=json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}','--jq','{id,head_sha,status,conclusion,run_attempt,path}',timeout=30).stdout)
+        job=json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_match[2]}','--jq','{id,name,head_sha,run_id,status,conclusion,run_attempt,steps}',timeout=30).stdout)
+        if (workflow.get('id')!=ident or job.get('id')!=int(job_match[2]) or job.get('name')!=check.get('name')
+                or workflow.get('head_sha')!=head or job.get('head_sha')!=head or job.get('run_id')!=ident
+                or workflow.get('status')!='completed' or job.get('status')!='completed'
+                or workflow.get('conclusion')!='failure' or job.get('conclusion')!='failure'
+                or workflow.get('run_attempt')!=job.get('run_attempt')
+                or not isinstance(job.get('run_attempt'),int)):
+            raise RuntimeError('CI setup evidence changed; observe the current workflow attempt again')
+        steps=[s['name'] for s in job.get('steps',[]) if s.get('conclusion')=='failure']
+        path=workflow.get('path','')
+        if steps!=['Install Playwright browsers'] or not re.fullmatch(r'\.github/workflows/[\w.-]+\.ya?ml',path):return None
+        workflows.add(path);platforms.add(match[1])
+    paths=sorted(workflows | {'web/package.json','web/package-lock.json','.npmrc','web/.npmrc'})
+    cache={}
+    def inputs(ref):
+        result={}
+        for path in paths:
+            key=(ref,path)
+            if key not in cache:
+                response=run('gh','api',f'repos/{repo}/contents/{path}?ref={ref}','--jq','{sha,type,status}',timeout=30,check=False)
+                value=json.loads(response.stdout)
+                if response.returncode and str(value.get('status'))=='404' and path.endswith('.npmrc'):
+                    cache[key]=None
+                elif response.returncode or value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):
+                    raise RuntimeError('Cannot establish exact CI configuration identity')
+                else:cache[key]=value['sha']
+            result[path]=cache[key]
+        return result
+    original=inputs(head)
+    if original!=inputs(base):return None
+    main=json.loads(run('gh','api',f'repos/{repo}/git/ref/heads/main',timeout=30).stdout).get('object',{}).get('sha','')
+    if not re.fullmatch(r'[a-f0-9]{40}',main):raise RuntimeError('Cannot establish current main for CI recovery')
+    fingerprint=hashlib.sha256(json.dumps([repo,'playwright-unsupported-platform',sorted(platforms),original],sort_keys=True).encode()).hexdigest()
+    return {'status':'environment_refresh' if inputs(main)!=original else 'environment_failed',
+            'failure_signature':fingerprint,'environment_failure':{'kind':'playwright-unsupported-platform',
+                'platforms':sorted(platforms),'inputs':original},'target_base':main}
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     pr = json.loads(run('gh', 'pr', 'view', url, '--json',
-                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit', timeout=30).stdout)
+                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit,baseRefOid,mergeable', timeout=30).stdout)
     if pr['headRefOid'] != head:
         raise RuntimeError('PR head changed outside the recorded verification')
     if pr['state'] == 'MERGED':
@@ -36,6 +128,15 @@ def observe(run, url, head, base, directory):
         return {'status': 'closed'}
     checks = pr.get('statusCheckRollup') or []
     (directory / 'github-checks.json').write_text(json.dumps(pr, indent=2))
+    # Conflicts require source repair even when CI is green, absent, or still
+    # running. Recheck both refs and conflict state before handing off.
+    if merge_conflict(pr):
+        return {'status':'merge_conflict','head':head,'base':pr['baseRefOid'],
+                'verified_base':base,'pr':url,'merge_state':'DIRTY',
+                'check_summary':[{key:check.get(key) for key in ('name','status','conclusion','context','state')} for check in checks],
+                'detail':'The published PR conflicts with its current target branch. Resolve the merge against current main, preserving the retained implementation. Inspect all unmerged paths, resolve source conflicts, regenerate conflicting build artifacts from the resolved source, and obtain fresh independent review and verification.'}
+    pr, reconciled = reconcile_checks(run,url,head,pr)
+    (directory / 'github-check-reconciliation.json').write_text(json.dumps(reconciled,indent=2))
     pending, failed, infrastructure = check_sets(pr)
     if (pending and not failed) or not checks:
         return {'status': 'pending'}
@@ -49,6 +150,7 @@ def observe(run, url, head, base, directory):
                 'checks': 'green', 'merge_state': pr['mergeStateStatus']}
     repo = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/\d+', url).group(1)
     candidate_evidence, baseline_evidence = [], []
+    logs={}
     artifact_directories = []
     baseline_only = True
     baseline_runs = json.loads(run('gh', 'api',
@@ -73,6 +175,7 @@ def observe(run, url, head, base, directory):
                 {key:check.get(key) for key in ('name','conclusion','detailsUrl','targetUrl')}
                 for check in failed if run_id(check) == ident])
         (directory / f'github-run-{ident}.log').write_text(candidate_log)
+        logs[ident]=candidate_log
         allowance = max(1024, 60000 // (2 * len(failed)))
         candidate_evidence.append(f'## Current PR head {head}: {metadata["name"]}, run {ident}\n\n{candidate_log[-allowance:]}')
         if metadata['name'] == 'E2E Tests':
@@ -103,12 +206,16 @@ def observe(run, url, head, base, directory):
     candidate_path.write_text('\n\n'.join(candidate_evidence))
     baseline_path.write_text('\n\n'.join(baseline_evidence))
     log.write_text('\n\n'.join(candidate_evidence + baseline_evidence))
-    return {'status': 'baseline_failed' if baseline_only else 'candidate_failed',
+    result={'status': 'baseline_failed' if baseline_only else 'candidate_failed',
             'base': base, 'baseline_log': str(baseline_path), 'candidate_log': str(candidate_path),
             'pr': url, 'head': head, 'runs': sorted({run_id(check) for check in failed}, key=str),
             'artifact_directories': artifact_directories,
             'environment': 'github-' + hashlib.sha256(json.dumps(sorted((item.get('workflowName', ''), item.get('name', ''), item.get('context', '')) for item in failed)).encode()).hexdigest(),
             'log': str(log)}
+    setup=setup_failure(run,repo,head,base,failed,logs)
+    if setup:
+        result.update(setup,baseline_log=str(candidate_path))
+    return result
 
 
 def run_id(check):

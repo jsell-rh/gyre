@@ -14,6 +14,7 @@ import time
 import threading
 
 from .execution import ROOT, Retry, Wait
+from .catalog import helper
 from .diagnostics import DEFAULT_MODEL_TIMEOUT, diagnose
 
 
@@ -73,6 +74,15 @@ def adopt(execution, task):
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
         (execution.directory / 'outcome.json').write_text(json.dumps(receipt))
+        provenance={'work':claim['id'],'attempt':int(path.parent.name),'head':receipt['head']}
+        (execution.directory / 'adopted-from.json').write_text(json.dumps(provenance))
+        with execution.log.open('a') as output:
+            output.write(f"Adopted published checkpoint from attempt {path.parent.name}.\n")
+            previous_log=path.parent/'output.log'
+            if previous_log.exists() and previous_log != execution.log:
+                with previous_log.open('rb') as source:
+                    source.seek(0,2);source.seek(max(0,source.tell()-16000))
+                    output.write(source.read(16000).decode('utf-8',errors='replace'))
         return receipt | {'branch': execution.branch}
     return None
 
@@ -99,6 +109,7 @@ def prepare(execution, task, prompt):
     execution.command('git', 'checkout', '--quiet', '-b', branch, seed, cwd=repo)
     if claim['stage'] == 'implement':
         execution.command('git', 'merge', '--no-edit', claim['input']['base'], cwd=repo, check=False)
+        helper('pipeline-artifacts').restore_generated(repo,claim['input']['base'])
     task_path = repo / 'specs/tasks' / (task['name'] + '.md')
     task_path.parent.mkdir(parents=True, exist_ok=True)
     task_path.write_text(task['body'])
@@ -111,7 +122,7 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
@@ -171,8 +182,8 @@ def prepare(execution, task, prompt):
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
                        'sandbox': {'GYRE_PIPELINE_STAGE': stage,
-                                   'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
-                                   'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
+                                   **helper('pipeline-build-env').environment(),
+                                   'NODE_OPTIONS':'--max-old-space-size=768',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
                                    'GYRE_DEV_REAL_NPM': '/usr/bin/npm', 'GYRE_DEV_REAL_NPX': '/usr/bin/npx'}}}
@@ -180,7 +191,7 @@ def prepare(execution, task, prompt):
         raise Retry('Set fullsend_image to the pushed digest built from docker/dev-worker/Dockerfile')
     (cfg / 'harness' / (stage + '.yaml')).write_text(json.dumps(harness))
     value = {'state': str(execution.store.directory), 'work': claim['id'], 'token': claim['token'],
-             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve())}
+             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve()), 'durable_agent':True}
     (execution.directory / 'fullsend-context.json').write_text(json.dumps(value))
     shim = execution.directory / 'bin'
     shim.mkdir(exist_ok=True)
@@ -228,9 +239,18 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'pipeline-agent.py', 'job.json'):
         source = execution.directory / 'bundle' / name
+        if name == 'pipeline-agent.py' or (name == 'pipeline-artifacts.py' and not source.exists()):
+            source = ROOT / 'scripts' / name
         execution.os('sandbox', 'upload', sandbox, str(source), '/tmp/stage/' + name, '--no-git-ignore', timeout=120)
+    # Tools can outlive Pi in detached groups. No checkpoint may race a writer.
+    code="import pathlib,subprocess,sys\nfor p in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):\n if p.is_dir() and (p/'identity.json').exists(): subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(p)],check=True,timeout=12)"
+    stopped=execution.os('sandbox','exec','-n',sandbox,'--','python3','-c',code,timeout=60,check=False)
+    if stopped.returncode:
+        from .execution import Attention
+        error=Attention('Owned agent tools could not be stopped before checkpoint capture; no source receipt accepted')
+        error.category='sandbox_stopped';raise error
     result = execution.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/sandbox/workspace/checkout',
                           '--', 'python3', '/tmp/stage/pipeline-remote.py', 'finalize', '1' if success else '0',
                           timeout=300, check=False)
@@ -339,6 +359,13 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                 if time.monotonic() >= deadline:
                     raise Retry('fullsend execution exceeded assignment deadline')
                 execution.cancelled.wait(1)
+        runtime_failure=execution.directory/'runtime-failure.json'
+        if runtime_failure.exists():
+            value=json.loads(runtime_failure.read_text())
+            from .execution import Attention
+            error=(Attention if value.get('attention') else Retry)(value['message'])
+            error.category=value['category'];error.diagnostic=value.get('diagnostic')
+            raise error
         result = execution.directory / 'outcome.json'
         diagnostic = diagnose(execution.directory, process.returncode) if process.returncode or not result.exists() else None
         if result.exists():
@@ -377,7 +404,7 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                     continue
                 execution.store.resource_state(name, 'deleting')
                 if inventory[name]['phase'].lower() != 'deleting':
-                    if inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
+                    if execution.claim['stage']=='implement' and inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
                         try:
                             collect(execution, name, success=False)
                         except Exception as exc:

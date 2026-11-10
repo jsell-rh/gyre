@@ -254,8 +254,9 @@ async fn spec_conflict_response(
             now as i64,
         );
         notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_path.to_string());
-        notif.repo_id = Some(repo.id.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = spec_path.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
         }
@@ -426,21 +427,57 @@ pub async fn assist_spec(
     let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
 
-    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
+    // platform-model.md §Budget Tracking). The LlmPort does not return actual
+    // usage, so keep the existing estimate — ~4 chars per token for the
+    // prompts plus response overhead and a 3x reasoning multiplier — and
+    // split it into input/output for the per-call budget record so that
+    // input + output equals the estimate.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
-    let base_estimate = (estimated_input + 500) as f64;
-    let estimated_tokens = base_estimate * 3.0;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(caller.agent_id.clone()),
         None,
         "llm_query",
-        estimated_tokens,
+        base_estimate,
         "tokens",
         now_secs(),
     );
     if let Err(e) = state.costs.record(&cost_entry).await {
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
+    }
+
+    // Per-call budget record + workspace/tenant counter increment
+    // (platform-model.md §Budget Tracking).
+    let ws_for_budget = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(ws) = ws_for_budget {
+        super::budget::record_llm_call_usage(
+            &state,
+            &super::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: Some(repo.id.clone()),
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %repo.workspace_id,
+            "specs/assist budget recording skipped: workspace not found"
+        );
     }
 
     // Build SSE events: partial events stream the explanation progressively,
@@ -677,7 +714,8 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
+    // Priority-2 "Spec approval requested" notification (user-management.md
+    // §Notification Entity + HSI §2/§8).
     // user_id is "system" — real per-user fan-out requires workspace membership
     // which is outside this task's scope.
     let notif_id = new_id();
@@ -685,12 +723,14 @@ pub async fn save_spec(
         notif_id,
         repo.workspace_id.clone(),
         Id::new("system"),
-        NotificationType::SpecPendingApproval,
+        NotificationType::SpecApprovalRequested,
         format!("Spec pending approval: {}", req.spec_path),
         &tenant_id,
         now as i64,
     );
-    notif.entity_ref = Some(mr_id.to_string());
+    notif.source.entity_type = "mr".to_string();
+    notif.source.entity_id = mr_id.to_string();
+    notif.source.repo_id = Some(repo.id.clone());
     // Non-fatal — MR is created even if notification fails.
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
@@ -943,10 +983,10 @@ mod tests {
         let notifs = state.notifications.list_recent(10).await.unwrap();
         let spec_notif = notifs
             .iter()
-            .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
-            .expect("SpecPendingApproval notification must be created");
-        assert_eq!(spec_notif.priority, 2);
-        assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
+            .find(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+            .expect("SpecApprovalRequested notification must be created");
+        assert_eq!(spec_notif.priority_rank, 2);
+        assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
     }
 
     #[tokio::test]
@@ -1656,6 +1696,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = SpecSaveRequest {
             spec_path: "specs/system/conflict.md".to_string(),
@@ -1694,10 +1735,10 @@ mod tests {
                 1,
                 "user {uid} must get exactly one SpecConflict notification, got {notifs:?}"
             );
-            assert_eq!(conflict[0].priority, 2);
+            assert_eq!(conflict[0].priority_rank, 2);
             assert_eq!(
-                conflict[0].entity_ref.as_deref(),
-                Some("specs/system/conflict.md")
+                conflict[0].source.entity_id.as_str(),
+                "specs/system/conflict.md"
             );
             let body: serde_json::Value =
                 serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();

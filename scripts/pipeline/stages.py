@@ -111,7 +111,7 @@ def implement(execution, task):
                                                 'id': execution.claim['id'],
                                                 'agent_exit': result['agent_exit'],
                                                 'detail': 'Continue from this saved source checkpoint. The previous assignment did not complete; do not repeat broad repository exploration or full integration gates.',
-                                                'log_tail': execution.log.read_text(errors='replace')[-12000:]}}
+                                                'log_tail': execution.log_tail(12000)}}
     if contract_changed:
         updates['repair'].update(category='contract',
             detail='The protected task text changed. The executor restores the assigned task document in the next checkout; preserve the existing production fix. Keep all progress notes under exactly ## Shipped, using ### for round subheadings. Do not rename that heading or add diagnostic top-level sections. Normative changes require separate spec review.',
@@ -205,6 +205,13 @@ def verify(execution, task):
                               '-m', f"verify({task['name']}): reconcile candidate with main",
                               approved_candidate, cwd=path, check=False)
     if merge.returncode:
+        generated,remaining=helper('pipeline-artifacts').resolve_generated_conflicts(path,inp['base'])
+        if generated:
+            execution.store.event('generated_conflicts_resolved',{'paths':generated,'base':inp['base']},task['name'],execution.claim['id'])
+            if not remaining:
+                execution.command('git','-c','core.hooksPath=/dev/null','commit','--no-gpg-sign','--no-edit',cwd=path)
+                merge.returncode=0
+    if merge.returncode:
         finding = {'id': execution.claim['id'], 'category': 'rebase', 'source': inp['candidate'],
                    'base': inp['base'], 'details': merge.stdout + merge.stderr}
         return {'passed': False}, {'repair': finding}, [finding]
@@ -215,27 +222,44 @@ def verify(execution, task):
     if not remote['passed']:
         failed = next(record for record in records if record['exit_code'])
         code = failed['exit_code']
-        if code in (75, 77, 79, 124, 137) or code < 0:
+        if code == 124:
+            from .verification import deadline_error
+            raise deadline_error()
+        if code in (75, 77, 79, 137) or code < 0:
             raise Retry('verification infrastructure unavailable')
         if code == 81:
             observation = static_baseline_observation(execution.log, inp['base'])
             prerequisite = baseline_repair(execution, observation)
             finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
                                      'source': inp['candidate'], 'prerequisite': prerequisite,
-                                     'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+                                     'log_tail': execution.log_tail(16000)}
             return {'passed': False, 'checks': records}, {
                 'repair': finding, 'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite})}, [finding]
         finding = {'id': execution.claim['id'], 'category': 'verification',
                    'source': inp['candidate'], 'base': inp['base'],
                    'command': failed['command'], 'exit_code': code,
                    'artifact': str(execution.log),
-                   'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+                   'log_tail': execution.log_tail(16000)}
         return {'passed': False, 'checks': records}, {'repair': finding}, [finding]
     branch = f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"
-    execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
+    if remote.get('publication'):
+        publication=remote['publication']
+        actual=execution.command('git','ls-remote','origin','refs/heads/'+branch,cwd=path).stdout.split()
+        if not actual or actual[0]!=publication.get('head'):raise Retry('verified artifact branch was not confirmed')
+        execution.command('git','fetch','--quiet','origin',branch,cwd=path,timeout=180)
+        try:
+            helper('pipeline-artifacts').validate(path,{'head':head,'tree':tree},publication,task['name'],branch)
+        except ValueError as exc:
+            from .execution import Attention
+            raise Attention('Verified artifact proof rejected: '+str(exc)) from exc
+        head,tree=publication['head'],publication['tree']
+        execution.store.event('generated_artifacts_verified',publication|{'tested_head':remote['head']},task['name'],execution.claim['id'])
+    else:
+        execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
     receipt = {'candidate': inp['candidate'], 'base': inp['base'], 'head': head,
                'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
-               'engine': 'gateway', 'sandbox': remote['sandbox']}
+               'engine': 'gateway', 'sandbox': remote['sandbox'],
+               'tested_head':remote.get('head'),'artifacts':remote.get('publication')}
     (execution.directory / 'verified.json').write_text(json.dumps(receipt))
     return receipt, {'verified': receipt}, []
 
@@ -274,7 +298,7 @@ def publish(execution, task):
             rejected = ci_failure(execution,task,previous,observed)
             if rejected:
                 return rejected
-            if observed['status'] not in ('passed','policy_pending') or observed.get('checks') != 'green':
+            if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
                 raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
@@ -395,15 +419,18 @@ def baseline_repair(execution, observation):
     signature = observation.get('failure_signature')
     key = observation['base'] + ':' + (signature or observation['environment'])
     excerpt = Path(observation['baseline_log']).read_text()[-24000:]
-    body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
+    shared=observation.get('status')=='environment_failed'
+    title=('Repair shared CI environment ' + signature[:12]) if shared else ('Repair verified failure on main ' + observation['base'][:12])
+    body = ('---\ntitle: "' + title + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
             'depends_on: []\nprogress: not-started\ncommits: []\n---\n\n'
-            '## Required behavior\n\nReproduce and repair this verified upstream failure. '
+            '## Required behavior\n\n' + ('Repair this shared CI setup failure. The failed installer ran with the same workflow and dependency inputs as the upstream base; an older green run does not prove the current runner supports them. ' if shared else 'Reproduce and repair this verified upstream failure. ') +
             'Implement real production fixes or correct a genuinely broken test setup. '
             'Do not weaken checks, add skips or exemptions, or implement the blocked feature. '
             'Obtain independent review and pass full verification and GitHub checks.\n\n'
             'Base: `' + observation['base'] + '`\n'
             'Environment fingerprint: `' + observation['environment'] + '`\n\n'
+            + ('CI setup inputs: '+json.dumps(observation.get('environment_failure',{}),sort_keys=True)+'\n\n' if shared else '') +
             '## Baseline failure\n\n```text\n' + excerpt + '\n```\n')
     generation = generation_for(store, body)
     with store.transaction():
@@ -425,6 +452,7 @@ def baseline_repair(execution, observation):
         name = f'task-{number:03d}'
         data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
                                 'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
+        if shared:data.update(ci_environment=observation['environment_failure'],triaged=generation)
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?)', (name, generation, body, json.dumps(data), time.time()))
         store.event('baseline_prerequisite', {'base': observation['base'], 'evidence': observation['baseline_log']}, name)
         return name
@@ -515,27 +543,45 @@ def cleanup(execution, task):
     old_directory = execution.store.directory / 'attempts' / owned['work'] / str(owned['token'])
     old_directory.mkdir(parents=True, exist_ok=True)
     if any(item['name'] == resource for item in inventory):
-        # Crash cleanup must preserve source too. Stop the old process group
-        # before capturing its index; its expired token cannot approve work.
-        code = """import json,os,pathlib,signal,time
-p=pathlib.Path('/tmp/stage/step.exit.process.json')
-if p.exists():
+        # Only implementers own source to salvage. Reviews and exact-tree
+        # verification must not spend minutes indexing generated build output.
+        # Stop durable agent supervisors before capturing an implementer's index.
+        code = """import json,os,pathlib,signal,time,subprocess,sys
+for root in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):
+ if root.is_dir() and (root/'identity.json').exists():
+  subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(root)],check=True,timeout=12)
+pairs=[pathlib.Path('/tmp/stage/step.exit.process.json')]
+pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/identity.json'))
+pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/child.json'))
+for p in pairs:
+ if not p.exists(): continue
  value=json.loads(p.read_text()); pid=int(value['pid']); stat=pathlib.Path(f'/proc/{pid}/stat')
- if stat.exists() and stat.read_text().rsplit(')',1)[1].split()[19]==value['start'] and pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()==value['boot']:
-  os.killpg(pid,signal.SIGTERM); time.sleep(1)
-  if stat.exists(): os.killpg(pid,signal.SIGKILL)
+ def same_process():
+  try:
+   fields=stat.read_text().rsplit(')',1)[1].split()
+   return fields[0]!='Z' and fields[19]==value['start'] and pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()==value['boot']
+  except FileNotFoundError: return False
+ try:
+  if same_process():
+   os.killpg(pid,signal.SIGTERM); time.sleep(1)
+   if same_process(): os.killpg(pid,signal.SIGKILL)
+ except ProcessLookupError: pass
 """
         try:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
-            execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+            if old_work and old_work['stage']=='implement':
+                execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)
+                stopped=execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+                if stopped.returncode:raise RuntimeError('owned agent tools did not quiesce; source capture skipped')
             raw = execution.remote(resource, 'tail', '-c', '1048576', '/tmp/stage/step.log', timeout=30, check=False)
             (old_directory / 'orphan.log').write_text(raw.stdout)
-            try:
-                execution.command('env', 'GYRE_DEV_RECOVERY_REPO=' + json.loads(owned['data']).get('repo', '/tmp/gyre'), 'python3', str(ROOT / 'scripts/dev-recover.py'), resource,
-                                  str(old_directory / 'recovery.patch'), timeout=180, check=False)
-            except Exception as exc:
-                execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
+            if old_work and old_work['stage']=='implement':
+                try:
+                    execution.command('env', 'GYRE_DEV_RECOVERY_REPO=' + json.loads(owned['data']).get('repo', '/tmp/gyre'), 'python3', str(ROOT / 'scripts/dev-recover.py'), resource,
+                                      str(old_directory / 'recovery.patch'), timeout=180, check=False)
+                except Exception as exc:
+                    execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
         except Exception as exc:
             execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
         execution.store.resource_state(resource, 'deleting')

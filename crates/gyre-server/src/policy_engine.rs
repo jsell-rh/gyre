@@ -121,6 +121,9 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
                     AttrValue::Number(n),
                     ConditionValue::Number(expected),
                 ) => n != expected,
+                (ConditionOp::NotEquals, AttrValue::Bool(b), ConditionValue::Bool(expected)) => {
+                    b != expected
+                }
                 // In: value must be in list
                 (ConditionOp::In, AttrValue::Single(s), ConditionValue::StringList(list)) => {
                     list.contains(s)
@@ -568,6 +571,117 @@ mod tests {
     }
 
     // --- TASK-061: Attestation chain attribute evaluation ---
+
+    #[test]
+    fn not_equals_bool_condition_compares_booleans() {
+        // NotEquals on Bool attributes (used by
+        // builtin:require-signed-authorization's unless-clause).
+        let cond = Condition {
+            attribute: "subject.attestation_chain_present".to_string(),
+            operator: ConditionOp::NotEquals,
+            value: ConditionValue::Bool(true),
+        };
+        let mut p = deny_policy(100, vec![cond]);
+        p.actions = vec!["merge".to_string()];
+        p.resource_types = vec!["attestation".to_string()];
+
+        // Chain present (true != true is false) → policy does not match →
+        // a companion allow decides.
+        let mut present = AttributeContext::default();
+        present.set_bool("subject.attestation_chain_present", true);
+        let allow = allow_policy(50, vec![]);
+        let result = evaluate(vec![p.clone(), allow], &present, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Chain explicitly absent-marked (false != true) → deny matches.
+        let mut absent = AttributeContext::default();
+        absent.set_bool("subject.attestation_chain_present", false);
+        let result = evaluate(vec![p], &absent, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert!(result.matched_policy.is_some());
+    }
+
+    #[test]
+    fn builtin_signed_authorization_satisfied_by_chain_presence() {
+        // §7.2: "Deny unless a valid attestation chain exists for the
+        // submitted work" — the shipped builtin pair must let attested
+        // work through and deny chain-less work.
+        let builtins: Vec<Policy> = crate::abac_middleware::m34_builtin_policies()
+            .into_iter()
+            .filter(|p| {
+                p.name == "builtin:require-signed-authorization"
+                    || p.name == "builtin:attested-authorization"
+            })
+            .collect();
+        assert_eq!(builtins.len(), 2, "both builtins must exist");
+
+        // Attested agent work: immutable deny's unless-clause is false, the
+        // attested-authorization Allow (priority 150) matches.
+        let mut attested = AttributeContext::default();
+        attested.set("subject.type", "agent");
+        attested.set_bool("subject.attestation_chain_present", true);
+        let result = evaluate(builtins.clone(), &attested, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+        assert_eq!(
+            result.matched_policy,
+            Some("builtin-attested-authorization".to_string())
+        );
+
+        // Chain-less agent work: the immutable deny fires and cannot be
+        // overridden by the attested Allow. The attribute is set explicitly
+        // to false (not merely absent): eval_condition fails closed on
+        // missing attributes, so an absent chain attribute would leave the
+        // deny's `!= true` condition unevaluated and fall through to the
+        // anonymous default deny (matched_policy: None) instead of
+        // attributing the decision to this policy. Production sets the
+        // attribute explicitly whenever it runs the attestation-scoped
+        // evaluation (git_http.rs / merge_processor.rs), and the neighboring
+        // not_equals_bool_condition_compares_booleans models absence the
+        // same way.
+        let mut unattested = AttributeContext::default();
+        unattested.set("subject.type", "agent");
+        unattested.set_bool("subject.attestation_chain_present", false);
+        let result = evaluate(builtins, &unattested, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(
+            result.matched_policy,
+            Some("builtin-require-signed-authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn user_deny_overrides_attested_authorization_allow() {
+        // The attested-authorization Allow sits at priority 150, below the
+        // user band (200-299), so a user deny still restricts attested work.
+        let builtins: Vec<Policy> = crate::abac_middleware::m34_builtin_policies()
+            .into_iter()
+            .filter(|p| {
+                p.name == "builtin:require-signed-authorization"
+                    || p.name == "builtin:attested-authorization"
+            })
+            .collect();
+        let mut user_deny = deny_policy(
+            200,
+            vec![Condition {
+                attribute: "subject.chain_depth".to_string(),
+                operator: ConditionOp::GreaterThan,
+                value: ConditionValue::Number(0),
+            }],
+        );
+        user_deny.actions = vec!["merge".to_string()];
+        user_deny.resource_types = vec!["attestation".to_string()];
+
+        let mut policies = builtins;
+        policies.push(user_deny);
+
+        let mut deep_chain = AttributeContext::default();
+        deep_chain.set("subject.type", "agent");
+        deep_chain.set_bool("subject.attestation_chain_present", true);
+        deep_chain.set_number("subject.chain_depth", 2);
+        let result = evaluate(policies, &deep_chain, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(result.matched_policy, Some("p-200".to_string()));
+    }
 
     #[test]
     fn chain_depth_greater_than_denies_deep_chains() {

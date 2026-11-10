@@ -35,6 +35,7 @@ struct MetaSpecRow {
     approval_status: String,
     approved_by: Option<String>,
     approved_at: Option<i64>,
+    approved_content_hash: Option<String>,
     created_by: String,
     created_at: i64,
     updated_at: i64,
@@ -58,6 +59,7 @@ impl MetaSpecRow {
                 .ok_or_else(|| anyhow!("unknown approval_status: {}", self.approval_status))?,
             approved_by: self.approved_by,
             approved_at: self.approved_at.map(|t| t as u64),
+            approved_content_hash: self.approved_content_hash,
             created_by: self.created_by,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
@@ -80,6 +82,7 @@ struct InsertMetaSpecRow<'a> {
     approval_status: &'a str,
     approved_by: Option<&'a str>,
     approved_at: Option<i64>,
+    approved_content_hash: Option<String>,
     created_by: &'a str,
     created_at: i64,
     updated_at: i64,
@@ -181,6 +184,7 @@ impl MetaSpecRepository for PgStorage {
         let approval_status = meta_spec.approval_status.as_str().to_string();
         let approved_by = meta_spec.approved_by.clone();
         let approved_at = meta_spec.approved_at.map(|t| t as i64);
+        let approved_content_hash = meta_spec.approved_content_hash.clone();
         let created_by = meta_spec.created_by.clone();
         let created_at = meta_spec.created_at as i64;
         let updated_at = meta_spec.updated_at as i64;
@@ -199,6 +203,7 @@ impl MetaSpecRepository for PgStorage {
                 approval_status: &approval_status,
                 approved_by: approved_by.as_deref(),
                 approved_at,
+                approved_content_hash,
                 created_by: &created_by,
                 created_at,
                 updated_at,
@@ -270,6 +275,7 @@ impl MetaSpecRepository for PgStorage {
         let approval_status = meta_spec.approval_status.as_str().to_string();
         let approved_by = meta_spec.approved_by.clone();
         let approved_at = meta_spec.approved_at.map(|t| t as i64);
+        let approved_content_hash = meta_spec.approved_content_hash.clone();
         let updated_at = meta_spec.updated_at as i64;
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
@@ -283,19 +289,25 @@ impl MetaSpecRepository for PgStorage {
                 .context("fetch current meta_spec")?;
 
             if let Some(current_row) = current {
-                let version_id = uuid::Uuid::new_v4().to_string();
-                let ver_row = InsertVersionRow {
-                    id: &version_id,
-                    meta_spec_id: &current_row.id,
-                    version: current_row.version,
-                    prompt: &current_row.prompt,
-                    content_hash: &current_row.content_hash,
-                    created_at: now,
-                };
-                diesel::insert_into(meta_spec_versions::table)
-                    .values(&ver_row)
-                    .execute(&mut *conn)
-                    .context("archive meta_spec version")?;
+                // Archive only when the content version changed — a
+                // same-version update (approval of unchanged content,
+                // required-flag toggle) is not a new version and must not
+                // create a duplicate history row.
+                if current_row.version != version {
+                    let version_id = uuid::Uuid::new_v4().to_string();
+                    let ver_row = InsertVersionRow {
+                        id: &version_id,
+                        meta_spec_id: &current_row.id,
+                        version: current_row.version,
+                        prompt: &current_row.prompt,
+                        content_hash: &current_row.content_hash,
+                        created_at: now,
+                    };
+                    diesel::insert_into(meta_spec_versions::table)
+                        .values(&ver_row)
+                        .execute(&mut *conn)
+                        .context("archive meta_spec version")?;
+                }
             }
 
             diesel::update(meta_specs::table.filter(meta_specs::id.eq(&ms_id)))
@@ -311,6 +323,7 @@ impl MetaSpecRepository for PgStorage {
                     meta_specs::approval_status.eq(&approval_status),
                     meta_specs::approved_by.eq(&approved_by),
                     meta_specs::approved_at.eq(&approved_at),
+                    meta_specs::approved_content_hash.eq(&approved_content_hash),
                     meta_specs::updated_at.eq(updated_at),
                 ))
                 .execute(&mut *conn)
@@ -438,6 +451,18 @@ impl MetaSpecBindingRepository for PgStorage {
                 .filter(meta_spec_bindings::spec_id.eq(&sid))
                 .load::<MetaSpecBindingRow>(&mut *conn)
                 .context("list meta_spec_bindings")?;
+            Ok(rows.into_iter().map(|r| r.into_domain()).collect())
+        })
+        .await?
+    }
+
+    async fn list_all(&self) -> Result<Vec<MetaSpecBinding>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<Vec<MetaSpecBinding>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = meta_spec_bindings::table
+                .load::<MetaSpecBindingRow>(&mut *conn)
+                .context("list all meta_spec_bindings")?;
             Ok(rows.into_iter().map(|r| r.into_domain()).collect())
         })
         .await?

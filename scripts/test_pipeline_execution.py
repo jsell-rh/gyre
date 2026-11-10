@@ -25,6 +25,19 @@ class CrashTest(unittest.TestCase):
         self.work = self.store.enqueue('implement', 'task-001', 'g', {})
         self.claim = self.store.claim('implement', 'actor')
 
+    def test_maximum_memory_attention_cannot_be_bypassed_by_checkpoint_or_new_main(self):
+        from pipeline.execution import Attention
+        execution=Execution(self.store,self.claim)
+        (execution.directory/'recovery.json').write_text('{}')
+        def exhausted(*_):
+            error=Attention('OOM at maximum tier');error.category='sandbox_oom';raise error
+        with patch.dict(cli.HANDLERS,{'implement':exhausted}):
+            cli.run_claim(self.store,self.claim)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(self.work,)).fetchone()[0],'attention')
+        next_work=self.store.enqueue('implement','task-001','g',{'base':'advanced-main'})
+        self.assertIsNone(self.store.claim('implement','cannot-bypass',ident=next_work))
+        self.assertTrue(self.store.runtime_held({'task':'task-001','stage':'implement','generation':'g'}))
+
     def test_inventory_cannot_release_inflight_creation(self):
         self.store.reserve('inflight', self.work, self.claim['token'], 'sandbox', 1)
         with patch.object(cli.gateway if hasattr(cli, 'gateway') else __import__('pipeline.execution', fromlist=['gateway']).gateway, 'login'), patch('pipeline.execution.gateway.inventory', return_value=[]):
@@ -58,6 +71,45 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(observed[0]['data']['candidate'],'saved-source')
         self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='checkpoint_contract_restored'").fetchone()[0],1)
 
+    def test_verifier_safety_failure_stops_retries_and_releases_lane_until_operator_retry(self):
+        from pipeline.execution import Attention
+        self.store.finish(self.work,self.claim['token'],{})
+        self.store.put_task('task-001','g','body',{'candidate':'source','dependencies':[]})
+        work=self.store.enqueue('verify','task-001','g',{'candidate':'source','base':'main'})
+        claim=self.store.claim('verify','verifier')
+        with patch.dict(cli.HANDLERS,{'verify':lambda *_: (_ for _ in ()).throw(Attention('source changed'))}):
+            cli.run_claim(self.store,claim)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(work,)).fetchone()[0],'attention')
+        self.assertIsNone(self.store.integration_lane())
+        new=self.store.enqueue('verify','task-001','g',{'candidate':'source','base':'advanced-main'})
+        self.assertIsNone(self.store.claim('verify','cannot-bypass',ident=new))
+        self.store.put_task('task-002','g','body',{'candidate':'other'})
+        self.store.enqueue('verify','task-002','g',{'candidate':'other'})
+        other=self.store.claim('verify','next-task')
+        self.assertEqual(other['task'],'task-002')
+        self.store.finish(other['id'],other['token'],{}, {'delivered':{'sha':'merged'}})
+        with self.store.transaction():
+            self.store.db.execute("UPDATE work SET state='ready',retry_at=0 WHERE id=?",(work,))
+        self.assertIsNotNone(self.store.claim('verify','operator-retry',ident=work))
+
+    def test_adopted_partial_implementation_without_current_log_is_recorded_once(self):
+        from pipeline.fullsend import adopt
+        # A checkpoint exists, but no process has run in this resumed attempt.
+        prior=self.store.directory/'attempts'/self.work/'0';(prior/'bundle').mkdir(parents=True)
+        (prior/'bundle/job.json').write_text(json.dumps({'stage':'implement','task':'task-001','branch':'private'}))
+        body='---\ntitle: Task\nprogress: not-started\ndepends_on: []\nspec_ref: fixture\n---\nRequired behavior.\n'
+        self.store.put_task('task-001','g',body,{'dependencies':[]})
+        outcome={'published':True,'head':'retained-source','valid':False,'agent_exit':1,'branch':'private','task_body':body}
+        (prior/'outcome.json').write_text(json.dumps(outcome))
+        execution=Execution(self.store,self.claim)
+        result=adopt(execution,self.store.task('task-001'))
+        self.assertEqual(result['head'],'retained-source')
+        self.assertIn('Adopted published checkpoint',execution.log_tail())
+        self.assertEqual(json.loads((execution.directory/'adopted-from.json').read_text())['attempt'],0)
+        # Tail absence is diagnostic, never loss of a recovered source receipt.
+        execution.log.unlink()
+        self.assertEqual(execution.log_tail(),'')
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)
@@ -83,7 +135,7 @@ class CrashTest(unittest.TestCase):
         with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', side_effect=[[item], [], []]), patch.object(execution, 'remote', side_effect=subprocess.TimeoutExpired('capture', 30)), patch.object(execution, 'os', return_value=subprocess.CompletedProcess([], 0, '', '')) as delete:
             result, _, _ = cleanup(execution, self.store.task('task-001'))
         self.assertEqual(result['deleted'], 'pod')
-        delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
+        delete.assert_any_call('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
 
     def test_unstarted_error_is_purged_without_unreachable_capture(self):
@@ -235,6 +287,58 @@ class CrashTest(unittest.TestCase):
             _, updates, _ = cleanup(execution, self.store.task('task-001'))
         self.assertEqual(updates, {})
         self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
+
+    def test_cleanup_purges_non_implementers_without_indexing_their_checkout(self):
+        for stage in ('review','verify'):
+            self.store.reserve('finished-'+stage,self.work,self.claim['token'],'sandbox',10)
+        self.store.retry(self.work,self.claim['token'],{'message':'interrupted'},delay=0)
+        for stage in ('review','verify'):
+            with self.subTest(stage=stage):
+                resource='finished-'+stage
+                self.store.db.execute('UPDATE work SET stage=? WHERE id=?',(stage,self.work))
+                ident=self.store.enqueue('cleanup','task-001','g',{'resource':resource})
+                execution=Execution(self.store,self.store.claim('cleanup','cleaner',ident=ident))
+                item={'name':resource,'phase':'Ready','labels':{'gyre.dev/pipeline':self.store.setting('owner')}}
+                with patch.object(execution,'login'),patch('pipeline.stages.gateway.inventory',side_effect=[[item],[],[]]),patch.object(execution,'remote',return_value=subprocess.CompletedProcess([],0,'bounded log','')) as remote,patch.object(execution,'command',side_effect=AssertionError('non-implementer must not capture source')),patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')) as operations:
+                    _,updates,_=cleanup(execution,self.store.task('task-001'))
+                self.assertEqual(updates,{})
+                self.assertEqual(remote.call_count,1)
+                self.assertIn('tail',remote.call_args.args)
+                operations.assert_called_once_with('sandbox','delete',resource,timeout=180,check=False)
+                self.assertEqual(self.store.db.execute('SELECT state FROM resources WHERE name=?',(resource,)).fetchone()[0],'absent')
+                self.store.finish(ident,execution.claim['token'],{}, {})
+
+    def test_crash_cleanup_stops_durable_agent_before_capturing_source(self):
+        import sys,time
+        workspace=Path(self.temp.name)/'workspace';root=workspace/'.gyre-agent-proof'
+        root.mkdir(parents=True)
+        helper=Path(__file__).with_name('pipeline-agent.py')
+        (workspace/'pipeline-agent.py').write_bytes(helper.read_bytes())
+        marker=workspace/'running'
+        job={'argv':[sys.executable,'-c',f'from pathlib import Path; import time; Path({str(marker)!r}).touch(); time.sleep(60)'],
+             'cwd':str(workspace),'timeout':60}
+        (root/'command.json').write_text(json.dumps(job))
+        subprocess.run([sys.executable,str(helper),'launch',str(root)],check=True,capture_output=True)
+        self.addCleanup(lambda:subprocess.run([sys.executable,str(helper),'cancel',str(root)],capture_output=True))
+        deadline=time.monotonic()+5
+        while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+        self.assertTrue(marker.exists())
+        self.store.reserve('orphan',self.work,self.claim['token'],'sandbox',10)
+        self.store.retry(self.work,self.claim['token'],{'message':'lost host'},delay=0)
+        ident=self.store.enqueue('cleanup','task-001','g',{'resource':'orphan'})
+        execution=Execution(self.store,self.store.claim('cleanup','cleaner',ident=ident))
+        item={'name':'orphan','phase':'Ready','labels':{'gyre.dev/pipeline':self.store.setting('owner')}}
+        def remote(name,*args,**kwargs):
+            if args[0]=='python3':
+                code=args[-1].replace('/sandbox/workspace',str(workspace)).replace('/tmp/stage',str(workspace))
+                return subprocess.run([sys.executable,'-c',code],check=True,capture_output=True,text=True)
+            return subprocess.CompletedProcess([],0,'bounded log','')
+        def capture(*args,**kwargs):
+            self.assertEqual(json.loads((root/'result.json').read_text())['exit_code'],130)
+            return subprocess.CompletedProcess([],0,'','')
+        with patch.object(execution,'login'),patch('pipeline.stages.gateway.inventory',side_effect=[[item],[],[]]),patch.object(execution,'remote',side_effect=remote),patch.object(execution,'command',side_effect=capture) as capture_call,patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')):
+            cleanup(execution,self.store.task('task-001'))
+        self.assertEqual(capture_call.call_count,1)
 
     def test_cleanup_captures_but_never_promotes_explicitly_fenced_source(self):
         self.store.reserve('fenced-pod', self.work, self.claim['token'], 'sandbox', 1)

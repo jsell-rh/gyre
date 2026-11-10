@@ -24,6 +24,15 @@
 
 import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/seeded.js';
 import { MOCK_GRAPH, VIEW_QUERY_WITH_ANNOTATIONS, BLAST_RADIUS_QUERY } from './fixtures/mock-graph.js';
+import { readFileSync } from 'node:fs';
+
+// Deterministic webfont fixtures (see fixtures/forced-fonts.css for rationale).
+// Served via route interception so sandbox and CI rasterize identical font
+// binaries — the app's system-ui/'SF Mono' stacks and the fonts.googleapis.com
+// link never reach fontconfig or the network from these tests.
+const FIXTURES_DIR = new URL('./fixtures/', import.meta.url);
+const FORCED_FONTS_CSS = new URL('./fixtures/forced-fonts.css', import.meta.url);
+const FONTS_DIR = new URL('./fixtures/fonts/', import.meta.url);
 
 const SEED_SLUG = SEED_WORKSPACE_SLUG;
 const SEED_REPO = SEED_REPO_NAME;
@@ -66,6 +75,79 @@ const MOCK_REPO = {
  * after navigation means the initial API calls are missed.
  */
 async function setupGraphIntercept(page) {
+  // ── Deterministic webfonts (font-truth parity) ────────────────────
+  // Every glyph in every baseline must come from the same font binary in
+  // every environment. Three sources are pinned:
+  //   a) fonts.googleapis.com is served an empty stylesheet so the network
+  //      never decides which Red Hat faces load (sandbox: host blocked;
+  //      CI: real webfonts — different subsetting/rasterization).
+  //   b) The forced-fonts.css fixture (committed) declares @font-face for
+  //      the Red Hat families from committed woff2 binaries and overrides
+  //      every literal font stack the Explorer surface uses. It is injected
+  //      at document_start, before the app boots.
+  //   c) Canvas ctx.font strings patch 'system-ui' → 'Red Hat Text' and
+  //      "'SF Mono', Menlo, monospace" → 'Red Hat Mono' through the context
+  //      prototype so canvas labels also bypass fontconfig.
+  const forcedFontsCss = readFileSync(FORCED_FONTS_CSS, 'utf8');
+  await page.route('**/fonts.googleapis.com/**', (route) => {
+    route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+  });
+  await page.route('**/test-assets/fonts/**', (route) => {
+    const name = route.request().url().split('/test-assets/fonts/')[1].split(/[?#]/)[0];
+    try {
+      const body = readFileSync(new URL(name, FONTS_DIR));
+      route.fulfill({
+        status: 200,
+        contentType: 'font/woff2',
+        body,
+      });
+    } catch {
+      route.fulfill({ status: 404, body: '' });
+    }
+  });
+  await page.addInitScript(
+    ({ css }) => {
+      // Inject before any app script runs: <style> with @font-face + stack
+      // overrides (!important — later app styles cannot re-enable fontconfig
+      // stacks), rewritten so font urls hit the route above.
+      const style = document.createElement('style');
+      style.textContent = css.replace(
+        /url\('fonts\//g,
+        "url('/test-assets/fonts/",
+      );
+      document.addEventListener('DOMContentLoaded', () => {
+        document.head.appendChild(style);
+      });
+      // document_start: head may not exist yet — also append immediately when
+      // possible so @font-face exist before first fonts.load()/layout.
+      (document.head || document.documentElement).appendChild(style);
+      // Patch canvas font shorthand so ctx.font strings resolve to the
+      // committed webfonts instead of fontconfig generics.
+      const proto = CanvasRenderingContext2D.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'font');
+      if (desc && desc.set) {
+        Object.defineProperty(proto, 'font', {
+          ...desc,
+          set(value) {
+            desc.set.call(
+              this,
+              String(value)
+                .replace(/system-ui/g, "'Red Hat Text'")
+                .replace(/'SF Mono', Menlo, monospace/g, "'Red Hat Mono'"),
+            );
+          },
+        });
+      }
+      // Eagerly decode every face at document_start; by the time the app
+      // fetches graph data and runs its first drawFrame, fonts are loaded.
+      for (const family of ['Red Hat Text', 'Red Hat Mono', 'Red Hat Display']) {
+        for (const weight of [400, 500, 600, 700]) {
+          document.fonts.load(`${weight} 13px '${family}'`, 'A').catch(() => {});
+        }
+      }
+    },
+    { css: forcedFontsCss },
+  );
   // ── Workspace & repo APIs ──────────────────────────────────────────
   await page.route('**/api/v1/workspaces', (route) => {
     if (route.request().method() === 'GET') {
@@ -419,6 +501,81 @@ test.describe('View query rendering visual regression', () => {
 // 3. Filter presets show correct subsets
 // ---------------------------------------------------------------------------
 
+// Screenshot comparison options for the filter-preset tests.
+//
+// Playwright's default pixelmatch threshold (0.2, perceptual YIQ) discounts
+// this dark theme's preset dimming: dimming a leaf from full opacity to 0.1
+// over the dark background moves the affected pixels by only ~0.05–0.15
+// normalized YIQ — under the default threshold — so a render with preset
+// dimming entirely disabled in production code still matched the committed
+// baselines (task-080 review finding: nodeFilterOpacity() forced to 1.0 kept
+// every filter-preset visual test green). The tighter threshold makes those
+// dimming shifts count: the Endpoints-state canvas differs from a
+// dimming-disabled render by ~83k pixels at threshold 0.05, far above the
+// 2% (7,296 px) allowance.
+const PRESET_SNAPSHOT_OPTIONS = {
+  maxDiffPixelRatio: 0.02,
+  threshold: 0.05,
+  timeout: 10_000,
+};
+
+// Canvas-pixel change probing — behavioral assertions on the live canvas,
+// independent of the committed baselines (so the test still fails if the
+// baselines are re-recorded from a build with broken dimming).
+//
+// The canvas renders deterministically in this suite (forced webfonts, fixed
+// viewport, reduced motion), so identical states produce identical pixels; a
+// visible-change count therefore measures real rendering changes, not noise.
+// The epsilon matches the screenshot threshold above (5% of 255 per channel);
+// preset dimming shifts pixels by ~25–40 per channel, well above it.
+const VISIBLE_CHANGE_EPSILON = 13;
+
+// Minimum canvas pixels that must visibly change for a UI action to count
+// as having re-rendered the graph. Calibrated on the deterministic mock
+// graph: 5 wheel-zoom steps repaint ~239k of 363,924 canvas pixels (66%),
+// clicking the Endpoints preset ~100k (27%), and the Endpoints→Types subset
+// change ~127k (35%). With preset dimming disabled in production code the
+// Endpoints→Types transition repaints only ~40 pixels — three orders of
+// magnitude below any of these — so 20k sits safely between the healthy and
+// broken behavior.
+const MIN_VISIBLE_CANVAS_CHANGES = 20_000;
+
+async function storeCanvasSnapshot(page) {
+  await page.evaluate(() => {
+    const canvas = document.querySelector('canvas.treemap-canvas');
+    const ctx = canvas.getContext('2d');
+    // getImageData() copies the pixels; the snapshot stays valid after the
+    // evaluate call returns.
+    window.__canvasSnapshot = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  });
+}
+
+// Count canvas pixels that changed by more than VISIBLE_CHANGE_EPSILON in
+// any RGBA channel since the last storeCanvasSnapshot()/call, then re-arm
+// the snapshot to the current frame so consecutive calls measure
+// consecutive transitions.
+async function countVisibleCanvasChanges(page) {
+  return page.evaluate((epsilon) => {
+    const canvas = document.querySelector('canvas.treemap-canvas');
+    const ctx = canvas.getContext('2d');
+    const now = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const before = window.__canvasSnapshot;
+    if (!before) throw new Error('countVisibleCanvasChanges: no canvas snapshot stored');
+    let changed = 0;
+    for (let i = 0; i < now.length; i += 4) {
+      const d = Math.max(
+        Math.abs(now[i] - before[i]),
+        Math.abs(now[i + 1] - before[i + 1]),
+        Math.abs(now[i + 2] - before[i + 2]),
+        Math.abs(now[i + 3] - before[i + 3]),
+      );
+      if (d > epsilon) changed++;
+    }
+    window.__canvasSnapshot = now;
+    return changed;
+  }, VISIBLE_CHANGE_EPSILON);
+}
+
 test.describe('Filter presets visual regression', () => {
   test.beforeEach(async ({ page }) => {
     await setupGraphIntercept(page);
@@ -429,10 +586,7 @@ test.describe('Filter presets visual regression', () => {
 
     // Default filter is 'all' — all nodes visible, no query applied
     const canvasArea = page.locator('.treemap-canvas-area');
-    await expect(canvasArea).toHaveScreenshot('filter-all.png', {
-      maxDiffPixelRatio: 0.02,
-      timeout: 10_000,
-    });
+    await expect(canvasArea).toHaveScreenshot('filter-all.png', PRESET_SNAPSHOT_OPTIONS);
   });
 
   test('filter_endpoints_shows_only_endpoints', async ({ page }) => {
@@ -447,10 +601,90 @@ test.describe('Filter presets visual regression', () => {
     });
 
     const canvasArea = page.locator('.treemap-canvas-area');
-    await expect(canvasArea).toHaveScreenshot('filter-endpoints.png', {
-      maxDiffPixelRatio: 0.02,
-      timeout: 10_000,
+    await expect(canvasArea).toHaveScreenshot('filter-endpoints.png', PRESET_SNAPSHOT_OPTIONS);
+  });
+
+  test('filter_preset_buttons_show_correct_subsets', async ({ page }) => {
+    await navigateToExplorer(page);
+
+    // Spec §32 visual test: "Filter presets show correct subsets" — click the
+    // actual toolbar preset buttons (not the query editor) and verify the
+    // canvas re-renders with the preset's subset.
+    //
+    // Two independent layers of verification (task-080 review repair):
+    //  1. Behavioral — canvas-pixel change counts between preset states
+    //     (see countVisibleCanvasChanges). The Endpoints→Types transition
+    //     repaints ~35% of the canvas because a different node subset stays
+    //     lit; with preset dimming disabled in production code it repaints
+    //     ~40 pixels, so a broken subset filter fails here no matter what
+    //     the baselines say.
+    //  2. Visual — screenshot comparison at threshold 0.05
+    //     (PRESET_SNAPSHOT_OPTIONS). The committed baselines record the
+    //     dimmed subsets; the tighter threshold makes the dimming shifts
+    //     count against the comparator's default 0.2 perceptual discount.
+
+    // Snapshot the settled pre-zoom canvas, then zoom in so individual leaf
+    // nodes (and their per-preset dimming) are visible — at the fully
+    // zoomed-out package overview the leaves are too small to distinguish
+    // presets.
+    await storeCanvasSnapshot(page);
+    await page.evaluate(() => {
+      const canvas = document.querySelector('canvas.treemap-canvas');
+      if (canvas) {
+        for (let i = 0; i < 5; i++) {
+          canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: -100, clientX: 640, clientY: 360, bubbles: true,
+          }));
+        }
+      }
     });
+    await page.waitForTimeout(500);
+
+    // The zoom must actually take effect (it repaints ~66% of the canvas).
+    // If the wheel-zoom path breaks, the preset screenshots below would
+    // silently record the unzoomed package overview where per-leaf dimming
+    // is invisible — the original review found exactly that recorded state
+    // in a stale baseline.
+    const zoomChanges = await countVisibleCanvasChanges(page);
+    expect(zoomChanges).toBeGreaterThan(MIN_VISIBLE_CANVAS_CHANGES);
+
+    // Click the "Endpoints" preset button — endpoint nodes stay at full
+    // opacity, everything else dims.
+    const endpointsBtn = page.locator('.filter-preset-group button', {
+      hasText: 'Endpoints',
+    });
+    await expect(endpointsBtn).toBeVisible({ timeout: 5_000 });
+    await endpointsBtn.click();
+    await expect(endpointsBtn).toHaveAttribute('aria-pressed', 'true');
+    await page.waitForTimeout(500);
+
+    // The preset click must visibly re-render the canvas (~27% of it changes:
+    // dimmed non-endpoint leaves + the filtered edge set).
+    const endpointsChanges = await countVisibleCanvasChanges(page);
+    expect(endpointsChanges).toBeGreaterThan(MIN_VISIBLE_CANVAS_CHANGES);
+
+    const canvasArea = page.locator('.treemap-canvas-area');
+    await expect(canvasArea).toHaveScreenshot('filter-preset-endpoints.png', PRESET_SNAPSHOT_OPTIONS);
+
+    // Click the "Types" preset button — the subset must change (type/
+    // interface/field nodes emphasized instead of endpoints).
+    const typesBtn = page.locator('.filter-preset-group button', {
+      hasText: 'Types',
+    });
+    await typesBtn.click();
+    await expect(typesBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(endpointsBtn).toHaveAttribute('aria-pressed', 'false');
+    await page.waitForTimeout(500);
+
+    // The subset change must be visible on the canvas: Endpoints→Types lights
+    // a different node set (~35% of the canvas repaints). This is the
+    // assertion that fails when preset dimming breaks — without node dimming
+    // the two presets render nearly identical canvases (~40 changed pixels,
+    // all of them edges).
+    const typesChanges = await countVisibleCanvasChanges(page);
+    expect(typesChanges).toBeGreaterThan(MIN_VISIBLE_CANVAS_CHANGES);
+
+    await expect(canvasArea).toHaveScreenshot('filter-preset-types.png', PRESET_SNAPSHOT_OPTIONS);
   });
 
   test('filter_types_shows_only_type_nodes', async ({ page }) => {
@@ -478,10 +712,7 @@ test.describe('Filter presets visual regression', () => {
     await page.waitForTimeout(500);
 
     const canvasArea = page.locator('.treemap-canvas-area');
-    await expect(canvasArea).toHaveScreenshot('filter-types.png', {
-      maxDiffPixelRatio: 0.02,
-      timeout: 10_000,
-    });
+    await expect(canvasArea).toHaveScreenshot('filter-types.png', PRESET_SNAPSHOT_OPTIONS);
   });
 
   test('filter_calls_shows_call_graph', async ({ page }) => {
@@ -502,10 +733,7 @@ test.describe('Filter presets visual regression', () => {
     });
 
     const canvasArea = page.locator('.treemap-canvas-area');
-    await expect(canvasArea).toHaveScreenshot('filter-calls.png', {
-      maxDiffPixelRatio: 0.02,
-      timeout: 10_000,
-    });
+    await expect(canvasArea).toHaveScreenshot('filter-calls.png', PRESET_SNAPSHOT_OPTIONS);
   });
 
   test('filter_dependencies_shows_dependency_edges', async ({ page }) => {
@@ -526,10 +754,7 @@ test.describe('Filter presets visual regression', () => {
     });
 
     const canvasArea = page.locator('.treemap-canvas-area');
-    await expect(canvasArea).toHaveScreenshot('filter-dependencies.png', {
-      maxDiffPixelRatio: 0.02,
-      timeout: 10_000,
-    });
+    await expect(canvasArea).toHaveScreenshot('filter-dependencies.png', PRESET_SNAPSHOT_OPTIONS);
   });
 });
 

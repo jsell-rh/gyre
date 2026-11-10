@@ -420,7 +420,7 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 			if !e.c.Watch && attempted[attempt] {
 				continue
 			}
-			if !eligible(job, rows, seconds()) {
+			if !dispatchEligible(job, rows, seconds(), e.c.AdapterBackend) {
 				continue
 			}
 			ready++

@@ -136,7 +136,7 @@ def run_claim(store, claim):
     except Exception as exc:
         try:
             receipt = execution.directory / 'recovery.json'
-            if stage == 'implement' and receipt.exists():
+            if stage == 'implement' and receipt.exists() and not getattr(exc, 'attention', False):
                 from pipeline.recovery import restore
                 repository = store.directory / 'recovery.git'
                 with (store.directory / 'recovery.lock').open('a') as lock:
@@ -161,8 +161,8 @@ def run_claim(store, claim):
             store.retry(claim['id'], claim['token'],
                         {'category': category, 'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False),
                          'diagnostic': getattr(exc, 'diagnostic', None)},
-                        delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait))
-            execution.phase('RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
+                        delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait), attention=getattr(exc,'attention',False))
+            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
         except StaleClaim:
             pass
         except Exception as recovery_error:
@@ -172,7 +172,8 @@ def run_claim(store, claim):
                              'recovery_error': str(recovery_error)[-2000:]})
             except StaleClaim:
                 pass
-        print(f'{stage}/{claim["task"]}: retry scheduled: {exc}', file=sys.stderr)
+        action='needs attention' if getattr(exc,'attention',False) else 'retry scheduled'
+        print(f'{stage}/{claim["task"]}: {action}: {exc}', file=sys.stderr)
     finally:
         store.resource_state(store.admission_name(claim['id'], claim['token']), 'absent')
     return True
@@ -245,6 +246,8 @@ def main():
                 if args.command == 'retry':
                     query += ' AND task=?'
                     params += (args.task,)
+                for row in store.db.execute("SELECT task,stage,generation FROM work WHERE state IN ('attention','retry')" + (' AND task=?' if args.command=='retry' else ''), (args.task,) if args.command=='retry' else ()).fetchall():
+                    store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')

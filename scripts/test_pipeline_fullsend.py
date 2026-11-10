@@ -253,7 +253,7 @@ if a[:1]==['-g']:
  v.setdefault('gateways',[]).append(a[1]);a=a[2:]
 v['calls'].append(a)
 if a[:2]==['sandbox','create']:
- n=a[a.index('--name')+1];v['pods'].append({'name':n,'phase':'Ready','labels':{}})
+ n=a[a.index('--name')+1];labels=dict(a[i+1].split('=',1) for i,x in enumerate(a) if x=='--label');v['pods'].append({'name':n,'phase':'Ready','labels':labels})
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
@@ -281,15 +281,28 @@ else: print('fixture control operation')
         return subprocess.run([str(self.shim/'openshell'),*args],env={**self.env,**(extra or {})},capture_output=True,text=True,timeout=30)
 
     def test_creation_is_reserved_and_owned_before_real_cli_and_capacity_is_enforced(self):
-        result=self.invoke('sandbox','create','--name',self.name,'--keep','--','sleep','infinity')
+        self.store.set_setting('compute_memory:task-9999:implement',8)
+        result=self.invoke('sandbox','create','--name',self.name,'--memory','8Gi','--keep','--','sleep','infinity')
         self.assertEqual(result.returncode,0,result.stderr)
         state=json.loads((self.root/'backend.json').read_text())
         self.assertNotIn('--keep',state['calls'][0])
+        self.assertEqual(state['calls'][0][state['calls'][0].index('--memory')+1],'4Gi')
         self.assertIn('gyre.dev/work='+self.work,state['calls'][0])
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'present')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_readiness_retry_adopts_the_same_pending_allocation(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        path=self.root/'backend.json';state=json.loads(path.read_text());state['pods'][0]['phase']='Provisioning';path.write_text(json.dumps(state))
+        self.assertEqual(self.invoke('sandbox','delete',self.name).returncode,75)
+        retry=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(retry.returncode,0,retry.stderr)
+        state=json.loads(path.read_text())
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in state['calls']),1)
+        self.assertEqual(len(state['pods']),1)
+        self.assertEqual(self.store.compute_used(),1)
 
     def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
         process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
@@ -335,7 +348,16 @@ else: print('fixture control operation')
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
         streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
         self.assertEqual(streamed.returncode,0,streamed.stderr)
-        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
+        self.assertEqual(set(json.loads((self.root/'backend.json').read_text())['gateways']),{alias})
+
+    def test_streamed_bootstrap_refreshes_auth_before_replacing_the_process(self):
+        result=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        login=next(i for i,c in enumerate(calls) if c[:2]==['gateway','login'])
+        upload=next(i for i,c in enumerate(calls) if c[:2]==['sandbox','upload'])
+        self.assertLess(login,upload)
+        self.assertEqual(sum(c[:2]==['sandbox','upload'] for c in calls),1)
 
     def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
         self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
@@ -378,6 +400,15 @@ else: print('fixture control operation')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'deleting')
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_failed_review_deletes_without_attempting_source_capture(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        self.store.db.execute("UPDATE work SET stage='review' WHERE id=?",(self.work,))
+        result=self.invoke('sandbox','delete',self.name)
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertFalse(any(x[:2]==['sandbox','exec'] for x in calls))
+        self.assertFalse(json.loads((self.root/'backend.json').read_text())['pods'])
 
     def test_fenced_worker_cannot_invoke_gateway(self):
         self.store.finish(self.work,self.claim['token'],{})

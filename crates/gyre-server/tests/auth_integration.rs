@@ -13,7 +13,7 @@
 //!   - Multiple API endpoints all enforce auth
 
 use gyre_common::Id;
-use gyre_domain::User;
+use gyre_domain::{Tenant, User};
 use gyre_server::{abac_middleware, build_router, build_state};
 use sha2::{Digest, Sha256};
 
@@ -36,7 +36,9 @@ async fn start_server() -> (String, reqwest::Client) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     let app = build_router(state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -52,15 +54,22 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
 
-    // Pre-seed a user and API key before starting the server.
-    let user = User::new(
+    // Pre-seed a user and API key before starting the server. The user is
+    // bound to a tenant (task-099 F1): API-key auth fail-closes on users
+    // without a tenant scope instead of fabricating one.
+    let tenant = Tenant::new(Id::new("auth-int-tenant-1"), "Auth Int", "auth-int", 0);
+    state.tenants.create(&tenant).await.unwrap();
+    let mut user = User::new(
         Id::new("auth-int-user-1"),
         "ext-auth-int-1",
         "api-key-tester",
         1000,
     );
+    user.tenant_id = Some(Id::new("auth-int-tenant-1"));
     state.users.create(&user).await.unwrap();
 
     // API keys are stored as SHA-256 hashes of the raw key.

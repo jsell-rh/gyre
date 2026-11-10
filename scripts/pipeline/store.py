@@ -131,6 +131,13 @@ class Store:
             return self.db.execute('SELECT id FROM work WHERE stage=? AND task=? AND generation=? AND input_key=?',
                                    (stage, task, generation, key)).fetchone()['id']
 
+    @staticmethod
+    def runtime_hold_key(task, stage, generation):
+        return f'runtime_hold:{task}:{stage}:{generation}'
+
+    def runtime_held(self, work):
+        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation'])))
+
     def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
               ident=None, capacity=None):
         now = time.time() if now is None else now
@@ -169,6 +176,7 @@ class Store:
             row = next((row for row in rows
                         if (not compute or not self.db.execute(
                             "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        and not self.runtime_held(row)
                         and self.integration_available(dict(row))
                         and valid_priority(row)
                         and (eligible is None or eligible(dict(row)))), None)
@@ -201,8 +209,22 @@ class Store:
     def admission_name(ident, token):
         return f'admission-{ident}-{token}'
 
+    def compute_resources(self):
+        """Cleanup debt occupies compute until fresh scoped runtime evidence says otherwise."""
+        context,namespace=self.setting('runtime_kube_context'),self.setting('runtime_namespace')
+        now=time.time()
+        result=[]
+        for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'"):
+            proof=json.loads(row['data']).get('compute_observation') or {}
+            released=(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
+                and proof.get('context')==context and proof.get('namespace')==namespace
+                and proof.get('work')==row['work'] and proof.get('token')==row['token']
+                and proof.get('absent') is True and 0<=now-proof.get('at',0)<180)
+            if not released:result.append(row)
+        return result
+
     def compute_used(self):
-        return self.db.execute("SELECT count(*) FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'").fetchone()[0]
+        return len(self.compute_resources())
 
     def verification_reserve(self, capacity=None):
         capacity=self.setting('slots',8) if capacity is None else capacity
@@ -216,9 +238,8 @@ class Store:
             return False
         if stage == 'verify':
             return True
-        used=self.db.execute("""SELECT count(*) FROM resources r LEFT JOIN work w ON w.id=r.work
-            WHERE r.kind IN ('sandbox','admission') AND r.state<>'absent'
-            AND COALESCE(w.stage,'unknown')<>'verify'""").fetchone()[0]
+        verification={r['id'] for r in self.db.execute("SELECT id FROM work WHERE stage='verify'")}
+        used=sum(row['work'] not in verification for row in self.compute_resources())
         return used < capacity-self.verification_reserve(capacity)
 
     def ordered_ready(self):
@@ -226,6 +247,18 @@ class Store:
         now=time.time()
         rows=[dict(row) for row in self.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') AND retry_at<=?",(now,))]
         return sorted(rows,key=lambda row:sort_key(self,row,now))
+
+    def integration_waiting(self, data):
+        """A long external wait yields the lane, never the merge/check gates."""
+        ci = data.get('ci') or {}
+        # Green CI on an outdated branch needs our own base refresh. Parking
+        # it until GitHub becomes CLEAN deadlocks: only integration can do that.
+        if (ci.get('checks') == 'green' and ci.get('status') == 'policy_pending'
+                and ci.get('merge_state') == 'BEHIND'):
+            return False
+        return (ci.get('head') == data.get('published_head') and bool(ci.get('waiting_since'))
+                and ci.get('status') in ('pending','policy_pending','infrastructure')
+                and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
 
     def integration_lane(self):
         lane = self.setting('integration_lane')
@@ -238,6 +271,7 @@ class Store:
         ci = data.get('ci') or {}
         if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
                 or data.get('repair') or data.get('delivered') or data.get('resolved')
+                or self.integration_waiting(data)
                 or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
                 or self.setting('task_paused:'+lane['task'],False)):
             return None
@@ -248,6 +282,12 @@ class Store:
             return True
         data = self.task(work['task'])['data']
         ci = data.get('ci') or {}
+        if self.integration_waiting(data):
+            return False
+        # A new base must not silently bypass an unresolved source safety hold.
+        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'", (work['task'],work['generation'])):
+            if json.loads(row['input']).get('candidate') == data.get('candidate'):
+                return False
         if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
             return False
         lane = self.integration_lane()
@@ -288,13 +328,16 @@ class Store:
                                  finding.get('source'), finding['category'], json.dumps(finding), time.time()))
             self.db.execute("UPDATE work SET state='succeeded',result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (json.dumps(result), time.time(), ident))
-            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') == 'merged'):
-                victims = self.db.execute("SELECT id FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
+            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') in ('merged','environment_refresh')):
+                victims = self.db.execute("SELECT id,input FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
                 for victim in victims:
+                    if result.get('status')=='environment_refresh' and json.loads(victim['input']).get('base')==result.get('target_base'):
+                        continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
             lane = self.setting('integration_lane')
-            if lane and lane['task'] == row['task'] and self.integration_lane() is None:
+            refresh_idle=(result.get('status')=='environment_refresh' and not self.db.execute("SELECT 1 FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchone())
+            if lane and lane['task'] == row['task'] and (self.integration_lane() is None or refresh_idle):
                 self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
                 self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
@@ -302,15 +345,23 @@ class Store:
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             self.event('completed', result, row['task'], ident)
 
-    def retry(self, ident, token, reason, delay=None, count_failure=True):
+    def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
-            delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
+            delay = min(self.setting('retry_max_seconds', 900), self.setting('retry_base_seconds', 5) * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             retry_at=time.time()+delay
-            self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
-                            (failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
-            self.event('retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
+                            ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
+            self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage'):
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                    (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
+            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning','sandbox_admission')):
+                lane=self.setting('integration_lane')
+                if lane and lane['task'] == row['task']:
+                    self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                    self.event('integration_released',{'reason':'verification safety failure needs attention'},row['task'],ident)
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
