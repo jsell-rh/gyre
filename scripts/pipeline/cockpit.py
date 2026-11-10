@@ -27,6 +27,8 @@ def snapshot(store):
         active = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'claimed' and item['expires'] > time.time()), None)
         retry = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
+        if satisfied(data):
+            attention, retry = None, None  # Historical failures remain in attempts, not the current condition.
         shared_wait = (data.get('repair') or {}).get('shared_environment')
         state = ('merged' if satisfied(data) and data.get('delivered') else
                  'resolved' if satisfied(data) else 'failed' if attention else 'running' if active else

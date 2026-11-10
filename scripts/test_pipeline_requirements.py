@@ -205,6 +205,24 @@ class RequirementTests(unittest.TestCase):
         view=cockpit(self.store)['tasks'][0]
         self.assertEqual(view['state'],'failed');self.assertEqual(view['condition'],'A deterministic check failed')
 
+    def test_requirement_reversion_never_reuses_an_old_execution_epoch(self):
+        original=self.spec.read_text();self.sync();first=self.store.task('task-001')['generation']
+        self.spec.write_text(original.replace('Must do one','Must do two'));self.sync()
+        second=self.store.task('task-001')['generation']
+        self.spec.write_text(original);self.sync();third=self.store.task('task-001')['generation']
+        self.assertNotEqual(first,second);self.assertNotEqual(first,third);self.assertNotEqual(second,third)
+        self.sync();self.assertEqual(self.store.task('task-001')['generation'],third)
+
+    def test_restored_delivery_does_not_report_a_historical_oom_as_current(self):
+        self.store.put_task('task-001','g',BODY,{'dependencies':[]})
+        ident=self.store.enqueue('implement','task-001','g',{'base':'main'})
+        claim=self.store.claim('implement','worker')
+        self.store.retry(ident,claim['token'],{'category':'sandbox_oom','message':'Historical OOM'},attention=True)
+        self.store.put_task('task-001','g',BODY,{'dependencies':[],'delivered':{'sha':'shipped'}})
+        task=cockpit(self.store)['tasks'][0]
+        self.assertEqual(task['state'],'merged');self.assertIsNone(task['condition'])
+        self.assertEqual(self.store.db.execute('select state from work where id=?',(ident,)).fetchone()[0],'attention')
+
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
         self.assertEqual([n['heading'] for n in nodes],['','Real','Actual'])

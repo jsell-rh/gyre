@@ -47,7 +47,7 @@ def sync_checkout(store, checkout, revision=None):
              for p in (checkout / 'specs' / section).glob('*.md')}
     goal = (checkout / 'specs/GOAL.md').read_text()
     existing = {task['name']: task for task in store.tasks()}
-    from .requirements import snapshot, change
+    from .requirements import snapshot, change, digest
     for path in sorted((checkout / 'specs/tasks').glob('task-*.md')):
         body = path.read_text()
         try:
@@ -70,7 +70,9 @@ def sync_checkout(store, checkout, revision=None):
                 continue
             data = safe_metadata(body) | {'requirements': scoped, 'catalog_generation': gen,
                                          'catalog_source': revision}
-            epoch = scoped['fingerprint']
+            # An epoch identifies a transition, not just content. Reverting a
+            # requirement must not resurrect succeeded work from a prior cycle.
+            epoch = digest({'requirements':scoped['fingerprint'],'previous':old['generation']}) if old else scoped['fingerprint']
             if old:
                 previous = old['data']
                 data = previous | data | {'triaged': epoch, 'delivered': None, 'resolved': None,
