@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["a59344eaafbf82d69a23452c0ad5de4c51e1cc60", "531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab", "33a60bc0fb1954f90f46cb73a2a905fc753f3165"]
+commits: ["33a60bc0fb1954f90f46cb73a2a905fc753f3165", "a59344eaafbf82d69a23452c0ad5de4c51e1cc60", "531434a6875f62e1ee17899032e799a0a4d5c11b", "31c35ddb2cf13663cfc4c1ee337eff847e289253", "b3678e2762149ba743e63c604bb618e66dd564ab"]
 ---
 
 ## Spec Excerpt
