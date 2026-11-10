@@ -93,8 +93,9 @@ When working on this task:
 
 The spec save git write-through is fully implemented in production code on this
 branch (inherited from mainline; review history in `specs/reviews/task-011.md`,
-R2 verdict `complete`), and this assignment closes the one remaining evidence
-gap: end-to-end proof that saves actually reach git.
+R2 verdict `complete`), and this round is a contract repair: the executor
+restored the assigned task document, so the completion record is re-applied
+here while preserving the existing production fix unchanged.
 
 ### Actual behavior
 
@@ -116,25 +117,32 @@ gap: end-to-end proof that saves actually reach git.
   branch, no MR, no approval notification — and returns the real commit SHA.
 - Slug: path → lowercase, `/` → `-`, strip `.md`, plus a 4-hex-char hash of the
   full original path (collision-safe), per ui-layout.md §3.
+- All four R2 review findings (F1–F4) are fixed in the current code: caller
+  identity filter on existing-MR detection (line 641), `author_agent_id` set
+  on MR creation (line 703), stale "(stubbed)" doc comment removed, and the
+  notification assertion (`entity_id == mr_id`) present in tests.
 
 ### Test evidence
 
-- Handler logic (NoopGitOps): 21 pre-existing tests covering branch naming, MR
-  creation, existing-MR append, priority-2 notification assertion
+- Handler logic (NoopGitOps): tests covering branch naming, MR creation,
+  existing-MR append, priority-2 notification assertion
   (`save_spec_creates_mr_for_existing_repo` verifies `priority_rank == 2` and
   `entity_id == mr_id`), prompt save SHA shape, slug format/collision, and the
   HSI §7 409 conflict path.
-- New end-to-end tests (commit `3488a06bf`, this branch) inject the real
-  `Git2OpsAdapter` with an on-disk bare repo so the full chain — handler →
-  GitOpsPort → libgit2 — runs: real branch exists with content, default branch
-  untouched by spec saves, re-save appends exactly one commit (verified via
-  `commit_log`) with no second MR/branch, prompt save lands on `main` with the
-  returned SHA equal to the real new tip and no branch/MR created.
+- End-to-end tests (commit `3488a06bf`) inject the real `Git2OpsAdapter` with
+  an on-disk bare repo so the full chain — handler → GitOpsPort → libgit2 —
+  runs: real branch exists with content, default branch untouched by spec
+  saves, re-save appends exactly one commit (verified via `commit_log`) with no
+  second MR/branch, prompt save lands on `main` with the returned SHA equal to
+  the real new tip and no branch/MR created.
 - Adapter layer: 31 git2_ops tests including `write_file` on feature branches,
   nested paths, overwrite, `create_branch` from existing ref, and
   `branch_exists`.
-- Probe results (exit codes and output retained in
-  `/tmp/stage/review-evidence/task-011/`):
-  `cargo test -p gyre-server --lib api::specs_assist` → 24 passed, 0 failed;
-  `cargo test -p gyre-adapters --lib git2_ops` → 31 passed, 0 failed;
-  clippy on gyre-server lib+tests → 0 warnings originating in specs_assist.rs.
+- Probe results this round (exit codes and output retained in
+  `/tmp/stage/review-evidence/task-011/`, re-run at the merged branch head
+  including the task-107 base merge):
+  `cargo test -p gyre-server --lib api::specs_assist` → 24 passed, 0 failed
+  (exit 0); `cargo test -p gyre-adapters --lib git2_ops` → 31 passed, 0 failed
+  (exit 0). The only source delta the base merge introduced in
+  `specs_assist.rs` is a test-fixture `bearer_token: None` field required by
+  the task-107 auth change — no behavioral impact.
