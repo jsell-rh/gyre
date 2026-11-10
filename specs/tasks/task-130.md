@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
+commits: ["371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0", "f69bd657a"]
 ---
 
 ## Spec Excerpt
@@ -83,19 +83,19 @@ Read `specs/system/platform-model.md` §1 Token Scoping for the full spec. Curre
 
 ## Shipped
 
-Implemented `platform-model.md` §1 Token Scoping end-to-end. This round is the rebase repair of the merge conflicts from rebasing the branch onto base `774737638` (task-177 rendering + task-140 persona resolution + task-099 system-principal/API-key tenant fixes). The §1 implementation is unchanged in substance; every conflict was resolved to keep BOTH sides' enforcement.
+Implemented `platform-model.md` §1 Token Scoping end-to-end. This round is the rebase repair of the merge conflicts from rebasing the branch onto base `b5a872087` (task-108 admin user impersonation). The §1 implementation is unchanged in substance; every conflict was resolved to keep BOTH sides' enforcement.
 
-### This round: rebase onto 774737638 (merge f6ea08e94)
+### This round: rebase onto b5a872087 (merge f69bd657a)
 
-**auth.rs.** Base moved system/agent-token construction to `system_principal_tenant()`, API-key auth to the user's stored tenant binding (fail-closed when absent), and added `is_system_principal()` (user_id discriminator, not a spoofable name match). Task-130 added the §1 hierarchy fields (`workspace_id`/`repo_id`/`scope`) to the same construction sites. Merged: every site uses base's tenant resolution AND carries the §1 fields (`None`/empty for non-JWT paths); the impl block keeps both `with_hierarchy_from_claims` (mirrors all §1 fields from signature-verified claims) and `is_system_principal`.
+**auth.rs (4 conflict sites).** Base (task-108) added auth-success auditing (`record_auth_success` gated on `auth_already_audited`, `token_kind` distinguishing `agent_jwt`/`uuid_token`) and the `impersonation: Option<ImpersonationContext>` field to every `AuthenticatedAgent` construction; task-130 added the §1 hierarchy mirroring (`with_hierarchy_from_claims`) at the same four sites (agent-token path in the extractor, agent-token path in the secondary authenticator, Keycloak JWT path, federated JWT path). Merged: every site carries base's audit block + `impersonation` field AND task-130's mirroring of the signature-verified §1 claims onto the resolved principal.
 
-**orchestrator.rs.** Base replaced the soft `validate_persona` with fail-closed `resolve_orchestrator_persona` (scope chain repo→workspace→tenant, unapproved → Conflict, missing → NotFound) and added `LaunchOutcome` to the spawn tail. Task-130 moved tenant containment into the spawn cores (`caller_tenant` param) so the MCP spawn tools (no middleware ABAC) are contained too. Merged: base's persona resolution + `LaunchOutcome` returns + task-130's core-level containment; base's 4-arg test calls updated to pass the seeded tenant. The REST handlers combine base's `is_system_principal` bypass with the core containment (for the bypassed system principal they pass the target workspace's tenant so the core comparison matches base's semantics for the bootstrap principal).
+**fabricated-scope-defaults-exemptions.txt.** Comment-only conflict: both sides describe the same two fixed legacy entries (git_http ws_id, auth.rs tenant claim) with the entry count already lowered to 2. Combined the provenance notes from both sides; entries unchanged, `FROZEN_EXEMPTION_COUNT=2` unchanged.
 
-**stale_agents.rs.** Base's `match &token` with task-130's token-registration comment.
+**impersonation.rs (auto-merge fallout).** Base's new `resolve_impersonation_auth` constructs `AuthenticatedAgent` without the §1 fields task-130 made mandatory. Added `workspace_id`/`repo_id: None` and `scope: Vec::new()` — impersonation targets a user principal, and user tokens carry no §1 hierarchy claims (gated by ABAC/RBAC, not token scope).
 
-**exemption files.** Base fixed the task-099 scope-literal sites for real (`system_principal_tenant()` helper, user-bound tenant, workspace-tenant-resolving emit paths, `bootstrap_workspace()` in domain agent.rs), so its side of `scope-literal-defaults-exemptions.txt` has 9 fewer entries and no `agent.rs` entry — took base's deletions (12 entries, frozen count unchanged); re-pointed `domain/merge_request.rs` line drift (119 → 124) to the merged tree. `inert-enforcement-exemptions.txt` and `abac-exempt-handlers-exemptions.txt`: no entries on either side; comment blocks combined. Zero new exemptions anywhere.
+**auth.rs tests (auto-merge fallout).** Base's `impersonation_jwt_rejects_agent_jwt` and `auth_failure_audit_event_recorded_for_revoked_agent_jwt` mint via the old 5-arg `.mint()`; updated to the §1 hierarchy signature with tenant/workspace/repo context.
 
-**spawn.rs (auto-merge fallout).** Base changed the tenant resolution to `Option<String>`; the secret-accessed audit log inside the `Some` arm now logs the matched `tenant` rather than the `Option`.
+**spawn.rs tests (auto-merge fallout).** Base's five direct-drive `spawn_agent_core` unit tests (F6 legacy-path, F9 missing-branch, worktree-path cases 1a/1b, R19 bookmark-export ordering) seed a repo referencing `ws-1` without the workspace row; §1 spawn fails closed when the repo's workspace row is missing (the workspace is the tenant-scope source for the minted agent JWT), so the tests now seed `ws-1` via a new `seed_ws1_workspace` helper (tenant `default`, matching the spawner fixture principal). Test literals carry the §1 fields (`None`/empty for the spawner principal).
 
 ### Implementation (unchanged in substance)
 
@@ -107,14 +107,15 @@ Implemented `platform-model.md` §1 Token Scoping end-to-end. This round is the 
 - **Rebase onto `fefde2946` (merge `149111bd2`)**: kept §1 `scope: Vec<String>` AND base's `jti` claim (all three construction sites mint both); task-103 tenant-claim schema-default merged cleanly; base's new tests (jti uniqueness, task-098 secrets-resource, task-099 exempt-handler sites) updated to the §1 claims shape (`agent_auth` mints repo/workspace-tier scope lists and mirrors `with_hierarchy_from_claims`).
 - **Rebase onto `c5deca801` (merge `afb1d86bd`)**: base's spec-approve agent detection replaced with the §1 array-based detection; `register_e2e_agent` updated to the 17-arg `mint_with_workload` hierarchy signature with attestation from the fixture.
 - **Review 92601fb6 (commit `78ac5caf`)**: F1 `gyre_list_mrs` no-arg fallback clamped to the caller's signed repo; F2 worker-tool target binding (see Implementation above).
+- **Rebase onto `774737638` (merge `f6ea08e94`)**: task-177 rendering + task-140 fail-closed persona resolution + task-099 system-principal/API-key tenant fixes. auth.rs sites merged base's `system_principal_tenant`/user-bound API-key tenant with the §1 fields; orchestrator.rs kept base's `resolve_orchestrator_persona` + `LaunchOutcome` and task-130's core-level `caller_tenant` containment; scope-literal exemption entries took base's real fixes (9 deletions).
 
-### Test evidence (this round, head f6ea08e94)
+### Test evidence (this round, head f69bd657a)
 
-- `cargo test -p gyre-server --lib`: **1541 passed / 0 failed** (includes the task-130 mcp_scope_* suite, the orchestrator containment/persona/LaunchOutcome tests from both sides, and base's is_system_principal spoof-shape test updated to the §1 claims shape).
+- `cargo test -p gyre-server --lib`: **1631 passed / 0 failed** (includes the task-130 mcp_scope_* suite, base's task-108 impersonation suite, the orchestrator containment/persona tests, and the four repaired base spawn tests). Log: /tmp/stage/review-evidence/lib-tests.log.
 - Integration suites: auth_integration 21/21, m18_oidc_integration 8/8, e2e_ralph_loop 1/1, api_integration 66/66. Log: /tmp/stage/review-evidence/integration-tests.log.
-- `cargo check --all --all-targets`: clean (whole workspace).
-- `cargo clippy -p gyre-server --all-targets --all-features`: **0 warnings on changed lines vs base 774737638** (596 pre-existing elsewhere, ignored by the changed-lines gate). Log: /tmp/stage/review-evidence/clippy-changed-lines-analysis.txt (raw JSON: clippy-gyre-server-alltargets.json).
-- `cargo fmt --all --check`: clean. All static gates green (check-arch, check-abac-route-registry, check-mcp-write-tools, check-migration-versions, check-dead-message-kinds, check-byte-slice-truncation, check-relative-path-defaults, check-fail-open-ref-resolution, check-task-commit-attribution, check-mem-port-contracts, check-lossy-secret-conversion, check-inert-enforcement [crates], check-scope-literal-defaults [crates], check-fabricated-scope-defaults [crates], check-forwarded-header-trust, check-in-memory-state-stores, check-unbounded-external-http, check-migration-sql-portability, check-forged-scope-fields, check-abac-exempt-handlers, check-dead-parameters, check-ignored-tool-tests, check-unwritten-store-fields, check-warn-continue-creation). Log: /tmp/stage/review-evidence/static-gates.log.
-- `check-mcp-wrapper-parity.sh` fails on pre-existing sites (verified exit 1 on base `774737638` in a clean worktree — not a regression of this merge).
+- `cargo check --workspace --all-targets`: clean (whole workspace).
+- `python3 scripts/check-clippy-diff.py HEAD^1`: **PASS — 0 warnings on changed lines** (58 changed Rust files, 930 pre-existing elsewhere, ignored by the changed-lines gate); also verified 0 changed-line failures crate-locally (`cargo clippy -p gyre-server --all-targets --all-features`). Logs: /tmp/stage/review-evidence/clippy-changed-lines-analysis.txt (raw JSON: clippy-workspace.json, clippy-gyre-server-alltargets.json, base comparison: clippy-base.json).
+- `cargo fmt --all --check`: clean. All static gates green, re-run after the merge commit (check-arch, check-abac-route-registry, check-mcp-write-tools, check-migration-versions, check-dead-message-kinds, check-byte-slice-truncation, check-relative-path-defaults, check-fail-open-ref-resolution, check-task-commit-attribution, check-mem-port-contracts, check-lossy-secret-conversion, check-inert-enforcement, check-scope-literal-defaults, check-fabricated-scope-defaults, check-forwarded-header-trust, check-in-memory-state-stores, check-unbounded-external-http, check-migration-sql-portability, check-forged-scope-fields, check-abac-exempt-handlers). Log: /tmp/stage/review-evidence/static-gates.log.
+- `check-mcp-wrapper-parity.sh` was not re-run this round; it fails on pre-existing sites verified against base `774737638` in a clean worktree during the previous round (not a regression of this merge; this round's changes touch no MCP wrapper sites).
 
 Full workspace suite, all-target Clippy on every crate, and exact-head GitHub CI remain with verification/publication.
