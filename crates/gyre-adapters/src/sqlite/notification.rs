@@ -454,13 +454,31 @@ mod tests {
 
         let all = NotificationRepository::list_recent(&s, 100).await.unwrap();
         let by_id = |id: &str| all.iter().find(|n| n.id.as_str() == id).unwrap();
-        assert_eq!(by_id("card-1").body.as_deref(), Some("{\"spec_sha\":\"new\"}"));
-        assert_eq!(by_id("card-2").body.as_deref(), Some("{\"spec_sha\":\"new\"}"));
+        assert_eq!(
+            by_id("card-1").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
+        assert_eq!(
+            by_id("card-2").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
         // Resolved/dismissed/other-entity/other-type bodies untouched.
-        assert_eq!(by_id("card-resolved").body.as_deref(), Some("{\"spec_sha\":\"old\"}"));
-        assert_eq!(by_id("card-dismissed").body.as_deref(), Some("{\"spec_sha\":\"old\"}"));
-        assert_eq!(by_id("card-other-mr").body.as_deref(), Some("{\"spec_sha\":\"old\"}"));
-        assert_eq!(by_id("card-other-type").body.as_deref(), Some("{\"spec_sha\":\"old\"}"));
+        assert_eq!(
+            by_id("card-resolved").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-dismissed").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-mr").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-type").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
 
         // Nonexistent entity updates nothing, succeeds.
         let updated = NotificationRepository::update_body_by_entity_ref(

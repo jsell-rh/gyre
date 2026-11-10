@@ -7,6 +7,7 @@ use gyre_common::{Id, Notification};
 /// Per-handler auth — callers MUST verify that the notification's `user_id` and
 /// `tenant_id` match the authenticated user before invoking mutating methods.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait NotificationRepository: Send + Sync {
     async fn create(&self, notification: &Notification) -> Result<()>;
 
