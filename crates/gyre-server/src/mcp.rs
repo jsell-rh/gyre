@@ -5925,6 +5925,7 @@ mod tests {
                 "repo_id": repo_id,
             })),
             deprecated_token_auth: false,
+            impersonation: None,
         }
     }
 
@@ -6428,6 +6429,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let result = handle_prompt_get(&state, &auth, "system://protocol", None)
             .await
@@ -6457,6 +6459,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         for name in [
             "system://persona",

@@ -260,9 +260,7 @@ pub async fn context_prompt_for_caller(
                 .map_err(|e| format!("task lookup failed: {e}"))?;
             let t = t.ok_or_else(|| format!("task '{tid}' not found"))?;
             if t.workspace_id != scope.workspace_id {
-                return Err(format!(
-                    "task '{tid}' belongs to a different workspace"
-                ));
+                return Err(format!("task '{tid}' belongs to a different workspace"));
             }
             if let Some(caller_repo) = &scope.repo_id {
                 if !t.repo_id.to_string().is_empty() && t.repo_id != *caller_repo {
