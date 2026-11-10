@@ -5,7 +5,7 @@ depends_on: []
 progress: complete
 review: specs/reviews/task-056.md
 coverage_sections: []
-commits: []
+commits: ["d5b463e109599315f6329aab8d12c2fa5a74fe31"]
 ---
 
 ## Spec Excerpt
