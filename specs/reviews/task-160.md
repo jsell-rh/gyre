@@ -57,3 +57,58 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+---
+
+## Round 5 — final review at candidate f3ed179c (base 4d6759a0) — verdict: complete
+
+Assignment: candidate `f3ed179c9217b9204abbdc803d08238b37f8903b` (current round =
+merge-resolution of upstream task-084 `4d6759a0` on retained checkpoint
+`a8769d5`, semantic repair `9dc6ffd47`, plus process commits). Tree clean at
+HEAD; all probes run on the working tree with `git diff --quiet`-confirmed
+restoration after each mutation. Full evidence:
+`/tmp/stage/review-evidence/task-160-final-review.md`.
+
+**Acceptance criteria, independently probed:**
+
+- `check-hierarchy.sh` clean exit 0; kills both `Task.workspace_id → Option<Id>`
+  (exit 1, names task.rs:60) and field deletion ("missing from the struct",
+  exit 1). gyre-common exclusion by construction (scans gyre-domain only).
+- `check-tenant-filter.sh` clean exit 0 (109 checked / 0 violations, skip list
+  documented per file); kills a stripped tenant predicate in
+  `sqlite/task.rs::find_by_id` (exit 1, exact file:line).
+- `check-api-auth.sh` clean exit 0 (middleware chain, 4 non-ABAC handlers with
+  auth extractors, delegated route-registry pass); kills an unregistered route
+  added to api/mod.rs (exit 1 via delegated check-abac-route-registry).
+- All three scripts executable, usage-commented, blocking in pre-commit
+  (config lines 46/62/70) and CI (ci.yml:72/74/76, no `|| true`).
+- Focused tests: `merge_attestation_abac_decision_recorded_in_audit_trail` 1
+  passed; `reconciliation` 21 passed; `supervised_trust` 1 passed;
+  `tenant_isolation` 2 passed — and mutation-proven non-self-confirming:
+  stripping the find_by_id tenant filter makes
+  `tenant_reads_never_see_another_tenants_rows` FAIL on the exact leak
+  assertion. Full workspace `cargo test --all` is owned by verification.
+
+**Current-round code review:** `9dc6ffd47` correctly adapts all seven
+reconciliation emit_event call sites to the branch's scoped signature
+(tenant resolved from the workspace record; message dropped on
+unresolvable scope) and converts the unscoped None+Broadcast fallback to
+skip-and-log per the fabricated-scope-defaults invariant — no fabricated
+scope identity anywhere in the round. `b82af6b4` binds both
+evaluate_attestation_abac results and records them in the policy decision
+audit trail; both inert-enforcement exemptions deleted; merge-gating
+enforcement remains explicitly owned by task-077's revision round (F5),
+which this task does not claim. Frozen exemption counts across the diff
+only shrink (scope-literal 24→10), never grow.
+
+**Mechanical invariants at HEAD:** check-inert-enforcement,
+check-fabricated-scope-defaults, check-scope-literal-defaults,
+check-task-commit-attribution, check-abac-route-registry, check-arch,
+check-mem-port-contracts — all exit 0.
+
+**Spec-gating note:** spec §103's "initially disabled, enabled in M34 Slice 3
+after the non-optional migration lands" — the migration has landed (all five
+fields non-optional `Id`), so the script's default-on / `=0` opt-out is the
+spec's intended end-state; CI still sets GYRE_CHECK_HIERARCHY=1 explicitly.
+
+**Findings:** none. Approved.
