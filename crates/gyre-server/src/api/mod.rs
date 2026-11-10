@@ -22,6 +22,7 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod impersonation;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -76,12 +77,15 @@ use compute::{
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
+use impersonation::{
+    approve_impersonation, deny_impersonation, end_impersonation, request_impersonation,
+};
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
+    get_judgments, get_me, get_my_notifications, get_notification_count,
+    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
+    remove_member, resolve_notification, update_me, update_member_role,
     update_notification_preferences, update_team,
 };
 
@@ -109,6 +113,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
+        .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -474,6 +479,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        // Admin user impersonation (identity-security.md §Impersonation).
+        // Approve/deny are called by the TARGET user (any role) and are
+        // ABAC-exempt with per-handler authorization — see
+        // api/impersonation.rs and abac_middleware.rs.
+        .route("/api/v1/admin/impersonate", post(request_impersonation))
+        .route(
+            "/api/v1/admin/impersonate/:request_id/approve",
+            post(approve_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id/deny",
+            post(deny_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id",
+            delete(end_impersonation),
+        )
         .route(
             "/api/v1/admin/agents/:id/kill",
             post(admin::admin_kill_agent),
@@ -771,6 +793,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs-registry/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
+        // Spec-level meta-spec bindings (agent-runtime spec §2)
+        .route(
+            "/api/v1/specs/:path/meta-spec-bindings",
+            get(meta_specs::get_spec_meta_spec_bindings)
+                .put(meta_specs::put_spec_meta_spec_bindings),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
@@ -808,9 +836,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users", post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
-        .route("/api/v1/users/me/agents", get(get_my_agents))
-        .route("/api/v1/users/me/tasks", get(get_my_tasks))
-        .route("/api/v1/users/me/mrs", get(get_my_mrs))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",

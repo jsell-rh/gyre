@@ -74,6 +74,7 @@ struct AgentRow {
     orchestrator_type: String,
     repo_id: Option<String>,
     restart_on_failure: bool,
+    persona_id: Option<String>,
 }
 
 impl AgentRow {
@@ -95,6 +96,7 @@ impl AgentRow {
             orchestrator_type: str_to_orchestrator_type(&self.orchestrator_type)?,
             repo_id: self.repo_id.map(Id::new),
             restart_on_failure: self.restart_on_failure,
+            persona_id: self.persona_id.map(Id::new),
         })
     }
 }
@@ -116,6 +118,7 @@ struct NewAgentRow<'a> {
     orchestrator_type: &'a str,
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
+    persona_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -141,6 +144,7 @@ impl AgentRepository for PgStorage {
                 orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
+                persona_id: a.persona_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -158,6 +162,7 @@ impl AgentRepository for PgStorage {
                     agents::orchestrator_type.eq(row.orchestrator_type),
                     agents::repo_id.eq(row.repo_id),
                     agents::restart_on_failure.eq(row.restart_on_failure),
+                    agents::persona_id.eq(row.persona_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert agent")?;
@@ -253,6 +258,7 @@ impl AgentRepository for PgStorage {
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
+                agents::persona_id.eq(a.persona_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
             .context("update agent")?;
