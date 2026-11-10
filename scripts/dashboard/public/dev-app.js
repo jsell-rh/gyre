@@ -205,6 +205,7 @@ function renderOverview() {
   const deferred = tasks.filter((t) => t.state === "deferred");
   const gate = s.health || {};
   const candidate = tasks.filter((t) => t.state === "candidate");
+  const assessing = tasks.filter((t) => ["assessing", "needs-triage"].includes(t.state));
   const blocked = tasks.filter((t) => t.state === "blocked");
   const published = tasks.filter((t) => t.state === "published");
   const cards = [
@@ -259,6 +260,8 @@ function renderOverview() {
     published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
       published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
+    assessing.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Requirement assessment · ${assessing.length}` }),
+      assessing.map((task) => taskButton(task, task.condition || "Independent assessment pending"))) : null,
     blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),
       blocked.map((task) => taskButton(task, task.condition || "Waiting for prerequisite repair"))) : null,
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),

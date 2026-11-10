@@ -48,7 +48,8 @@ class RequirementTests(unittest.TestCase):
         self.assertEqual(discover(self.store,'assess','main'),[])
         work=discover(self.store,'triage','main')[0]
         self.assertIsNotNone(self.store.claim('triage','owner',eligible=lambda w:eligible(self.store,w)))
-        self.assertEqual(cockpit(self.store)['tasks'][0]['state'],'needs-triage')
+        self.assertEqual(cockpit(self.store)['tasks'][0]['state'],'running')
+        self.assertEqual(cockpit(self.store)['tasks'][0]['stage'],'triage')
         self.spec.write_text('# Contract\n## One\nFirst\n## One\nSecond\n')
         self.assertIn('ambiguous',self.snap()['errors'][0])
 
@@ -78,7 +79,8 @@ class RequirementTests(unittest.TestCase):
         self.assertIsNotNone(self.store.claim('assess','owner',eligible=lambda w:eligible(self.store,w)))
         view=cockpit(self.store)
         self.assertEqual(view['confirmed_merges'],1)
-        self.assertEqual(view['tasks'][0]['state'],'assessing')
+        self.assertEqual(view['tasks'][0]['state'],'running')
+        self.assertEqual(view['tasks'][0]['stage'],'assess')
         with self.assertRaises(sqlite3.IntegrityError):self.store.db.execute('DELETE FROM task_history')
 
     def test_fenced_code_and_assessment_cannot_commit_old_requirement_receipts(self):

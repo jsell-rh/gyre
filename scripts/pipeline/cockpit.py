@@ -27,10 +27,11 @@ def snapshot(store):
         retry = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
         shared_wait = (data.get('repair') or {}).get('shared_environment')
-        state = ('needs-triage' if (data.get('requirements') or {}).get('errors') else
-                 'assessing' if data.get('assessment_pending') else
-                 'merged' if data.get('delivered') else 'resolved' if data.get('resolved') else 'failed' if attention else
-                 'running' if active else 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else 'deferred' if retry else
+        state = ('merged' if satisfied(data) and data.get('delivered') else
+                 'resolved' if satisfied(data) else 'failed' if attention else 'running' if active else
+                 'needs-triage' if (data.get('requirements') or {}).get('errors') else
+                 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else
+                 'deferred' if retry else 'assessing' if data.get('assessment_pending') else
                  'blocked' if shared_wait or task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
