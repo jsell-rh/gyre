@@ -6,7 +6,7 @@ depends_on:
 progress: complete
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a", "1336b4d924b290926551ec4b62a707d2ae8d7387"]
 ---
 
 ## Spec Excerpt
