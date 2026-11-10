@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb", "98b0bfa32cfeb8b4ae22c0f2f3c0ca3519a5a565"]
+commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb"]
 ---
 
 ## Spec Excerpt
