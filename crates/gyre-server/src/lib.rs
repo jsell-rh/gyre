@@ -54,6 +54,7 @@ pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
 pub mod policy_engine;
+pub mod signal_chain;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -80,9 +81,9 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TenantMetaSpecSetRepository,
-    TraceRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
-    WorkspaceRepository, WorktreeRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -275,6 +276,17 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
+    /// Compute backend each running agent was spawned on: agent_id ->
+    /// backend owning its handle. Lets kill/is_alive reach the right
+    /// orchestrator (docker/podman, remote SSH docker, or kubectl)
+    /// instead of assuming a local pid (agent-runtime.md §3).
+    ///
+    /// Values are `Arc` so the exit monitor can clone the backend and drop
+    /// the lock BEFORE probing liveness — an SSH probe can block for the
+    /// TCP connect timeout, and holding this lock across it would stall
+    /// admin kills and every new spawn.
+    pub spawned_backends:
+        Arc<Mutex<HashMap<String, std::sync::Arc<crate::api::spawn::SpawnBackend>>>>,
     /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
     /// cold segment for lines older than the compression age
     /// (observability.md §Log Retention & Compression).
@@ -304,6 +316,8 @@ pub struct AppState {
     pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
     /// Per-repo spec enforcement policies (persisted).
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
+    /// Per-repo spec lifecycle configuration (persisted).
+    pub spec_lifecycle_configs: Arc<dyn gyre_ports::SpecLifecycleRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
     /// Authorization provenance attestation chains (TASK-006).
@@ -439,6 +453,12 @@ pub struct AppState {
     pub secrets: Arc<dyn gyre_ports::SecretRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// Orchestrator registry (agent-runtime.md §1 Phases 2–3): per-workspace
+    /// and per-repo processing locks implementing exactly-one-active
+    /// semantics for the spec-approval signal chain. Process-local
+    /// serialization only — agent liveness lives in the port-backed agents
+    /// store.
+    pub orchestrator_registry: signal_chain::OrchestratorRegistry,
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
@@ -1008,6 +1028,12 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+    // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
+    // pairs with `MemWorkspaceRepository` so `has_workspace_references`
+    // (agent-runtime.md §3 delete guard) sees real workspace assignments
+    // instead of a hardcoded empty set.
+    let mem_workspace_store =
+        Arc::new(Mutex::new(HashMap::<String, gyre_domain::Workspace>::new()));
 
     // In pure in-memory mode, the meta-spec and meta-spec-binding repos must
     // share a single binding store so the delete guard in
@@ -1082,6 +1108,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
+        spawned_backends: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
@@ -1111,6 +1138,10 @@ pub fn build_state(
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
+        ),
+        spec_lifecycle_configs: store!(
+            dyn SpecLifecycleRepository,
+            mem::MemSpecLifecycleRepository::default()
         ),
         attestation_store: store!(
             dyn AttestationRepository,
@@ -1182,6 +1213,7 @@ pub fn build_state(
         workspaces: store!(
             dyn WorkspaceRepository,
             mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+                .with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
         policies: store!(
@@ -1274,7 +1306,7 @@ pub fn build_state(
         ),
         compute_targets: store!(
             dyn ComputeTargetRepository,
-            mem::MemComputeTargetRepository::default()
+            mem::MemComputeTargetRepository::with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
@@ -1292,6 +1324,7 @@ pub fn build_state(
             dyn gyre_ports::JudgmentLedgerRepository,
             mem::MemJudgmentLedgerRepository
         ),
+        orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
