@@ -27,23 +27,27 @@ Infrastructure failures retry with backoff without changing the task contract.
 
 ## Thin workers and runtime recovery
 
-Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
-unit tests use one worker; the guarded frontend test command also serializes
-Vitest files. Thin-worker dev/test builds omit DWARF debug symbols (test
-behavior and debug assertions remain enabled) to reduce memory and workspace
-footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
-assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
-memory. Compute choices and the triggering evidence remain in the ledger.
-Build workspaces need 30 GiB persistent disk; this is separate from worker RAM.
-With the scoped Kubernetes runtime context configured, the harness verifies
-gateway ownership and PVC owner UID, expands only that sandbox's volume, and
-waits for the mounted filesystem before starting builds. Other backends must
-provision adequate workspace storage at the gateway. This does not alter
-gateway-wide defaults. Disk or inode exhaustion is reported as storage failure,
-never as transport loss or an OOM; identical attempts require an explicit retry.
-After stopping an implementation agent, its generated build cache can be
-reclaimed to leave room for saving source. Source and symlink targets are never
-deleted by this reclamation.
+Build-capable assignments always request one CPU and **4 GiB RAM**. Historical
+per-task 8 GiB settings are ignored. An OOM is retained as a resource failure
+requiring a lower-memory implementation or build strategy; it never authorizes
+larger allocations or cluster-policy changes. The harness does not read or
+change namespace admission policy to increase its budget.
+
+Build commands share one sandbox lock, with one Cargo job and one test thread.
+Agent and verifier environments use the same settings: no incremental Rust
+compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
+assertions, test selection, and required verification checks stay enabled.
+The coding agent's JavaScript heap is bounded separately from build tools.
+
+Source/checkpoints and the agent spool remain on the gateway-provided workspace.
+Rebuildable Cargo target/registry and npm caches use disk-backed
+`/tmp/gyre-build`, which survives transport reconnects but may require rebuilding
+after a sandbox restart. Before builds, the harness inspects filesystem space
+through OpenShell and rejects memory-backed or insufficient cache storage.
+It never patches PVCs or cluster limits. Storage exhaustion retains evidence
+and requires attention rather than silently changing platform configuration.
+Only generated build cache may be reclaimed; source and symlink targets are
+never deleted by reclamation.
 
 An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
 and `runtime_namespace` settings to capture workload termination reasons before
@@ -51,16 +55,17 @@ pods disappear. It only records pods matching existing owned resource records;
 cluster diagnostics are not a prerequisite for healthy gateway execution. Read-only
 cgroup counters also detect child-only OOM kills that leave the pod running;
 a compiler failure by itself never raises memory.
-Without an authoritative OOM and its killed allocation size, no memory escalation
-is inferred. The cockpit reports the actual runtime failure instead of calling
+An authoritative OOM and its allocation size are retained as diagnostics;
+no automatic memory escalation is permitted. The cockpit reports the actual runtime failure instead of calling
 an OOM a model or generic transport failure.
 
 Agent polling refreshes expired gateway authentication. Failed polls preserve
 process identity and output offsets while the sandbox remains Ready, bounded by
 the assignment deadline. A stopped owned sandbox may restart once per claim;
 trusted temporary inputs are restored and Pi resumes its persisted session.
-Agent spool and build cache live on the workspace volume. Another stop requires
-attention. OOM recovery can salvage source before retiring undersized compute;
+Agent spool lives on the workspace volume; disposable caches are rebuilt after
+a stop. Another stop requires
+attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
 Infrastructure backoff releases the integration lane so another reviewed
@@ -248,7 +253,7 @@ No GCP credential file is needed.
 A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
-unconfirmed deletion stays charged and is retried independently. A pending
+unconfirmed compute release stays charged and deletion is retried independently. A pending
 allocation is retained across fullsend's readiness retries; a repeated create
 adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
 allocations cannot be recreated within an attempt. A deleted sandbox
@@ -441,7 +446,16 @@ Infrastructure errors retain the same work identity and use exponential backoff
 from five seconds up to fifteen minutes. Pending autoscaler capacity waits within
 the existing sandbox. Failed input clones retry before sandbox allocation. No failure retains a sandbox
 for debugging: artifacts are captured locally, deletion is attempted immediately,
-and cleanup retries unresolved deletion while the reservation remains charged.
+and cleanup retries unresolved deletion. Cleanup debt and compute occupancy are
+tracked separately: a deleting allocation releases its compute slot only after
+scoped Kubernetes inventories establish that its sandbox is suspended, deleting,
+or absent and no matching pod remains. Sandbox state is read before pod state;
+even a terminating pod remains charged. Evidence is bound to the resource claim,
+cluster context, and namespace, and expires after three minutes. Unknown,
+incomplete, or stale evidence keeps the slot charged. Gateway sandbox/provider
+cleanup records and retries remain intact, and cleanup of the same task still
+precedes a replacement attempt. The cockpit reports occupied slots separately
+from pending deletions.
 
 Model admission also checks the pinned inference endpoint before reserving a
 sandbox. The shared probe uses `ENMAAS_API_KEY` or the local secret-store entry
@@ -469,6 +483,23 @@ logs are kept separate from baseline failures; bounded logs and screenshot
 artifacts are staged inside the repair sandbox. Pending checks and merge
 confirmation are expected observations, polled every 30 seconds without
 accumulating infrastructure failure backoff.
+
+Shared CI setup failures are coordinated separately from product defects.
+For Playwright's unsupported-runner failure, the observer verifies the terminal
+Actions job/attempt and failed installation step, then compares workflow and npm
+input blob identities against the exact upstream base. Product-test failures,
+mixed failures, and candidates that changed those inputs remain candidate repairs.
+An older green base run cannot establish the health of today's hosted runner.
+Matching setup failures share one SQLite-deduplicated repair task, even as main
+advances. Affected tasks retain their candidate, review, and product dependency
+contract; they do not start individual implementation workers for that failure.
+The shared repair receives automatic repair priority.
+
+Once the repair ships, retained candidates re-enter verification against a base
+containing the fix. If main already has different CI inputs when the failure is
+observed, the observer requests that integration refresh directly, without a
+repair model. This permits fresh verification only; it never marks CI green or
+merges an old failing head. New publication still requires all GitHub checks.
 
 Completing a repair clears its active finding but retains the original evidence
 as review context. The independent reviewer receives the failure source identity,
@@ -542,7 +573,7 @@ only those unchanged files, leaving candidate deletions intact; modified or
 pre-existing files are never blindly cleaned. This prevents the verifier itself
 from contaminating the exact checkout it later checks. Git retries reuse the
 allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
-unconfirmed deletion charged until authoritative absence. Slots zero drains
+unconfirmed compute release charged until scoped runtime evidence proves absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
 

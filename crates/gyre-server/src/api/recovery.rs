@@ -1,6 +1,7 @@
 //! Post-merge recovery protocol endpoints (platform-model.md §6).
 //!
 //! GET  /api/v1/repos/:id/status            — main health + queue pause state
+//!                                           (?gates=false skips gate execution)
 //! PUT  /api/v1/repos/:id/queue/pause       — manual merge queue pause
 //! PUT  /api/v1/repos/:id/queue/resume      — manual merge queue resume
 //! POST /api/v1/repos/:id/revert/:mr_id     — manual revert of a merged MR
@@ -12,7 +13,7 @@
 //! `gate_executor::run_post_merge_gates`).
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -38,6 +39,15 @@ pub struct PauseRequest {
     pub reason: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct RepoStatusQuery {
+    /// "false" skips post-merge gate execution: the response reports queue
+    /// pause state only, with `main_green: None`. Dashboards that render the
+    /// pause state for many repos use this to avoid running gate commands
+    /// (which can take minutes) on every page load.
+    pub gates: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct QueueStatusResponse {
     pub repo_id: String,
@@ -46,7 +56,8 @@ pub struct QueueStatusResponse {
     /// Pause reason, if paused.
     pub pause_reason: Option<String>,
     /// Whether the repo's default branch HEAD passes post-merge validation.
-    /// None when no post-merge gates are configured.
+    /// None when no post-merge gates are configured or when gate execution
+    /// was skipped (`?gates=false`).
     pub main_green: Option<bool>,
     /// Post-merge gate configs currently set for this repo.
     pub post_merge_gates: Vec<PostMergeGateDto>,
@@ -190,10 +201,12 @@ pub async fn resume_queue(
 /// GET /api/v1/repos/:id/status — main health and merge queue state.
 ///
 /// Runs post-merge validation against the default branch HEAD to compute
-/// `main_green` (None when no gates are configured).
+/// `main_green` (None when no gates are configured). Pass `?gates=false` to
+/// skip gate execution and report queue pause state only.
 pub async fn repo_status(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    Query(query): Query<RepoStatusQuery>,
 ) -> Result<Json<QueueStatusResponse>, ApiError> {
     let repo = state
         .repos
@@ -220,11 +233,17 @@ pub async fn repo_status(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
+    let skip_gates = query
+        .gates
+        .as_deref()
+        .map(|g| g.eq_ignore_ascii_case("false") || g == "0")
+        .unwrap_or(false);
+
     // main_green: run post-merge gates against current default-branch HEAD.
     // Fail CLOSED (task-095 R3-F3): when the HEAD ref does not resolve there
     // is no tree to validate — report `main_green: false` with the failure in
     // `pause_reason` context, never a green reading from an unvalidated tree.
-    let main_green = if gates.is_empty() {
+    let main_green = if skip_gates || gates.is_empty() {
         None
     } else {
         match crate::git_refs::resolve_ref(
@@ -747,5 +766,52 @@ mod tests {
             serde_json::json!(false),
             "unresolvable HEAD must report main_green: false (fail closed), got {body}"
         );
+    }
+
+    /// `?gates=false` reports queue pause state without executing post-merge
+    /// gate commands — dashboards use it to render pause state for many repos
+    /// without running minute-long gate commands on every page load. The
+    /// gate below exits non-zero when executed: `main_green: null` (not
+    /// `false`) proves the gate never ran.
+    #[tokio::test]
+    async fn repo_status_gates_false_skips_gate_execution() {
+        let state = test_state();
+        let repo = seed_repo(&state, "status-skip-gates").await;
+        state
+            .quality_gates
+            .save(&QualityGate {
+                id: Id::new("gate-skip"),
+                repo_id: repo.id.clone(),
+                name: "always-fail".to_string(),
+                gate_type: GateType::TestCommand,
+                command: Some("false".to_string()),
+                required_approvals: None,
+                persona: None,
+                required: true,
+                gate_phase: GatePhase::PostMerge,
+                timeout_secs: Some(10),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{}/status?gates=false", repo.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["main_green"],
+            serde_json::json!(null),
+            "?gates=false must skip gate execution (main_green null), got {body}"
+        );
+        assert_eq!(body["queue_paused"], serde_json::json!(false));
     }
 }

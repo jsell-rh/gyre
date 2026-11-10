@@ -679,6 +679,22 @@ mod tests {
         test_state()
     }
 
+    /// Seed the workspace the fixtures' repos live in ("proj-1").
+    /// Emissions (emit_event/emit_telemetry) resolve the tenant scope from
+    /// the workspace record and skip the message when the workspace does
+    /// not exist (task-099 F1), so the workspace must be real for the
+    /// domain-event assertions below.
+    async fn seed_workspace(state: &Arc<AppState>, workspace_id: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(workspace_id),
+            gyre_common::Id::new("t1"),
+            workspace_id,
+            workspace_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
     async fn create_repo(state: &Arc<AppState>, name: &str) -> Id {
         create_repo_in_workspace(state, name, "proj-1").await
     }
@@ -2468,6 +2484,10 @@ import "google/protobuf/empty.proto";
     #[tokio::test]
     async fn test_reconcile_emits_domain_event_for_new_edge() {
         let state = setup();
+        // The domain event is emitted via emit_event, which resolves the
+        // tenant scope from the workspace record and skips the emission
+        // when the workspace does not exist (task-099 F1) — seed it.
+        seed_workspace(&state, "proj-1").await;
         let repo_a = create_repo(&state, "repo-a").await;
         let repo_b = create_repo(&state, "repo-b").await;
 
@@ -2555,6 +2575,9 @@ import "google/protobuf/empty.proto";
     #[tokio::test]
     async fn test_reconcile_emits_event_per_new_edge() {
         let state = setup();
+        // Same F1 contract as test_reconcile_emits_domain_event_for_new_edge:
+        // seed the workspace so emit_event does not skip the emission.
+        seed_workspace(&state, "proj-1").await;
         let repo_a = create_repo(&state, "repo-a").await;
         let repo_b = create_repo(&state, "repo-b").await;
         let repo_c = create_repo(&state, "repo-c").await;

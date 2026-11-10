@@ -272,6 +272,13 @@ pub async fn set_stack_policy(
     Json(req): Json<SetStackPolicyRequest>,
 ) -> Result<Json<StackPolicyResponse>, ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/repos/:id/stack-policy",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update stack attestation policy".to_string(),
         ));
@@ -622,6 +629,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "rogue-agent",
                 "preferred_username": "rogue-agent",
                 "realm_access": { "roles": ["agent"] }

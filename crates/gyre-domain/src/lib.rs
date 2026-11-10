@@ -30,6 +30,7 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod meta_spec;
+pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
@@ -42,6 +43,7 @@ pub mod rust_extractor;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
+pub mod spec_lifecycle_config;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -89,7 +91,9 @@ pub use merge_request::{
 };
 pub use message_type::MessageType;
 pub use meta_spec::{
-    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
+    MetaSpecVersion, ReconciliationPriority, RolloutPolicy, RolloutStrategy,
+    DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
@@ -109,12 +113,19 @@ pub use spec_assertions::{
     SpecAssertionResult, Subject,
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
-pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
+pub use user::{
+    DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User, UserPreferences,
+    UserPreferencesPatch, UserRole,
+};
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
-pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
+pub use workspace::{
+    builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
+    Workspace, BUILTIN_PERSONA_DEFS,
+};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

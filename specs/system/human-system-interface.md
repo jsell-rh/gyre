@@ -313,6 +313,14 @@ pub enum NotificationType {
 }
 ```
 
+> **Taxonomy unification (user-management.md §Notification Entity, task-123):**
+> `SpecPendingApproval` was renamed `SpecApprovalRequested` and `BudgetWarning`
+> was renamed `AgentBudgetWarning` (rank 7 → 4, High) to match the
+> user-management entity contract; `AgentEscalation` moved to rank 2 (Urgent)
+> per that spec's explicit level examples. `NotificationType::parse` still
+> accepts the legacy strings, so pre-existing rows keep parsing. The full
+> unified taxonomy lives in user-management.md §Notification Entity.
+
 The `dismissed_at` field tracks user dismissals (used by trust suggestions to suppress re-creation for 30 days). The `resolved_at` field tracks resolution (action taken). The Inbox badge count is the count of notifications where `resolved_at IS NULL AND dismissed_at IS NULL`.
 
 **Crate placement:** The `Notification` struct lives in `gyre-common` (shared wire type, like `Message` and `Id`). `NotificationRepository` lives in `gyre-ports`.
