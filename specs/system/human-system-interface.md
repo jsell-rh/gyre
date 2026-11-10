@@ -1369,10 +1369,16 @@ These are architectural constraints, not implementation work. They ensure we don
 |---|---|---|
 | Briefing | `gyre briefing [--workspace <slug>] [--since <epoch>]` | Resource: `briefing://` |
 | Inbox | `gyre inbox [--workspace <slug>] [--priority <min>-<max>]` | Resource: `notifications://` |
-| Explorer (concept search) | `gyre explore <concept> [--repo <name>]` | Tool: `graph.concept` |
+| Explorer (concept search) | `gyre explore <concept> [--repo <name>]` | Tool: `graph_concept` |
 | System Trace | `gyre trace <mr-id>` | Resource: `trace://<mr-id>` |
-| Spec editing assist | `gyre spec assist <path> "<instruction>"` | Tool: `spec.assist` |
+| Spec editing assist | `gyre spec assist <path> "<instruction>"` | Tool: `spec_assist` |
 | Divergence alerts | `gyre divergence [--workspace <slug>]` | (via notifications) |
+
+**Tool naming:** MCP tool names use snake_case (`graph_concept`, `spec_assist`),
+the convention for every tool the MCP server exposes. Earlier revisions of
+this table showed dotted shorthand (`graph.concept`, `spec.assist`), which
+was editorial, not an API contract; the table was amended to name the
+shipped tools (2026-09-29 §11 coverage audit resolution).
 
 This table is not exhaustive — it establishes the pattern. The REST API is the single source of truth; the UI, CLI, and MCP are all consumers. No data surface should be UI-only.
 
