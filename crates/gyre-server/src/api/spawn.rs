@@ -2469,6 +2469,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = crate::api::spawn::SpawnAgentRequest {
             name: "f6-worker".to_string(),
@@ -2561,6 +2562,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = crate::api::spawn::SpawnAgentRequest {
             name: "f9-worker".to_string(),
@@ -2680,6 +2682,7 @@ mod tests {
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
                 deprecated_token_auth: false,
+                impersonation: None,
             };
             let req = crate::api::spawn::SpawnAgentRequest {
                 name: "f1a-worker".to_string(),
@@ -2745,6 +2748,7 @@ mod tests {
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
                 deprecated_token_auth: false,
+                impersonation: None,
             };
             let req = crate::api::spawn::SpawnAgentRequest {
                 name: "f1b-worker".to_string(),
@@ -2835,6 +2839,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let req = SpawnAgentRequest {
             name: "r19-worker".to_string(),

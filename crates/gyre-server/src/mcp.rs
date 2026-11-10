@@ -3827,6 +3827,7 @@ mod tests {
                 "task_id": "task-1"
             })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(is_agent_jwt(&auth_with_agent_scope));
 
@@ -3838,6 +3839,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!is_agent_jwt(&auth_global));
 
@@ -3852,6 +3854,7 @@ mod tests {
                 "realm_access": {"roles": ["developer"]}
             })),
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(!is_agent_jwt(&auth_keycloak));
     }
@@ -5499,6 +5502,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: Some(claims),
             deprecated_token_auth: false,
+            impersonation: None,
         }
     }
 
@@ -5693,6 +5697,7 @@ mod tests {
             tenant_id: "default".to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         let result = handle_resource_read(&state, &auth, "secrets://names").await;
         assert!(result["error"].as_str().unwrap().contains("agent identity"));

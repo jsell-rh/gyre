@@ -102,6 +102,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Impersonation TTL expiry sweep (identity-security.md §Impersonation) —
+    // ends sessions past their TTL, emitting ImpersonationEnded.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "impersonation_expiry".to_string(),
+        Arc::clone(&state),
+    );
+
     // Log compression (observability.md §Log Retention & Compression) —
     // daily by default, configurable via GYRE_LOG_COMPRESSION_INTERVAL.
     jobs::spawn_job(

@@ -1,14 +1,23 @@
 /**
  * WorkspaceHomeArchitecture.test.js
  *
- * Tests for the collapsible Architecture section in WorkspaceHome (ui-navigation.md §2).
+ * Tests for the collapsible Architecture section in WorkspaceHome
+ * (ui-navigation.md §2 + ui-layout.md §5 Workspace Scope — Realized
+ * Architecture).
  *
  * Spec requirements:
- *   - Expanded by default (knowledge graph is a primary view)
- *   - "Hide workspace graph" toggle collapses; "Show workspace graph" expands
- *   - Calls api.workspaceGraph(workspaceId) on mount
- *   - Shows graph canvas when loaded
- *   - Shows error + retry on failure
+ *   - Collapsed by default; "Show workspace graph" / "Hide workspace graph" toggle
+ *   - When expanded, renders the workspace-scoped Explorer: repos as nodes,
+ *     cross-repo dependencies as edges (C4 Container level)
+ *   - Repo drill from the workspace graph routes through the host shell
+ *     (onSelectRepo(repo, 'architecture')) so the URL/breadcrumb update —
+ *     ui-layout.md §5 "Double-click → drill down to crate level (scope
+ *     changes to repo)"
+ *   - A repo from another workspace is NOT opened (scope containment)
+ *
+ * The ExplorerView itself (graph rendering, empty state, single-click detail
+ * panel, fallback drill) is covered by ExplorerViewWorkspaceGraph.test.js.
+ * Here it is stubbed so these tests assert the section wiring only.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -22,7 +31,6 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     specsForWorkspace: vi.fn().mockResolvedValue([]),
     getMetaSpecs: vi.fn().mockResolvedValue([]),
-    workspaceGraph: vi.fn(),
     approveSpec: vi.fn(),
     revokeSpec: vi.fn(),
     enqueue: vi.fn(),
@@ -58,31 +66,50 @@ vi.mock('../lib/toast.svelte.js', () => ({
   toastError: vi.fn(),
 }));
 
+// Stub ExplorerView (Svelte 5 component convention: (anchor, props)).
+// Renders a marker plus a button that invokes the captured onEnterRepo prop,
+// so tests can drive the repo-drill wiring without mounting the real canvas.
+const lastStubProps = { current: null };
+vi.mock('../components/ExplorerView.svelte', () => ({
+  default: function ExplorerViewStub(anchor, props) {
+    lastStubProps.current = props;
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'explorer-view-stub');
+    el.setAttribute('data-scope-type', props?.scope?.type ?? 'tenant');
+    el.setAttribute('data-scope-workspace-id', props?.scope?.workspaceId ?? '');
+    const btn = document.createElement('button');
+    btn.setAttribute('data-testid', 'stub-enter-repo');
+    btn.textContent = 'drill';
+    btn.addEventListener('click', () => {
+      // Simulated repo-node double-click from the workspace graph
+      props?.onEnterRepo?.({ id: 'repo-1', name: 'frontend' });
+    });
+    el.appendChild(btn);
+    if (anchor instanceof Node) anchor.before(el);
+    else if (props?.target) props.target.appendChild(el);
+  },
+}));
+
 import { api } from '../lib/api.js';
+import { toastError } from '../lib/toast.svelte.js';
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-vi.mock('../lib/ExplorerCanvas.svelte', () => ({
-  default: function ExplorerCanvasStub() {},
-}));
-
 const WORKSPACE = { id: 'ws-1', name: 'Payments', slug: 'payments', trust_level: 'Guided' };
 
-const GRAPH = {
-  nodes: [
-    { id: 'r1', label: 'payment-api', kind: 'Repo' },
-    { id: 'r2', label: 'user-service', kind: 'Repo' },
-  ],
-  edges: [
-    { source: 'r1', target: 'r2', label: 'depends_on' },
-  ],
-};
+async function expandArch(container) {
+  await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
+  await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
+}
 
-describe('WorkspaceHome — Architecture section (ui-navigation.md §2, HSI §1.3)', () => {
+describe('WorkspaceHome — Architecture section (ui-navigation.md §2, ui-layout.md §5)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.workspaceGraph.mockResolvedValue(GRAPH);
+    lastStubProps.current = null;
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'frontend', description: 'SPA', default_branch: 'main' },
+    ]);
   });
 
   it('renders the Architecture section when workspace is provided', () => {
@@ -114,13 +141,6 @@ describe('WorkspaceHome — Architecture section (ui-navigation.md §2, HSI §1.
     });
   });
 
-  it('calls workspaceGraph on initial render', async () => {
-    render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    await waitFor(() => {
-      expect(api.workspaceGraph).toHaveBeenCalledWith('ws-1');
-    });
-  });
-
   it('expands when toggle is clicked from collapsed', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const toggle = container.querySelector('[data-testid="arch-toggle"]');
@@ -138,60 +158,48 @@ describe('WorkspaceHome — Architecture section (ui-navigation.md §2, HSI §1.
     expect(container.querySelector('[data-testid="arch-body"]')).toBeNull();
   });
 
-  it('re-expands when toggle is clicked a third time', async () => {
+  it('renders the workspace-scoped Explorer when expanded (ui-layout.md §5)', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    const toggle = container.querySelector('[data-testid="arch-toggle"]');
-    await fireEvent.click(toggle); // expand
-    await fireEvent.click(toggle); // collapse
-    expect(container.querySelector('[data-testid="arch-body"]')).toBeNull();
-    await fireEvent.click(toggle); // expand again
-    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
+    await expandArch(container);
+    await waitFor(() => {
+      const stub = container.querySelector('[data-testid="explorer-view-stub"]');
+      expect(stub).toBeTruthy();
+      expect(stub.getAttribute('data-scope-type')).toBe('workspace');
+      expect(stub.getAttribute('data-scope-workspace-id')).toBe('ws-1');
+    });
+    // embedded: the Explorer suppresses its own page header inside the section
+    expect(lastStubProps.current?.embedded).toBe(true);
   });
 
-  it('renders the canvas after graph loads and section is expanded', async () => {
-    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
+  it('repo drill from the workspace graph routes through onSelectRepo with the architecture tab (scope change to repo)', async () => {
+    const onSelectRepo = vi.fn();
+    const { container } = render(WorkspaceHome, {
+      props: { workspace: WORKSPACE, onSelectRepo },
+    });
+    await expandArch(container);
+    await waitFor(() => expect(container.querySelector('[data-testid="stub-enter-repo"]')).toBeTruthy());
+    await fireEvent.click(container.querySelector('[data-testid="stub-enter-repo"]'));
     await waitFor(() => {
-      expect(container.querySelector('[data-testid="arch-canvas"]')).toBeTruthy();
+      expect(onSelectRepo).toHaveBeenCalledTimes(1);
+      const [repo, tab] = onSelectRepo.mock.calls[0];
+      expect(repo.id).toBe('repo-1');
+      expect(repo.name).toBe('frontend');
+      expect(tab).toBe('architecture');
     });
   });
 
-  it('does NOT re-fetch graph on collapse/expand cycle', async () => {
-    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    const toggle = container.querySelector('[data-testid="arch-toggle"]');
-
-    await waitFor(() => expect(api.workspaceGraph).toHaveBeenCalledTimes(1));
-
-    await fireEvent.click(toggle); // collapse
-    await fireEvent.click(toggle); // expand again
-
-    expect(api.workspaceGraph).toHaveBeenCalledTimes(1);
-  });
-  it('shows error row and retry button on API failure (when expanded)', async () => {
-    api.workspaceGraph.mockRejectedValue(new Error('network error'));
-    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
-    await waitFor(() => {
-      expect(container.querySelector('[role="alert"]')).toBeTruthy();
-      expect(container.querySelector('[aria-label="Retry loading workspace graph"]')).toBeTruthy();
+  it('a repo from another workspace is not opened from the workspace graph (scope containment)', async () => {
+    const onSelectRepo = vi.fn();
+    const { container } = render(WorkspaceHome, {
+      props: { workspace: WORKSPACE, onSelectRepo },
     });
-  });
-  it('retry button calls workspaceGraph again', async () => {
-    api.workspaceGraph.mockRejectedValueOnce(new Error('fail'));
-    api.workspaceGraph.mockResolvedValue(GRAPH);
-
-    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
-
+    await expandArch(container);
+    await waitFor(() => expect(lastStubProps.current?.onEnterRepo).toBeTruthy());
+    // External repo (referenced by a dependency edge but not in this workspace)
+    lastStubProps.current.onEnterRepo({ id: 'foreign-repo', name: 'other-ws-repo' });
     await waitFor(() => {
-      expect(container.querySelector('[aria-label="Retry loading workspace graph"]')).toBeTruthy();
-    });
-
-    const retryBtn = container.querySelector('[aria-label="Retry loading workspace graph"]');
-    await fireEvent.click(retryBtn);
-
-    await waitFor(() => {
-      expect(api.workspaceGraph).toHaveBeenCalledTimes(2);
+      expect(onSelectRepo).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalled();
     });
   });
 

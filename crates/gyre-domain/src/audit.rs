@@ -25,6 +25,8 @@ pub enum AuditEventType {
     AuthFailure,
     AbacDenied,
     RbacDenied,
+    // Impersonation lifecycle (identity-security.md §Impersonation,
+    // observability.md §Audit Event Types)
     ImpersonationStarted,
     ImpersonationEnded,
     // Agent lifecycle events (observability.md §Audit Event Types)
