@@ -326,6 +326,7 @@ mod tests {
             sessions: base.sessions.clone(),
             secrets: base.secrets.clone(),
             judgment_ledger: base.judgment_ledger.clone(),
+            orchestrator_registry: base.orchestrator_registry.clone(),
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),

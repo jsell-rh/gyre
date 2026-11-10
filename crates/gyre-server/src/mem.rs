@@ -4112,6 +4112,7 @@ fn test_state_inner(
         sessions: Arc::new(MemSessionRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
+        orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
