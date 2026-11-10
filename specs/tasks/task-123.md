@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["27bfb2a699f9bd6f22085b497726e0d32f8f688a", "deec7953a0c6a6d289d99f8239068ba403c43b06", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "33ae5e39446eac1dc781c81783c9d7780012041f"]
 ---
 
 ## Spec Excerpt
@@ -109,11 +109,10 @@ Read `specs/system/user-management.md` §Notification Entity. Existing notificat
 
 ## Shipped
 
-Implemented (commits 27bfb2a69, deec7953a0; rebased onto base fefde294
-in merge 730073ad1 + fix f92a48916, then onto base 774737638 in merge
-7f0ec2b7c) — `user-management.md` §Notification Entity is closed in
-production code; no stand-ins remain on the creation paths this task
-owned.
+Implemented (commits 27bfb2a69, deec7953a0, f92a48916; re-homed onto base
+79dfbdde in merge 33ae5e394) — `user-management.md` §Notification Entity
+is closed in production code; no stand-ins remain on the creation paths
+this task owned.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -123,12 +122,14 @@ owned.
   fields (`workspace_id`, `priority_rank`, `resolved_at`, `dismissed_at`,
   `tenant_id`) that the HSI contracts require.
 - All 18 `NotificationType` variants are defined, unified with the HSI §2
-  inbox types (35 total). Renames per this spec: `SpecPendingApproval` →
-  `SpecApprovalRequested`, `BudgetWarning` → `AgentBudgetWarning` (rank
-  7→4, High), `AgentEscalation` 5→2 (Urgent, per the spec's explicit
-  level examples). `parse()` accepts the legacy DB strings so existing
-  rows keep parsing; a supersession note was added to
-  `specs/system/human-system-interface.md` §2.
+  inbox types (38 total after the base's `ImpersonationRequest`,
+  `ImpersonationAlert`, and `PersonaChangePendingApproval` variants were
+  carried over in merge 33ae5e394). Renames per this spec:
+  `SpecPendingApproval` → `SpecApprovalRequested`, `BudgetWarning` →
+  `AgentBudgetWarning` (rank 7→4, High), `AgentEscalation` 5→2 (Urgent,
+  per the spec's explicit level examples). `parse()` accepts the legacy
+  DB strings so existing rows keep parsing; a supersession note was
+  added to `specs/system/human-system-interface.md` §2.
 - `NotificationPriority` (Low/Medium/High/Urgent) with
   `default_priority()` per type. It is always the band of the HSI 1–10
   rank (1–2 Urgent, 3–4 High, 5–7 Medium, 8–10 Low), so the two priority
@@ -169,9 +170,9 @@ owned.
   green, deduped per user+MR), `MergeQueuePaused` (pause_merge_queue →
   workspace Admins/Owners), `DependencyStale` (staleness job, on stale
   transition only), `MembershipChanged` (remove_member).
-- `notify_rich` now takes `entity_type` and auto-derives `action_url`
-  deep links through the workspace slug + repo name to the SPA entity
-  routes (`/workspaces/:slug/r/:repo/mrs|agents|specs/:id`); no link is
+- `notify_rich` takes `entity_type` and auto-derives `action_url` deep
+  links through the workspace slug + repo name to the SPA entity routes
+  (`/workspaces/:slug/r/:repo/mrs|agents|specs/:id`); no link is
   fabricated when the workspace cannot be resolved.
 
 ### API
@@ -188,7 +189,7 @@ owned.
 - Inbox UI (commit deec7953a0): type normalization and badge variants
   map the renamed types (`SpecApprovalRequested`, `AgentBudgetWarning`,
   legacy names kept for pre-migration rows) and all new taxonomy types,
-  with en.json labels — verified by the full vitest suite (1858 passed).
+  with en.json labels — verified by the full vitest suite.
 
 ### Not emitted (documented, not hidden)
 
@@ -209,21 +210,37 @@ coverage row rather than wired to a fake event.
   model: the dedup check reads `source.entity_id`, and creation sets
   `source.entity_type = "secret"`, `source.entity_id` to the secret id,
   plus `repo_id` for repo-scoped secrets.
-- Onto 774737638 (merge 7f0ec2b7c, this assignment): resolved the one
-  content conflict (`gyre-server/src/api/spawn.rs`, `fail_agent`) by
-  keeping both sides — the base's `revoke_agent_task_secrets` call
-  (Platform Model §7 terminal-run teardown, review F2) ahead of the
-  task's `AgentFailed` typed notification with its taxonomy comment.
-  The `notify_rich` call below the markers already carried the task's
-  `NotificationType::AgentFailed` and the 11-argument structured-source
-  signature; no other hunk conflicted.
+- Onto 774737638 (merge 7f0ec2b7c): resolved the one content conflict
+  (`gyre-server/src/api/spawn.rs`, `fail_agent`) by keeping both sides —
+  the base's `revoke_agent_task_secrets` call (Platform Model §7
+  terminal-run teardown, review F2) ahead of the task's `AgentFailed`
+  typed notification with its taxonomy comment.
+- Onto 79dfbdde (merge 33ae5e394, this assignment): resolved two content
+  conflicts. `gyre-common/src/notification.rs`
+  (`default_priorities_match_hsi_table`): kept the rank-based API and
+  carried the base's `PersonaChangePendingApproval` rank-2 assertion
+  over to it; the base's three new variants (`ImpersonationRequest`,
+  `ImpersonationAlert`, `PersonaChangePendingApproval`) merged into the
+  taxonomy with ranks 2/1/2. `gyre-server/src/api/mod.rs` (users import
+  list): kept the task's notification handlers
+  (`mark_notification_read`/`unread`, `dismiss_notification`) and
+  dropped the `get_my_agents`/`get_my_tasks`/`get_my_mrs` imports that
+  mainline removed. Adapted the base's new notification creation sites
+  to the structured source model: git_http persona-push notifications
+  (`entity_type "persona"`, slug id, repo-scoped), impersonation
+  request/alert notifications (`entity_type "impersonation"`,
+  request/session id), and the prompt_assembly stale-pin drift
+  notification (`entity_type "spec"`, binding spec id). Base test
+  assertions updated to the new field set (`source.entity_type` /
+  `entity_id` / `repo_id`, `priority_rank`).
 
 ### Test evidence (all green)
 
 - gyre-common: 8 notification tests — 18-variant taxonomy round-trip,
   legacy-name parsing, band mapping matches the spec's level examples
   (Low=merged/passed, Medium=stale/drift, High=budget-warning/gate
-  failure, Urgent=security/escalation/reverted).
+  failure, Urgent=security/escalation/reverted), including the
+  base-added variants.
 - gyre-adapters (SQLite, runs the real migration): create persists
   source/action_url/read; mark_read stamps, clears, and is user-scoped;
   has_active_notification matches type/entity/since and respects
@@ -236,24 +253,11 @@ coverage row rather than wired to a fake event.
   MrMerged/GateFailure typed notifications with deep links, no
   fabricated link for unresolvable workspaces, mark-read endpoints
   (read/unread cycle + cross-user 404 with no mutation).
-- Full suites: gyre-server 1429 lib tests + integration suites,
-  gyre-adapters 378, gyre-common 120, gyre-domain 432, gyre-cli 129 —
-  all passing. All mechanical checks pass (arch, migration versions and
-  portability, ABAC route registry, mem port contracts, scope-default
-  and enforcement lints); clippy introduces no new warnings.
-- Post-rebase probes (this assignment, merged tree 7f0ec2b7c on base
-  774737638): `cargo check --all` clean; gyre-common 8 notification
-  tests, gyre-server 34 notification-filtered + 8 secret_rotation lib
-  tests, gyre-adapters 6 notification tests — all passing; the full
-  gyre-server lib suite ran twice consecutively green (1537/0 both
-  runs; one earlier run had a single flaky failure that did not
-  reproduce, output retained in
-  /tmp/stage/review-evidence/server-lib-tests*.txt). All 20 mechanical
-  checks pass (arch, migration versions and portability, ABAC route
-  registry and exempt handlers, MCP write tools, dead message kinds,
-  mem port contracts, byte-slice, relative paths, fail-open refs,
-  commit attribution, scope-default lints, lossy secrets, inert
-  enforcement, forwarded headers, in-memory stores, unbounded HTTP,
-  forged scope fields). Clippy on gyre-server reports only warnings
-  pre-existing in both parents (none in the resolved conflict region).
-
+- Post-rebase probes (this assignment, merged tree 33ae5e394 on base
+  79dfbdde): `cargo check --all --all-targets` clean; gyre-common 8
+  notification tests; gyre-server filtered suites — notifications (36),
+  impersonation (15), persona (40), stale-pin (1), users (19) — all
+  passing; gyre-adapters full suite 428 passed. Mechanical checks pass:
+  arch, migration versions and SQL portability, dead message kinds, mem
+  port contracts, task commit attribution. Evidence retained under
+  /tmp/stage/review-evidence.
