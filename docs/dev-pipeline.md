@@ -644,3 +644,27 @@ findings, rechecks its entire planned state transactionally, and retains all
 candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
 select completed speculative repairs whose recorded catalog source was that
 specific invalidation; it does not select arbitrary historical changes.
+
+A no-gap assessment also inspects the retained candidate's actual merge
+contribution. Reviewed source changes proceed through normal verification and
+publication; they are not retired merely because main meets the product contract.
+Ancestor checkpoints and task/review-note-only differences do not manufacture
+new coding work. This preserves useful guard or quality fixes discovered during
+an earlier repair without paying for another implementation round.
+
+Assessment is source inspection only: its build wrapper rejects builds/tests.
+All model stages defer gyre-server code generation to the independent verifier;
+server `cargo check` and explicit smaller-package probes remain available to
+implementation/review. This prevents the large test compiler and model heap from
+competing for the same 4 GiB. The verifier still runs the full required suites.
+
+Semantic spec conflicts are `needs-triage`, distinct from implementation failures.
+Their stage/generation hold survives unrelated main advances; a requirement
+change or explicit operator retry releases it. Evidence and conflicting findings
+remain attached to the attempt instead of provoking speculative implementation.
+
+During recovery, `requirements_recovery_revision` can name the original catalog
+revision. Source refresh then retries the guarded migration for deferred tasks
+as their existing claims finish. It does not fence active work or supersede
+unrelated repair findings; once handled, each task's migration marker makes the
+operation a no-op.

@@ -40,3 +40,8 @@ Write `/tmp/stage/verdict.json` with this shape:
 Approve only after independent evidence supports the task contract. An approval
 must use `approved: true` and an empty findings array. Record a concise review
 under specs/reviews for the assigned task. Missing or partial verdicts fail closed.
+
+Large gyre-server builds/test compilation must run in the independent verifier,
+after the model exits, to fit the hard 4 GiB budget. Use cargo check for server
+type checking and focused tests of smaller explicit packages. Record the server
+tests the verifier must execute. Do not bypass the build wrapper.
