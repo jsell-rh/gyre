@@ -357,7 +357,7 @@ class Store:
             if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage'):
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
                     (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
-            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning')):
+            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning','sandbox_admission')):
                 lane=self.setting('integration_lane')
                 if lane and lane['task'] == row['task']:
                     self.db.execute("DELETE FROM settings WHERE key='integration_lane'")

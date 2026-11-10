@@ -63,6 +63,18 @@ pub mod version;
 pub mod workload;
 pub mod workspaces;
 
+/// Deserialize helper that keeps an explicit JSON `null` distinct from an
+/// absent field. serde collapses `null` to `None` inside `Option<Value>`,
+/// which would make a "clear this field" request indistinguishable from
+/// "leave it alone". Returns `Some(Value::Null)` for a present null so
+/// handlers can branch on the difference. Pair with `#[serde(default)]`.
+pub fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
     query_audit_events, record_audit_event, update_siem_target,
@@ -643,6 +655,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/budget/summary", get(budget::budget_summary))
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",

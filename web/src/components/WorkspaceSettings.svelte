@@ -26,7 +26,7 @@
   // (display-only for name/description; compute target selector)
   let computeTargets = $state([]);
   let computeLoading = $state(false);
-  let defaultComputeTarget = $state(workspace?.default_compute_target ?? '');
+  let defaultComputeTarget = $state(workspace?.compute_target_id ?? '');
   let generalSaving = $state(false);
   let generalSaved = $state(false);
 
@@ -130,7 +130,7 @@
   // Sync form values when workspace prop changes
   $effect(() => {
     if (workspace) {
-      defaultComputeTarget = workspace.default_compute_target ?? '';
+      defaultComputeTarget = workspace.compute_target_id ?? '';
       trustLevel = workspace.trust_level ?? 'Autonomous';
       persistedTrustLevel = workspace.trust_level ?? 'Autonomous';
       warnOnDrift = workspace.meta_spec_policy?.warn_on_drift ?? true;
@@ -525,7 +525,11 @@
     if (!workspace?.id) return;
     generalSaving = true;
     try {
-      await api.updateWorkspace(workspace.id, { default_compute_target: defaultComputeTarget });
+      // Empty selection means "no workspace target — fall back to tenant
+      // default" (agent-runtime.md §3); the API clears via JSON null.
+      await api.updateWorkspace(workspace.id, {
+        compute_target_id: defaultComputeTarget || null,
+      });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
     } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_settings')); }
@@ -1250,7 +1254,7 @@
                 {#if ct.description}
                   <p class="compute-desc">{ct.description}</p>
                 {/if}
-                {#if ct.id === (defaultComputeTarget || workspace?.default_compute_target)}
+                {#if ct.id === (defaultComputeTarget || workspace?.compute_target_id)}
                   <span class="compute-default-badge">{$t('workspace_settings.compute.default_badge')}</span>
                 {/if}
               </div>
