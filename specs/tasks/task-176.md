@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "91fe1e86da29a2c68cdb5cf32137da69b36e3132"]
 ---
 
 ## Spec Excerpt
@@ -76,52 +76,48 @@ editing with results retained; Publish → registry PUT resets approval
 to Pending and refreshes the diff baseline so a post-publish preview
 never diffs against a stale pre-publish prompt.
 
-### This round (review repair)
+### Review repairs (prior rounds, intact at HEAD)
 
-- **Iterate keeps results visible (review finding 2):** the meta-spec
-  editing state previously rendered ONLY the target-spec selector, so
-  Iterate (State 3 → State 1) removed the Architecture/Code Diff tabs
-  from the DOM even though `metaPreviewResult` was retained in state.
-  The right-pane chain now gives `preview_running` priority, renders
-  the selector in the meta-spec editing state (height-capped via a
+- **Iterate keeps results visible:** the meta-spec editing state
+  previously rendered ONLY the target-spec selector, so Iterate
+  (State 3 → State 1) removed the Architecture/Code Diff tabs from the
+  DOM even though `metaPreviewResult` was retained in state. The
+  right-pane chain now gives `preview_running` priority, renders the
+  selector in the meta-spec editing state (height-capped via a
   `.stacked` modifier when results are retained), and renders the
   Architecture/Code Diff tabs whenever a preview result exists
   (`showResultTabs`). The Code Diff meta-spec status list is bound to
   `metaPreviewResult` instead of `previewState` so it survives Iterate.
-  Spec-context behavior is unchanged.
-- **Test for the failing surface (review finding 3):** new meta-spec
-  context test runs a real-shape `previewPersona` poll to completion,
-  clicks Iterate, and asserts the selector AND the retained results
-  (meta-impact, both tabs, per-spec statuses) stay visible. Verified it
-  kills the bug: against the pre-fix component it fails exactly at
-  `tab-architecture` (checkout + rerun), and passes with the fix.
-- **Stale shipped bundle (review finding 1):** `web/dist` regeneration
-  is owned by the executor (restores dist from the assignment base;
-  final integration rebuilds and publishes remotely), so no dist commit
-  is made here. Local build evidence recorded in
-  `/tmp/stage/review-evidence/dist-build-evidence.txt`: `npm run build`
-  exits 0 from the repaired source and the fresh bundle contains the
-  §9 markers (`locked-diff`, `meta-impact`, `spec-selector`).
-- **Known limitation (review finding 4):** the production §9 surface
-  (workspace meta-specs page) mounts EditorSplit without `repoId`, and
-  `specs/assist` is repo-scoped, so the State 1 LLM chat input renders
-  but is disabled there. Implementation-plan item 4 is reachable only
-  in the repo-scoped spec context (covered by the §3 Accept/Edit/Dismiss
-  tests). Unblocking it needs a workspace-scoped assist endpoint —
-  follow-up work against the API surface, not this UI task.
+  Spec-context behavior is unchanged. A meta-spec-context test runs a
+  real-shape `previewPersona` poll to completion, clicks Iterate, and
+  asserts the selector AND the retained results stay visible; it was
+  verified to fail on the pre-fix component at `tab-architecture`.
+- **Post-publish diff baseline:** Publish refreshes the in-session diff
+  baseline from the registry write so the next preview diffs against
+  the newly published prompt, not the stale pre-publish one.
 
-### Test evidence
+### This round (contract restoration)
 
-`npm ci`, then vitest on the affected surfaces → **5 files, 207/207
-passed** (`EditorSplit.test.js`, `MetaSpecs.test.js`,
-`DetailPanel.test.js`, `DetailPanelChat.test.js`, `lineDiff.test.js`;
-EditorSplit+MetaSpecs alone: 153/153). Mutation check: the new
-meta-spec Iterate test fails on the pre-fix component at
-`tab-architecture` and passes with the fix. Evidence retained in
-`/tmp/stage/review-evidence/` (focused-tests.txt,
-dist-build-evidence.txt). Server tests are not affected by this round
-(frontend-only change); the verifier's standard web suite run covers
-the remainder.
+The executor restored the assigned task document to its contract form
+(repair `c0ed46af2e5d43e4898b1c165e5111de`); this round changes no
+production code — it re-verifies and re-records the existing fix.
+`git diff 91fe1e86d HEAD -- web/src` is empty, confirming the Iterate
+results-visibility repair is intact at HEAD `8c9a00454`. Focused
+vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` (after `npm ci`
+from the lockfile): 2 files, **153/153 passed**. Evidence:
+`/tmp/stage/review-evidence/focused-tests.txt`. `web/dist` regeneration
+is executor-owned (restored from the assignment base; final integration
+rebuilds and publishes remotely), so no dist commit is made here.
+
+### Known limitation
+
+The production §9 surface (workspace meta-specs page) mounts
+EditorSplit without `repoId`, and `specs/assist` is repo-scoped, so the
+State 1 LLM chat input renders but is disabled there.
+Implementation-plan item 4 is reachable only in the repo-scoped spec
+context (covered by the §3 Accept/Edit/Dismiss tests). Unblocking it
+needs a workspace-scoped assist endpoint — follow-up work against the
+API surface, not this UI task.
 
 ### Scope boundary
 
@@ -130,5 +126,5 @@ on `preview/{preview_id}/*` throwaway branches, line-level code diffs,
 DELETE cleanup — belong to the preview endpoint itself and are tracked
 by task-206 against meta-spec-reconciliation.md coverage row 9
 ("Hollow (code-verified 2026-09-29)"). The UI consumes exactly the real
-PreviewResponse/PreviewStatusResponse shapes the server sends today
-and never fabricates a completed State 3.
+PreviewResponse/PreviewStatusResponse shapes the server sends today and
+never fabricates a completed State 3.
