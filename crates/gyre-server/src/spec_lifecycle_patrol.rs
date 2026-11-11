@@ -523,6 +523,28 @@ mod tests {
         task
     }
 
+    /// The escalation path resolves the tenant scope from the workspace
+    /// record (`AppState::message_tenant_id`) and skips persisting when the
+    /// workspace does not exist, so every test that asserts persisted
+    /// escalation messages must seed the workspace it attributes findings
+    /// to (mirrors `spec_patrol.rs` tests).
+    fn make_workspace(id: &str) -> gyre_domain::Workspace {
+        gyre_domain::Workspace {
+            id: Id::new(id),
+            tenant_id: Id::new("default"),
+            name: format!("ws-{id}"),
+            slug: format!("ws-{id}"),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        }
+    }
+
     fn make_ledger_entry(
         path: &str,
         workspace_id: Option<&str>,
@@ -804,6 +826,14 @@ mod tests {
     #[tokio::test]
     async fn flags_and_escalates_only_the_accountability_gaps() {
         let state = test_state();
+        // The escalation is persisted only when the workspace (and thereby
+        // its tenant scope) can be resolved; seed it so the assert below
+        // proves real emission rather than silent skip-on-unresolvable.
+        state
+            .workspaces
+            .create(&make_workspace("ws1"))
+            .await
+            .unwrap();
 
         state
             .tasks

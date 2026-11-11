@@ -6348,6 +6348,27 @@ specs:
     #[tokio::test(flavor = "multi_thread")]
     async fn spec_lifecycle_patrol_endpoint_flags_and_escalates() {
         let state = test_state();
+        // `emit_event` resolves the tenant scope from the workspace record
+        // and skips persisting when it is missing; seed "ws1" so the
+        // persisted-escalation assert below proves real emission.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new("ws1"),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "ws-ws1".to_string(),
+                slug: "ws-ws1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Guided,
+                llm_model: None,
+                created_at: 1_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
         // 2 days: past the 24h default drift threshold, inside the 7d backlog one.
         seed_drift_review_task(&state, 2 * 86_400).await;
 
