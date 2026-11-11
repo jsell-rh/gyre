@@ -5,7 +5,7 @@ depends_on:
   - task-115
   - task-116
   - task-117
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-runtime.md §Phase 4: System Spawns Agents (Mechanical)"
   - "agent-runtime.md §Phase 5: Implementation"
