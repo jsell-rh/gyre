@@ -12,7 +12,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["73f302cae5ea83f44cb2a56a44397440b546e3f1", "096cd9bd6f97faae2b0bfc4e4a866752089c8953", "c8b4e5efc28c285c0a81f8f332e68439f72f58a0", "a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
+commits: ["26edb8fc38732bcb23f8c96770ccdbe60d79e4e7", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "c8b4e5efc28c285c0a81f8f332e68439f72f58a0", "096cd9bd6f97faae2b0bfc4e4a866752089c8953", "73f302cae5ea83f44cb2a56a44397440b546e3f1", "56a528d05874c6113ef873f747cd515ccf068e7d"]
 ---
 
 ## Spec Excerpt
@@ -95,107 +95,86 @@ Read `specs/system/agent-runtime.md` §1 Phases 4-8 in full. Agent spawn is in `
 ## Shipped
 
 Commits `26edb8fc3` (Phases 4–8 implementation), `6ae1e989c`,
-`a08ef0e79`, `c8b4e5efc` (round-1 review/verification repairs),
-`096cd9bd6` (merge repair with main: `QualityGate.validation_type` in
-the ralph_loop fixture), and `73f302cae` (round-2 review repairs F1–F3,
-below) implement agent-runtime.md §1 Phases 4–8.
+`a08ef0e79`, `c8b4e5efc`, `096cd9bd6` (round-1/2 review and merge
+repairs), `73f302cae` (round-3: Phase 7 spawn-failure policy on
+re-spawns, stale worker-claim recovery), and `56a528d05` (round-4
+verification repair, below) implement agent-runtime.md §1 Phases 4–8.
 
 ### Phase 4 — worker scheduler
 
 `spawn_implementation_workers` (signal_chain.rs) runs inside
 `scheduler_run_once` under the same cycle lock. It detects `Backlog`
 tasks with `task_type: Implementation`, checks ordering (`depends_on`
-resolved; `order` next in the repo+parent group) and preconditions:
-repo not `Archived` (defer, resume on unarchive); `effective_max_agents`
-= `repo.max_agents` → `workspace.max_agents_per_repo` → unlimited, with
-queueing-not-rejection semantics; workspace budget exhaustion flags the
-`budget-exhausted` task label (cleared on the later successful spawn).
-It re-reads the freshest task row before claiming, claims the task
-`InProgress`, and spawns attempt 0 synchronously through
-`spawn_agent_core` as the system principal. New
-`Repository.max_agents`/`max_agent_iterations` columns (migration
-000060, SQLite + PG; `PUT /repos/:id` validates repo limit ≤ workspace
-per-repo limit).
+resolved to Done/Cancelled; `order` next in the decomposition group) and
+preconditions: repo not Archived (task stays Backlog), `max_agents`
+(repo override → workspace fallback; task queued, never rejected),
+workspace budget (task flagged `budget-exhausted` and left Backlog).
+Eligible tasks are claimed Backlog→InProgress and spawned through the
+real spawn core (agent record, repo-scoped JWT, prompt set, worktree,
+compute-target provisioning, env injection) — the same core the REST
+spawn endpoint uses. Crash recovery (`recover_stale_worker_claims`)
+releases stale InProgress claims whose agent is not Active back to
+Backlog via the domain's dedicated release edge.
 
-Mid-flight budget race (claim taken, budget exhausted inside the spawn
-core): the claim is released to Backlog via the domain edge
-`Task::release_claim` — the ONLY InProgress→Backlog transition — with
-the `budget-exhausted` label, and a later cycle re-spawns the task
-(`budget_exhausted_mid_flight_releases_claim_and_respawns`).
+### Phase 5/6 — completion → MR → gates
 
-Crash recovery for claimed worker tasks (round-3 F2 repair):
-`recover_stale_worker_claims` releases a stale InProgress Implementation
-claim whose assigned agent is not Active — e.g. a server crash during
-the spawn-retry backoff, when the last attempt's agent is already
-Failed — back to Backlog through the same `release_claim` edge, so a
-later cycle re-spawns it. A claim held by an Active agent is never
-released (task rows are not touched while a worker runs); a
-crashed-but-Active agent is first reaped by the stale-agent detector.
-Tests: `stale_worker_claim_released_and_respawned`,
-`stale_worker_claim_with_active_agent_is_kept`.
-
-### Phase 5→6 — completion, MR and gates
-
-Both completion surfaces — REST `POST /agents/:id/complete` and MCP
-`gyre_agent_complete` — share `create_mr_for_completion` (idempotent per
-open agent+branch MR) and call `ralph_loop::on_agent_mr_created`, which
-enqueues via `merge_queue::enqueue_core`; enqueue triggers
-`trigger_gates_for_mr`, so gates run automatically and results are
-recorded on the MR. `tests/e2e_ralph_loop.rs` proves auto-enqueue
-without a manual step.
+`agent.complete` (REST and MCP) creates the MR through
+`create_mr_for_completion`; the MR enters the merge queue, which runs
+the gate executor (test/lint/spec-review/trace) and records results on
+the MR.
 
 ### Phase 7 — Ralph loop
 
-Pass path: bounded gate watcher → merge-processor merge observed → task
-Review→Done with `TaskTransitioned`; agent Idle + JWT revoked at
-completion. Closed-MR and trust-hold cases stop the loop with the task
-left in Review (human decision).
-
-Fail path: task back to InProgress, one `GateFailure` inbox message per
-failed gate carrying the gate's real recorded output, failed MR Closed,
-iteration incremented against `Repository.max_agent_iterations`,
-re-spawn through the same `launch_agent_process` core with fresh JWT,
-`GYRE_ITERATION` injected, prompt set re-assembled, budget re-claimed.
-Max iterations → task Blocked, agent Failed, token removed, `TaskBlocked`
-routed to a spawned-on-demand repo orchestrator.
-
-Spawn-failure policy on BOTH spawn paths (round-3 F1 repair): the re-spawn
-launch is a `ComputeTarget::spawn_process()` call and the Phase 7 policy
-is not path-scoped — `respawn_with_retry` applies the same 1s/5s/30s
-exponential backoff ladder (`SPAWN_RETRY_BACKOFF_SECS`, shared with
-`retry_worker_spawn`) before any terminal state, keeps the claim fresh
-per attempt (`touch_task`), and on exhaustion marks the task Blocked,
-the agent Failed, removes the freshly-minted re-spawn JWT (agent JWT
-auth validates token presence + signature, not agent status), notifies
-the repo orchestrator (`TaskBlocked`) AND creates the priority-1
-`ComputeTargetUnavailable` notification for workspace admins
-(`notify_compute_target_unavailable`, extracted from
-`final_spawn_failure` so both ladders share it). Test:
-`respawn_failure_retries_then_blocks_task` (paused clock; asserts the
-36s backoff ladder, terminal state, JWT removal, both notifications).
+`on_gates_failed`/`on_gates_passed` (ralph_loop.rs): gate failures are
+written to the agent's inbox as `GateFailure` messages carrying the
+gate's real recorded output, the failed MR is closed, and the agent is
+re-spawned — same persona, same meta-spec set, same task, fresh JWT and
+fresh context — with the iteration counter incremented. At
+`max_iterations` (repo setting, default 10): task Blocked, agent Failed,
+token removed, `TaskBlocked` routed to the repo orchestrator's inbox
+(spawning one on demand when none is live, workspace-destined fallback
+otherwise). Spawn failure on both the first-spawn and re-spawn paths
+follows the same 3-retry exponential backoff ladder (1s/5s/30s,
+`SPAWN_RETRY_BACKOFF_SECS`), then task Blocked + priority-1
+`ComputeTargetUnavailable` notification for workspace Owner/Admin
+members. Spec rejection cancels in-flight tasks and shuts down agents
+with a 60s grace period.
 
 ### Phase 8 — system-initiated agents
 
-Gate reviewer (single-shot reviewer process, `GYRE_REVIEW_TOKEN`)
-triggered mechanically by the Ralph loop's auto-enqueue; interrogation
-agents (30-min JWT, read-only, no worktree) on "Ask Why"; reconciliation
-tasks flow through the closed Phase 4 spawn chain. Spec rejection
-mid-flight cancels in-flight tasks by spec_path, stops active agents
-with a 60s-grace shutdown message, priority-2 notifications.
+Gate reviewer (gate executor spec-review gate), interrogation agent
+("Ask Why" endpoint, 30-min JWT TTL), reconciliation agent (meta-spec
+change publication) all spawn through the real spawn core on the
+workspace compute target.
 
-### Test evidence and deferred verification
+### Round-4 verification repair (`56a528d05`)
 
-In-sandbox (implement + review stages): `cargo check -p gyre-server
---lib --tests` clean; `cargo fmt --check` clean; gyre-domain (466),
-gyre-common (124), gyre-adapters sqlite::repository (9) suites green
-(review stage); all repo invariant scripts pass. Server test EXECUTION
-is blocked by the build wrapper in both the review and implement
-sandboxes (4 GiB budget) — recorded as an infrastructure restriction,
-not a code defect. The independent verifier must run: `cargo test
---all`, plus focused `cargo test -p gyre-server ralph_loop`,
-`signal_chain`, `merge_queue`, `update_repo_agent_limits_validated`,
-and `--test e2e_ralph_loop`. Round 3 also fixed a latent never-executed
-test bug (`scheduler_defers_until_depends_on_complete` walked its
-spawned dependency from Backlog unconditionally — invalid same-state
-transition) and removed the `GYRE_AGENT_COMMAND` env leak from
-`gate_failure_respawns_agent_with_fresh_context` (F3, Drop guard).
+The round-3 candidate failed `cargo test --all` with 4 gyre-server lib
+test failures (attempt 055fbdf3), all test-side:
+
+- Three tests asserted the `TaskBlocked` message through
+  `messages.list_by_workspace`, which by port contract excludes
+  Directed (agent-destined) messages; `notify_task_blocked` routes to
+  the repo orchestrator's inbox whenever one can be ensured on demand
+  (the spec's primary routing), so the assertions saw `[]`. New
+  cfg(test) helper `collect_task_blocked_messages` collects TaskBlocked
+  from both bus tiers (workspace event tier + repo-orchestrator
+  inboxes) and the three tests assert through it — same assertion
+  strength (exact task_id payload), correct accessor.
+- `stale_worker_claim_released_and_respawned` transitioned its gating
+  dependency directly to Done, but the first scheduler cycle correctly
+  claims that dependency (an eligible Backlog Implementation task) to
+  InProgress; the domain requires InProgress→Review→Done. The test now
+  walks the dependency to Done from whichever state the spawn left it
+  in, mirroring `scheduler_defers_until_depends_on_complete`.
+
+### Test evidence
+
+- `cargo check -p gyre-server --tests`: clean (type-checks the lib
+  including cfg(test) targets).
+- `cargo fmt`: clean; arch, dead-message-kind, in-memory-store,
+  inert-enforcement scripts: OK.
+- Full `cargo test --all` (1747+ tests incl. the four repaired tests)
+  is deferred to the independent verifier — gyre-server test codegen
+  exceeds the in-model 4 GiB budget (probe list recorded in
+  /tmp/stage/review-evidence/round4-repair.md).
