@@ -2,7 +2,7 @@
 title: "Specs and Inbox view layouts — spec list, inbox cards, briefing narrative"
 spec_ref: "ui-layout.md §6-§8"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §6. Specs View Layout"
   - "ui-layout.md §7. Inbox Layout"
