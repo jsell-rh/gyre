@@ -750,6 +750,11 @@ pub(crate) const SPAWN_RETRY_BACKOFF_SECS: [u64; 3] = [1, 5, 30];
 /// Runs under the scheduler cycle lock (the caller holds it), so two
 /// cycles can never both claim the same Backlog task.
 async fn spawn_implementation_workers(state: &Arc<AppState>) {
+    // Crash recovery first (review F2, task-118): release stale InProgress
+    // claims whose agent is not Active — stranded by a dead process — so
+    // the Backlog scan below (and later cycles) can re-spawn them.
+    recover_stale_worker_claims(state).await;
+
     let now = crate::api::now_secs();
     let backlog = match state.tasks.list_by_status(&TaskStatus::Backlog).await {
         Ok(t) => t,
@@ -922,6 +927,55 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
                 });
             }
         }
+    }
+}
+
+/// Crash recovery for claimed Implementation tasks (agent-runtime.md §1
+/// Phase 4/7; review F2, task-118). A task left InProgress by a dead
+/// process — e.g. a server crash during the spawn-retry backoff, when the
+/// last attempt's agent is already `Failed` so the stale-agent detector
+/// has no Active agent to reap — would be stranded forever: the worker
+/// scan selects only Backlog, and the orchestrator stale-claim recovery
+/// deliberately skips Implementation tasks. Such claims are released back
+/// to Backlog through the domain's dedicated `Task::release_claim` edge
+/// (the only InProgress→Backlog route), so a later cycle re-spawns them.
+///
+/// A claim held by an **Active** agent is never released: task rows are
+/// not touched while a worker runs (only the claim and the completion
+/// transition write them), so task age alone must not requeue live work.
+/// A crashed-but-still-Active agent is first reaped by the stale-agent
+/// detector (heartbeat timeout → Dead), after which the next cycle
+/// releases the orphaned claim here.
+async fn recover_stale_worker_claims(state: &Arc<AppState>) {
+    let now = crate::api::now_secs();
+    let stale_before = now.saturating_sub(SCHEDULER_CLAIM_STALENESS_SECS);
+    let claimed = match state.tasks.list_by_status(&TaskStatus::InProgress).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("signal-chain: stale worker-claim scan failed: {e}");
+            return;
+        }
+    };
+    for task in claimed
+        .into_iter()
+        .filter(|t| t.task_type == Some(TaskType::Implementation))
+        .filter(|t| t.updated_at <= stale_before)
+    {
+        // An Active agent holds the claim — never release it from under a
+        // live worker.
+        if let Some(aid) = task.assigned_to.as_ref() {
+            if let Ok(Some(a)) = state.agents.find_by_id(aid).await {
+                if a.status == AgentStatus::Active {
+                    continue;
+                }
+            }
+        }
+        tracing::warn!(
+            task_id = %task.id,
+            agent_id = ?task.assigned_to,
+            "signal-chain: stale worker claim with no active agent; releasing to Backlog (crash recovery)"
+        );
+        release_claim(state, &task, "stale worker claim (crash recovery)").await;
     }
 }
 
@@ -1252,7 +1306,10 @@ async fn release_claim(state: &Arc<AppState>, task: &Task, reason: &str) {
 }
 
 /// Bump a task's updated_at so the stale-claim recovery window restarts.
-async fn touch_task(state: &Arc<AppState>, task_id: &Id) {
+/// Shared with the Ralph loop's re-spawn retry ladder, which must keep its
+/// claim fresh across the same 1s/5s/30s backoff sleeps this module's own
+/// retry ladder touches through.
+pub(crate) async fn touch_task(state: &Arc<AppState>, task_id: &Id) {
     if let Ok(Some(mut t)) = state.tasks.find_by_id(task_id).await {
         t.updated_at = crate::api::now_secs();
         let _ = state.tasks.update(&t).await;
@@ -1280,8 +1337,29 @@ async fn final_spawn_failure(state: &Arc<AppState>, repo: &Repository, task: &Ta
     )
     .await;
 
-    // Priority-1 notification for workspace admins. Recipients: workspace
-    // Owner/Admin members (same resolution as the budget notifications).
+    // Priority-1 notification for workspace admins.
+    notify_compute_target_unavailable(state, repo, &blocked, reason).await;
+    tracing::error!(
+        task_id = %blocked.id,
+        repo_id = %repo.id,
+        reason,
+        "signal-chain: worker spawn failed after all retries; task Blocked"
+    );
+}
+
+/// Priority-1 `ComputeTargetUnavailable` notification for workspace admins
+/// (agent-runtime.md §1 Phase 7 "Spawn failure": "priority-1 notification
+/// created for workspace admins"). Recipients: workspace Owner/Admin
+/// members (same resolution as the budget notifications). Shared by the
+/// scheduler's first-spawn retry ladder ([`final_spawn_failure`]) and the
+/// Ralph loop's re-spawn retry ladder — the spawn-failure policy is not
+/// path-scoped.
+pub(crate) async fn notify_compute_target_unavailable(
+    state: &Arc<AppState>,
+    repo: &Repository,
+    task: &Task,
+    reason: &str,
+) {
     let target_name = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -1319,26 +1397,20 @@ async fn final_spawn_failure(state: &Arc<AppState>, repo: &Repository, task: &Ta
             "default",
             Some(
                 serde_json::json!({
-                    "task_id": blocked.id.to_string(),
+                    "task_id": task.id.to_string(),
                     "repo_id": repo.id.to_string(),
                     "reason": reason,
                     "target": target_name,
                 })
                 .to_string(),
             ),
-            Some(blocked.id.to_string()),
+            Some(task.id.to_string()),
             Some(repo.id.to_string()),
             "task",
             None,
         )
         .await;
     }
-    tracing::error!(
-        task_id = %blocked.id,
-        repo_id = %repo.id,
-        reason,
-        "signal-chain: worker spawn failed after all retries; task Blocked"
-    );
 }
 
 /// Ensure a live repo orchestrator exists for a failure notification
@@ -2497,10 +2569,19 @@ mod tests {
         assert_eq!(after.status, TaskStatus::Backlog, "dependent task defers");
         assert!(after.assigned_to.is_none());
 
-        // Resolve the dependency (Done) — the next cycle spawns.
+        // Resolve the dependency (Done) — the next cycle spawns. The
+        // first cycle spawned the dependency ITSELF (it is an eligible
+        // Backlog Implementation task), so walk it to Done from whichever
+        // state that spawn left it in — a direct Backlog→InProgress
+        // transition would be rejected as an invalid same-state edge when
+        // the claim already happened.
         let mut done = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
-        done.transition_status(TaskStatus::InProgress).unwrap();
-        done.transition_status(TaskStatus::Review).unwrap();
+        if done.status == TaskStatus::Backlog {
+            done.transition_status(TaskStatus::InProgress).unwrap();
+        }
+        if done.status == TaskStatus::InProgress {
+            done.transition_status(TaskStatus::Review).unwrap();
+        }
         done.transition_status(TaskStatus::Done).unwrap();
         state.tasks.update(&done).await.unwrap();
 
@@ -2790,6 +2871,100 @@ mod tests {
             !respawned.labels.iter().any(|l| l == "budget-exhausted"),
             "budget flag cleared on the re-spawn"
         );
+    }
+
+    /// Crash recovery for claimed Implementation tasks (review F2,
+    /// task-118): a stale InProgress claim whose agent is not Active —
+    /// e.g. a server crash during the spawn-retry backoff, when the last
+    /// attempt's agent is already Failed so the stale-agent detector has
+    /// no Active agent to reap — is released to Backlog (the worker scan
+    /// selects only Backlog, so it would otherwise be stranded forever),
+    /// and a later cycle re-spawns it with a fresh worker.
+    #[tokio::test]
+    async fn stale_worker_claim_released_and_respawned() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-stale").await;
+
+        // Claim as the scheduler does; the crash left the last attempt's
+        // agent Failed and the task row stale.
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        claimed.assigned_to = Some(Id::new("agent-dead"));
+        claimed.updated_at = 0; // far in the past → stale
+        state.tasks.update(&claimed).await.unwrap();
+        let mut dead = Agent::new(Id::new("agent-dead"), "worker-stale", 0);
+        dead.transition_status(AgentStatus::Active).unwrap();
+        dead.transition_status(AgentStatus::Failed).unwrap();
+        dead.workspace_id = Id::new("ws-1");
+        state.agents.create(&dead).await.unwrap();
+
+        // An incomplete dependency holds the released task in Backlog for
+        // the assertion (the same cycle would otherwise re-spawn it
+        // immediately — proven by the second phase below).
+        let mut dep = Task::new(Id::new("dep-stale"), "Dependency", 0);
+        dep.task_type = Some(TaskType::Implementation);
+        dep.workspace_id = Id::new("ws-1");
+        dep.repo_id = Id::new("r-1");
+        state.tasks.create(&dep).await.unwrap();
+        let mut gated = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        gated.depends_on = vec![dep.id.clone()];
+        state.tasks.update(&gated).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "stale claim with a dead agent is released to Backlog (crash recovery)"
+        );
+
+        // Dependency complete: a later cycle re-spawns the released task
+        // with a FRESH worker (the dead agent does not keep the claim).
+        let mut dep = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
+        dep.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.update(&dep).await.unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let respawned = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            respawned.status,
+            TaskStatus::InProgress,
+            "the released task is re-spawned by a later cycle"
+        );
+        assert_ne!(
+            respawned.assigned_to,
+            Some(Id::new("agent-dead")),
+            "a fresh worker takes over the released claim"
+        );
+    }
+
+    /// The stale worker-claim recovery never releases a claim held by an
+    /// ACTIVE agent: task rows are not touched while a worker runs, so
+    /// task age alone must not requeue live work under its agent.
+    #[tokio::test]
+    async fn stale_worker_claim_with_active_agent_is_kept() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-live").await;
+
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        claimed.assigned_to = Some(Id::new("agent-live"));
+        claimed.updated_at = 0; // stale by age — but the agent is live
+        state.tasks.update(&claimed).await.unwrap();
+        let mut live = Agent::new(Id::new("agent-live"), "worker-live", 0);
+        live.transition_status(AgentStatus::Active).unwrap();
+        live.workspace_id = Id::new("ws-1");
+        state.agents.create(&live).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "a claim held by an Active agent is never released"
+        );
+        assert_eq!(after.assigned_to, Some(Id::new("agent-live")));
     }
 
     /// Phase 7 spawn-failure policy: when ComputeTarget::spawn_process()

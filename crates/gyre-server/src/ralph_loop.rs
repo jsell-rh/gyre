@@ -380,22 +380,100 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
         return;
     }
     if let Err(e) = relaunch_agent_session(state, &agent, &task).await {
-        // Re-spawn failure follows the Phase 7 spawn-failure policy: the
-        // agent goes Failed, the task Blocked, orchestrator notified.
-        let mut a = agent.clone();
-        let _ = a.transition_status(AgentStatus::Failed);
-        let _ = state.agents.update(&a).await;
-        let _ = task.transition_status(TaskStatus::Blocked);
-        task.updated_at = now_secs();
-        let _ = state.tasks.update(&task).await;
-        notify_task_blocked(
-            state,
-            &task,
-            repo.as_ref(),
-            format!("re-spawn failed: {e:#}"),
-        )
-        .await;
+        // The re-spawn launch is a `ComputeTarget::spawn_process()` call,
+        // and the Phase 7 spawn-failure policy is not path-scoped — route
+        // it through the same retry/notification ladder the first-spawn
+        // path uses (review F1, task-118).
+        respawn_with_retry(state, &agent, &task, repo.as_ref(), e).await;
     }
+}
+
+/// Phase 7 spawn-failure policy on the re-spawn path (agent-runtime.md
+/// §1 Phase 7; review F1, task-118): "If `ComputeTarget::spawn_process()`
+/// fails … Retries up to 3 times with exponential backoff (1s, 5s, 30s).
+/// If all retries fail: task marked Blocked, orchestrator notified,
+/// priority-1 notification created for workspace admins." The first
+/// failure (`first_error`) plus 3 backoff retries is the same attempt
+/// ladder [`crate::signal_chain::retry_worker_spawn`] applies to first
+/// spawns. Each attempt keeps the claim fresh
+/// ([`crate::signal_chain::touch_task`]) so the scheduler's stale
+/// worker-claim recovery never releases the task mid-retry (the agent is
+/// Active — the recovery's own guard — but the touch keeps the two
+/// mechanisms from racing on a status flip).
+///
+/// Terminal state: agent `Failed` with the freshly-minted re-spawn JWT
+/// removed (agent JWT auth validates token presence + signature, not
+/// agent status — a terminal agent must not keep a valid token), task
+/// `Blocked`, `TaskBlocked` to the repo orchestrator, and the priority-1
+/// `ComputeTargetUnavailable` notification for workspace admins.
+async fn respawn_with_retry(
+    state: &Arc<AppState>,
+    agent: &Agent,
+    task: &Task,
+    repo: Option<&gyre_domain::Repository>,
+    first_error: anyhow::Error,
+) {
+    let mut reason = format!("{first_error:#}");
+    for attempt in 1..=crate::signal_chain::SPAWN_RETRY_BACKOFF_SECS.len() {
+        let backoff = crate::signal_chain::SPAWN_RETRY_BACKOFF_SECS[attempt - 1];
+        tracing::warn!(
+            agent_id = %agent.id,
+            task_id = %task.id,
+            attempt,
+            backoff_secs = backoff,
+            reason = %reason,
+            "ralph-loop: re-spawn launch failed; retrying with backoff"
+        );
+        crate::signal_chain::touch_task(state, &task.id).await;
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        match relaunch_agent_session(state, agent, task).await {
+            Ok(()) => return,
+            Err(e) => reason = format!("{e:#}"),
+        }
+    }
+
+    // All retries exhausted — the Phase 7 terminal spawn-failure state.
+    let now = now_secs();
+    let mut failed = agent.clone();
+    let _ = failed.transition_status(AgentStatus::Failed);
+    let _ = state.agents.update(&failed).await;
+    // The re-spawn minted a fresh JWT before the failed launch; a terminal
+    // agent must not keep it (same teardown as the max-iterations path and
+    // the scheduler's `teardown_failed_spawn`).
+    let _ = state
+        .kv_store
+        .kv_remove("agent_tokens", agent.id.as_str())
+        .await;
+
+    // Freshest task row: the watcher snapshot predates the backoff awaits,
+    // and the whole-row persist must not overwrite a concurrent mutation
+    // (cancellation, spec rejection).
+    let blocked = match state.tasks.find_by_id(&task.id).await {
+        Ok(Some(mut t)) => {
+            let _ = t.transition_status(TaskStatus::Blocked);
+            t.updated_at = now;
+            let _ = state.tasks.update(&t).await;
+            t
+        }
+        _ => task.clone(),
+    };
+    notify_task_blocked(
+        state,
+        &blocked,
+        repo,
+        format!("re-spawn failed after all retries: {reason}"),
+    )
+    .await;
+    if let Some(repo) = repo {
+        crate::signal_chain::notify_compute_target_unavailable(state, repo, &blocked, &reason)
+            .await;
+    }
+    tracing::error!(
+        task_id = %task.id,
+        agent_id = %agent.id,
+        reason = %reason,
+        "ralph-loop: re-spawn failed after all retries; task Blocked, agent Failed (agent-runtime.md §1 Phase 7)"
+    );
 }
 
 /// Deliver the `TaskBlocked` message to the repo orchestrator's inbox
@@ -742,6 +820,17 @@ mod tests {
     /// auto-detection, so the launch is deterministic).
     #[tokio::test]
     async fn gate_failure_respawns_agent_with_fresh_context() {
+        // Pin the launch command for THIS test only, and remove it on scope
+        // exit (including panic unwind): GYRE_AGENT_COMMAND is process-global,
+        // so a leaked value changes every later test's launch behavior
+        // (order-dependent pollution — review F3, task-118).
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
         std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
         let state = loop_state(None).await; // default ceiling: 10
 
@@ -807,6 +896,129 @@ mod tests {
             .await
             .unwrap();
         assert!(token.is_some(), "re-spawned agent has a fresh token");
+    }
+
+    /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,
+    /// task-118): a gate failure under the iteration ceiling re-spawns the
+    /// agent; when the re-spawn LAUNCH fails (compute target unreachable),
+    /// the policy is the same 3-retry exponential backoff (1s/5s/30s) as
+    /// the first-spawn path — the task is NOT blocked after one attempt —
+    /// and the terminal state carries the priority-1
+    /// `ComputeTargetUnavailable` notification for workspace admins and
+    /// removes the freshly-minted re-spawn JWT (agent JWT auth validates
+    /// token presence + signature, not agent status, so a terminal Failed
+    /// agent must not keep a valid token). Deterministic launch failure:
+    /// the workspace's compute target is a Kubernetes target — `kubectl
+    /// apply` cannot succeed without a cluster in any test environment.
+    #[tokio::test(start_paused = true)]
+    async fn respawn_failure_retries_then_blocks_task() {
+        let state = loop_state(None).await; // ceiling 10; iteration 1 < 10
+
+        // A workspace admin to receive the priority-1 notification.
+        state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                Id::new("mem-1"),
+                Id::new("admin-user"),
+                Id::new("ws-1"),
+                gyre_domain::WorkspaceRole::Admin,
+                Id::new("inviter"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Unreachable Kubernetes compute target assigned to the workspace:
+        // every re-spawn launch attempt fails deterministically.
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-k8s"),
+            Id::new("t1"),
+            "k8s-unreachable",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "image": "gyre-agent:latest" });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        // The full backoff ladder ran: 1s + 5s + 30s of retry sleep between
+        // the four launch attempts (attempt 0 + retries 1-3). A single
+        // failed attempt with no retry — the pre-fix behavior — returns in
+        // well under a second of paused time.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(36),
+            "three backoff retries (1+5+30s) preceded the terminal state; elapsed {:?}",
+            started.elapsed()
+        );
+
+        let task = state
+            .tasks
+            .find_by_id(&Id::new("task-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Blocked);
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.status, AgentStatus::Failed);
+        assert_eq!(agent.iteration, 1, "the gate failure still counted");
+
+        // The freshly-minted re-spawn JWT did not outlive the agent.
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-1")
+            .await
+            .unwrap();
+        assert!(token.is_none(), "failed re-spawn's JWT removed");
+
+        // TaskBlocked message on the bus, routed to the repo
+        // orchestrator spawned on demand (or workspace-destined when none
+        // could be ensured) — the same routing as the max-iterations path.
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new("ws-1"),
+                Some(MessageKind::TaskBlocked.as_str()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter()
+                .any(|m| m.payload.as_ref().and_then(|p| p["task_id"].as_str()) == Some("task-1")),
+            "TaskBlocked message emitted: {msgs:?}"
+        );
+
+        // Priority-1 notification for the workspace admin.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("admin-user"), None, None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.iter().any(|n| {
+                n.notification_type == gyre_common::NotificationType::ComputeTargetUnavailable
+                    && n.priority_rank == 1
+            }),
+            "priority-1 ComputeTargetUnavailable notification created: {notifs:?}"
+        );
     }
 
     /// Phase 7 at the ceiling: max iterations → task Blocked, agent Failed,
