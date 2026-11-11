@@ -131,25 +131,25 @@ are `implemented` with per-row evidence notes.
 
 ### Behavior
 
-- **Domain types** (`gyre-domain/src/policy.rs`): `Policy` carries every
-  spec field (`id`, `name`, `description`, `scope`,
-  `scope_id: Option<Id>`, `priority`, `effect`, `conditions`, `actions`,
-  `resource_types`, `enabled`, `immutable`, `created_by: Id`, `created_at`,
-  `updated_at`) plus `built_in` (required by §Built-In Policies).
-  `PolicyScope` = {Tenant, Workspace, Repo}; `PolicyEffect` = {Allow,
-  Deny}; `ConditionOp` has all 8 variants; `ConditionValue` = {String,
-  StringList, Number, Bool} plus `Null` as the value-side placeholder for
-  `Exists`. `builtin_policies()` seeds the fail-closed defaults.
+- **Domain types** (`gyre-domain/src/policy.rs`): `Policy` carries every spec
+  field (`id`, `name`, `description`, `scope`, `scope_id: Option<Id>`,
+  `priority`, `effect`, `conditions`, `actions`, `resource_types`,
+  `enabled`, `immutable`, `created_by: Id`, `created_at`, `updated_at`) plus
+  `built_in` (required by §Built-In Policies). `PolicyScope` = {Tenant,
+  Workspace, Repo}; `PolicyEffect` = {Allow, Deny}; `ConditionOp` has all 8
+  variants; `ConditionValue` = {String, StringList, Number, Bool} plus `Null`
+  as the value-side placeholder for `Exists`. `builtin_policies()` seeds the
+  fail-closed defaults.
 - **Attribute model** (`policy_engine.rs` `AttributeContext` +
-  `abac_middleware.rs` extraction): a typed attribute bag covering all
-  four spec categories. Subject facts come from the auth context and the
+  `abac_middleware.rs` extraction): a typed attribute bag covering all four
+  spec categories. Subject facts come from the auth context and the
   membership/team stores and are never claim-definable: JWT-claim merging
   into the live context is allowlisted to the four agent-claim names
   (persona, stack_hash, attestation_level, repo_scope —
   `merge_agent_jwt_claims`) and gated on `subject.type == agent`. Resource
-  identity from the request path (parent-scoped child routes never leak
-  the parent id into `resource.id`; `:path`-addressed spec routes populate
-  the decoded registry path), entity-lookup attributes (tenant_id, owner,
+  identity from the request path (parent-scoped child routes never leak the
+  parent id into `resource.id`; `:path`-addressed spec routes populate the
+  decoded registry path), entity-lookup attributes (tenant_id, owner,
   approval_status) from real store lookups; `resource.team`/`visibility`
   remain unpopulated until an entity carries those fields (conditions on
   them fail closed). Env: `env.ip` from the socket peer (CWE-348),
@@ -162,12 +162,13 @@ are `implemented` with per-row evidence notes.
   `dynamic_reference_unresolvable_fails_closed`).
 - **Port + adapters**: `PolicyRepository` (CRUD, `list_by_scope`, decision
   audit). SQLite adapter against the `policies` table
-  (conditions/actions/resource_types as JSON) plus migration; mem adapter
-  enforces the same contracts in code (built-in delete guard in both).
+  (conditions/actions/resource_types as JSON) plus migration; the mem-side
+  wiring enforces the same contracts in code (built-in delete guard in
+  both adapters).
 - **Evaluation** (`policy_engine::evaluate`): immutable Deny first, then
   priority order with scope specificity (repo > workspace > tenant) and
-  Deny-before-Allow tie-break, then default deny. All five §Policy
-  Examples are encoded as verbatim evaluation tests
+  Deny-before-Allow tie-break, then default deny. All five §Policy Examples
+  are encoded as verbatim evaluation tests
   (`spec_example_agent_repo_scope` incl. its `$resource.repo_id`
   reference, `spec_example_persona_management`,
   `spec_example_viewer_no_spawn`, `spec_example_gate_approved_persona`,
@@ -184,37 +185,34 @@ routes, formatting/lint findings, and parent MR/agent id leakage on
 merge-requests/agents child routes — each with killing tests named in the
 commit messages and per-row evidence in the coverage file.
 
-### Rebase repair (merge c8d076fe7)
+### Rebase repair (merge 2bbd0d4d6, this round)
 
-Merged new base cfeefbd (task-091 HSI, incl. the task-134 gate-agent
-route allow-list) into the branch; no behavior change to either side:
+Merged the new assignment base cba416b46 (task-118: agent spawning,
+implementation phase & Ralph loop) into the branch. The base refactored
+`api/spawn.rs` so first spawn and Ralph-loop re-spawn share
+`launch_agent_process` returning `AgentLaunchResult` (adds the
+`process_launched` spawn-failure flag and §2.4 deployment-generation replay
+prevention). Conflict resolution kept the base's structure verbatim and
+re-applied the task-128-specific worker JWT scoping on top:
+`mint_worker_scoped` (workspace/repo scope, persona-less workers,
+identity-security attestation levels 1–3 from the resolved compute target)
+replaces the base's unscoped `mint_with_workload` pre-mint at the same
+call site; interrogation policy seeding keeps `created_by: Id::new("system")`
+consistent with the task-128 domain `Policy.created_by: Id`. The base's
+`specs/coverage/SUMMARY.md` numbers were taken as-is. No behavior change
+to either side beyond that re-application.
 
-- `abac_middleware.rs`: the two sides' shared route-pattern consts are
-  unified — each `/api/v1/...` literal is defined exactly once (frozen
-  duplicate count unchanged; `check-abac-route-registry.sh` passes) — and
-  the reviewer/validator gate-agent allow-lists are retained verbatim.
-- `auth.rs`: both scoped-mint paths survive as distinct functions — the
-  gate-agent `mint_scoped(scope)` from the base (used by
-  `gate_executor.rs` and `tests/task134_review_probe.rs`) and the worker
-  repo-scope mint (renamed `mint_worker_scoped`; `api/spawn.rs` and the
-  middleware tests updated) — with the gate-agent mint now initializing
-  the `persona`/`attestation_level` claim fields task-128 added to
-  `AgentJwtClaims`.
-
-### Contract repair (this round)
-
-The executor restored the assigned (protected) task document into the
-checkout — the previous round had dropped the `Implementation Plan` and
-`Acceptance Criteria` sections from it. No production code changed this
-round; the assigned task text is preserved verbatim and only the
-frontmatter (`progress`, `commits`) and this `## Shipped` section are
-(re-)applied on top. Probes at this head: `cargo check -p gyre-domain -p
-gyre-ports -p gyre-adapters` and `cargo check -p gyre-server` clean;
-`cargo test -p gyre-domain policy` 6/6 passed;
+Probes at head 2bbd0d4d6 (evidence: /tmp/stage/review-evidence/):
+`cargo test -p gyre-domain` 466/466 passed; `cargo test -p gyre-adapters
+--lib policy` 9/9 passed (CRUD roundtrip, built-in delete guard, scope
+filtering); `cargo check -p gyre-server` clean (5m39s);
 `scripts/check-task-commit-attribution.sh` passes with the restored
 commits list. Per the build-budget rule the server test binaries run in
-the independent verifier — the relevant suites are the `abac_middleware`
-tests (worker repo-scope claims: `agent_jwt_claims_reach_live_evaluation`,
-persona/attestation: `persona_attestation_*`, gate-agent allow-list:
-`review_scoped_token_*`/`validation_scoped_token_*`), the
-`policy_engine` spec-example tests, and `tests/task134_review_probe.rs`.
+the independent verifier — the relevant suites are the `policy_engine`
+lib tests (8 operators, 4 value types, dynamic-reference fail-closed
+mutation-kill cases, all five §Policy Examples), the `abac_middleware`
+lib tests (live attribute extraction:
+`agent_jwt_claims_reach_live_evaluation`, `persona_attestation_*`,
+`review_scoped_token_*`/`validation_scoped_token_*`, env attribute
+sources, spec-path resource.id), `tests/task134_review_probe.rs`, and the
+`auth` mint_worker_scoped round-trip tests.
