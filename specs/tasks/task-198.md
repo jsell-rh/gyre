@@ -2,10 +2,10 @@
 title: "Spec Links — Persistent Forge-Maintained Spec Graph"
 spec_ref: "spec-links.md §Forge-Maintained Spec Graph"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -74,14 +74,14 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 
 ## Acceptance Criteria
 
-- [x] `spec_links` migration exists with the **exact 13-column schema** from the spec (incl. `source_sha TEXT NOT NULL`), registered in `schema.rs`; `cargo build --all` runs migrations clean.
-- [x] `SpecLinkEntry` has a `source_sha: String` field populated from the source spec's real current SHA during `sync_spec_ledger` (not a placeholder/empty string).
-- [x] `SpecLinkRepository` port + SQLite + Postgres + Mem adapters; all link writes in the server go through it (SQL table is authoritative).
-- [x] On startup the in-memory graph is rebuilt from the persisted table via `list_all` — verified by a test that seeds links, drops/recreates the in-memory store from the repo, and asserts the graph is non-empty and identical.
-- [x] **Restart-durability test (the bug this task kills):** push a manifest with links so they persist; construct a fresh app state (new in-memory store) backed by the same repository/DB; assert the loaded graph contains the links **before any re-push**, and that a staleness/gate query returns the same result it would after a push. This test MUST fail against the current empty-init behavior.
-- [x] All existing `SpecLinksStore` readers (`api/specs.rs` graph endpoints, `merge_processor.rs`, `spec_link_staleness.rs`, `spec_patrol.rs`, `api/graph.rs`) compile and pass with the new field/persistence.
-- [x] `SpecLinkEntry` round-trips losslessly through each adapter (SQLite + Postgres + Mem) — verified by an adapter round-trip test including `Option` columns and each `SpecLinkType` variant.
-- [x] `cargo test --all` passes; `bash scripts/check-arch.sh` passes (no infra deps leak into `gyre-domain`; `SpecLinkEntry` stays where it is unless moved into `gyre-domain` like `SpecLedgerEntry`).
+- [ ] `spec_links` migration exists with the **exact 13-column schema** from the spec (incl. `source_sha TEXT NOT NULL`), registered in `schema.rs`; `cargo build --all` runs migrations clean.
+- [ ] `SpecLinkEntry` has a `source_sha: String` field populated from the source spec's real current SHA during `sync_spec_ledger` (not a placeholder/empty string).
+- [ ] `SpecLinkRepository` port + SQLite + Postgres + Mem adapters; all link writes in the server go through it (SQL table is authoritative).
+- [ ] On startup the in-memory graph is rebuilt from the persisted table via `list_all` — verified by a test that seeds links, drops/recreates the in-memory store from the repo, and asserts the graph is non-empty and identical.
+- [ ] **Restart-durability test (the bug this task kills):** push a manifest with links so they persist; construct a fresh app state (new in-memory store) backed by the same repository/DB; assert the loaded graph contains the links **before any re-push**, and that a staleness/gate query returns the same result it would after a push. This test MUST fail against the current empty-init behavior.
+- [ ] All existing `SpecLinksStore` readers (`api/specs.rs` graph endpoints, `merge_processor.rs`, `spec_link_staleness.rs`, `spec_patrol.rs`, `api/graph.rs`) compile and pass with the new field/persistence.
+- [ ] `SpecLinkEntry` round-trips losslessly through each adapter (SQLite + Postgres + Mem) — verified by an adapter round-trip test including `Option` columns and each `SpecLinkType` variant.
+- [ ] `cargo test --all` passes; `bash scripts/check-arch.sh` passes (no infra deps leak into `gyre-domain`; `SpecLinkEntry` stays where it is unless moved into `gyre-domain` like `SpecLedgerEntry`).
 
 ## Agent Instructions
 
@@ -90,179 +90,3 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 - The restart-durability test is the section-closing evidence. It must genuinely fail on `main` (empty-init) and pass after your change — a self-confirming or mirrored-logic test does not close this section.
 - Skip project-wide formatters/linters and the full suite until the end; then run `cargo test --all` and `scripts/check-arch.sh` once.
 - Commit with conventional commits; author `Project Manager` is NOT the implementer — use your own agent identity.
-
-## Shipped
-
-The forge-maintained spec-link graph (spec-links.md §Forge-Maintained Spec
-Graph) is a persistent SQL table with the in-memory `SpecLinksStore`
-retained as a write-through hot cache, so the graph survives restarts instead
-of silently degrading to empty for staleness checks, approval/merge gates,
-graph queries, and the accountability patrol.
-
-### Production behavior
-
-- Migration `2026-11-08-000061_spec_links` creates the `spec_links` table with
-  the spec's 13-column schema (`source_sha TEXT NOT NULL`, `target_sha`
-  NOT NULL storing `''` for the `Option::None` unresolved-link case, mapped
-  and documented in both SQL adapters), plus indexes on `source_repo_id`,
-  `source_path`, and `target_path`; registered in `schema.rs`. Portability
-  checked (`check-migration-sql-portability.sh` PASS — runs on both SQLite
-  and PostgreSQL). Originally `2026-10-08-000056_spec_links`; renumbered to
-  `000059` at the fefde294 rebase (base added `...-000056_spec_assertion_results`)
-  and to `000061` at the cfeefbda rebase (base added
-  `...-000059_spec_lifecycle_configs`) — Diesel silently drops duplicate
-  versions.
-- `SpecLinkEntry` gained `source_sha: String`, populated in `sync_spec_ledger`
-  from the source spec's real blob SHA computed at HEAD (reused from
-  `manifest_sha_by_path`, never a placeholder). The type lives in
-  `gyre-domain::spec_links` alongside `SpecLedgerEntry` so the port and
-  adapters can persist it; `gyre-server::spec_registry` re-exports it.
-- New port `gyre_ports::SpecLinkRepository` (`list_all`,
-  `replace_for_source`, `save` upsert-by-id, `delete_by_source_repo`) with
-  SQLite + Postgres adapters (`crates/gyre-adapters/src/{sqlite,postgres}/spec_links.rs`)
-  and `MemSpecLinkRepository` (`mem.rs`), wired into `AppState.spec_link_repo`
-  via the `store!` macro (SQLite/PG when `GYRE_DATABASE_URL` is set, Mem
-  otherwise).
-- Every link mutation writes through to the table: `sync_spec_ledger` issues
-  one `replace_for_source` per manifest spec (including empty link sets, so
-  manifest-removed links are deleted from the table — no resurrection on
-  next boot); staleness transitions and cross-workspace re-resolution in
-  `spec_link_staleness.rs` call `save`; repo deletion (`api/repos.rs`)
-  calls `delete_by_source_repo`. The in-memory store is updated alongside
-  every durable write so both stay in sync.
-- Boot: `load_spec_links_into_store` (lib.rs, called from `build_state` and
-  the mem constructor) populates the hot cache from `list_all` on a dedicated
-  thread with its own runtime; read failure is logged at error level rather
-  than silently masquerading as an empty graph.
-
-### Test evidence
-
-- Restart-durability (the bug this task kills):
-  `restart_rebuilds_spec_link_graph_from_persisted_table` and
-  `staleness_query_parity_after_restart` in `spec_registry.rs` — push a real
-  manifest through `sync_spec_ledger` against a real SQLite file, then build
-  a brand-new store from the same repo (including a fresh storage handle on
-  the same file) and assert the graph is identical and the staleness verdict
-  (stale + `stale_since`) survives without any re-push. These fail against
-  the pre-task empty-init behavior.
-- Cross-repo scoping and removal: `sync_replaces_links_scoped_to_source_repo`
-  (repo A's rows survive a repo-B push of the same path; cache and table
-  agree) and `sync_clears_durable_rows_when_links_removed_from_manifest`
-  (removed links are deleted from the durable table, not resurrected).
-- Adapter round-trips: `sqlite::spec_links` tests cover every
-  `SpecLinkType` variant, all `Option` columns in `Some`/`None` forms,
-  reopen-durability, replace scoping, and repo-scoped delete;
-  `mem::spec_link_contract_tests` mirror the round-trip and scoping contract
-  for the Mem adapter. The Postgres adapter follows the identical row-mapping
-  and query structure as the SQLite adapter; the repo has no PG test
-  infrastructure, so PG is compile-verified — same convention as every other
-  PG adapter.
-- `migrations_create_tables` extended with `spec_links`.
-
-### Rebase repair onto cfeefbda (merge 61be0a75f + fix 6ab2e89cc)
-
-Resolved the merge of the new assignment base cfeefbda into the task branch
-(finding db0d1fe7):
-
-- Module-list conflicts (`gyre-ports`, `gyre-domain`, `gyre-adapters`
-  sqlite/postgres `mod.rs`): kept both sides — this branch's
-  `spec_link_repo`/`spec_links` modules and the base's new
-  `spec_lifecycle`/`spec_lifecycle_config`/`spec_lifecycle_repo` modules.
-- `git_http.rs` `process_spec_lifecycle`: took the base's newer form
-  (task-104 `emit_spec_changed_audit` with task id, per-push `ws_id`
-  resolution hoisted out of the loop, config-driven `dedup_open_tasks`);
-  this branch never intentionally modified that logic. The branch's
-  task-198 change (the `spec_link_repo` argument to `sync_spec_ledger` in
-  `git_receive_pack`) is preserved.
-- `spec_registry.rs`: kept this branch's removal of the local
-  `SpecLinkType` enum (moved to `gyre-domain::spec_links` and re-exported);
-  verified the base's enum is byte-identical to the old base's, so nothing
-  was lost.
-- `mem.rs`: took the base's `meta_spec_binding_store` wiring and `Mutex`
-  import; this branch's `MemSpecLinkRepository` + `load_spec_links_into_store`
-  boot wiring preserved (auto-merged).
-- `api/repos.rs`: restored the `&state.spec_link_repo` argument the textual
-  merge dropped from the `sync_spec_ledger` call in the manual-sync endpoint
-  (caught by `cargo check --all`).
-- Renamed this branch's migration to `2026-11-08-000061_spec_links` — the
-  base added `2026-10-08-000059_spec_lifecycle_configs`, colliding on Diesel
-  version 20261008000059. `check-migration-versions.sh` passes.
-- Renumbered drifted line-keyed frozen exemptions
-  (`in-memory-state-stores`: spec_registry 194/196 → 196/198;
-  `unnamed-tuple-carriers`: spec_registry 771 → 773, mem 3323 → 3718,
-  git_http 3418 → 4316) — same frozen sites, counts unchanged, no additions;
-  both checks pass again.
-
-Focused probes at HEAD 6ab2e89cc (logs under `/tmp/stage/review-evidence/
-task-198-rebase-cfeefbd/`):
-
-- `cargo check --all` — clean (full workspace type-checks; gyre-server test
-  compilation is budget-blocked in this sandbox and belongs to the
-  independent verifier).
-- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
-  (sqlite round-trip every link type + option columns,
-  reopen-durability, replace scoping, repo-scoped delete).
-- Full `scripts/check-*.sh` battery compared against both a cfeefbda
-  worktree and the pre-merge candidate 3030d98 worktree: every script
-  either passes in the merged tree or fails with finding-sets identical to
-  the parents modulo line-number drift (pre-existing upstream debt, no new
-  violations introduced by the merge — verified by set-comparing findings
-  across all three trees). Scripts repaired this round to pass:
-  `check-migration-versions`, `check-migration-sql-portability`,
-  `check-in-memory-state-stores`, `check-unnamed-tuple-carriers`
-  (plus `check-arch`, `check-abac-exempt-handlers`,
-  `check-dead-message-kinds`, `check-mem-port-contracts` confirmed PASS).
-
-### Verifier-owned probes (must run post-merge)
-
-- `cargo test -p gyre-server --lib spec_registry::` — includes the four
-  section-closing tests: `restart_rebuilds_spec_link_graph_from_persisted_table`,
-  `staleness_query_parity_after_restart`,
-  `sync_replaces_links_scoped_to_source_repo`,
-  `sync_clears_durable_rows_when_links_removed_from_manifest`.
-- `cargo test -p gyre-server --lib spec_link_staleness spec_patrol mem::spec_link`
-  and the `migrations_create_tables` adapter test.
-- `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
-  verification per the assignment).
-
-### Contract restorations (findings e270b1ae, 34597faa)
-
-The executor restored the assigned task document twice (checkboxes
-unchecked, `commits:` emptied, Shipped notes stripped) while keeping the
-production fix on the branch. No source changed in either round. Latest
-re-verification at HEAD b71c76c05 (finding 34597faa; log under
-`/tmp/stage/review-evidence/contract-restore-round.log`):
-
-- `cargo check -p gyre-server` — clean (7m47s, exit 0).
-- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
-  (round-trip every link type + option columns, reopen-durability, replace
-  scoping, repo-scoped delete).
-- `cargo test -p gyre-adapters duplicate_migration` — ok, 1 passed (no
-  duplicate Diesel migration version prefixes after the 000061 renumber).
-- `scripts/check-task-commit-attribution.sh` — passes once the frontmatter
-  commit list is restored (it fails against the executor-stripped file by
-  construction; no new product-surface commits since 6ab2e89cc — the three
-  commits after it are docs/process-only).
-
-### Prior repair history (condensed)
-
-- 053d36d8 (verification-repair round, base 110180fb): fixed the verification
-  gate's findings for real — removed the git_http fabricated-scope exemption
-  by fixing the code (skip + warn), rustfmt/clippy changed-line compliance,
-  replaced the otlp positional tuple with a named `ReceiverHandle` struct.
-- 2736e818: restored the missing `#[tokio::test]` on
-  `staleness_query_parity_after_restart` — the section-closing test had been
-  dead code.
-- 9e91c2c8 (rebase onto fefde294): merged the base's spec-assertion-results
-  feature alongside this branch's persistence; renumbered the migration and
-  drifted exemptions then too.
-
-### Sandbox/gate notes
-
-- The gyre-server build script re-runs `npm ci && npm run build` whenever
-  `web/node_modules` is absent (fresh sandbox), so any full-build gate will
-  re-dirty `web/dist`; that rebuild is environmental, not a source change.
-  This round used the build wrapper's implicit web build only for
-  `cargo check`; `web/dist` in the merge commit is the base's committed
-  content plus the task branch's previously committed state, with no
-  rebuild performed or committed.
