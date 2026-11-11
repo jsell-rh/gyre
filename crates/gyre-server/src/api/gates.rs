@@ -257,7 +257,11 @@ pub async fn create_gate(
     // single-gate API go to the end of the chain (agent-gates.md §Gate
     // Chains — ordered policies). The chain-config endpoint is the
     // authority for full reordering.
-    let next_position = existing.iter().map(|g| g.position).max().map_or(0, |m| m + 1);
+    let next_position = existing
+        .iter()
+        .map(|g| g.position)
+        .max()
+        .map_or(0, |m| m + 1);
 
     let gate = QualityGate {
         id: new_id(),
@@ -421,7 +425,13 @@ fn validate_chain(chain: &GateChainToml) -> Result<Vec<GateType>, ApiError> {
         })?;
         match gate_type {
             GateType::TestCommand | GateType::LintCommand => {
-                if entry.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                if entry
+                    .command
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(ApiError::InvalidInput(format!(
                         "gate chain entry {i} ('{}'): command is required for {} gates",
                         entry.name, entry.gate_type
@@ -482,7 +492,10 @@ pub async fn set_gate_chain(
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase())
         .unwrap_or_default();
-    if !matches!(content_type.as_str(), "application/toml" | "text/plain" | "") {
+    if !matches!(
+        content_type.as_str(),
+        "application/toml" | "text/plain" | ""
+    ) {
         return Err(ApiError::UnsupportedMediaType(format!(
             "gate chain configuration must be TOML (application/toml or text/plain), got '{content_type}'"
         )));
@@ -490,9 +503,8 @@ pub async fn set_gate_chain(
 
     let text = std::str::from_utf8(&body)
         .map_err(|e| ApiError::InvalidInput(format!("gate chain body is not valid UTF-8: {e}")))?;
-    let chain: GateChainToml = toml::from_str(text).map_err(|e| {
-        ApiError::InvalidInput(format!("gate chain is not valid TOML: {e}"))
-    })?;
+    let chain: GateChainToml = toml::from_str(text)
+        .map_err(|e| ApiError::InvalidInput(format!("gate chain is not valid TOML: {e}")))?;
 
     // Full validation before any mutation (atomicity).
     let types = validate_chain(&chain)?;
@@ -529,23 +541,21 @@ pub async fn set_gate_chain(
     let mut saved = Vec::with_capacity(chain.gates.len());
     for (i, entry) in chain.gates.iter().enumerate() {
         let gate_type = types[i].clone();
-        let mut gate = by_name
-            .remove(&entry.name)
-            .unwrap_or_else(|| QualityGate {
-                id: new_id(),
-                repo_id: Id::new(repo_id.clone()),
-                name: entry.name.clone(),
-                gate_type: gate_type.clone(),
-                command: None,
-                required_approvals: None,
-                persona: None,
-                validation_type: None,
-                required: true,
-                gate_phase: Default::default(),
-                timeout_secs: None,
-                position: 0,
-                created_at: now_secs(),
-            });
+        let mut gate = by_name.remove(&entry.name).unwrap_or_else(|| QualityGate {
+            id: new_id(),
+            repo_id: Id::new(repo_id.clone()),
+            name: entry.name.clone(),
+            gate_type: gate_type.clone(),
+            command: None,
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            position: 0,
+            created_at: now_secs(),
+        });
         // Update config in place (persisting gates keep their id and
         // created_at; only the chain-controlled fields change).
         gate.gate_type = gate_type;
@@ -1022,10 +1032,7 @@ required = true
         assert_eq!(gates.len(), 5, "all five chain entries applied");
 
         // The chain is ordered: position = array index, mixed types kept.
-        let names: Vec<&str> = gates
-            .iter()
-            .map(|g| g["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = gates.iter().map(|g| g["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             vec![
@@ -1113,7 +1120,10 @@ required = true
         );
         assert_eq!(round.gates[0].command.as_deref(), Some("cargo test"));
         assert_eq!(round.gates[4].min_approvals, Some(1));
-        assert_eq!(round.gates[2].persona.as_deref(), Some("personas/security.md"));
+        assert_eq!(
+            round.gates[2].persona.as_deref(),
+            Some("personas/security.md")
+        );
     }
 
     #[tokio::test]
@@ -1198,7 +1208,10 @@ required = false
             .iter()
             .map(|g| g["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["security-review", "peer-approval", "advisory-lint"]);
+        assert_eq!(
+            names,
+            vec!["security-review", "peer-approval", "advisory-lint"]
+        );
     }
 
     #[tokio::test]
@@ -1373,7 +1386,9 @@ type = "PsychicReview"
         // Wrong content type (JSON is a different format — 415, not a gamble).
         let resp = put_chain(
             &app,
-            serde_json::to_string(&serde_json::json!({"gates": []})).unwrap().as_str(),
+            serde_json::to_string(&serde_json::json!({"gates": []}))
+                .unwrap()
+                .as_str(),
             "application/json",
         )
         .await;

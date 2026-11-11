@@ -406,9 +406,11 @@ mod tests {
         // Insert out of order: positions 2, 0, 1; created_at deliberately
         // anti-correlated with position so only (position, created_at)
         // ordering produces the expected sequence.
-        for (name, position, created_at) in
-            [("third", 2u32, 100u64), ("first", 0, 300), ("second", 1, 200)]
-        {
+        for (name, position, created_at) in [
+            ("third", 2u32, 100u64),
+            ("first", 0, 300),
+            ("second", 1, 200),
+        ] {
             let mut g = sample_gate();
             g.id = Id::new(format!("gate-order-{position}"));
             g.name = name.to_string();

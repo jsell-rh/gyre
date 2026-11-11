@@ -89,9 +89,7 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         GateType::TestCommand | GateType::LintCommand => {
             run_command(gate.command.as_deref().unwrap_or("true")).await
         }
-        GateType::RequiredApprovals => {
-            run_required_approvals_gate(&state, &gate, &mr_id).await
-        }
+        GateType::RequiredApprovals => run_required_approvals_gate(&state, &gate, &mr_id).await,
         GateType::AgentReview => run_agent_review_gate(&state, &gate, &mr_id).await,
         GateType::AgentValidation => run_agent_validation_gate(&state, &gate, &mr_id).await,
         GateType::TraceCapture => run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await,
@@ -1295,7 +1293,12 @@ async fn capture_gate_agent_context(
 
     let sha = match state
         .conversations
-        .store(&Id::new(gate_agent_id), workspace_id, tenant_id, &compressed)
+        .store(
+            &Id::new(gate_agent_id),
+            workspace_id,
+            tenant_id,
+            &compressed,
+        )
         .await
     {
         Ok(sha) => sha,
@@ -2051,11 +2054,7 @@ mod tests {
 
     /// Drive one gate through the full `run_gate` path and return its final
     /// persisted status.
-    async fn run_one_gate(
-        state: &Arc<AppState>,
-        gate: QualityGate,
-        mr_id: &Id,
-    ) -> GateStatus {
+    async fn run_one_gate(state: &Arc<AppState>, gate: QualityGate, mr_id: &Id) -> GateStatus {
         let result_id = Id::new(Uuid::new_v4().to_string());
         let result = GateResult {
             id: result_id.clone(),
@@ -2102,7 +2101,11 @@ mod tests {
             "advisory comment is attributed to the gate"
         );
         assert!(c.body.contains("non-blocking"), "body: {}", c.body);
-        assert!(c.body.contains("test-gate"), "body names the gate: {}", c.body);
+        assert!(
+            c.body.contains("test-gate"),
+            "body names the gate: {}",
+            c.body
+        );
     }
 
     #[tokio::test]
@@ -2119,7 +2122,10 @@ mod tests {
         assert_eq!(status, GateStatus::Failed);
 
         let comments = state.reviews.list_comments(&mr_id).await.unwrap();
-        assert!(comments.is_empty(), "required failure is not an advisory comment");
+        assert!(
+            comments.is_empty(),
+            "required failure is not an advisory comment"
+        );
     }
 
     // ── RequiredApprovals: live review-count evaluation (§Gate Types) ───
@@ -2270,7 +2276,8 @@ mod tests {
         // must proceed anyway (Ok(true)), not requeue forever (Ok(false)).
         let result = check_gates_for_mr(&state, &mr_id).await;
         assert_eq!(
-            result, Ok(true),
+            result,
+            Ok(true),
             "advisory approvals gate short of its minimum must not block merging"
         );
     }
@@ -2460,7 +2467,10 @@ mod tests {
         // The reviewer's eyes: persona system prompt, the MR diff, the
         // pinned spec content, and the task's acceptance criteria.
         assert!(
-            ctx["system_prompt"].as_str().unwrap().contains("test-reviewer"),
+            ctx["system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("test-reviewer"),
             "persona system prompt captured"
         );
         assert!(
@@ -2468,7 +2478,8 @@ mod tests {
             "MR diff captured"
         );
         assert_eq!(
-            ctx["spec_content"].as_str().unwrap(), "# Spec v1",
+            ctx["spec_content"].as_str().unwrap(),
+            "# Spec v1",
             "spec at the PINNED sha captured (not the v2 tip)"
         );
         assert!(
