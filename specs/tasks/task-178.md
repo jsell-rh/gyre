@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §1. The Navigable Architecture"
   - "ui-navigation.md §Tab: Architecture (Moldable Development Surface)"
-commits: ["618f415278d033b796295fc49ad55947513c81bd", "197222ba96f83d640031cd04880e3f157deb3323"]
+commits: ["197222ba96f83d640031cd04880e3f157deb3323", "618f415278d033b796295fc49ad55947513c81bd", "177990c310de0e00909db8b74d4dfb4f2164dea9"]
 ---
 
 ## Spec Excerpt
@@ -100,77 +100,45 @@ history / code), lens checkbox group (Structural locked on, Evaluative
 additive overlay fetching `GET /repos/:id/graph/risks`, Observable future),
 view-selector dropdown (built-in → saved → Generate view…), 200px collapsible
 in-view filter panel, Ask input (GeneratedViewChat → POST
-/workspaces/:id/explorer-views/generate), and the View Spec Editor.
+/workspaces/:id/explorer-views/generate), and the View Spec Editor. The
+review-repair round (filter reaches tree-group containers, mutation-proof
+draw tests, REST saved views, Observable a11y) is commit 618f415.
 
-This round is the review repair of the four findings from checkpoint
-16e5800 (commit 618f415):
+### This round: rebase onto base cfeefbda (repair 71d93b0c)
 
-### Boundaries filter reached tree-group containers (was a visible no-op)
+Rebased the task branch onto the updated base (task-091 head), which
+introduced the flow-view / workspace-graph line of work in
+ExplorerCanvas.svelte and ExplorerView.svelte. Resolved both conflicts:
 
-At default zoom the boundary boxes on screen are the synthetic
-package/module tree-group containers (buildPathTree/layoutPathTreeNode),
-which the draw loop exempted from the hiddenNodeIds filter — unchecking
-Boundaries changed nothing in the canonical default view. Tree-group
-containers are now filtered through their own node
-(`treeGroupFilterHidden` in ExplorerCanvas: `nodeCategory` for unchecked
-categories, `nodeMatchesConcept` for concept focus — the same
-filter-categories.js semantics as the leaf rules). A filtered group skips
-its own box but keeps drawing children, so zoomed-in content of other
-categories stays visible when only the container's category is unchecked;
-the minimap applies the same rule. The redraw effect now tracks the filter
-props by identity (swapping one unchecked category for another keeps the
-hidden set's size).
+- `web/src/lib/ExplorerCanvas.svelte` — both sides added import blocks at
+  the same site; kept both (flow-particles/particle-layer from the base,
+  filter-categories from task-178). Verified every symbol from both blocks
+  is used in the merged draw loop: the particle overlay (ParticleLayer,
+  particlesAtTime, trailSegments, …) and the tree-group filter
+  classification (nodeCategory, nodeMatchesConcept) coexist on the same
+  canvas.
+- `docs/ui.md` — merged the task-178 dropdown view-selector description
+  with the base's richer ui-layout.md §5 Level-1 (workspace-scope graph)
+  wording; the "view-selector tabs" phrasing from the old base was dropped
+  because it contradicts the dropdown the code ships.
 
-### Canvas-draw assertions are mutation-proof (were vacuous)
-
-The old snapshot-and-clear capture read empty whenever the canvas was idle
-between redraws, so `not.toContain` passed with the production hiding code
-deleted (reviewer's mutation probe: 11/11). The capture is now
-frame-bucketed per canvas element (stable per-element ctx mock;
-`drawFrame` begins with `ctx.setTransform`, delimiting frames): the latest
-frame's labels persist, and the tests wait for a frame drawn after the
-interaction (`labelsOfNextRedraw`) before asserting, with a settle wait
-before the baseline capture. Verified by re-running the mutations:
-removing the whole filter block, or only the tree-group branch, fails both
-the Boundaries and the concept-focus tests (2/12 each); the restored code
-passes 12/12.
-
-### Saved views load via REST when the dropdown opens
-
-The dropdown's saved-views section no longer depends solely on the explorer
-chat WebSocket's `views` message. Opening the dropdown fetches
-`GET /workspaces/:id/explorer-views` (api.explorerViews) and
-`GET /repos/:id/views` (api.savedViews) — merged by id, mirroring the
-socket's ListViews scope mix; workspace records carry a ViewSpec and are
-translated via `viewSpecToViewQuery`, repo records carry the ViewQuery
-directly. Socket updates merge over the REST-fetched list preserving
-already-known query fields. New test covers the no-socket path end to end
-(list → select → canvas annotation applied).
-
-### Observable lens toggle is keyboard-operable (a11y)
-
-The `<label onclick>` wrapper around the disabled Observable checkbox
-emitted `a11y_click_events_have_key_events` and
-`a11y_no_noninteractive_element_interactions` on every build/test run. It is
-now a `<div role="checkbox" aria-checked="false" aria-disabled="true"
-tabindex="0">` with onclick + onkeydown (Enter/Space surface the telemetry
-notice) around the same disabled input — visually identical (all styling is
-class-driven; no CSS targets the removed label element), and the new
-warnings are gone from the build output.
+Merge commit: 177990c31.
 
 ### Test evidence
 
-- `ExplorerViewNavigableArchitecture.test.js`: 12/12 (boundaries + concept
-  tests now kill the production-code mutations; new REST saved-views and
-  Observable keyboard tests).
-- Mutation probes (evidence in /tmp/stage/review-evidence): filter block
-  removed → 2 failures; tree-group branch only removed → 2 failures;
-  restored → 12/12.
-- Related suites green: ExplorerCanvas* (6 files) + ExplorerDefaultViews +
-  ExplorerGeneratedViews + ExplorerViewLensUrl + filter-categories (265);
-  ExplorerView-* (8 files) + ExplorerChat* (3) + GeneratedViewChat (186);
-  App/Workspace/RepoMode suites importing these components (210 passed,
-  41 skipped).
-- E2E visual baselines not regenerated: the only DOM change (label→div with
-  identical class styling) is pixel-neutral, and exact-head GitHub checks
-  verify after independent review.
+Focused web probes only (npm ci with locked versions; full suites, server
+builds, and web/dist rebuilds are owned by independent verification):
+
+- Batch 1 — 12 files, 274 tests passed: ExplorerCanvas, ExplorerCanvas.flow,
+  ExplorerCanvas.evaluative-lens, filter-categories, ExplorerDefaultViews,
+  ExplorerViewLensUrl, ExplorerViewNavigableArchitecture, ExplorerViewScope,
+  ExplorerViewWorkspaceGraph, FlowCanvas, flow-particles, particle-layer.
+- Batch 2 — 12 files, 119 tests passed: canvas-filters, ExplorerViewDrillUrl,
+  ExplorerCanvasDrillDown, ExplorerCanvasTrace, ExplorerCanvasLiveness,
+  ExplorerViewLivenessWiring, ExplorerGeneratedViews, ExplorerViewViewEvents,
+  ExplorerViewShortcuts, ExplorerViewLayoutRenderers, flow-layout,
+  ExplorerCanvas-performance.
+
+Total 393/393 passing, covering both sides of the merge. Evidence and
+command output retained in /tmp/stage/review-evidence (controller artifact
+path, not a repo path).
