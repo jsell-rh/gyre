@@ -210,16 +210,22 @@ describe('UserProfile', () => {
     expect(await findByText(/No activity recorded/)).toBeTruthy();
   });
 
-  it('shows a toggle for every canonical NotificationType (22)', async () => {
+  it('shows a toggle for every canonical NotificationType (39)', async () => {
     const { findByText, container } = r();
     const prefsTab = await findByText('Notification Preferences');
     await fireEvent.click(prefsTab);
-    // Spot-check canonical NotificationType::as_str() names.
+    // Spot-check canonical NotificationType::as_str() names, including
+    // types the curated subset previously omitted (review F3: the spec
+    // requires a toggle for ANY NotificationType variant).
     expect(await findByText('Gate Failures')).toBeTruthy();
     expect(await findByText('Specs Pending Approval')).toBeTruthy();
     expect(await findByText('Merge Queue Escalations')).toBeTruthy();
+    expect(await findByText('Agent Failures')).toBeTruthy();
+    expect(await findByText('Security Findings')).toBeTruthy();
+    expect(await findByText('Merge Queue Paused')).toBeTruthy();
+    expect(await findByText('Persona Changes Pending Approval')).toBeTruthy();
     const checkboxes = container.querySelectorAll('.pref-checkbox');
-    expect(checkboxes.length).toBe(22);
+    expect(checkboxes.length).toBe(39);
   });
 
   it('loads server-side prefs rows into the toggles', async () => {
@@ -269,10 +275,15 @@ describe('UserProfile', () => {
     // Backend PUT expects { preferences: [{ notification_type, enabled }] }
     // with canonical names — anything else is a 400.
     expect(Array.isArray(arg.preferences)).toBe(true);
-    expect(arg.preferences.length).toBe(22);
+    expect(arg.preferences.length).toBe(39);
     const types = arg.preferences.map(p => p.notification_type);
     expect(types).toContain('GateFailure');
     expect(types).toContain('MergeQueueEscalation');
+    // Previously-omitted canonical variants are now toggleable and saved.
+    expect(types).toContain('AgentFailed');
+    expect(types).toContain('SecurityFinding');
+    expect(types).toContain('BreakingChangeDetected');
+    expect(types).toContain('PersonaChangePendingApproval');
     // Fabricated names must be gone.
     expect(types).not.toContain('SpecApproval');
     expect(types).not.toContain('MergeRequestMerged');

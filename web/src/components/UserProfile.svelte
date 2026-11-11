@@ -31,15 +31,31 @@
   // (Legacy parse aliases like 'SpecPendingApproval'/'BudgetWarning' must
   // NOT appear here: the inbox exclusion compares raw strings, so an alias
   // id would be a silently inert toggle.)
+  // Every canonical NotificationType::as_str() name, in enum declaration
+  // order (HSI §12: "enable/disable any NotificationType variant"). The
+  // backend PUT rejects names that are not canonical as_str() spellings, so
+  // this list must stay in lockstep with gyre-common's NotificationType.
   const NOTIF_TYPE_IDS = [
-    'AgentNeedsClarification', 'SpecApprovalRequested', 'GateFailure',
-    'CrossWorkspaceSpecChange', 'ConflictingInterpretations', 'MetaSpecDrift',
-    'AgentBudgetWarning', 'TrustSuggestion', 'SpecAssertionFailure',
-    'AbandonedBranch', 'AgentCompleted', 'AgentEscalation',
-    'SuggestedSpecLink', 'SpecRejected', 'ConstraintViolation',
+    // user-management.md §Notification Entity taxonomy
+    'SpecApprovalRequested', 'PersonaApprovalRequested',
+    'AgentEscalation', 'AgentBudgetWarning', 'AgentBudgetExhausted',
+    'AgentFailed',
+    'GateFailure', 'GatePassed',
+    'MrMerged', 'MrReverted', 'MergeQueuePaused',
+    'BreakingChangeDetected', 'SpecDriftDetected', 'DependencyStale',
+    'SecurityFinding',
+    'InvitationReceived', 'MembershipChanged',
+    'SystemAlert',
+    // HSI §2 inbox types
+    'AgentNeedsClarification', 'CrossWorkspaceSpecChange',
+    'ConflictingInterpretations', 'MetaSpecDrift',
+    'TrustSuggestion', 'SpecAssertionFailure',
+    'AbandonedBranch', 'AgentCompleted', 'SuggestedSpecLink',
+    'SpecRejected', 'ConstraintViolation',
     'CascadeTestTriggered', 'CascadeTestFailed', 'DependencyChainTooDeep',
-    'AtomicGroupFailure', 'SpecConflict', 'MrReverted',
-    'MergeQueueEscalation',
+    'AtomicGroupFailure', 'SpecConflict', 'MergeQueueEscalation',
+    'ImpersonationRequest', 'ImpersonationAlert', 'SecretExpiring',
+    'PersonaChangePendingApproval',
   ];
   // Build NOTIF_TYPES array with localized labels for compatibility with defaultPrefs()
   const NOTIF_TYPES = NOTIF_TYPE_IDS.map(id => ({ id, labelKey: `user_profile.notif_types.${id}` }));
