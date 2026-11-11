@@ -7,7 +7,7 @@ coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["26fc7b32667bf8d3121ec07f837d1a960d0681d7", "0237af23cb7403ef2489b1247a52f2601f1bab66", "219780c5aef6f0a9fc88da61185949decc8e97a8", "4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "730f9df11e81dfe1644d2b464cec1352f72bda35", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "36e401fbd899a48fc15a4bf430f25ef904747e1e", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
+commits: ["26fc7b32667bf8d3121ec07f837d1a960d0681d7", "0237af23cb7403ef2489b1247a52f2601f1bab66", "219780c5aef6f0a9fc88da61185949decc8e97a8", "4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "730f9df11e81dfe1644d2b464cec1352f72bda35", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "36e401fbd899a48fc15a4bf430f25ef904747e1e", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673", "3399157f03203b1bb57e7924670917b78d4f544a"]
 ---
 
 ## Spec Excerpt
@@ -47,12 +47,12 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 
 ## Acceptance Criteria
 
-- [ ] `git push` to an archived repo returns an error (not silently accepted)
-- [ ] Admin workspace scope has a "Repos" tab listing all repos
-- [ ] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
-- [ ] Repo scope admin has a "Gates" panel showing gate configuration
-- [ ] Gates can be added, toggled, and configured through the UI
-- [ ] `cargo test --all` and `cd web && npm test` pass
+- [x] `git push` to an archived repo returns an error (not silently accepted)
+- [x] Admin workspace scope has a "Repos" tab listing all repos
+- [x] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
+- [x] Repo scope admin has a "Gates" panel showing gate configuration
+- [x] Gates can be added, toggled, and configured through the UI
+- [x] `cargo test --all` and `cd web && npm test` pass
 
 ## Agent Instructions
 
@@ -61,27 +61,22 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 ## Shipped
 
 All three coverage sections are implemented in production code on this branch
-(assignment base `cfeefbda` merged at `78e9dfe3`, with the full chain of earlier
-checkpoints and repair rounds listed in `commits:`). This round repaired the
-two verification findings from candidate `6c0ef4c` (`26fc7b32`):
+(full chain of checkpoints and repair rounds in `commits:`; latest assignment
+base `cba416b46` merged at `b436a91a7`). This round repaired the single
+verification finding against candidate `7b367f39d` (`3399157f0`):
 
-- **Duplicate Diesel migration version** -- the base merge brought
-  `2026-10-08-000059_spec_lifecycle_configs` (mainline task-109 owns version
-  `20261008000059`), colliding with our gate-position migration. Renamed to
-  `2026-10-08-000061_gate_position` (next unused sequence); only the
-  alphabetically-first directory runs per version, so the duplicate silently
-  dropped one migration on fresh databases.
-- **E0063 in `gyre-adapters` lib test** -- the merged `sample_gate()` had lost
-  the `position` field added with gate ordering. Restored it and extended the
-  task-134 upsert regression guard to flip `position` too (its contract: the
-  upsert `.set(...)` must update every mutable config column -- drag-to-reorder
-  persists through the same path).
+- **E0063 in `gyre-server` lib test** — the base merge brought the `position`
+  field on `gyre_domain::QualityGate` into a tree where the `ralph_loop.rs`
+  `loop_state()` fixture initializer had lost it, failing `cargo check` of the
+  gyre-server lib test target. Restored `position: 0` (matching `Default` and
+  every other fixture initializer); verified every other `QualityGate`
+  initializer in the tree already sets `position`.
 
 ### Git push rejection for archived repos (§API Summary)
 
 - `git_info_refs` rejects the `git-receive-pack` advertisement for archived
   repos with a 200 response whose pkt-line stream carries
-  `ERR push rejected: repository is archived` -- the git-smart-HTTP convention
+  `ERR push rejected: repository is archived` — the git-smart-HTTP convention
   so `git push` actually prints the reason. `git_receive_pack` (POST) keeps a
   defense-in-depth 403 before the packfile is processed; clone/fetch still
   works on archived repos (read-only, not invisible).
@@ -111,16 +106,16 @@ two verification findings from candidate `6c0ef4c` (`26fc7b32`):
 
 ### Evidence (this round)
 
-- `cargo test -p gyre-adapters quality_gate` → 1 passed
-  (`save_upsert_updates_all_config_columns`, now also asserts position
-  round-trip).
-- `cargo test -p gyre-adapters no_duplicate_migration_version_prefixes` →
-  1 passed.
-- `cargo check -p gyre-server --tests` → clean (server test code now
-  compiles; the failed round never reached it past the adapters error).
-- All 19 mechanical `scripts/check-*.sh` gates pass, including
-  `check-migration-versions.sh` and `check-task-commit-attribution.sh`.
-- Verifier must run (deferred per 4 GiB budget): full `cargo test --all`
-  (notably `gyre-server` git_http unit tests and
-  `tests/git_integration.rs::push_to_archived_repo_rejected`) and
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` → clean
+  (lib, lib test, bins, integration tests; the previous round's E0063 is
+  gone). Exit 0.
+- `cargo fmt -p gyre-server -- --check` → clean. Exit 0.
+- All 19 mechanical `scripts/check-*.sh` gates passed in the previous
+  verification round; the only failing step was the compile error fixed here.
+- Verifier must run (deferred per 4 GiB budget): full `cargo test --all` —
+  notably the `ralph_loop` tests that consume the repaired fixture
+  (`gate_failure_respawns_agent_with_fresh_context`,
+  `max_iterations_blocks_task_and_fails_agent`, `merge_completes_task`),
+  the `gyre-server` git_http unit tests,
+  `tests/git_integration.rs::push_to_archived_repo_rejected`, and
   `cd web && npm test`.
