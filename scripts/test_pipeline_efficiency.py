@@ -90,6 +90,25 @@ class EfficiencyTests(unittest.TestCase):
         archive.write_bytes(archive.read_bytes()+b'corrupt')
         with self.assertRaises(ValueError):remote.restore(archive,value['sha256'],dst)
 
+    def test_verifier_source_guard_includes_cache_export_before_publication(self):
+        import sys
+        verifier=helper('pipeline-verify');stage=self.root/'stage';stage.mkdir()
+        self.git('remote','add','origin',str(self.repo))
+        identity={'head':self.head,'base':self.head,'candidate':self.head,'tree':self.git('rev-parse','HEAD^{tree}')}
+        job=identity|{'image':'pinned','repo_url':str(self.repo),'cache_enabled':True,'task':'task-001',
+            'publication_branch':'pipeline/verified/'+'a'*32+'-1'}
+        (stage/'verify-job.json').write_text(json.dumps(job))
+        (stage/'pipeline-build-env.py').write_text('def environment(): return {}\n')
+        (stage/'pipeline-cache.py').write_text('from pathlib import Path\ndef prepare(*args): return {}\ndef export(checkout,*args):\n (Path(checkout)/"code").write_text("unexpected cache side effect")\n return {}\n')
+        shutil.copyfile(Path(__file__).with_name('pipeline-artifacts.py'),stage/'pipeline-artifacts.py')
+        def passed(commands,path,assigned,env):
+            path.write_text(json.dumps(assigned|{'passed':True,'checks':[]}))
+        with patch.object(verifier,'STAGE',stage),patch.object(verifier,'CHECKOUT',self.repo),patch.object(verifier,'run_checks',side_effect=passed),patch.object(sys,'argv',['pipeline-verify.py','run']):
+            verifier.main()
+        receipt=json.loads((stage/'verification.json').read_text())
+        self.assertFalse(receipt['passed']);self.assertEqual(receipt['error_kind'],'source_integrity')
+        self.assertIn('code',receipt['dirty_paths']);self.assertNotIn('publication',receipt)
+
     def test_cache_export_is_downloadable_inside_the_gateway_workspace(self):
         stage=self.root/'stage';stage.mkdir()
         with patch.object(remote.subprocess,'run'),patch.object(remote,'pack',return_value={'bytes':1}) as pack:

@@ -163,6 +163,8 @@ def main():
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())
+        if value.get('passed') and cache is not None:
+            value['cache']=cache_module['export'](CHECKOUT,build_env,STAGE,cache)
         integrity = source_integrity(identity)
         if integrity:
             value.update(integrity,passed=False,infrastructure=True)
@@ -171,8 +173,6 @@ def main():
             import importlib.util
             spec=importlib.util.spec_from_file_location('artifacts',STAGE/'pipeline-artifacts.py')
             artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
-            if cache is not None:
-                value['cache']=cache_module['export'](CHECKOUT,build_env,STAGE,cache)
             value['publication']=artifacts.publish(CHECKOUT,job['task'],job['publication_branch'])
         atomic(receipt, value)
     except Exception as exc:
