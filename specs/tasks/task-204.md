@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "bb5e82ee3c480fcad524fedd4a4f7eac40016399"]
 ---
 
 ## Spec Excerpt
@@ -94,19 +94,25 @@ no scope resolves — never a fabricated `"default"`), payload identifying
 defaults keep the check bodies free of hardcoded limits (task-109 config
 feed-ready). Storage failures return 500, not an empty finding list.
 
-### Repair round (merge 1f460064)
+### Repair rounds
 
-Resolved the rebase of base `cfeefbda` (task-091/task-109 lineage) into this
-branch: `git_http.rs` lost the hardcoded `SPEC_WATCHED_PATHS` constant to
-main's per-repo config work, so check 3's watched-path filter was ported to
-`SpecLifecycleConfig::is_watched`/`enabled` via `get_for_repo` (cached per
-patrol run, error-propagated on store failure). The e2e.yml conflict was
-comment-only (both sides pin ubuntu-24.04); main's text kept. New test
-`check3_watched_paths_follow_per_repo_config` proves the filter is
-config-driven: a repo watching only `specs/milestones/` has its orphaned
-milestone spec flagged while a default-watched `system/` orphan is not, and a
-disabled repo is skipped — this test fails if the filter reverts to a
-hardcoded list. Docs and the coverage row were updated to match.
+- **Merge 1f460064** (rebase onto base `cfeefbda`): `git_http.rs` lost the
+  hardcoded `SPEC_WATCHED_PATHS` constant to main's per-repo config work, so
+  check 3's watched-path filter was ported to
+  `SpecLifecycleConfig::is_watched`/`enabled` via `get_for_repo` (cached per
+  patrol run, error-propagated on store failure). The e2e.yml conflict was
+  comment-only; main's text kept. New test
+  `check3_watched_paths_follow_per_repo_config` proves the filter is
+  config-driven and fails if it reverts to a hardcoded list.
+- **Review 630bdf88 F1** (commit `bb5e82ee3`): the two escalation-verification
+  tests asserted persisted messages for workspace "ws1" without ever creating
+  it, and the post-rebase `emit_event` (task-099 tenant resolution via
+  `message_tenant_id`) silently skips persistence when
+  `workspaces.find_by_id` yields None — so they failed with 0 persisted
+  messages. Both tests now seed the workspace (mirroring `spec_patrol.rs`
+  tests), so the asserts prove real emission rather than silent
+  skip-on-unresolvable. Test-side only; the production emit path is unchanged
+  and sound for real workspaces.
 
 ### Test evidence
 
@@ -118,9 +124,15 @@ threshold-tightening proves the checks are not no-ops or inverted) plus 2
 endpoint tests in `api/specs.rs` (flags + persisted escalation; thresholds
 honoured in both directions).
 
-This sandbox has no crates.io access (cargo registry cache empty, network
-blocked — recorded under `/tmp/stage/review-evidence`), so compilation and
-the test run are deferred to the independent verifier. Required probes:
-`cargo test -p gyre-server spec_lifecycle_patrol`, `cargo test -p gyre-server
-api::specs::tests::spec_lifecycle_patrol`, `cargo check -p gyre-server`,
-`bash scripts/check-arch.sh`, and `cargo test --all`.
+In this sandbox `cargo check -p gyre-server --tests` (exit 0, includes the
+repaired test code), `bash scripts/check-arch.sh`,
+`bash scripts/check-scope-literal-defaults.sh` and
+`bash scripts/check-fabricated-scope-defaults.sh` all pass; gyre-server test
+*execution* is blocked by the build wrapper (4 GiB budget, evidence under
+`/tmp/stage/review-evidence/task-204-repair/`) and is deferred to the
+independent verifier. Required probes: `SKIP_WEB_BUILD=1 cargo test -p
+gyre-server spec_lifecycle_patrol` (the previously failing
+`flags_and_escalates_only_the_accountability_gaps` must now pass with 4
+persisted escalations for ws1), `SKIP_WEB_BUILD=1 cargo test -p gyre-server
+spec_lifecycle_patrol_endpoint`, `SKIP_WEB_BUILD=1 cargo test --all`, and
+`bash scripts/check-arch.sh`.
