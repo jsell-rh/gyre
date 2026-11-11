@@ -490,7 +490,7 @@ async fn notify_workspace_admins(
             .unwrap_or_default();
         let dismissal_cutoff = now as i64 - 86_400;
         let suppressed = existing.iter().any(|n| {
-            n.entity_ref.as_deref() == Some(secret.id.as_str())
+            n.source.entity_id == secret.id.as_str()
                 && (n.is_active()
                     || n.dismissed_at
                         .map(|d| d >= dismissal_cutoff)
@@ -531,7 +531,13 @@ async fn notify_workspace_admins(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(secret.id.to_string());
+        // Source the notification to the secret itself; a repo-scoped
+        // secret carries its repo so the source is scoped like the entity.
+        notif.source.entity_type = "secret".to_string();
+        notif.source.entity_id = secret.id.to_string();
+        if secret.scope == gyre_common::SecretScope::Repo {
+            notif.source.repo_id = Some(Id::new(secret.scope_id.clone()));
+        }
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(

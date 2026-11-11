@@ -69,8 +69,6 @@ pub struct SpawnAgentResponse {
 pub struct OrchestratorAgentResponse {
     #[serde(flatten)]
     pub agent: AgentResponse,
-    /// "workspace_orchestrator" | "repo_orchestrator" | "worker".
-    pub orchestrator_type: String,
     /// Repo the orchestrator is bound to (repo tier only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
@@ -87,13 +85,15 @@ pub struct OrchestratorAgentResponse {
 /// neutralization because it is declared ONLY on the flattened
 /// `AgentResponse` (populated by `AgentResponse::from`) — declaring it here
 /// as well is what emitted it twice (task-099 round-3 finding 1).
+/// `orchestrator_type` is likewise carried only by the flattened
+/// `AgentResponse` (exposed there for the role-scoped chat recipient
+/// lookup, HSI §4).
 pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
     OrchestratorAgentResponse {
         agent: AgentResponse {
             repo_id: None,
             ..AgentResponse::from(a.clone())
         },
-        orchestrator_type: a.orchestrator_type.to_string(),
         repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
         restart_on_failure: a.restart_on_failure,
     }
@@ -2096,6 +2096,8 @@ pub async fn complete_agent(
             Some(body_json),
             Some(mr.id.to_string()),
             Some(mr.repository_id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -2229,15 +2231,28 @@ pub async fn fail_agent(
     // revoke them alongside the teardown bookkeeping (review F2).
     crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
-    // Notify the spawning user that the agent failed (HSI §2).
+    // Notify the spawning user that the agent failed (user-management.md
+    // §Notification Entity: AgentFailed — High, needs attention soon).
+    // Genuine escalations (agent asking for a human) keep AgentEscalation.
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
+        crate::notifications::notify_rich(
             state.as_ref(),
             agent.workspace_id.clone(),
             Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentEscalation,
+            gyre_common::NotificationType::AgentFailed,
             format!("Agent '{}' failed and needs attention", agent.name),
             "default",
+            Some(
+                serde_json::json!({
+                    "agent_id": agent.id.as_str(),
+                    "agent_name": agent.name,
+                })
+                .to_string(),
+            ),
+            Some(agent.id.to_string()),
+            agent.repo_id.as_ref().map(|r| r.to_string()),
+            "agent",
+            None,
         )
         .await;
     }
@@ -2770,6 +2785,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -2863,6 +2879,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -2983,6 +3000,7 @@ mod tests {
                 roles: vec![],
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
+                bearer_token: None,
                 deprecated_token_auth: false,
                 impersonation: None,
             };
@@ -3049,6 +3067,7 @@ mod tests {
                 roles: vec![],
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
+                bearer_token: None,
                 deprecated_token_auth: false,
                 impersonation: None,
             };
@@ -3140,6 +3159,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
