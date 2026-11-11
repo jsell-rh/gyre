@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: ["11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "bd83468915b374048847de7dc7d4551aaa95f857"]
 ---
 
 ## Spec Excerpt
@@ -80,114 +80,65 @@ meta-spec set {old}, current is {new}. Reconciliation may be needed.` and
 
 **Merge-gate wiring (§9)** — `crates/gyre-server/src/merge_processor.rs`:
 the drift + merge-policy evaluation runs DURING candidate selection in
-`process_next` (step 4c'', `selection_meta_spec_drift_hold`), exactly like
-the task-077 trust hold. Default (warn only): a gate result with id
-`meta-spec-drift`, `GateStatus::Passed` and the §9 warning output is
-recorded on the MR (idempotent across retry cycles — an existing result is
-updated in place, not duplicated) and the merge proceeds. Strict policy
-(`require_current_meta_spec_set: true`): the entry is requeued carrying the
-drift reason and the processor continues to the next candidate in the SAME
-cycle, so a strictly-blocked drifted MR at the head of the shared queue
-cannot starve later entries — in its own workspace or in other workspaces.
-The entry stays Queued until the code is reconciled under the current set
-or the policy is relaxed. `selection_meta_spec_drift_hold` expands
-atomic-group candidates to all group members, so a drifted member holds
-the whole group (each member entry is requeued with the drift reason)
-without blocking later entries in that cycle; `merge_atomic_group` and
-the single-entry path no longer re-check drift after selection.
+`process_next` (step 4c'', `selection_meta_spec_drift_hold`). Default (warn
+only): a gate result with id `meta-spec-drift`, `GateStatus::Passed` and the
+§9 warning output is recorded on the MR (idempotent across retry cycles)
+and the merge proceeds. Strict policy (`require_current_meta_spec_set:
+true`): the entry is requeued carrying the drift reason and the processor
+continues to the next candidate in the SAME cycle, so a strictly-blocked
+drifted MR at the head of the shared queue cannot starve later entries —
+in its own workspace or in other workspaces. `selection_meta_spec_drift_hold`
+expands atomic-group candidates to all group members, so a drifted member
+holds the whole group without blocking later entries in that cycle.
 
-**Workspace merge policy** — `crates/gyre-server/src/merge_policy.rs`:
-`WorkspaceMergePolicy { require_current_meta_spec_set }` persisted through
-the port-backed KV store (namespace `workspace_merge_policies`, key =
-workspace id), default false. A corrupt stored policy surfaces as an error
-on direct lookup and degrades to the spec default (warn only) inside the
-merge processor so a policy-store outage cannot wedge the queue.
-Exposed as `GET/PUT /api/v1/workspaces/{id}/merge-policy` (partial update;
-PUT Admin-only, both handlers tenant-scoped; `crates/gyre-server/src/api/workspaces.rs`),
-registered in the ABAC resolver (`abac_middleware.rs`) and documented in
-`docs/api-reference.md`.
+**Workspace merge policy + API** — `crates/gyre-server/src/merge_policy.rs`
++ `crates/gyre-server/src/api/workspaces.rs`: `WorkspaceMergePolicy {
+require_current_meta_spec_set }` persisted through the port-backed KV
+store (namespace `workspace_merge_policies`, key = workspace id), default
+false. Exposed via `GET/PUT /api/v1/workspaces/:id/merge-policy`
+(ABAC-registered in `abac_middleware.rs`). A corrupt stored policy
+surfaces as an error on direct lookup and degrades to the spec default
+(warn only) inside the merge processor so a policy-store outage cannot
+wedge the queue.
 
-**UI** — `web/src/components/MergeQueueGraph.svelte`: nodes carry a ⚠
-meta-spec drift badge (`data-drift`, `mq-drift-{mr_id}`) when the backend
-recorded a drift warning, the hover tooltip shows "Meta-spec drift:
-produced under v{old}, current is v{new}" (8-char SHA prefixes), and the
-legend lists "Meta-spec drift (warn only)". The graph API
-(`GET /api/v1/merge-queue/graph`, `crates/gyre-server/src/api/merge_deps.rs`)
-surfaces the recorded drift per node by parsing the same gate result the
-MR detail view reads, so the graph cannot disagree with gate results.
+**UI** — `web/src/components/MergeQueueGraph.svelte` renders the drift
+warning badge ("Meta-spec drift: produced under v{old}, current is
+v{new}") alongside other gate results, covered by
+`web/src/__tests__/MergeQueueGraph.test.js`.
 
-### Test evidence
+### Verification repair round
 
-- `cargo test -p gyre-server --lib meta_spec_drift` — 5 passed:
-  warn-records-gate-result-and-merges, hard-block + policy-relax recovery,
-  match-no-warning, no-attestation-skip, gate-result idempotency.
-- `cargo test -p gyre-server --lib strict_drift_hold` — 2 passed (review
-  repair regression): clean MRs behind a strictly-blocked drifted head
-  merge in the same cycle (same-workspace and cross-workspace), and a
-  drift-held atomic group does not starve a later independent entry.
-  Kill-tested: with the old post-selection early-return shape restored,
-  both tests fail on "clean MR must merge in the same cycle".
-- `cargo test -p gyre-server --lib merge_policy` — 4 passed (KV default /
-  roundtrip / corrupt-fallback + API test: default warn-only, Developer
-  PUT 403 with no state change, Admin PUT roundtrips, unknown workspace
-  404).
-- `cargo test -p gyre-server --lib reconciliation::` — 24 passed,
-  `merge_deps::` — 13 passed, `api::workspaces::` — 17 passed,
-  `merge_processor` — 74 passed (all selection/atomic-group/trust suites
-  included, since the selection loop changed).
-- `cargo test -p gyre-server --lib` (full lib) — 1501 passed, 0 failed
-  (merge-correctness probe after the base merge repair).
-- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 29 passed
-  (20 pre-existing + 5 drift badge/tooltip/legend tests + 4 added by the
-  base); this repair touched no web/ sources.
-- Mechanical checks green: check-inert-enforcement, check-arch,
-  check-abac-route-registry, check-abac-exempt-handlers,
-  check-scope-literal-defaults, check-in-memory-state-stores,
-  check-forged-scope-fields, check-migration-versions,
-  check-lossy-secret-conversion, check-fail-open-ref-resolution,
-  check-forwarded-header-trust, check-unbounded-external-http,
-  check-fabricated-scope-defaults, check-relative-path-defaults,
-  check-mem-port-contracts, check-mcp-write-tools,
-  check-dead-message-kinds, check-migration-sql-portability,
-  check-task-commit-attribution.
+The prior verification round (candidate fae71f881, base cfeefbda) failed
+only the diff-scoped rustfmt gate: changed drift-gate lines in
+`abac_middleware.rs`, `merge_policy.rs`, `merge_processor.rs` and
+`reconciliation.rs` needed formatting. Commit bd8346891 realigns those
+lines to the rustfmt canonical form — whitespace-only, no behavior
+change. `python3 scripts/check-rustfmt-diff.py cfeefbda` now reports
+`rustfmt: changed lines clean (8 Rust files checked)`; `cargo check -p
+gyre-server` passes on the merged tree (8m 14s, no errors).
 
-### Round note (review-repair round f05caa26)
+### Tests for the verifier to execute
 
-Prior rounds: original backend, policy API, drift evaluation, UI, and
-tests (recovered checkpoint 333030908 + feat commit abbcd4aad); the
-starvation review repair (8a99bd808); base merges fefde2946 (with the
-attestation-ABAC test repair, 11a702b89), b5a8720878 (merge 34b4b8ebc),
-and fca5de5fb (merge e29668348, no product change). This round merged
-the assigned base 18adceb68 (PR #765 four-GiB frontend-heap fix; merge
-19fd874a2 — pipeline scripts, docs, and one ExplorerCanvas test only,
-no conflict against the task-159 surface) and repaired the two review
-findings from round f05caa26:
+`cargo test -p gyre-server` filters (test compilation deferred to the
+independent verifier per the 4 GiB budget):
 
-- **Coverage header (docs finding, fixed):** the meta-spec-reconciliation
-  coverage header read `5/11 (7 n/a, 6 task-assigned, 5 implemented)`
-  while the table holds 6 implemented rows (5,6,7,8,11,13) and 5
-  task-assigned rows (9,10,12,14,15); corrected to
-  `6/11 (7 n/a, 5 task-assigned, 6 implemented)` (mechanically recounted
-  against the table).
-- **Stale committed web/dist (code finding, resolved at the source
-  level):** the committed bundle predates the task-159 drift UI, so it
-  contains none of the `mq-drift` / `data-drift` / `Meta-spec drift` /
-  `mq-tooltip-drift` markers. Under this assignment's executor runtime,
-  generated `web/dist` files are restored from the assignment base and
-  the final integration stage rebuilds and publishes those assets
-  remotely, so the dist regeneration is deliberately not performed or
-  committed here. Source-level verification recorded instead: all four
-  marker classes are present in
-  `web/src/components/MergeQueueGraph.svelte`, byte-identical to review
-  checkpoint 7d5a9715 where the reviewer's fresh `npm run build` of this
-  source reproduced all of them in `dist/assets/*.js`; no `web/src`
-  file changed this round, so that build reproduction still stands for
-  the remote integration rebuild.
+- merge_processor: `meta_spec_drift_records_warn_gate_result_and_merge_proceeds`,
+  `meta_spec_drift_hard_blocks_under_strict_workspace_policy`,
+  `meta_spec_drift_matching_set_sha_merges_without_warning`,
+  `meta_spec_drift_mr_without_attestation_skips_check`,
+  `meta_spec_drift_warning_gate_result_is_idempotent`,
+  `strict_drift_hold_does_not_starve_shared_merge_queue`,
+  `strict_drift_hold_atomic_group_does_not_starve_later_entry`
+- reconciliation: `drift_check_matching_set_sha_passes`,
+  `drift_check_mismatched_set_sha_reports_drift`,
+  `drift_check_mr_without_attestation_skips_gracefully`,
+  `drift_check_workspace_without_set_skips`,
+  `drift_check_empty_recorded_sha_skips`,
+  `drift_warning_parse_rejects_foreign_output`,
+  `drift_resolved_fires_when_all_drift_review_tasks_terminal`
+- merge_policy: corrupt-policy/default round-trip tests
+- web: `MergeQueueGraph.test.js` (drift badge rendering)
 
-No production code changed this round; the single new commit is the
-docs-only header fix, which is outside the attribution check's product
-surface (crates/, web/src, web/tests), so the `commits:` frontmatter is
-unchanged. Evidence retained under /tmp/stage/review-evidence/.
-The acceptance-criteria checkboxes remain unchecked in the task body per
-the assigned contract; the criteria themselves are satisfied by the
-shipped behavior above.
+These cover the four required cases — match (no warning), mismatch
+(warning in gate results), strict-policy hard block, and no-attestation
+skip — plus starvation and idempotence hardening.
