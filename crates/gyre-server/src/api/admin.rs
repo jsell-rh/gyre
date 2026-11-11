@@ -268,6 +268,7 @@ pub async fn admin_audit(
 pub async fn admin_kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let mut agent = state
         .agents
@@ -284,14 +285,34 @@ pub async fn admin_kill_agent(
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
-    // Kill the actual process if it is running.
+    // Kill the actual process/container/Pod if it is running. The backend
+    // recorded at spawn time decides how: a container ID goes to
+    // `docker rm --force`, a Pod name to `kubectl delete pod`, a remote
+    // container over SSH — falling back to LocalTarget (pid kill) only for
+    // agents whose backend is unknown (pre-task-117 records). The PID is
+    // captured for the AgentKilled audit event before the registry entry
+    // is consumed.
+    let mut killed_pid: Option<u32> = None;
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+        killed_pid = handle.pid;
+        let backend = state.spawned_backends.lock().await.remove(&id);
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
                 .await
-        {
+            }
+        };
+        if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
+    }
+    // Fall back to the attested PID when no live process handle exists.
+    if killed_pid.is_none() {
+        killed_pid = crate::agent_audit::attested_pid(&state, &id).await;
     }
 
     // Clean up worktrees.
@@ -344,6 +365,29 @@ pub async fn admin_kill_agent(
     crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
+    // Revoke the agent's token — killed agents must not continue to
+    // authenticate. Revocation is audited as an AgentTokenRevoked event.
+    crate::agent_audit::revoke_agent_token(&state, &agent, "admin_kill").await;
+
+    // Platform Model §7: revoke task-scoped ephemeral secrets on kill
+    // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
+    // for the agent's task and logs `secret.revoked` per secret.
+    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
+    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    let killed_by = auth
+        .user_id
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| auth.agent_id.clone());
+    crate::agent_audit::emit_killed(
+        &state,
+        &agent,
+        "force-killed by admin",
+        &killed_by,
+        killed_pid,
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -358,6 +402,7 @@ pub struct ReassignRequest {
 pub async fn admin_reassign_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<ReassignRequest>,
 ) -> Result<StatusCode, ApiError> {
     let agent = state
@@ -376,6 +421,12 @@ pub async fn admin_reassign_agent(
 
     let tasks = state.tasks.list_by_assignee(&agent.id).await?;
     let now = now_secs();
+    // Admin identity for the AgentReassigned audit events below.
+    let reassigned_by = auth
+        .user_id
+        .as_ref()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| auth.agent_id.clone());
     for mut task in tasks {
         task.assigned_to = Some(target.id.clone());
         // §2.4 replay prevention: reassignment bumps the deployment generation,
@@ -383,6 +434,11 @@ pub async fn admin_reassign_agent(
         task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
+
+        // Agent lifecycle audit event (observability.md §Audit Event Types):
+        // one per reassigned task, attributing the admin who moved it.
+        crate::agent_audit::emit_reassigned(&state, &agent, &task.id, &target.id, &reassigned_by)
+            .await;
     }
 
     let ws_id = agent.workspace_id.clone();
@@ -522,6 +578,13 @@ pub async fn admin_seed(
         );
         state.workspaces.create(&workspace).await?;
     }
+    // Platform-model.md §2: the demo tenant also gets the four built-in
+    // personas (idempotent — skipped if already present). Startup seeding
+    // only covers tenants that existed at boot, so a tenant created here
+    // (or created before the persona seeding existed) is seeded now.
+    let seed_tenant_id = Id::new(&tenant_id);
+    crate::seed_builtin_personas_for_tenant(&state, &seed_tenant_id).await;
+
     // Repo paths are derived from the configured repos root (same source as
     // repos.rs create handlers) — never relative "./..." literals, which a
     // child process resolves against its own cwd (task-106 R2-F6 class).
@@ -1113,6 +1176,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_kill_revokes_task_scoped_secrets() {
+        use crate::api::now_secs;
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = now_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-kill-teardown"),
+            Id::new("default"),
+            "Kill Teardown WS",
+            "kill-teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-kill-teardown"), "kill-teardown", now);
+        agent.workspace_id = Id::new("ws-kill-teardown");
+        agent.current_task_id = Some(Id::new("task-kill-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-kill-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-kill-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-teardown/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "admin kill must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive admin kill"
+        );
+    }
+
+    #[tokio::test]
     async fn admin_kill_blocks_active_task() {
         use crate::api::now_secs;
         use gyre_common::Id;
@@ -1210,6 +1372,129 @@ mod tests {
             reassigned.assigned_to.as_ref().map(|id| id.as_str()),
             Some("agent-to")
         );
+    }
+
+    #[tokio::test]
+    async fn admin_kill_emits_lifecycle_audit_events() {
+        // observability.md §Audit Event Types: an admin kill must record an
+        // AgentKilled event (reason/killed_by/pid) and revoke + audit the
+        // agent's token (AgentTokenRevoked, reason admin_kill).
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::Agent;
+
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-kill-audit"), "kill-audit-target", now);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+        // Seed a legacy (non-JWT) token so revocation is observable.
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-kill-audit",
+                "legacy-uuid-token".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-audit/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The token must actually be revoked, not just audited.
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-kill-audit")
+            .await
+            .unwrap();
+        assert!(token.is_none(), "killed agent's token must be removed");
+
+        let killed = crate::agent_audit::recorded_events(&state, "agent_killed").await;
+        assert_eq!(killed.len(), 1, "exactly one agent_killed event");
+        let ev = &killed[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-kill-audit"));
+        assert_eq!(ev.detail["reason"], "force-killed by admin");
+        // Global test token authenticates as "system".
+        assert_eq!(ev.detail["killed_by"], "system");
+        // No process handle and no attestation → pid unknown (null), not fabricated.
+        assert!(ev.detail["pid"].is_null());
+
+        let revoked = crate::agent_audit::recorded_events(&state, "agent_token_revoked").await;
+        assert_eq!(revoked.len(), 1, "exactly one agent_token_revoked event");
+        assert_eq!(revoked[0].detail["reason"], "admin_kill");
+        // Legacy non-JWT token → jti unknown (null), not fabricated.
+        assert!(revoked[0].detail["jti"].is_null());
+    }
+
+    #[tokio::test]
+    async fn admin_reassign_emits_agent_reassigned_audit_event() {
+        // observability.md §Audit Event Types: each reassigned task must
+        // record an AgentReassigned event attributing the admin who moved it.
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::{Agent, Task};
+
+        let state = test_state();
+        let now = now_secs();
+        let src = Agent::new(Id::new("agent-reassign-audit-src"), "src-agent", now);
+        let dst = Agent::new(Id::new("agent-reassign-audit-dst"), "dst-agent", now);
+        state.agents.create(&src).await.unwrap();
+        state.agents.create(&dst).await.unwrap();
+        let mut task = Task::new(Id::new("task-reassign-audit"), "reassign audit task", now);
+        task.assigned_to = Some(src.id.clone());
+        state.tasks.create(&task).await.unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let body = serde_json::json!({ "target_agent_id": "agent-reassign-audit-dst" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-reassign-audit-src/reassign")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The task actually moved.
+        let reassigned = state
+            .tasks
+            .find_by_id(&Id::new("task-reassign-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reassigned.assigned_to.as_ref().map(|id| id.as_str()),
+            Some("agent-reassign-audit-dst")
+        );
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_reassigned").await;
+        assert_eq!(events.len(), 1, "exactly one agent_reassigned event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-reassign-audit-src"));
+        assert_eq!(ev.detail["old_task_id"], "task-reassign-audit");
+        assert_eq!(ev.detail["new_task_id"], "task-reassign-audit");
+        assert_eq!(ev.detail["reassigned_by"], "system");
+        assert_eq!(ev.detail["from_agent_id"], "agent-reassign-audit-src");
+        assert_eq!(ev.detail["to_agent_id"], "agent-reassign-audit-dst");
     }
 
     #[tokio::test]
