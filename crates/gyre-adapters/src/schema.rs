@@ -68,6 +68,7 @@ diesel::table! {
         task_type -> Nullable<Text>,
         order -> Nullable<Integer>,
         depends_on -> Text,
+        generation -> Integer,
     }
 }
 
@@ -504,6 +505,7 @@ diesel::table! {
         command -> Nullable<Text>,
         required_approvals -> Nullable<Integer>,
         persona -> Nullable<Text>,
+        validation_type -> Nullable<Text>,
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,

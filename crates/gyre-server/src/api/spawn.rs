@@ -69,8 +69,6 @@ pub struct SpawnAgentResponse {
 pub struct OrchestratorAgentResponse {
     #[serde(flatten)]
     pub agent: AgentResponse,
-    /// "workspace_orchestrator" | "repo_orchestrator" | "worker".
-    pub orchestrator_type: String,
     /// Repo the orchestrator is bound to (repo tier only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
@@ -87,13 +85,15 @@ pub struct OrchestratorAgentResponse {
 /// neutralization because it is declared ONLY on the flattened
 /// `AgentResponse` (populated by `AgentResponse::from`) — declaring it here
 /// as well is what emitted it twice (task-099 round-3 finding 1).
+/// `orchestrator_type` is likewise carried only by the flattened
+/// `AgentResponse` (exposed there for the role-scoped chat recipient
+/// lookup, HSI §4).
 pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
     OrchestratorAgentResponse {
         agent: AgentResponse {
             repo_id: None,
             ..AgentResponse::from(a.clone())
         },
-        orchestrator_type: a.orchestrator_type.to_string(),
         repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
         restart_on_failure: a.restart_on_failure,
     }
@@ -929,6 +929,13 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // Assign task to agent and advance to InProgress
+    //
+    // §2.4 replay prevention: spawning onto a task that was assigned to a
+    // different agent is a reassignment — bump the deployment generation so
+    // SignedInputs pinned to the previous generation cannot be replayed.
+    if task.assigned_to.as_ref() != Some(&agent.id) {
+        task.generation = task.generation.saturating_add(1);
+    }
     task.assigned_to = Some(agent.id.clone());
     if task.status == TaskStatus::Backlog {
         let _ = task.transition_status(TaskStatus::InProgress);

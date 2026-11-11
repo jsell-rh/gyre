@@ -54,7 +54,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
-| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: `test_command`, `lint_command`, `required_approvals`, `agent_review`, `agent_validation` — serialized as snake_case) (M12.1, M12.3). See [agent-protocol.md](agent-protocol.md) for `AgentReview`/`AgentValidation` env vars. |
+| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: `test_command`, `lint_command`, `required_approvals`, `agent_review`, `agent_validation` — serialized as snake_case; `agent_validation` accepts optional `validation_type` string identifying the domain-specific check, delivered to the agent as `GYRE_VALIDATION_TYPE`) (M12.1, M12.3). See [agent-protocol.md](agent-protocol.md) for `AgentReview`/`AgentValidation` env vars. |
 | `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
 | `PUT/GET` | `/api/v1/repos/{id}/access-overrides/{user_id}` / `/api/v1/repos/{id}/access-overrides` | Set / list per-repo access overrides — body `{role}`; managed by workspace Owner/Admin or TenantAdmin. An override caps one member's effective role on one repo at `restricted_role`; the effective role is the more restrictive of the workspace role and the override, so overrides can restrict but never expand access (an override more privileged than the target's workspace role → 400; a duplicate override → 409; updating goes through delete + create) (user-management.md §Repo Access) |
 | `DELETE` | `/api/v1/repos/{id}/access-overrides/{user_id}` | Lift a per-repo access restriction (404 when none exists) (user-management.md §Repo Access) |
@@ -126,7 +126,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/graph/diff` | Graph diff between commits — `{from, to, message, deltas}`; `?from=<ref>&to=<ref>` (defaults: `HEAD~1`/`HEAD`) (M30) |
 | `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (M30) |
-| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`); every agent response carries `orchestrator_type`: `worker` \| `workspace_orchestrator` \| `repo_orchestrator` (platform-model §3 — the role signal for the HSI §4 scoped-chat recipient lookup) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
 | `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{model, input_tokens, output_tokens, cost_usd?}`; accumulated in budget tracking; `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
