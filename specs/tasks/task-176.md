@@ -2,10 +2,10 @@
 title: "Meta-specs Preview Loop layout — editor split states and preview workflow"
 spec_ref: "ui-layout.md §9"
 depends_on: [task-172]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -62,62 +62,3 @@ The preview loop is the primary meta-spec interaction: edit → preview → iter
 ## Agent Instructions
 
 Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read `meta-spec-reconciliation.md` §5 for the preview loop protocol. The existing `MetaSpecs.svelte` has the registry view and basic editing — this task adds the full EditorSplit preview workflow. Check the preview API endpoints: the spec mentions throwaway branches and agent spawning. Use the EditorSplit component created in task-172.
-
-## Shipped
-
-The §9 meta-specs preview loop runs through the shared EditorSplit (task-172)
-in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
-
-- **State 1 (Editing):** left panel is the persona/principle editor plus the
-  Preview/Publish actions; right panel is the target-spec checkbox selector
-  (specs from repos in the workspace) with Select All / Select None.
-- **State 2 (Preview Running):** the editor is locked and renders the
-  pending-changes diff — an LCS line diff of the edited prompt against the
-  published registry prompt (`+`/`-` markers, add/remove summary). The right
-  panel shows per-spec ◐ running / ✓ complete indicators from the real
-  preview-status poll plus aggregate progress, with a [Cancel Preview]
-  action (button and Esc) that aborts the running preview.
-- **State 3 (Preview Complete):** the right panel has [Architecture]
-  (default) and [Code Diff] tabs rendering the server-computed
-  PreviewResponse fields: structural impact (scope, affected spec count,
-  blast radius with affected repos and pin reasons) and per-spec statuses
-  from the throwaway-branch agent runs.
-- **Iterate** returns to State 1 with the selector restored AND the last
-  preview results still visible (Architecture/Code Diff tabs retained
-  below the height-capped selector).
-- **Publish** PUTs the edited prompt to the meta-spec registry, resets the
-  spec's approval state to Pending, and refreshes the in-session diff
-  baseline so the next preview diffs against the newly published prompt.
-
-### Test evidence
-
-- `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
-- The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
-  shapes, runs the poll to completion, clicks Iterate, and asserts the
-  selector AND the retained Architecture/Code Diff results stay visible.
-  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
-  that test, confirming it kills the prior round's real defect (Iterate
-  dropping results from the DOM).
-- Preview cancellation, state transitions, architecture delta display,
-  and 404-rejection handling are covered in the same suites.
-
-### Known limitation
-
-The State 1 LLM chat input is rendered but disabled in the workspace-level
-meta-specs surface: EditorSplit requires a repo context for chat and the
-API layer has no workspace-scoped assist endpoint (the repo-scoped
-`specs/assist` is what produces inline suggestion blocks). This is outside
-this task's acceptance criteria and blocked by the existing repo-scoped
-API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
