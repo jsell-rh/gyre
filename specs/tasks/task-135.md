@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["583c4a07d9c1d0f2789cf3748a02d25152d3435d"]
+commits: ["583c4a07dde4629da277a1efdafaa5b077596b9d"]
 ---
 
 ## Spec Excerpt
