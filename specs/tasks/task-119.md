@@ -11,8 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits:
-  - 4bfdf85b8c1f992f0aa604c753d5277ab0a739b5
+commits: ["4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
 ---
 
 ## Spec Excerpt
