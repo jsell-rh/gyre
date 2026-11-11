@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §1. The Navigable Architecture"
   - "ui-navigation.md §Tab: Architecture (Moldable Development Surface)"
-commits: ["197222ba96f83d640031cd04880e3f157deb3323", "618f415278d033b796295fc49ad55947513c81bd", "177990c310de0e00909db8b74d4dfb4f2164dea9"]
+commits: ["618f415278d033b796295fc49ad55947513c81bd", "197222ba96f83d640031cd04880e3f157deb3323"]
 ---
 
 ## Spec Excerpt
