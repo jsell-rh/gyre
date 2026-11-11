@@ -57,6 +57,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         .await
         .insert(connection_id, targeted_tx);
 
+    // Record the connection's verified user identity for user-targeted
+    // pushes (identity-security.md §Impersonation). Connections without a
+    // user identity (shared token, agent tokens) are not registered.
+    if let Some(uid) = &caller.user_id {
+        state
+            .ws_connection_users
+            .write()
+            .await
+            .insert(connection_id, uid.as_str().to_string());
+    }
+
     // Subscribed workspace IDs authorized for this connection.
     let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
 
@@ -468,6 +479,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
     state.ws_connections.write().await.remove(&connection_id);
     state
+        .ws_connection_users
+        .write()
+        .await
+        .remove(&connection_id);
+    state
         .ws_connection_workspaces
         .write()
         .await
@@ -569,6 +585,19 @@ async fn authenticate(
 
     match crate::auth::authenticate_token(&token, state).await {
         Ok(auth) => {
+            // Identity-security.md §Impersonation: a WebSocket connection
+            // opened with an impersonation token is an action taken during
+            // impersonation — attribute it to the impersonator.
+            if let Some(imp) = &auth.impersonation {
+                crate::impersonation::spawn_record_impersonated_action(
+                    state,
+                    imp,
+                    "WS",
+                    "/ws",
+                    true,
+                    "websocket",
+                );
+            }
             let result = WsMessage::AuthResult {
                 success: true,
                 message: "authenticated".to_string(),

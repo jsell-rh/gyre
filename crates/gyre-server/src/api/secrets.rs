@@ -121,7 +121,7 @@ pub async fn create_secret(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateSecretRequest>,
 ) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "POST /api/v1/secrets").await?;
     let tenant_id = auth.tenant_id.clone();
 
     let scope = parse_scope(&req.scope)?;
@@ -205,7 +205,7 @@ pub async fn list_secrets(
     auth: AuthenticatedAgent,
     Query(q): Query<ListSecretsQuery>,
 ) -> Result<Json<Vec<SecretResponse>>, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "GET /api/v1/secrets").await?;
     let tenant_id = auth.tenant_id.clone();
 
     let scope = parse_scope(&q.scope)?;
@@ -224,7 +224,7 @@ pub async fn delete_secret(
     Path(secret_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "DELETE /api/v1/secrets/:id").await?;
     let tenant_id = auth.tenant_id.clone();
     let id = Id::new(secret_id.clone());
 
@@ -249,7 +249,7 @@ pub async fn rotate_secret(
     auth: AuthenticatedAgent,
     Json(req): Json<RotateSecretRequest>,
 ) -> Result<Json<SecretResponse>, ApiError> {
-    require_admin(&auth)?;
+    require_admin(&state, &auth, "POST /api/v1/secrets/:id/rotate").await?;
     let tenant_id = auth.tenant_id.clone();
     let id = Id::new(secret_id.clone());
 
@@ -298,8 +298,13 @@ pub async fn rotate_secret(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn require_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+async fn require_admin(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    endpoint: &str,
+) -> Result<(), ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(state, auth, "Admin", endpoint).await;
         return Err(ApiError::Forbidden(
             "secret management requires Admin role".to_string(),
         ));

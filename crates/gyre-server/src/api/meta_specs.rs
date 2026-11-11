@@ -240,6 +240,13 @@ pub async fn put_meta_spec_set(
     // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
     // bindings would let agents rewrite the rules they operate under (NEW-26).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-spec-set",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace meta-spec-set bindings".to_string(),
         ));
@@ -348,6 +355,13 @@ pub async fn put_rollout_policy(
     // (NEW-26: non-Admin callers, including agents, must not be able to
     // rewrite the rules that govern their own rollout).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-specs/rollout-policy",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace rollout policy".to_string(),
         ));
@@ -497,6 +511,13 @@ pub async fn post_meta_spec_preview(
     let allowed = auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !allowed {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/meta-specs/preview",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "Admin or Developer role required to run meta-spec preview".to_string(),
         ));
@@ -785,6 +806,7 @@ mod tests {
         // Developer-role OIDC JWT.
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
@@ -1258,6 +1280,7 @@ mod tests {
         // ReadOnly OIDC JWT.
         let ro_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -1377,6 +1400,8 @@ pub async fn list_meta_specs_registry(
     // is ABAC-exempt, so the handler is the only authorization surface —
     // any authenticated agent must not enumerate cross-workspace governance.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may list the meta-specs registry".to_string(),
         ));
@@ -1456,6 +1481,8 @@ pub async fn create_meta_spec_registry(
     // surface): creating registry entries defines tenant-wide governance;
     // non-Admin callers must not mint meta-specs.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/meta-specs-registry")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may create meta-specs registry entries".to_string(),
         ));
@@ -1525,6 +1552,13 @@ pub async fn update_meta_spec_registry(
     // the handler is the authorization surface). Without this gate, any
     // authenticated agent could edit governance prompts and reset approvals.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update meta-specs registry entries".to_string(),
         ));
@@ -1657,6 +1691,13 @@ pub async fn delete_meta_spec_registry(
     // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
     // the handler is the authorization surface).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "DELETE /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete meta-specs registry entries".to_string(),
         ));
@@ -2496,6 +2537,7 @@ mod registry_tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
@@ -2985,7 +3027,7 @@ mod registry_tests {
             .filter(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift)
             .collect();
         assert_eq!(drift.len(), 1, "expected exactly one drift notification");
-        assert_eq!(drift[0].priority, 6);
+        assert_eq!(drift[0].priority_rank, 6);
         assert!(drift[0].title.contains("system/stale.md"));
         assert!(drift[0].title.contains("v1"));
         assert!(drift[0].title.contains("v2"));
@@ -3210,6 +3252,7 @@ mod registry_tests {
         // Developer-role OIDC JWT (no Admin role).
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-registry",
                 "preferred_username": "dev-registry",
                 "realm_access": { "roles": ["developer"] }

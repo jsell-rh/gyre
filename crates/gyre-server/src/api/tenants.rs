@@ -64,6 +64,7 @@ pub async fn create_tenant(
     // non-Admin callers to create tenants would let Developer/Agent roles
     // provision new top-level isolation contexts (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/tenants").await;
         return Err(ApiError::Forbidden(
             "only Admin role may create tenants".to_string(),
         ));
@@ -112,6 +113,7 @@ pub async fn update_tenant(
     // are governance-level changes that must not be accessible to Developer/Agent
     // roles (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "PUT /api/v1/tenants/:id").await;
         return Err(ApiError::Forbidden(
             "only Admin role may update tenants".to_string(),
         ));
@@ -145,6 +147,7 @@ pub async fn delete_tenant(
     // Admin-only: deleting a tenant destroys all its workspaces, repos, and
     // agent sessions. Restrict to Admin role only (NEW-29).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "DELETE /api/v1/tenants/:id").await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete tenants".to_string(),
         ));
@@ -190,6 +193,7 @@ mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }

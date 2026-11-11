@@ -16,6 +16,8 @@ vi.mock('../lib/api.js', () => ({
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsApprovals: vi.fn().mockResolvedValue([]),
     mergeRequests: vi.fn().mockResolvedValue([]),
     mrGates: vi.fn().mockResolvedValue([]),
@@ -23,6 +25,23 @@ vi.mock('../lib/api.js', () => ({
     repoGraphRisks: vi.fn().mockResolvedValue([]),
   },
 }));
+
+// The workspace scope renders the realized-architecture graph
+// (ui-layout.md §5) via DependencyGraph — its ELK layout (WASM, unavailable
+// in jsdom) is mocked with deterministic positions so repo nodes render.
+vi.mock('../lib/layout-engines.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    elkLayout: vi.fn().mockImplementation(async (nodes) => {
+      const positions = {};
+      nodes.forEach((n, i) => {
+        positions[n.id] = { x: 100 + i * 200, y: 80 };
+      });
+      return positions;
+    }),
+  };
+});
 
 vi.mock('../lib/toast.svelte.js', () => ({ toast: vi.fn() }));
 
@@ -87,12 +106,15 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
   }
 
   async function drillIntoRepo(container) {
-    const repoCard = await waitFor(() => {
-      const btn = container.querySelector('.ws-repo-card');
-      expect(btn).toBeTruthy();
-      return btn;
+    // Since task-174 the workspace scope renders the realized-architecture
+    // graph (repos as nodes, ui-layout.md §5) — drill by double-clicking the
+    // rendered repo node (double-click = scope change to repo).
+    const repoNode = await waitFor(() => {
+      const el = container.querySelector('[data-testid="dep-node-repo-1"]');
+      expect(el).toBeTruthy();
+      return el;
     }, { timeout: 5000 });
-    await fireEvent.click(repoCard);
+    await fireEvent.dblClick(repoNode);
     await waitFor(() => {
       expect(container.querySelector('.lens-group')).toBeTruthy();
     }, { timeout: 5000 });
