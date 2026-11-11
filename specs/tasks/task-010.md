@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-010.md
 coverage_sections: []
-commits: ["275692a808a228d725ba27365a5461d778a26602"]
+commits: ["275692a808a228d725ba27365a5461d778a26602", "67985e8d9d51b99cf89a0f41ab7707b84ec18bce"]
 ---
 
 ## Spec Excerpt
@@ -147,6 +147,13 @@ The branch also carries the prior-epoch spec amendment (5b06eded9)
 renaming the in-repo §11 table cells to the shipped snake_case surface;
 protected spec publication stays with the controller. With the aliases,
 the server satisfies either spec text.
+
+### Verification repair (finding b550b5ccf)
+
+Changed-line rustfmt failures at mcp.rs:606, 6886-6888, 6967
+(tuple-array literal wrapping, chained `create_node` call). Commit
+67985e8d9 applies `cargo fmt`; whitespace-only, no behavior change.
+`cargo fmt -p gyre-server -- --check` now passes clean.
 
 ### Test evidence
 
