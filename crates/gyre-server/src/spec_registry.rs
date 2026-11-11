@@ -1480,10 +1480,15 @@ concepts:
         let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
             Arc::new(crate::mem::MemSpecLedgerRepository::default());
         let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // Durable link repo (Mem is enough here: this test asserts ledger
+        // population, not link durability, but the sync path requires one).
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
 
         sync_spec_ledger(
             &ledger,
             &links_store,
+            &link_repo,
             dir.path().to_str().unwrap(),
             &sha,
             1_700_000_000,
