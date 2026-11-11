@@ -3120,8 +3120,11 @@ fn prompt_result(description: &str, text: String) -> Value {
     })
 }
 
-/// `system://persona` — the assembled meta-spec prompt set, served verbatim
-/// from the spawn-time record (pinned versions, not a re-render).
+/// `system://persona` — the assembled meta-spec prompt set (the persona
+/// section of the agent-runtime.md §5 prompt structure), served verbatim
+/// from the spawn-time record (pinned versions, not a re-render). The
+/// system-managed protocol section is served separately via
+/// `system://protocol`.
 async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
     match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
         Some(record) => match record.rendered_prompt {

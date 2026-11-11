@@ -324,7 +324,10 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
 /// Check a repo-level budget override (agent-runtime.md §4 Cascade: "When no
 /// repo-level budget is set, the repo inherits the workspace limit" — the
 /// workspace check in `check_spawn_budget` covers that case). Called at
-/// agent spawn time alongside the workspace check.
+/// agent spawn time alongside the workspace check. Enforces every field of
+/// the override: the daily token/cost ceilings and the concurrent-agent cap
+/// (the lifetime ceiling is enforced continuously by
+/// `enforce_agent_lifetimes`).
 pub async fn check_repo_spawn_budget(state: &AppState, repo: &gyre_domain::Repository) -> Result<(), String> {
     let Some(budget) = repo.budget.as_ref() else {
         return Ok(()); // inherit the workspace limit
@@ -361,7 +364,125 @@ pub async fn check_repo_spawn_budget(state: &AppState, repo: &gyre_domain::Repos
             ));
         }
     }
+    // Repo-level concurrent-agent cap: a repo budget override of
+    // max_concurrent_agents binds at spawn time exactly like the
+    // workspace-level cap does (agent-runtime.md §4 Cascade — the repo
+    // budget is the finer-grained control). Counted live from the agent
+    // store: repo active-agent counts are not maintained incrementally
+    // anywhere else, unlike the workspace/tenant counters.
+    if let Some(max_concurrent) = budget.max_concurrent_agents {
+        let active = count_active_agents_in_repo(state, repo).await;
+        if active >= max_concurrent as usize {
+            return Err(format!(
+                "repo budget exceeded: max_concurrent_agents={max_concurrent} ({active} active in repo)"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Count Active agents scoped to a repo. Two linkage paths, mirroring the
+/// scheduler's `count_active_agents_for_repo` (signal_chain.rs): workers
+/// link repos via their worktree records, orchestrators carry `repo_id`
+/// directly. An agent reachable on either path is counted once.
+async fn count_active_agents_in_repo(state: &AppState, repo: &gyre_domain::Repository) -> usize {
+    let mut agent_ids: Vec<gyre_common::Id> = Vec::new();
+    if let Ok(agents) = state.agents.list_by_workspace(&repo.workspace_id).await {
+        for agent in agents {
+            if agent.repo_id.as_ref() == Some(&repo.id) && !agent_ids.contains(&agent.id) {
+                agent_ids.push(agent.id.clone());
+            }
+        }
+    }
+    if let Ok(worktrees) = state.worktrees.find_by_repo(&repo.id).await {
+        for wt in worktrees {
+            if !agent_ids.contains(&wt.agent_id) {
+                agent_ids.push(wt.agent_id.clone());
+            }
+        }
+    }
+    let mut active = 0;
+    for aid in &agent_ids {
+        if let Ok(Some(a)) = state.agents.find_by_id(aid).await {
+            if a.status == gyre_domain::AgentStatus::Active {
+                active += 1;
+            }
+        }
+    }
+    active
+}
+
+/// Enforce per-agent lifetime ceilings (`max_agent_lifetime_secs`) across
+/// every active agent: the EFFECTIVE limit is the repo budget override when
+/// the agent is repo-bound and the repo sets one, else the effective
+/// workspace limit (tighter of workspace config and tenant ceiling). An
+/// agent whose wall-clock age (spawn → now) exceeds the limit is stopped
+/// via the budget-kill path — `kill_process()`, worktree preserved, task
+/// left InProgress — the same recovery semantics as every other budget
+/// enforcement kill.
+///
+/// Runs after every usage report (agents actively burning budget are
+/// checked continuously) and from the hourly budget job (agents that
+/// stopped reporting are still bounded).
+pub async fn enforce_agent_lifetimes(state: &AppState) {
+    let agents = match state.agents.list().await {
+        Ok(agents) => agents,
+        Err(e) => {
+            tracing::warn!("lifetime enforcement: agent list failed: {e}");
+            return;
+        }
+    };
+    let now = now_secs();
+    for agent in agents
+        .into_iter()
+        .filter(|a| a.status == gyre_domain::AgentStatus::Active)
+    {
+        let Some(limit) = effective_lifetime_limit_secs(state, &agent).await else {
+            continue; // unlimited
+        };
+        let age = now.saturating_sub(agent.spawned_at);
+        if age > limit {
+            tracing::warn!(
+                agent_id = %agent.id,
+                age_secs = age,
+                limit_secs = limit,
+                "agent lifetime exceeded: budget kill"
+            );
+            budget_stop_agent(state, &agent, "agent lifetime exceeded").await;
+        }
+    }
+}
+
+/// Effective `max_agent_lifetime_secs` for one agent: repo budget override
+/// → effective workspace config (workspace → tenant, tighter wins). `None`
+/// when neither the repo nor the effective workspace config sets a limit.
+async fn effective_lifetime_limit_secs(state: &AppState, agent: &gyre_domain::Agent) -> Option<u64> {
+    // Repo binding via repo_id (orchestrators) or via a worktree
+    // (workers carry no repo_id) — first repo with an override wins.
+    let mut repo_ids: Vec<gyre_common::Id> = Vec::new();
+    if let Some(repo_id) = agent.repo_id.as_ref() {
+        repo_ids.push(repo_id.clone());
+    }
+    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+        for wt in worktrees {
+            if !repo_ids.contains(&wt.repository_id) {
+                repo_ids.push(wt.repository_id.clone());
+            }
+        }
+    }
+    for repo_id in &repo_ids {
+        if let Ok(Some(repo)) = state.repos.find_by_id(repo_id).await {
+            if let Some(repo_limit) = repo.budget.as_ref().and_then(|b| b.max_agent_lifetime_secs) {
+                return Some(repo_limit);
+            }
+        }
+    }
+    effective_workspace_config(
+        state,
+        &workspace_key(agent.workspace_id.as_str()),
+    )
+    .await
+    .max_agent_lifetime_secs
 }
 
 /// Increment active-agent counters for a workspace and the tenant.
@@ -496,6 +617,12 @@ pub async fn record_llm_call_usage(state: &Arc<AppState>, usage: &LlmCallUsage) 
         BUDGET_GRACE_PERIOD_SECS,
     )
     .await;
+
+    // agent-runtime.md §4 Cascade: the per-agent lifetime ceiling
+    // (repo override → effective workspace limit) is checked on every
+    // report too — an agent burning budget past its lifetime is stopped
+    // without waiting for the hourly job.
+    enforce_agent_lifetimes(state).await; // enforcement:ok — side-effecting kill, no decision to consume
 }
 
 // ── Threshold enforcement (agent-runtime.md §4 Enforcement Levels) ─────────────
@@ -593,10 +720,11 @@ async fn effective_workspace_config(state: &AppState, ws_key: &str) -> BudgetCon
 ///
 /// - ≥ 80%: `BudgetWarning` notification (Inbox) + `BudgetWarning` event on
 ///   the message bus. Agents continue running.
-/// - ≥ 100%: `BudgetExhausted` events to every active agent in the
-///   workspace, a `grace_secs` grace period to commit + complete, then
-///   `kill_process()` on agents still Active (marked `Stopped`; worktree
-///   preserved; task remains InProgress).
+/// - ≥ 100%: a `BudgetExhausted` message delivered to every active agent's
+///   inbox (`Destination::Agent` — readable via `list_unacked`/
+///   `list_after`, the surfaces agents actually poll), a `grace_secs` grace
+///   period to commit + complete, then `kill_process()` on agents still
+///   Active (marked `Stopped`; worktree preserved; task remains InProgress).
 /// - Beyond limit (usage strictly greater than the limit — the budget was
 ///   reduced below current usage): immediate `kill_process()`, no grace.
 ///
@@ -638,7 +766,7 @@ pub async fn enforce_workspace_budget(
             state
                 .emit_event(
                     Some(workspace.clone()),
-                    gyre_common::Destination::Workspace(workspace.clone()),
+                    gyre_common::Destination::Agent(agent.id.clone()),
                     gyre_common::MessageKind::BudgetExhausted,
                     Some(serde_json::json!({
                         "agent_id": agent.id.as_str(),
@@ -677,7 +805,7 @@ pub async fn enforce_workspace_budget(
             state
                 .emit_event(
                     Some(workspace.clone()),
-                    gyre_common::Destination::Workspace(workspace.clone()),
+                    gyre_common::Destination::Agent(agent.id.clone()),
                     gyre_common::MessageKind::BudgetExhausted,
                     Some(serde_json::json!({
                         "agent_id": agent.id.as_str(),
@@ -1727,7 +1855,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhaustion_emits_messages_and_kills_after_grace() {
-        let (state, ws_id, agent_id, task_id) =
+        let (state, _ws_id, agent_id, task_id) =
             enforcement_fixture("ws-grace").await;
         // Push usage to exactly 100%.
         state
@@ -1746,13 +1874,22 @@ mod tests {
         // grace 0: the grace timer fires immediately.
         super::enforce_workspace_budget(&state, "ws-grace", None, None, 0).await;
 
-        // BudgetExhausted message to the active agent.
-        let msgs = workspace_messages(state.as_ref(), &ws_id).await;
-        let exhausted: Vec<_> = msgs
+        // BudgetExhausted delivered to the active agent's INBOX — the
+        // surface agents actually read (list_unacked/list_after return
+        // only Destination::Agent messages), per agent-runtime.md §4:
+        // "All active agents in the workspace receive a BudgetExhausted
+        // message in their inbox."
+        let inbox = state
+            .messages
+            .list_unacked(&agent_id, 50)
+            .await
+            .unwrap();
+        let exhausted: Vec<_> = inbox
             .iter()
             .filter(|m| m.kind == gyre_common::MessageKind::BudgetExhausted)
             .collect();
-        assert_eq!(exhausted.len(), 1, "active agent must receive BudgetExhausted");
+        assert_eq!(exhausted.len(), 1, "active agent must receive BudgetExhausted in its inbox");
+        assert_eq!(exhausted[0].to, gyre_common::Destination::Agent(agent_id.clone()));
         assert_eq!(
             exhausted[0].payload.as_ref().unwrap()["grace_secs"],
             serde_json::json!(0u64)
@@ -1810,8 +1947,18 @@ mod tests {
         );
         let msgs = workspace_messages(state.as_ref(), &ws_id).await;
         assert!(
-            msgs.iter().any(|m| m.kind == gyre_common::MessageKind::BudgetExhausted),
-            "beyond-limit must emit BudgetExhausted (grace_secs 0)"
+            !msgs.iter().any(|m| m.kind == gyre_common::MessageKind::BudgetExhausted),
+            "beyond-limit BudgetExhausted goes to agent inboxes, not the workspace stream"
+        );
+        // ...and it IS in the agent's inbox (the surface agents read).
+        let inbox = state
+            .messages
+            .list_unacked(&agent_id, 50)
+            .await
+            .unwrap();
+        assert!(
+            inbox.iter().any(|m| m.kind == gyre_common::MessageKind::BudgetExhausted),
+            "beyond-limit must deliver BudgetExhausted to the agent inbox"
         );
         let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
         assert_eq!(wts.len(), 1, "worktree preserved for recovery");
@@ -2055,6 +2202,184 @@ mod tests {
         );
         unbounded.budget = None;
         assert!(super::check_repo_spawn_budget(state.as_ref(), &unbounded).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn repo_concurrent_budget_override_blocks_spawns() {
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-rconc");
+        let ws = Workspace::new(ws_id.clone(), gyre_common::Id::new("tenant-1"), "rconc", "rconc", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-rconc"),
+            ws_id.clone(),
+            "rconc",
+            "/tmp/repo-rconc",
+            0,
+        );
+        repo.budget = Some(gyre_domain::BudgetConfig {
+            max_concurrent_agents: Some(1),
+            ..Default::default()
+        });
+        state.repos.create(&repo).await.unwrap();
+
+        // No agents in the repo yet: allowed.
+        assert!(super::check_repo_spawn_budget(state.as_ref(), &repo).await.is_ok());
+
+        // One Active agent bound to the repo via its worktree (the worker
+        // linkage path — workers carry no repo_id).
+        let agent_id = gyre_common::Id::new("agent-rconc");
+        let mut agent = Agent::new(agent_id.clone(), "worker", now_secs_static());
+        agent.workspace_id = ws_id.clone();
+        agent.status = AgentStatus::Active;
+        state.agents.create(&agent).await.unwrap();
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new("wt-rconc"),
+            agent_id.clone(),
+            repo.id.clone(),
+            None,
+            "feat/rconc".to_string(),
+            "/tmp/wt-rconc".to_string(),
+            0,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+
+        let err = super::check_repo_spawn_budget(state.as_ref(), &repo)
+            .await
+            .expect_err("repo max_concurrent_agents=1 with one active agent must block spawns");
+        assert!(
+            err.contains("max_concurrent_agents=1"),
+            "got: {err}"
+        );
+
+        // The agent completes → the slot frees and spawns are allowed again.
+        let mut done = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        done.status = AgentStatus::Idle;
+        state.agents.update(&done).await.unwrap();
+        assert!(super::check_repo_spawn_budget(state.as_ref(), &repo).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_lifetime_enforced_from_workspace_config() {
+        let (state, _ws_id, agent_id, task_id) =
+            enforcement_fixture("ws-life-enc").await;
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-life-enc"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_agent_lifetime_secs: Some(3600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Aged past the limit.
+        let mut aged = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        aged.spawned_at = now_secs_static().saturating_sub(7200);
+        state.agents.update(&aged).await.unwrap();
+
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "an agent past max_agent_lifetime_secs must be budget-killed"
+        );
+        // Budget-kill semantics: worktree preserved, task stays InProgress.
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1, "lifetime kill must preserve the worktree");
+        let task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn repo_lifetime_override_tighter_than_workspace() {
+        let (state, _ws_id, over_agent, _) =
+            enforcement_fixture("ws-life-repo").await;
+        // Workspace ceiling: 3600s.
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-life-repo"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_agent_lifetime_secs: Some(3600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The fixture agent's worktree lives in "ws-life-repo-repo": give
+        // THAT repo a tighter 1800s override.
+        let repo_id = gyre_common::Id::new("ws-life-repo-repo");
+        let mut repo = gyre_domain::Repository::new(
+            repo_id.clone(),
+            gyre_common::Id::new("ws-life-repo"),
+            "life-repo",
+            "/tmp/repo-life-repo",
+            0,
+        );
+        repo.budget = Some(gyre_domain::BudgetConfig {
+            max_agent_lifetime_secs: Some(1800),
+            ..Default::default()
+        });
+        state.repos.create(&repo).await.unwrap();
+
+        // Aged 2000s: under the workspace ceiling (3600) but past the repo
+        // override (1800) — the repo budget is the finer-grained control.
+        let mut aged = state.agents.find_by_id(&over_agent).await.unwrap().unwrap();
+        aged.spawned_at = now_secs_static().saturating_sub(2000);
+        state.agents.update(&aged).await.unwrap();
+
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+
+        let agent = state.agents.find_by_id(&over_agent).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "the repo lifetime override (1800s) must bind tighter than the workspace ceiling (3600s)"
+        );
+
+        // Control: an agent in a repo WITHOUT an override, aged the same
+        // 2000s, stays Active under the 3600s workspace ceiling.
+        let control_id = gyre_common::Id::new("ws-life-repo-control");
+        let mut control = Agent::new(control_id.clone(), "control", now_secs_static());
+        control.workspace_id = gyre_common::Id::new("ws-life-repo");
+        control.status = AgentStatus::Active;
+        control.spawned_at = now_secs_static().saturating_sub(2000);
+        state.agents.create(&control).await.unwrap();
+        let plain_repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-plain-life"),
+            gyre_common::Id::new("ws-life-repo"),
+            "plain-life",
+            "/tmp/repo-plain-life",
+            0,
+        );
+        state.repos.create(&plain_repo).await.unwrap();
+        let control_wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new("wt-plain-life"),
+            control_id.clone(),
+            plain_repo.id.clone(),
+            None,
+            "feat/plain".to_string(),
+            "/tmp/wt-plain-life".to_string(),
+            0,
+        );
+        state.worktrees.create(&control_wt).await.unwrap();
+
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+        let agent = state.agents.find_by_id(&control_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Active,
+            "an agent under the effective lifetime limit must keep running"
+        );
     }
 
     #[tokio::test]

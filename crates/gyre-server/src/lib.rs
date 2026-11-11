@@ -1704,6 +1704,9 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
 /// counters to the per-call records inside the last 24 hours, so
 /// time-based budgets (`max_tokens_per_day`, `max_cost_per_day`) reset on
 /// a rolling window. Replaces the pre-task-119 midnight-UTC counter reset.
+/// The same cycle enforces the per-agent lifetime ceilings
+/// (`max_agent_lifetime_secs`, repo override → effective workspace limit)
+/// so agents that stopped reporting usage are still bounded.
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
         state
@@ -1717,6 +1720,9 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             if let Err(error) = &result {
                 tracing::error!(%error, "failed to apply budget rolling 24h window");
             }
+            // Lifetime enforcement is best-effort alongside the reset —
+            // its failures are logged inside, never fail the job cycle.
+            api::budget::enforce_agent_lifetimes(&state).await;
             state
                 .job_registry
                 .record_cycle("spawn_budget_reset", started_at, &result)

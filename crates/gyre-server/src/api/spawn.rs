@@ -932,14 +932,14 @@ pub(crate) async fn spawn_agent_core(
                 set_sha: prompt_set.set_sha.clone(),
                 assembled_at: now,
                 meta_specs_used: prompt_set.sections.iter().map(|s| s.used.clone()).collect(),
-                // agent-runtime.md §5: the rendered three-section prompt —
-                // meta-spec system prompt + system-managed protocol —
-                // recorded verbatim for the MCP `system://persona` /
-                // `system://protocol` prompt delivery.
-                rendered_prompt: Some(format!(
-                    "{}\n{}",
-                    crate::prompt_assembly::render_system_prompt(&prompt_set.sections),
-                    crate::prompt_assembly::render_protocol_prompt()
+                // agent-runtime.md §5: the rendered meta-spec system prompt
+                // (the persona section) — recorded verbatim so the MCP
+                // `system://persona` prompt serves exactly what the agent
+                // received in `GYRE_META_SPEC_PROMPT` at spawn. The
+                // protocol section is system-managed and served separately
+                // via `system://protocol` (`GYRE_PROTOCOL_PROMPT`).
+                rendered_prompt: Some(crate::prompt_assembly::render_system_prompt(
+                    &prompt_set.sections,
                 )),
             },
         )
@@ -6151,6 +6151,97 @@ exit 1\n"
         assert!(
             env_protocol.contains("agent.complete"),
             "protocol prompt must carry completion signaling:\n{env_protocol}"
+        );
+    }
+
+    /// agent-runtime.md §5 (task-119 repair, F4): the MCP
+    /// `system://persona` prompt must serve the pinned meta-spec system
+    /// prompt ONLY — not the system-managed protocol section. The record
+    /// stored at spawn is what the prompt serves verbatim, so this test
+    /// fails if the spawn path concatenates the protocol into
+    /// `rendered_prompt` (a client asking for the persona would then also
+    /// receive the protocol text verbatim).
+    #[tokio::test]
+    async fn mcp_persona_prompt_serves_meta_spec_section_only() {
+        use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+        use sha2::Digest;
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // One required, approved, tenant-scoped persona — assembled into
+        // every spawn's prompt set.
+        let prompt_text = "You are the persona-delivery regression persona.";
+        let content_hash = {
+            let mut h = sha2::Sha256::new();
+            h.update(prompt_text.as_bytes());
+            hex::encode(h.finalize())
+        };
+        state
+            .meta_specs
+            .create(&gyre_domain::MetaSpec {
+                id: gyre_common::Id::new("ms-persona-delivery"),
+                kind: MetaSpecKind::Persona,
+                name: "persona-delivery-persona".to_string(),
+                scope: MetaSpecScope::Global,
+                scope_id: None,
+                prompt: prompt_text.to_string(),
+                version: 1,
+                content_hash,
+                required: true,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: Some("system".to_string()),
+                approved_content_hash: None,
+                approved_at: Some(1),
+                created_by: "system".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("seeding required meta-spec must succeed");
+
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Persona prompt delivery task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/persona-prompt").await;
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Fetch the persona prompt AS the spawned agent.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 91,
+                            "method": "prompts/get",
+                            "params": { "name": "system://persona" }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("persona prompt text");
+
+        // The pinned meta-spec section is served verbatim.
+        assert!(
+            text.contains(prompt_text),
+            "system://persona must serve the pinned meta-spec prompt:\n{text}"
+        );
+        // ...and ONLY that: the protocol section is served via
+        // system://protocol, never bundled into the persona prompt.
+        assert!(
+            !text.contains("Ralph loop rules"),
+            "system://persona must not serve the protocol section:\n{text}"
         );
     }
 

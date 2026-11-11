@@ -345,12 +345,14 @@ pub struct AgentPromptSetRecord {
     pub set_sha: String,
     pub assembled_at: u64,
     pub meta_specs_used: Vec<MetaSpecUsed>,
-    /// The rendered three-section system prompt (agent-runtime.md §5) as
-    /// delivered to the agent at spawn — meta-spec sections plus the
-    /// system-managed protocol section. Served verbatim by the MCP
+    /// The rendered meta-spec system prompt (the persona section of the
+    /// agent-runtime.md §5 prompt structure) as delivered to the agent at
+    /// spawn via `GYRE_META_SPEC_PROMPT`. Served verbatim by the MCP
     /// `system://persona` prompt so on-demand reads return exactly what
     /// the pinned assembly produced, not a re-render at current versions.
-    /// `None` on records written before task-119.
+    /// The system-managed protocol section is NOT part of this field — it
+    /// is served via `system://protocol`. `None` on records written before
+    /// task-119.
     #[serde(default)]
     pub rendered_prompt: Option<String>,
 }
