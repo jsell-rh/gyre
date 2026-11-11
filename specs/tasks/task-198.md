@@ -159,7 +159,7 @@ graph queries, and the accountability patrol.
   PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Rebase repair onto cfeefbda (merge 61be0a75f + fix 6ab2e89cc, this round)
+### Rebase repair onto cfeefbda (merge 61be0a75f + fix 6ab2e89cc)
 
 Resolved the merge of the new assignment base cfeefbda into the task branch
 (finding db0d1fe7):
@@ -224,6 +224,21 @@ task-198-rebase-cfeefbd/`):
   and the `migrations_create_tables` adapter test.
 - `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
   verification per the assignment).
+
+### Contract restoration (this round, finding e270b1ae)
+
+The executor restored the assigned task document (checkboxes unchecked,
+`commits:` emptied, Shipped notes stripped) while keeping the production
+fix on the branch. No source changed this round. Re-verified at HEAD
+f28e7a8b (logs under `/tmp/stage/review-evidence/task-198-contract-restore/`):
+
+- `cargo check --all` — clean (7m48s, exit 0).
+- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
+  (round-trip every link type + option columns, reopen-durability, replace
+  scoping, repo-scoped delete).
+- `scripts/check-task-commit-attribution.sh` — passes once the frontmatter
+  commit list is restored (it fails against the executor-stripped file by
+  construction; no new product-surface commits since 6ab2e89cc).
 
 ### Prior repair history (condensed)
 
