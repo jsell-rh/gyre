@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["f51cc2296bf96aeb0a151c7b19c55e73faf5e9b0", "91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
 ---
 
 ## Spec Excerpt
@@ -72,52 +72,69 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
   Preview/Publish actions; right panel is the target-spec checkbox selector
   (specs from repos in the workspace) with Select All / Select None.
 - **State 2 (Preview Running):** the editor is locked and renders the
-  pending-changes diff — an LCS line diff of the edited prompt against the
-  published registry prompt (`+`/`-` markers, add/remove summary). The right
-  panel shows per-spec ◐ running / ✓ complete indicators from the real
-  preview-status poll plus aggregate progress, with a [Cancel Preview]
-  action (button and Esc) that aborts the running preview.
+  pending-changes diff (LCS line diff of the edited prompt against the
+  published registry prompt); the right panel shows per-spec ◐ running /
+  ✓ complete indicators from the real preview-status poll plus aggregate
+  progress, with a [Cancel Preview] action (button and Esc).
 - **State 3 (Preview Complete):** the right panel has [Architecture]
   (default) and [Code Diff] tabs rendering the server-computed
-  PreviewResponse fields: structural impact (scope, affected spec count,
-  blast radius with affected repos and pin reasons) and per-spec statuses
-  from the throwaway-branch agent runs.
+  PreviewResponse fields (structural impact, blast radius, per-spec
+  statuses from the throwaway-branch agent runs).
 - **Iterate** returns to State 1 with the selector restored AND the last
-  preview results still visible (Architecture/Code Diff tabs retained
-  below the height-capped selector).
+  preview results still visible.
 - **Publish** PUTs the edited prompt to the meta-spec registry, resets the
   spec's approval state to Pending, and refreshes the in-session diff
-  baseline so the next preview diffs against the newly published prompt.
+  baseline.
+
+### This round: §9 State 1 LLM chat wired to a workspace-scoped assist
+
+Closes the round-1 finding that the production §9 surface (workspace
+meta-specs, no repo context) rendered the State 1 chat permanently disabled:
+
+- **Server** — `POST /api/v1/workspaces/:id/meta-specs/assist`
+  (`specs_assist::assist_meta_spec`): workspace-scoped LLM assist using the
+  same SSE `{diff, explanation}` wire protocol as the repo-scoped
+  `/repos/:id/specs/assist` (protocol logic extracted into a shared
+  `assist_sse_events` helper, not duplicated). Effective content is the
+  caller's `draft_content` (the in-editor draft) or, when only
+  `meta_spec_id` is given, the stored registry prompt. Real behavior:
+  per-user/workspace 10 req/60 s rate limit, 503 when the LLM is
+  unconfigured, 404 for unknown workspace/meta-spec, 403 when a
+  Workspace-scoped meta-spec belongs to another workspace, 400 when neither
+  draft nor id is given, cost-entry + per-call budget recording keyed to
+  the workspace. ABAC resolver entry `meta_spec`/`generate` added to
+  `abac_middleware.rs` (no exemption-file growth).
+- **Frontend** — EditorSplit enables the chat when `repoId` OR (meta-spec
+  context + `workspaceId`); the §9 surface dispatches to
+  `api.metaSpecsAssist(workspaceId, {instruction, draft_content,
+  meta_spec_id})`. The dead `specsAssistGlobal` 404 stand-in was removed
+  from `api.js`.
 
 ### Test evidence
 
-- `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
-- The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
-  shapes, runs the poll to completion, clicks Iterate, and asserts the
-  selector AND the retained Architecture/Code Diff results stay visible.
-  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
-  that test, confirming it kills the prior round's real defect (Iterate
-  dropping results from the DOM).
-- Preview cancellation, state transitions, architecture delta display,
-  and 404-rejection handling are covered in the same suites.
+- Frontend: `npx vitest run src/__tests__/EditorSplit.test.js
+  src/__tests__/MetaSpecs.test.js src/__tests__/lineDiff.test.js` — 169
+  passed; full `npm test` — 2102 passed, 41 skipped (logs in
+  `/tmp/stage/review-evidence/task-176-frontend-*.log`). New EditorSplit
+  tests cover: chat enabled in meta-spec context with a workspace and no
+  repo; chat still disabled without either; §9 chat dispatches to the
+  workspace endpoint (not `specsAssist`) with the draft + meta_spec_id and
+  renders the Accept-able suggestion block. Mutation probes: reverting
+  `llmChatEnabled` to repo-only fails 2 tests; dispatching to
+  `specsAssist` unconditionally fails 1 test.
+- Server: 8 new `assist_meta_spec_*` tests in `specs_assist.rs` — 404
+  (workspace/meta-spec), 400 (no content), 403 (cross-workspace meta-spec),
+  503 (LLM unavailable), SSE complete streaming, and two
+  recording-LLM-factory tests asserting WHAT the LLM received (stored
+  registry prompt when no draft; draft overrides the stored prompt).
+  Type-checked in-sandbox (`cargo check -p gyre-server --lib --tests`);
+  execution exceeds the sandbox build budget — the verifier must run
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::specs_assist`
+  (evidence: `/tmp/stage/review-evidence/task-176-server-check.log`).
 
-### Known limitation
+### Note on web/dist
 
-The State 1 LLM chat input is rendered but disabled in the workspace-level
-meta-specs surface: EditorSplit requires a repo context for chat and the
-API layer has no workspace-scoped assist endpoint (the repo-scoped
-`specs/assist` is what produces inline suggestion blocks). This is outside
-this task's acceptance criteria and blocked by the existing repo-scoped
-API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
+The round-2 review finding (stale shipped bundle) concerns generated
+assets. Per the current assignment contract, `web/dist` is restored from
+the assignment base and rebuilt/published by final integration; this
+round's changes are source-only (`web/src`, `crates/`).
