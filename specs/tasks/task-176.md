@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "91fe1e86da29a2c68cdb5cf32137da69b36e3132"]
 ---
 
 ## Spec Excerpt
@@ -66,7 +66,8 @@ Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read 
 ## Shipped
 
 The §9 meta-specs preview loop runs through the shared EditorSplit (task-172)
-in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
+in `context="meta-spec"`, mounted by the MetaSpecs workspace view
+(`MetaSpecs.svelte`):
 
 - **State 1 (Editing):** left panel is the persona/principle editor plus the
   Preview/Publish actions; right panel is the target-spec checkbox selector
@@ -83,25 +84,44 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
   blast radius with affected repos and pin reasons) and per-spec statuses
   from the throwaway-branch agent runs.
 - **Iterate** returns to State 1 with the selector restored AND the last
-  preview results still visible (Architecture/Code Diff tabs retained
-  below the height-capped selector).
+  preview results still visible (`showResultTabs` in `EditorSplit.svelte`
+  retains the Architecture/Code Diff tabs below the selector).
 - **Publish** PUTs the edited prompt to the meta-spec registry, resets the
   spec's approval state to Pending, and refreshes the in-session diff
   baseline so the next preview diffs against the newly published prompt.
 
 ### Test evidence
 
-- `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
-- The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
-  shapes, runs the poll to completion, clicks Iterate, and asserts the
-  selector AND the retained Architecture/Code Diff results stay visible.
-  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
-  that test, confirming it kills the prior round's real defect (Iterate
-  dropping results from the DOM).
-- Preview cancellation, state transitions, architecture delta display,
-  and 404-rejection handling are covered in the same suites.
+At source HEAD `e8782818` (product commits `eee86b3e`, `6e3bb1a`,
+`91fe1e86`), this round re-ran and recorded:
+
+- `cd web && npm ci && npx vitest run --reporter=verbose
+  src/__tests__/EditorSplit.test.js src/__tests__/MetaSpecs.test.js
+  src/__tests__/lineDiff.test.js` — **166/166 passed, exit 0** (log:
+  `/tmp/stage/review-evidence/task-176-focused-tests.log`), including the
+  §9 tests for state transitions, locked-editor pending-changes diff,
+  preview cancellation, architecture delta display, publish-baseline
+  refresh, and Iterate retention.
+- Mutation probe: reverting `showResultTabs` to the pre-fix logic (dropping
+  `|| Boolean(metaPreviewResult)`) fails exactly the §9 test "meta-spec
+  Iterate returns to editing with the selector AND the last preview results
+  still visible" (1 failed | 46 passed; log:
+  `/tmp/stage/review-evidence/task-176-mutation-showResultTabs.log`). The
+  fix was restored and the suites re-run green.
+
+### web/dist status (round-2 review finding)
+
+The committed `web/dist` at HEAD is byte-identical to the assigned base
+(`git diff --shortstat fbf1a63b HEAD -- web/dist` is empty), so it does not
+contain the §9 UI. Per the current executor contract for this assignment,
+generated `web/dist` files are restored from the assignment base at
+checkpoint and are rebuilt and published remotely by final integration —
+this round deliberately contains no `build(web)` commit. The §9 production
+UI ships in source (`web/src/lib/EditorSplit.svelte`, `lineDiff.js`,
+`MetaSpecs.svelte`, `locales/en.json`; marker greps in
+`/tmp/stage/review-evidence/task-176-round3-verification.log`). Dist
+regeneration command for final integration: `cd web && npm ci && npm run
+build`; post-build check: `git grep -c 'locked-diff' -- web/dist` ≥ 1.
 
 ### Known limitation
 
@@ -111,13 +131,3 @@ API layer has no workspace-scoped assist endpoint (the repo-scoped
 `specs/assist` is what produces inline suggestion blocks). This is outside
 this task's acceptance criteria and blocked by the existing repo-scoped
 API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
