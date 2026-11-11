@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
 ---
 
 ## Spec Excerpt
@@ -193,25 +193,39 @@ Resolved the merge of the new assignment base cfeefbda into the task branch
   git_http 3418 → 4316) — same frozen sites, counts unchanged, no additions;
   both checks pass again.
 
-Focused probes at HEAD 6ab2e89cc (logs under `/tmp/stage/review-evidence/
-task-198-rebase-cfeefbd/`):
+### Contract-restore + test-target compile repair (finding a7a91778, commit 3b67c204)
 
-- `cargo check --all` — clean (full workspace type-checks; gyre-server test
-  compilation is budget-blocked in this sandbox and belongs to the
-  independent verifier).
+The executor restored the assigned task document a third time (checkboxes
+unchecked, `commits:` emptied, Shipped notes stripped) while keeping the
+production fix on the branch. Unlike the two earlier contract-restore rounds
+(docs-only), this round found and fixed real source damage the cfeefbda
+rebase left behind: `cargo check -p gyre-server --tests` failed with two
+test-target compile errors (the production lib compiled, but the test
+binary did not — so `cargo test --all` could not pass):
+
+- `signal_chain.rs` SpecApproved fixture: `SpecLinkEntry` literal missing
+  the `source_sha` field added by this task (E0063). Fixed with the source
+  spec's fixture blob SHA.
+- `spec_registry.rs` `cli_starter_manifest_round_trips_through_ledger_sync`:
+  `sync_spec_ledger` call still used the pre-task 11-arg signature without
+  the `link_repo` argument (E0061). Fixed by passing a
+  `MemSpecLinkRepository`, so the starter-manifest round-trip exercises the
+  full 12-arg sync path.
+
+Probes at HEAD 3b67c204 (log: `/tmp/stage/review-evidence/probes.txt`):
+
+- `cargo check -p gyre-server --tests` — clean (the two errors above are
+  gone; this is the compile gate `cargo test --all` needs).
 - `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
-  (sqlite round-trip every link type + option columns,
-  reopen-durability, replace scoping, repo-scoped delete).
-- Full `scripts/check-*.sh` battery compared against both a cfeefbda
-  worktree and the pre-merge candidate 3030d98 worktree: every script
-  either passes in the merged tree or fails with finding-sets identical to
-  the parents modulo line-number drift (pre-existing upstream debt, no new
-  violations introduced by the merge — verified by set-comparing findings
-  across all three trees). Scripts repaired this round to pass:
-  `check-migration-versions`, `check-migration-sql-portability`,
-  `check-in-memory-state-stores`, `check-unnamed-tuple-carriers`
-  (plus `check-arch`, `check-abac-exempt-handlers`,
-  `check-dead-message-kinds`, `check-mem-port-contracts` confirmed PASS).
+  (round-trip every link type + option columns, reopen-durability, replace
+  scoping, repo-scoped delete).
+- `cargo test -p gyre-adapters migrations_create_tables` — ok (spec_links
+  table created by migration).
+- `scripts/check-arch.sh`, `check-migration-sql-portability.sh`,
+  `check-migration-versions.sh` — PASS.
+- `scripts/check-task-commit-attribution.sh` — passes with the restored
+  frontmatter commit list (this round's fix commit 3b67c204 included);
+  fails by construction against the executor-stripped file.
 
 ### Verifier-owned probes (must run post-merge)
 
@@ -219,30 +233,14 @@ task-198-rebase-cfeefbd/`):
   section-closing tests: `restart_rebuilds_spec_link_graph_from_persisted_table`,
   `staleness_query_parity_after_restart`,
   `sync_replaces_links_scoped_to_source_repo`,
-  `sync_clears_durable_rows_when_links_removed_from_manifest`.
-- `cargo test -p gyre-server --lib spec_link_staleness spec_patrol mem::spec_link`
-  and the `migrations_create_tables` adapter test.
+  `sync_clears_durable_rows_when_links_removed_from_manifest`, plus the
+  repaired `cli_starter_manifest_round_trips_through_ledger_sync`.
+- `cargo test -p gyre-server --lib signal_chain::` — the repaired
+  SpecLinkEntry fixture site.
+- `cargo test -p gyre-server --lib mem::spec_link` and the
+  `migrations_create_tables` adapter test.
 - `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
   verification per the assignment).
-
-### Contract restorations (findings e270b1ae, 34597faa)
-
-The executor restored the assigned task document twice (checkboxes
-unchecked, `commits:` emptied, Shipped notes stripped) while keeping the
-production fix on the branch. No source changed in either round. Latest
-re-verification at HEAD b71c76c05 (finding 34597faa; log under
-`/tmp/stage/review-evidence/contract-restore-round.log`):
-
-- `cargo check -p gyre-server` — clean (7m47s, exit 0).
-- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
-  (round-trip every link type + option columns, reopen-durability, replace
-  scoping, repo-scoped delete).
-- `cargo test -p gyre-adapters duplicate_migration` — ok, 1 passed (no
-  duplicate Diesel migration version prefixes after the 000061 renumber).
-- `scripts/check-task-commit-attribution.sh` — passes once the frontmatter
-  commit list is restored (it fails against the executor-stripped file by
-  construction; no new product-surface commits since 6ab2e89cc — the three
-  commits after it are docs/process-only).
 
 ### Prior repair history (condensed)
 
@@ -263,6 +261,4 @@ re-verification at HEAD b71c76c05 (finding 34597faa; log under
   `web/node_modules` is absent (fresh sandbox), so any full-build gate will
   re-dirty `web/dist`; that rebuild is environmental, not a source change.
   This round used the build wrapper's implicit web build only for
-  `cargo check`; `web/dist` in the merge commit is the base's committed
-  content plus the task branch's previously committed state, with no
-  rebuild performed or committed.
+  `cargo check`; no `web/dist` changes were committed.
