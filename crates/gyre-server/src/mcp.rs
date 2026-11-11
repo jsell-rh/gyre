@@ -1076,7 +1076,13 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
         task.priority = parse_priority(p);
     }
     if let Some(agent_id) = get_str(args, "assigned_to") {
-        task.assigned_to = Some(Id::new(agent_id));
+        let new_assignee = Id::new(agent_id);
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        if task.assigned_to.as_ref() != Some(&new_assignee) {
+            task.generation = task.generation.saturating_add(1);
+        }
+        task.assigned_to = Some(new_assignee);
     }
     if let Some(branch) = get_str(args, "branch") {
         task.branch = Some(branch.to_string());
@@ -1414,7 +1420,51 @@ async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
+/// Create the completion MR for an MCP `gyre_agent_complete` call
+/// (agent-runtime.md §1 Phase 6): reuses the shared MR core, revokes the
+/// agent's token, and releases the budget slot — the teardown mirror of
+/// the REST completion handler. Returns the created (or pre-existing) MR.
+async fn complete_via_mr(
+    state: &std::sync::Arc<crate::AppState>,
+    agent: &gyre_domain::Agent,
+    wt: &gyre_domain::AgentWorktree,
+    summary: Option<&gyre_common::AgentCompletionSummary>,
+) -> Option<gyre_domain::MergeRequest> {
+    let repo = state
+        .repos
+        .find_by_id(&wt.repository_id)
+        .await
+        .ok()
+        .flatten()?;
+    let task = match agent.current_task_id.as_ref() {
+        Some(tid) => state.tasks.find_by_id(tid).await.ok().flatten(),
+        None => None,
+    };
+    let title = match &task {
+        Some(t) => format!("Agent '{}': {}", agent.name, t.title),
+        None => format!("Agent '{}' completed task", agent.name),
+    };
+    let conversation_sha = summary.and_then(|s| s.conversation_sha.as_deref());
+    let (mr, _created) = crate::api::spawn::create_mr_for_completion(
+        state,
+        agent,
+        &wt.branch,
+        &title,
+        &repo.default_branch,
+        conversation_sha,
+    )
+    .await
+    .ok()?;
+
+    // Revoke the agent's token — completed agents must not continue to
+    // authenticate (same teardown as the REST surface).
+    crate::agent_audit::revoke_agent_token(state, agent, "agent_completed").await;
+    // Release the workspace's active-agent budget slot.
+    crate::api::budget::decrement_active_agents(state, &repo.workspace_id.to_string()).await;
+    Some(mr)
+}
+
+async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -> Value {
     let agent_id = match get_str(args, "agent_id") {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
@@ -1494,6 +1544,32 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     // teardown) — deletes Task-scoped secrets for the
                     // agent's task and logs `secret.revoked` per secret.
                     crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
+                    // agent-runtime.md §1 Phase 5→6: `agent.complete` ends
+                    // the implementation phase — the server creates the MR
+                    // from the agent's branch and the gates run
+                    // automatically. Same MR core as the REST
+                    // POST /agents/:id/complete surface (the Phase 5 spec
+                    // names the MCP tool, not a route). Interrogation
+                    // agents have no worktree and skip this block.
+                    let worktrees = state
+                        .worktrees
+                        .find_by_agent(&agent.id)
+                        .await
+                        .unwrap_or_default();
+                    if let Some(wt) = worktrees.first() {
+                        match complete_via_mr(state, &agent, wt, summary.as_ref()).await {
+                            Some(mr) => {
+                                crate::ralph_loop::on_agent_mr_created(state, &agent, &mr).await;
+                            }
+                            None => {
+                                tracing::warn!(
+                                    agent_id = %agent.id,
+                                    "agent_complete: MR creation failed; completion recorded without MR"
+                                );
+                            }
+                        }
+                    }
                     tool_result(format!("Agent {agent_id} marked complete"))
                 }
                 Err(e) => tool_error(format!("Failed to update agent: {e}")),

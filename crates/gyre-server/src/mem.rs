@@ -2528,6 +2528,29 @@ impl NotificationRepository for MemNotificationRepository {
             .collect())
     }
 
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let mut updated = 0u64;
+        for n in self.store.lock().await.iter_mut() {
+            // Same match + unresolved guard as the SQL adapters: resolved or
+            // dismissed cards keep their historical body (audit record of what
+            // was acted on), so the guard is enforced in code here too.
+            if n.source.entity_id == entity_ref
+                && n.notification_type.as_str() == notification_type
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+            {
+                n.body = Some(body.to_string());
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
