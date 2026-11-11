@@ -69,3 +69,70 @@ Sweep for new findings:
 - All 1,843 tests pass (0 failures, 14 ignored).
 
 No new findings. **TASK-010 verified complete.**
+
+## R5 — 2026-11-10
+
+Reviewer: Independent review (pipeline epoch `0ab4ae7a1b8248d2bc0969d068c2b7ad/1`)
+Candidate: `b8e47aba5125b7eb65de33975a725bbb227f7bcb` (base `75afe7fca84e765eb1682e549a5a0e96dd135897`)
+
+Scope of this epoch: the base already carries the five TASK-010 surfaces
+(`briefing://`, `notifications://`, `trace://`, `graph_concept`, `spec_assist`)
+with their tests; the candidate diff is the dotted-name parity repair
+(`275692a80`) plus the rustfmt repair (`67985e8d9`) and doc/spec alignment.
+
+### Durable findings closed
+
+- **fd72a1bf (dotted §11 spellings rejected)** — `275692a80` normalizes
+  `graph.concept`/`spec.assist` to the canonical snake_case names in
+  `tools/call` BEFORE the `needs_write` RBAC gate and dispatch, and
+  advertises the dotted spellings in `tools/list` as alias entries derived
+  from the canonical definitions (same inputSchema; description carries an
+  alias prefix), so the two spellings cannot drift. Verified in source at
+  `mcp.rs:3346-3360` (normalization ordered before RBAC) and
+  `mcp.rs:592-625` (derived aliases). Both alias targets are read-only
+  handlers, so gate membership is unchanged — `check-mcp-write-tools.sh`
+  reports the same 8 gated tools at base and candidate.
+- **b550b5ccf (rustfmt)** — `cargo fmt -p gyre-server -- --check` exits 0
+  at the candidate (evidence: review-evidence/rustfmt-check.log).
+
+### Evidence (review-evidence/)
+
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` —
+  exit 0 (server test *execution* is deferred to the verifier by the stage
+  build wrapper; recorded below).
+- `scripts/check-mcp-write-tools.sh` — OK (8 tools, all gated), identical
+  at base and candidate.
+- `scripts/check-arch.sh` — pass.
+- `scripts/check-mcp-wrapper-parity.sh` — 35 violations, byte-identical
+  violation set to the assignment base (line-number shifts only; verified
+  by diffing normalized outputs from a base worktree).
+- `scripts/check-task-commit-attribution.sh` — OK; both task-labeled
+  commits are recorded in the task frontmatter.
+
+### Tests (new in this epoch)
+
+Three tests exercising the alias surface. Mutation sensitivity verified by
+reading (execution deferred): without the normalization, both dispatch
+tests fail with "Unknown tool: …"; without the derived advertising, the
+tools/list test fails its `must be listed` panic. The concept dispatch test
+uses a real manifest repo and real graph-store nodes (matching +
+non-matching) and asserts the dotted result is byte-identical to the
+canonical result — not a stub-backed or assertionless test.
+
+### Verifier-must-run probes (blocked in review stage by the build wrapper)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- dotted mcp_graph_concept mcp_spec_assist mcp_tools_list mcp_briefing mcp_notifications mcp_trace`
+
+### Notes
+
+- `docs/api-reference.md` rows for `graph_concept`/`spec_assist` now
+  document the alias surface; the `depth` param mention was dropped from
+  the `graph_concept` row, aligning docs with the shipped schema (the
+  manifest-based concept projection has no `depth` param — prior-epoch
+  design per realized-model.md §4; the canonical §11 text only requires a
+  concept-search tool).
+- The spec table amendment (snake_case names + naming note) is carried in
+  the branch; the requirement inputs include that amended text as
+  canonical, and with the aliases the server satisfies either revision.
+
+No new findings. **Candidate `b8e47aba5` approved.**
