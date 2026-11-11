@@ -105,7 +105,7 @@ impl JsonRpcResponse {
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 fn tool_definitions() -> Value {
-    json!({
+    let mut defs = json!({
         "tools": [
             {
                 "name": "gyre_create_task",
@@ -592,7 +592,36 @@ fn tool_definitions() -> Value {
                 }
             }
         ]
-    })
+    });
+
+    // HSI §11 parity-table dotted spellings (`graph.concept`, `spec.assist`):
+    // advertise them as aliases of the canonical snake_case tools so a client
+    // written against either revision of the §11 table discovers a tool under
+    // the name the spec gives it. The alias entries are DERIVED from the
+    // canonical definitions (same inputSchema, same description) so the two
+    // spellings cannot drift — only the name differs.
+    let tools = defs["tools"]
+        .as_array_mut()
+        .expect("tool definitions must be an array");
+    for (dotted, canonical) in [
+        ("graph.concept", "graph_concept"),
+        ("spec.assist", "spec_assist"),
+    ] {
+        let canonical_def = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(canonical))
+            .unwrap_or_else(|| panic!("canonical tool `{canonical}` missing from definitions"))
+            .clone();
+        let mut alias = canonical_def.clone();
+        alias["name"] = json!(dotted);
+        let description = format!(
+            "Alias of `{canonical}` (HSI §11 parity-table spelling). {}",
+            canonical_def["description"].as_str().unwrap_or("")
+        );
+        alias["description"] = json!(description);
+        tools.push(alias);
+    }
+    defs
 }
 
 // ── Tool call handlers ────────────────────────────────────────────────────────
@@ -1688,7 +1717,8 @@ async fn create_uncertainty_notifications(
             &tenant_id,
             now,
         );
-        notif.entity_ref = Some(agent_id.to_string());
+        notif.source.entity_type = "agent".to_string();
+        notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
         if let Err(e) = state.notifications.create(&notif).await {
@@ -3329,6 +3359,17 @@ pub async fn mcp_handler(
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+            // HSI §11 parity-table spellings: the spec's parity table names
+            // these tools `graph.concept` and `spec.assist`. snake_case is
+            // the canonical convention every MCP tool follows; the dotted
+            // §11 spellings are accepted as aliases so a client written
+            // against either table revision dispatches to the same handler.
+            let tool_name = match tool_name {
+                "graph.concept" => "graph_concept",
+                "spec.assist" => "spec_assist",
+                other => other,
+            };
+
             // Per-tool RBAC (MCP-1-B): write tools require Agent or Developer role;
             // read-only tools allow ReadOnly.
             let needs_write = matches!(
@@ -3927,6 +3968,7 @@ mod tests {
                 "scope": "agent",
                 "task_id": "task-1"
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3939,6 +3981,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -3954,6 +3997,7 @@ mod tests {
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -5602,6 +5646,7 @@ mod tests {
             roles: vec![UserRole::Agent],
             tenant_id: "default".to_string(),
             jwt_claims: Some(claims),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         }
@@ -5797,6 +5842,7 @@ mod tests {
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -6909,6 +6955,217 @@ specs:
             "must list graph_concept tool"
         );
         assert!(names.contains(&"spec_assist"), "must list spec_assist tool");
+    }
+
+    // ── TASK-010: HSI §11 dotted-name parity aliases ────────────────────────
+
+    /// tools/list must advertise the §11 parity-table dotted spellings, and
+    /// each alias must carry the same inputSchema as its canonical tool (the
+    /// alias entries are derived from the canonical definitions, so the
+    /// schemas cannot drift).
+    #[tokio::test]
+    async fn mcp_tools_list_includes_dotted_parity_aliases() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 152,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("tool `{name}` must be listed"))
+        };
+        for (dotted, canonical) in [
+            ("graph.concept", "graph_concept"),
+            ("spec.assist", "spec_assist"),
+        ] {
+            assert_eq!(
+                find(dotted)["inputSchema"],
+                find(canonical)["inputSchema"],
+                "alias `{dotted}` schema must match canonical `{canonical}`"
+            );
+        }
+    }
+
+    /// tools/call with the §11 dotted spelling `graph.concept` must dispatch
+    /// to the real concept projection — the same manifest-based result as
+    /// `graph_concept`, not "Unknown tool".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_graph_concept_dotted_alias_dispatches_projection() {
+        const AUTH_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation"
+    include:
+      - types: ["*Auth*"]
+"#;
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-alias"),
+            gyre_common::Id::new("tenant-1"),
+            "alias-ws",
+            "alias-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (_tmp, repo_path) = init_concept_manifest_repo(AUTH_MANIFEST);
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-alias"),
+            gyre_common::Id::new("ws-alias"),
+            "auth-service",
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        // One concept-matching node, one non-matching node.
+        let node = |name: &str| gyre_common::graph::GraphNode {
+            id: gyre_common::Id::new(format!("node-{name}")),
+            repo_id: repo.id.clone(),
+            node_type: gyre_common::NodeType::Type,
+            name: name.to_string(),
+            qualified_name: format!("crates::{name}"),
+            file_path: format!("src/{name}.rs"),
+            line_start: 1,
+            line_end: 2,
+            visibility: gyre_common::graph::Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: gyre_common::graph::SpecConfidence::None,
+            last_modified_sha: "abc".to_string(),
+            last_modified_by: None,
+            last_modified_at: 0,
+            created_sha: "abc".to_string(),
+            created_at: 0,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        state
+            .graph_store
+            .create_node(node("JwtAuthProvider"))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(node("Invoice"))
+            .await
+            .unwrap();
+
+        // Dotted §11 spelling.
+        let (status, json) = mcp_post(
+            crate::build_router(state.clone()),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 153,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph.concept",
+                    "arguments": {
+                        "concept": "Authentication",
+                        "repo_id": "repo-alias"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "dotted alias must dispatch, got: {json}"
+        );
+        let dotted_text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(dotted_text).unwrap();
+        let names: Vec<&str> = result["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"JwtAuthProvider"),
+            "dotted alias must return the concept projection: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Invoice"),
+            "dotted alias must not return non-matching nodes: {names:?}"
+        );
+
+        // The canonical snake_case spelling must produce the identical
+        // result for the same query.
+        let (status, canonical_json) = mcp_post(
+            crate::build_router(state),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 154,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "Authentication",
+                        "repo_id": "repo-alias"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let canonical_text = canonical_json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            dotted_text, canonical_text,
+            "dotted alias and canonical tool must return identical results"
+        );
+    }
+
+    /// tools/call with the §11 dotted spelling `spec.assist` must dispatch to
+    /// the real handler (repo resolution error), not "Unknown tool".
+    #[tokio::test]
+    async fn mcp_spec_assist_dotted_alias_dispatches() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 155,
+                "method": "tools/call",
+                "params": {
+                    "name": "spec.assist",
+                    "arguments": {
+                        "repo_id": "nonexistent-repo",
+                        "spec_path": "system/auth.md",
+                        "instruction": "Add a section about rate limiting"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("Unknown tool"),
+            "dotted alias must dispatch to the spec_assist handler, got: {text}"
+        );
+        assert!(text.contains("repo not found"));
     }
 
     // -- TASK-093: orchestrator tier tools -----------------------------------

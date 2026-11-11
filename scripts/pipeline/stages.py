@@ -31,6 +31,7 @@ def prompt(execution, task):
                         (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
+                        'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
                         'Durable findings:\n' + json.dumps(findings)))
 
@@ -41,6 +42,11 @@ def triage(execution, task):
         return recheck(execution, task)
     store = execution.store
     data = task['data']
+    if execution.claim['input'].get('binding_errors'):
+        from .execution import Attention
+        error = Attention('Spec input binding needs triage in specs/task-spec-inputs.json: ' + '; '.join(execution.claim['input']['binding_errors']))
+        error.category = 'requirements_binding'
+        raise error
     graph = {item['name']: item['data'].get('dependencies') or [] for item in store.tasks()}
     error = contract.graph_errors(graph).get(task['name']) or data.get('metadata_error')
     complete = data.get('dependencies') is not None and data.get('title') and data.get('spec_ref')
@@ -626,7 +632,8 @@ for p in pairs:
     return {'deleted': resource}, updates, []
 
 
-HANDLERS = {'triage': triage, 'implement': implement, 'review': review,
+from .assessment import run as assess
+HANDLERS = {'triage': triage, 'assess': assess, 'implement': implement, 'review': review,
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
 from .ci import observe
 HANDLERS['observe'] = observe
