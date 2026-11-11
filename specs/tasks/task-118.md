@@ -5,14 +5,14 @@ depends_on:
   - task-115
   - task-116
   - task-117
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-runtime.md §Phase 4: System Spawns Agents (Mechanical)"
   - "agent-runtime.md §Phase 5: Implementation"
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -91,77 +91,3 @@ On agent completion: server creates MR, gates run automatically (test, lint, spe
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §1 Phases 4-8 in full. Agent spawn is in `gyre-server/src/api/spawn.rs`. Agent domain: `gyre-domain/src/agent.rs` (has `iteration`, `loop_config`). Task domain: `gyre-domain/src/task.rs` (has `task_type`, `order`, `depends_on`). Gate execution: `gyre-server/src/gate_executor.rs`. MR creation: grep for `create_mr` or `MergeRequest::new`. JWT minting: `gyre-server/src/auth.rs` or `gyre-server/src/signing.rs`. Compute target: `gyre-domain/src/compute_target.rs`.
-
-## Shipped
-
-Commit `26edb8fc3` closes agent-runtime.md §1 Phases 4–8. This round is a
-task-document contract repair only (a prior checkpoint had folded progress
-notes into the protected assigned text; the executor restored the assigned
-contract and these notes now live here); no production code changed since
-`26edb8fc3`.
-
-### Phase 4 — worker scheduler
-
-`spawn_implementation_workers` (signal_chain.rs) runs inside
-`scheduler_run_once` under the same cycle lock. It detects `Backlog` tasks
-with `task_type: Implementation` (Delegation/Coordination excluded), checks
-ordering (`depends_on` resolved; `order` is next in the repo+parent group),
-and preconditions: repo not `Archived` (defer, resume on unarchive);
-`effective_max_agents` = `repo.max_agents` → `workspace.max_agents_per_repo`
-→ unlimited, with queueing-not-rejection semantics; workspace budget
-exhaustion flags the `budget-exhausted` task label (cleared on the later
-successful spawn). It claims the task `InProgress` and spawns attempt 0
-synchronously through `spawn_agent_core` as the system principal. New
-`Repository.max_agents`/`max_agent_iterations` columns (migration 000060,
-SQLite + PG; `PUT /repos/:id` validates repo limit ≤ workspace per-repo
-limit).
-
-### Phase 6 — MR and gates on completion
-
-Both completion surfaces — REST `POST /agents/:id/complete` and MCP
-`gyre_agent_complete` (which previously created no MR) — now share
-`create_mr_for_completion` and call `ralph_loop::on_agent_mr_created`, which
-enqueues via `merge_queue::enqueue_core`; enqueue triggers
-`trigger_gates_for_mr` so gates run automatically and results are recorded
-on the MR.
-
-### Phase 7 — Ralph loop
-
-New `crates/gyre-server/src/ralph_loop.rs`. Pass path: a bounded watcher
-waits for the merge processor's merge, then task → Done + TaskTransitioned,
-agent Idle, JWT revoked. Fail path: task back to `InProgress`, one
-`GateFailure` message per failed gate in the agent's inbox carrying the
-gate's real recorded output, failed MR Closed, and
-`relaunch_agent_session` re-launches the same agent entity with a fresh JWT
-and fresh context on the same worktree/branch (iteration incremented,
-`GYRE_ITERATION` injected, prompt set re-assembled at pinned versions). At
-`max_agent_iterations` (repo setting, default 10): task `Blocked`, agent
-`Failed`, token removed, `TaskBlocked` routed to the repo orchestrator
-(spawned on demand). Spawn failure: 3 retries at 1s/5s/30s
-(`SPAWN_RETRY_BACKOFF_SECS`, claim kept fresh vs the 60s stale recovery);
-exhausted → task `Blocked` + priority-1 `ComputeTargetUnavailable`
-notifications to workspace Owner/Admin members. Spec rejection mid-flight
-cancellation was already genuine (specs.rs, unchanged).
-
-### Phase 8 — system-initiated agents
-
-Gate reviewer (`run_agent_review_gate`, gate_executor.rs) is triggered
-mechanically now that the Ralph loop enqueues every agent MR; interrogation
-agents (spawn endpoint `agent_type: "interrogation"`, 30-min JWT, read-only
-ABAC policies) and reconciliation rollouts (`run_reconciliation` creating
-tasks that flow through the now-complete scheduler→worker chain) were
-pre-existing and verified.
-
-### Test evidence
-
-Verified in-sandbox at `26edb8fc3`: `cargo test -p gyre-domain` (124),
-`cargo test -p gyre-common` (463), `cargo test -p gyre-adapters` (438 +
-sqlite repository 9, incl. new `max_agent_limits_persist`);
-`cargo check -p gyre-server --all-targets` clean. The gyre-server lib/test
-binaries exceed the sandbox 4 GiB build budget, so the server probes must
-run in the independent verifier:
-
-- `cargo test -p gyre-server --lib ralph_loop`
-- `cargo test -p gyre-server --lib signal_chain`
-- `cargo test -p gyre-server --lib api::repos`
-- `cargo test -p gyre-server --test e2e_ralph_loop`
