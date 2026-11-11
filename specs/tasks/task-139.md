@@ -178,18 +178,59 @@ scripts with output identical to the pristine baseline. Full workspace
 `cargo test --all`, all-target Clippy, and GitHub CI on the exact head
 remain with verification/publication.
 
-### Rebase onto main (merge commit 98b0bfa32c)
+### Rebase rounds
 
-Rebased the task branch onto main head bd49c7847 (task-117/task-109/
-task-205 lineage). Single textual conflict in `docs/api-reference.md`:
-kept the task-139 spec-policy row (with `require_signed_approval` and the
-advisory MR comment) and retained main's new
-`/api/v1/repos/{id}/settings/spec-lifecycle` row. No semantic conflicts:
-post-merge re-runs on this sandbox (merged head 98b0bfa32) — `cargo test
--p gyre-server --lib` 1664/1664; `gyre-domain` 426 passed + 6 ignored;
-`gyre-adapters --lib` 448/448; integration `git_integration` 17/17,
-`api_integration` 66/66, `graph_integration` 38/38; frontend `vitest run
-src/__tests__/RepoSettings.test.js` 58/58; all 19 check-\* mechanical
-invariants PASS (migration versions unique — Diesel versions include the
-date prefix, so main's `2026-10-08-000059_spec_lifecycle_configs` and this
-task's `2026-11-09-000059_require_signed_approval` do not collide).
+- **Rebase onto main head bd49c7847** (merge commit 98b0bfa32c): single
+  textual conflict in `docs/api-reference.md` — kept the task-139
+  spec-policy row (with `require_signed_approval` and the advisory MR
+  comment) and retained main's new
+  `/api/v1/repos/{id}/settings/spec-lifecycle` row. Post-merge re-runs on
+  that head: `cargo test -p gyre-server --lib` 1664/1664; `gyre-domain`
+  426 passed + 6 ignored; `gyre-adapters --lib` 448/448; integration
+  `git_integration` 17/17, `api_integration` 66/66, `graph_integration`
+  38/38; frontend `vitest run src/__tests__/RepoSettings.test.js` 58/58;
+  all check-* mechanical invariants pass.
+
+- **Rebase onto main head cfeefbda9** (task-091 lineage, this round): two
+  content conflicts, both resolved by combining both sides' features
+  rather than picking one:
+  - `gate_executor.rs`: main's rework moved review-agent context into
+    `build_review_agent_context`/`GateReviewContext` (`ctx.spec_ref`,
+    `ctx.spec_content` at the pinned SHA). Resolution keeps main's
+    ctx-based access and this task's `GYRE_SPEC_URL` env delivery, with
+    the pinned-spec URL now derived from `ctx.spec_ref`.
+  - `notifications.rs`: main added `notify_gate_passed` (with per-(user,
+    MR) de-duplication) at the same site where this task added
+    `notify_spec_policy_violation`. Resolution keeps both functions.
+    `notify_spec_policy_violation` was adapted to main's richer
+    `notify_rich` signature (repo_id + entity_type "gate") and now takes
+    a real `tenant_id` parameter instead of the previous literal
+    `"default"` — `report_spec_policy_violation` (merge_processor)
+    resolves it from the workspace record and skips + logs when the
+    workspace cannot be resolved
+    (check-fabricated-scope-defaults.sh posture).
+  - Post-merge verification on this head (sandbox, see
+    review-evidence): `cargo check -p gyre-server` and `cargo check -p
+    gyre-server --tests` clean; `cargo test -p gyre-domain` 463+8
+    passed; `cargo test -p gyre-adapters --lib` 443 passed + 6 ignored
+    (migrations incl. `2026-11-09-000059_require_signed_approval` run on
+    fresh SQLite DBs); frontend `vitest run
+    src/__tests__/RepoSettings.test.js` 58/58; all 20 check-*
+    mechanical invariants pass (incl. migration-version uniqueness:
+    main's date-prefixed `2026-10-09-000059/000060` and
+    `2026-11-08-000059` do not collide with
+    `2026-11-09-000059_require_signed_approval`).
+
+  The sandbox build wrapper enforces the 4 GiB budget by refusing
+  gyre-server test compilation, so `cargo test -p gyre-server --lib`
+  and the integration suites must run in the independent verifier:
+  merge_processor::{require_current_spec_blocks_stale_spec_ref,
+  require_signed_approval_blocks_unsigned_spec_approval,
+  warn_stale_spec_adds_advisory_comment_without_blocking},
+  api::gates::{signed_spec_ref_requires_signature_on_active_approval,
+  revoked_approval_no_longer_verifies_spec_ref},
+  api::merge_requests::get_mr_spec_serves_pinned_sha_not_head,
+  api::spec_policy::set_require_signed_approval_round_trips,
+  notifications::gate_passed dedup tests, and gate_executor review
+  context (pinned-SHA delivery) tests, plus git_integration /
+  api_integration / graph_integration.

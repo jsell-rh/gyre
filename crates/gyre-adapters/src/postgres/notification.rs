@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, Notification, NotificationSource, NotificationType};
 use gyre_ports::NotificationRepository;
 use std::sync::Arc;
 
@@ -23,6 +23,10 @@ struct NotificationRow {
     body: Option<String>,
     entity_ref: Option<String>,
     repo_id: Option<String>,
+    entity_type: Option<String>,
+    action_url: Option<String>,
+    read: i32,
+    read_at: Option<i64>,
     resolved_at: Option<i64>,
     dismissed_at: Option<i64>,
     created_at: i64,
@@ -33,16 +37,30 @@ impl NotificationRow {
     fn into_notification(self) -> Result<Notification> {
         let ntype = NotificationType::parse(&self.notification_type)
             .ok_or_else(|| anyhow!("unknown notification_type: {}", self.notification_type))?;
+        let priority_rank = self.priority.clamp(1, 10) as u8;
+        // Rows written before migration 000059 have no entity_type: their
+        // source entity id survives in entity_ref, but its kind was never
+        // recorded — map to the generic "system" source kind rather than
+        // fabricating a specific one.
+        let source = NotificationSource {
+            entity_type: self.entity_type.unwrap_or_else(|| "system".to_string()),
+            entity_id: self.entity_ref.unwrap_or_default(),
+            workspace_id: Id::new(self.workspace_id),
+            repo_id: self.repo_id.map(Id::new),
+        };
         Ok(Notification {
             id: Id::new(self.id),
-            workspace_id: Id::new(self.workspace_id),
+            workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
             notification_type: ntype,
-            priority: self.priority.clamp(1, 10) as u8,
+            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            priority_rank,
             title: self.title,
             body: self.body,
-            entity_ref: self.entity_ref,
-            repo_id: self.repo_id,
+            source,
+            action_url: self.action_url,
+            read: self.read != 0,
+            read_at: self.read_at,
             resolved_at: self.resolved_at,
             dismissed_at: self.dismissed_at,
             created_at: self.created_at,
@@ -63,6 +81,10 @@ struct NewNotificationRow<'a> {
     body: Option<&'a str>,
     entity_ref: Option<&'a str>,
     repo_id: Option<&'a str>,
+    entity_type: Option<&'a str>,
+    action_url: Option<&'a str>,
+    read: i32,
+    read_at: Option<i64>,
     resolved_at: Option<i64>,
     dismissed_at: Option<i64>,
     created_at: i64,
@@ -83,11 +105,15 @@ impl NotificationRepository for PgStorage {
                 workspace_id: n.workspace_id.as_str(),
                 user_id: n.user_id.as_str(),
                 notification_type: n.notification_type.as_str(),
-                priority: n.priority as i32,
+                priority: n.priority_rank as i32,
                 title: &n.title,
                 body: n.body.as_deref(),
-                entity_ref: n.entity_ref.as_deref(),
-                repo_id: n.repo_id.as_deref(),
+                entity_ref: Some(n.source.entity_id.as_str()),
+                repo_id: n.source.repo_id.as_ref().map(|r| r.as_str()),
+                entity_type: Some(n.source.entity_type.as_str()),
+                action_url: n.action_url.as_deref(),
+                read: n.read as i32,
+                read_at: n.read_at,
                 resolved_at: n.resolved_at,
                 dismissed_at: n.dismissed_at,
                 created_at: n.created_at,
@@ -212,6 +238,36 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let uid = user_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            // `read = true` stamps read_at; `read = false` clears both so an
+            // unread notification has no stale read timestamp.
+            let (read_val, read_at): (i32, Option<i64>) =
+                if read { (1, Some(now)) } else { (0, None) };
+            diesel::update(
+                notifications::table
+                    .filter(notifications::id.eq(id.as_str()))
+                    .filter(notifications::user_id.eq(uid.as_str())),
+            )
+            .set((
+                notifications::read.eq(read_val),
+                notifications::read_at.eq(read_at),
+            ))
+            .execute(&mut *conn)
+            .context("mark notification read")?;
+            Ok(())
+        })
+        .await?
+    }
+
     async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
@@ -281,6 +337,37 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> Result<bool> {
+        let pool = Arc::clone(&self.pool);
+        let ws_id = workspace_id.clone();
+        let uid = user_id.clone();
+        let ntype = notification_type.to_string();
+        let eref = entity_ref.to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            let mut conn = pool.get().context("get db connection")?;
+            let count = notifications::table
+                .filter(notifications::workspace_id.eq(ws_id.as_str()))
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::notification_type.eq(&ntype))
+                .filter(notifications::entity_ref.eq(&eref))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .filter(notifications::created_at.ge(since))
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("has_active_notification")?;
+            Ok(count > 0)
+        })
+        .await?
+    }
+
     async fn delete_older_than(
         &self,
         read_cutoff_secs: u64,
@@ -291,14 +378,17 @@ impl NotificationRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let read_cutoff = read_cutoff_secs as i64;
             let unread_cutoff = unread_cutoff_secs as i64;
-            // A notification is "read" when the human acted on it (resolved) or
-            // explicitly dismissed it (business-continuity.md §5).
-            let is_read = notifications::resolved_at
-                .is_not_null()
+            // A notification is "read" when the human acted on it (resolved),
+            // explicitly dismissed it, or marked it read in the UI
+            // (business-continuity.md §5 + user-management.md read state).
+            let is_read = notifications::read
+                .eq(1)
+                .or(notifications::resolved_at.is_not_null())
                 .or(notifications::dismissed_at.is_not_null());
             let read_old = is_read.and(notifications::created_at.lt(read_cutoff));
-            let unread_old = notifications::resolved_at
-                .is_null()
+            let unread_old = notifications::read
+                .eq(0)
+                .and(notifications::resolved_at.is_null())
                 .and(notifications::dismissed_at.is_null())
                 .and(notifications::created_at.lt(unread_cutoff));
             let n = diesel::delete(notifications::table)
