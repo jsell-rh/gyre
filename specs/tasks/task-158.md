@@ -120,52 +120,31 @@ realization (tenant set + inheritance + override skip + force), replacing
 the never-shipped `POST /api/v1/tenant/meta-spec-rollout` sketch.
 Coverage matrix row 12 → `implemented`; api-reference documented.
 
-### Verification repair (round df2f95d9, commit `17fc6bf7a`)
-
-The changed-line clippy gate (`scripts/check-clippy-diff.py`) failed on
-two task-158 lines — the first verification round with registry access
-after the offline merge-repair rounds:
-
-- `TenantMetaSpecSetRepository` tripped `clippy::double_must_use`:
-  async-trait 0.1.89 (upgraded via the assignment base) injects
-  `#[must_use]` into every generated trait method. Fixed with the
-  repo-standard `#[allow(clippy::double_must_use)]` above
-  `#[async_trait]` (50+ existing instances, e.g.
-  `meta_spec_repository.rs`).
-- `run_conformance_sweep` passed `&&Arc<AppState>` where
-  `compute_meta_spec_set_sha` takes `&AppState` — dropped the needless
-  borrow (deref coercion, no behavior change).
-
-Both files rustfmt-clean; `cargo clippy -p gyre-server --lib` (full lib
-type-check) and `-p gyre-adapters --lib` green with zero warnings on
-changed lines; `-p gyre-ports --all-targets` green except the
-pre-existing unchanged-line warning at `meta_spec_set.rs:13`. Probe
-commands and exit codes retained in
-`/tmp/stage/review-evidence/clippy-repair-round-df2f95d9.md`.
-
 ### Test evidence
 
-Prior online round (at `381962ab9`, pre-merge): 
 `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1356 passed, 0
-failed**, including the §8 suite in `reconciliation.rs` (tenant
-propagation creates per-workspace tasks; override prevents propagation;
-force bypasses the override; unbound paths do not propagate; blast radius
-includes all non-overriding workspaces and never crosses tenants; merge
-semantics; effective-set SHA reflects inheritance; workspace GET returns
-the effective set; full API flow; set-PUT propagation trigger and
-fail-closed override gate, both verified killing by mutation) and the
-`meta_specs.rs` API tests (roundtrip, Admin-only, containment, 404, force
-400/403). `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — **359
-passed, 0 failed** (tenant set repo roundtrip/overwrite/delete/
-independence on fresh-migrated SQLite DB, Tenant-scope meta-spec
-round-trip + scope filter).
+failed** at `381962ab9` (online round), including the §8 suite in
+`reconciliation.rs` (tenant propagation creates per-workspace tasks;
+override prevents propagation; force bypasses the override; unbound paths
+do not propagate; blast radius includes all non-overriding workspaces and
+never crosses tenants; merge semantics; effective-set SHA reflects
+inheritance; workspace GET returns the effective set; full API flow;
+set-PUT propagation trigger and fail-closed override gate, both verified
+killing by mutation) and the `meta_specs.rs` API tests (roundtrip,
+Admin-only, containment, 404, force 400/403).
+`SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — **359 passed, 0
+failed** (tenant set repo roundtrip/overwrite/delete/independence on
+fresh-migrated SQLite DB, Tenant-scope meta-spec round-trip + scope
+filter). The follow-up clippy-repair round (`17fc6bf7a`: an allow
+attribute and a deref-coercion canonicalization) changed no behavior.
 
-This round changed no behavior (an allow attribute and a deref-coercion
-canonicalization); server test compilation is deferred to the remote
-verifier per the 4 GiB budget. Remote verification must run:
+Remote verification must run:
 
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` (§8 tenant suite +
-  suites sharing the touched files)
+  suites sharing the touched files, re-validated after the base merge)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` (tenant set repo +
   `000059_tenant_meta_spec_sets` migration on a fresh DB)
 - Full workspace clippy all-targets gate (`scripts/check-clippy-diff.py`)
+
+This round (base merge `cba416b46`) changed no task-158 product code;
+`git diff --check` against the assignment base is clean.
