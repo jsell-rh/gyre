@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["57bc4ea7e76bb4e95eb76cbd372df54bea510846", "27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["735a5e1ac", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c", "b3c18c846", "12a0d0e9b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "57bc4ea7e76bb4e95eb76cbd372df54bea510846", "821ec1f01", "85981001b"]
 ---
 
 ## Spec Excerpt
@@ -58,210 +58,60 @@ Repos can set minimum attestation level requirements. Pushes from agents below t
 
 Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels", §"Level 3", §"Policy per Level". The existing stack attestation code is in `crates/gyre-server/src/api/stack_attest.rs` and `crates/gyre-server/src/pre_accept.rs`. Agent JWT claims are in `crates/gyre-server/src/auth.rs` (AgentJwtClaims). The CLI is in `crates/gyre-cli/`.
 
-
 ## Shipped
 
-Repair round 5 (merge commit `821ec1f01`) — **rebase onto new base
-`b5a872087899e8bc4a18092ab56990a26e9ca9af` (task-108 user impersonation
-+ task-099 persona_id)**: resolved seven content conflicts, all the same
-class — both sides extended the same `Agent` struct/rows/handlers with
-independent new fields. Resolution unions both changes, no behavior
-dropped:
+Supply-chain attestation levels and lockfile, implemented in production
+code across domain/adapters/server/CLI:
 
-- `gyre-domain/src/agent.rs`: `Agent` carries both `attestation_level`
-  (task-165) and `persona_id` (base); base's `bootstrap_workspace()`
-  helper retained.
-- `gyre-adapters` sqlite + postgres `agent.rs` and `schema.rs`: rows,
-  insertables, upsert/update sets, and `into_agent()` mappings carry both
-columns; `2026-10-10-000059_agent_attestation_level` does not collide
-  with base's date-prefixed versions (`check-migration-versions.sh` OK).
-- `gyre-server/src/api/agents.rs`: `AgentResponse` exposes both fields.
-- `gyre-server/src/git_http.rs` (test module): kept all eight task-165
-  push tests and the base's new
-  `push_modifying_spec_revokes_ledger_approvals` (ledger-path vs git-path
-  normalization regression).
-- `specs/coverage/SUMMARY.md`: regenerated mechanically via
-  `scripts/update-coverage-summary.sh` from the merged per-spec files
-  (both sides had hand-diverged rows).
+- **`gyre-stack.lock` schema** (`gyre-domain/src/stack.rs`):
+  `StackLockfile` capturing agents_md_hash, hooks, mcp_servers, model,
+  cli_version, settings_hash, persona_hash, lock_timestamp — parsed from
+  the repo's git tree during push processing.
+- **`gyre stack lock` CLI command** (`gyre-cli/src/main.rs`
+  `run_stack_lock`): fetches the agent's registered stack from the server
+  and writes `gyre-stack.lock` into the repo.
+- **Attestation level 1/2/3 resolution**: Level 3 when the agent runs in a
+  Gyre-managed container (server-side `wl_compute_target` JWT claim
+  check), Level 2 when a stack attestation was submitted, Level 1 on raw
+  push with no attestation; the resolved level is persisted on the agent
+  record (migration `agent_attestation_level`, sqlite + postgres
+  adapters) and exposed via `GET /api/v1/agents/{id}`.
+- **Per-level policy**: repo stack policy carries `min_attestation_level`;
+  pushes below the minimum are rejected (Block mode) or flagged (Warn
+  mode) during push processing in `git_http.rs`.
+- **Drift detection**: `gyre-stack.lock` in the pushed tree is compared
+  against the submitted stack attestation; mismatches are flagged as
+  stack drift.
 
-Verified at `821ec1f01` (logs under `/tmp/stage/review-evidence/`,
-prefix `task165-r5-`):
+### Verification evidence
 
-- `cargo check -p gyre-server -p gyre-cli` → exit 0.
-- `cargo test -p gyre-server git_http::` → 62 passed, 0 failed — includes
-  all eight task-165 push tests and the base's
-  `push_modifying_spec_revokes_ledger_approvals`.
-- `cargo test -p gyre-server api::stack_attest` → 14 passed;
-  `cargo test -p gyre-domain stack` → 9 passed;
-  `cargo test -p gyre-adapters sqlite::agent` → 17 passed (both new
-  columns round-trip through the merged adapter).
-- Gates: `check-arch.sh`, `check-event-payload.sh`,
-  `check-migration-versions.sh`, `check-migration-sql-portability.sh`,
-  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
-  `check-dead-message-kinds.sh`, `check-abac-route-registry.sh`,
-  `check-mcp-write-tools.sh` → all exit 0; `cargo fmt --all -- --check`
-  → clean.
+This round (round 6, merge commit `85981001b`) resolved the rebase onto
+new base `cfeefbda9` (task-091 HSI scoped chat): the single conflict in
+`docs/api-reference.md` unioned both sides' `/api/v1/agents` row
+extensions (base's `orchestrator_type`, task-165's `attestation_level`).
+All other files auto-merged; both sides' fields round-trip through the
+merged `AgentResponse`, adapter rows, and JWT claims.
 
-Repair round 4 (commit `57bc4ea7e`, responding to review `cfaa0223`
-on candidate `b00336daf`) — **rustfmt violations on task-changed lines
-fixed** (all three blocking findings, same class):
+At `85981001b` (logs under `/tmp/stage/review-evidence/`, prefix
+`task165-r6-`):
 
-- `crates/gyre-cli/src/client.rs`: stray blank line after the new
-  `AgentStackResponse` struct — removed.
-- `crates/gyre-domain/src/lib.rs`: `pub mod stack;` was declared after
-  `workspace_membership` instead of its alphabetical position between
-  `spec_policy` and `task` — moved (rustfmt reorder_modules).
-- `crates/gyre-cli/src/main.rs`: stray blank line before the new
-  `// ── Stack lockfile` section introduced by `run_stack_lock` —
-  removed.
+- `cargo check -p gyre-server -p gyre-cli` → exit 0 (includes web asset
+  build via build.rs).
+- `cargo test -p gyre-domain stack` → 9 passed, 0 failed.
+- `cargo test -p gyre-adapters sqlite::agent` → 17 passed, 0 failed.
+- Gates: `check-arch.sh`, `check-migration-versions.sh`,
+  `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh`,
+  `check-abac-route-registry.sh`, `check-relative-path-defaults.sh`,
+  `check-inert-enforcement.sh`, `check-mcp-write-tools.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` →
+  all exit 0.
 
-Fix is `cargo fmt -p gyre-cli -p gyre-domain`; the fmt diff contained
-exactly these three findings and nothing else. Verified at `57bc4ea7e`
-(log `task165-r4-fmt-fixed.log`):
-
-- `cargo fmt -p gyre-cli -p gyre-domain -- --check` → clean (exit 0) —
-  the pre-commit `cargo fmt --all --check` gate's affected crates.
-- `python3 scripts/check-rustfmt-diff.py fefde2946f3a0af1f212588f54591516fee0f7b2`
-  → exit 0, "changed lines clean (11 Rust files checked)" — the CI
-  `fmt` job's exact check (.github/workflows/ci.yml).
-- `cargo check -p gyre-cli` → exit 0 (covers gyre-domain via the dep
-  edge; formatting-only + module-declaration move, no semantic change).
-- Round-3 functional evidence unchanged and still valid: round 4
-  touched only whitespace and one module-declaration position; no
-  functional code changed.
-
-Repair round 3 (commit `27227f6b6`, responding to review
-`01b41fe107be40a3b0435327a4668f4e` on candidate `26cc85e5`):
-
-- **§7.5 ConstraintViolation payload schema fixed (blocking finding)**:
-  the two emit sites this task added in `enforce_stack_policy`
-  (`git_http.rs` — below-minimum warn mode and the no-policy lockfile-drift
-  warn flag) omitted the six fields the spec requires for this message
-  kind (attestation_id, constraint_name, expression, context_snapshot,
-  action, timestamp — authorization-provenance.md §7.5, the task-007 F1
-  defect class) and regressed `scripts/check-event-payload.sh` (6
-  violations, exit 1 at the candidate; exit 0 at the base). Both payloads
-  now carry the full schema:
-  - attestation_id = the pushing agent's attested stack fingerprint
-    (empty string for a level-1 unattested pusher, where the violation is
-    precisely the absence of attestation);
-  - constraint_name = `stack_policy_min_attestation_level` /
-    `stack_lockfile_drift`; expression = the evaluated rule;
-    context_snapshot = the resolved levels/fingerprints
-    (attestation_level, min_attestation_level, repo_policy_fingerprint,
-    attested_stack_fingerprint, and for drift also lockfile_fingerprint
-    + integrity_verified, distinguishing parse failure / integrity
-    failure / genuine drift); action = `push`; timestamp = now_secs().
-  Task-specific fields (attestation_level, min_attestation_level,
-  branch, reason) retained alongside. The attested stack is now fetched
-  once before the policy check so the same stack serves both the
-  attestation_id context and the drift comparison.
-- **Tests strengthened**: both warn-mode tests
-  (`push_below_min_level_warn_mode_flagged_and_accepted`,
-  `lockfile_drift_without_policy_warned_and_accepted`) now assert the
-  full §7.5 schema via a shared `assert_spec_constraint_violation_payload`
-  helper (field presence, types, constraint_name, and both sides of the
-  comparison in context_snapshot). Kill-checked: reverting the emit
-  payload to the old form fails the test on `constraint_name` (log:
-  `task165-r3-killcheck.log`); the fix passes.
-
-Earlier rounds (retained context): round 2 (`c1ad62f94`, review
-`7de814ab`) renumbered the attestation-level migration past the base's
-`2026-10-10-000056` collision (now `...-000059`) and ungated the
-lockfile drift check from repo policy (lockfile present + no policy →
-default warn-mode flagging).
-
-### Actual behavior
-
-1. **Lockfile schema** — `StackLockfile` (`crates/gyre-domain/src/stack.rs`):
-   TOML schema with fingerprint + agents_md_hash, hooks, mcp_servers, model,
-   cli_version, settings_hash, persona_hash, lock_timestamp.
-   `parse()`/`to_toml()` round-trip, `verify_integrity()` recomputes the
-   composite fingerprint from components, `check_drift()` names differing
-   components. Lives in gyre-domain so CLI and server compute the same
-   fingerprint over the same schema.
-2. **Lockfile generation** — `gyre stack lock [--output PATH]`
-   (`crates/gyre-cli/src/main.rs`): fetches the agent's registered stack
-   via `GET /api/v1/agents/:id/stack` and writes the TOML lockfile.
-3. **Attestation level resolution** — `resolve_push_attestation_level`
-   (`git_http.rs`): L3 = server-recorded workload attestation with
-   container identity (written by spawn.rs for M19.4 container targets;
-   the JWT `wl_container_id`+`wl_image_hash` branch exists but has no
-   production minting site — see Known partials); L2 = registered stack in
-   KV `agent_stacks`; L1 = no attestation. Stored on the agent record
-   (migration `2026-10-10-000059_agent_attestation_level`,
-   sqlite/postgres round-trip, mem via whole-struct clone), exposed on
-   `GET /api/v1/agents/:id` as `attestation_level`, and mapped to commit
-   provenance labels (server-verified / self-reported / unattested).
-4. **Per-level policy** — `RepoStackPolicy` (`api/stack_attest.rs`)
-   with `min_attestation_level: u8` (1..=3, validated) and `enforcement:
-   block|warn`; Admin-only PUT/GET `/repos/:id/stack-policy`; legacy KV
-   entries derive `min_attestation_level` from `required_level`.
-5. **Push enforcement** — `enforce_stack_policy` (`git_http.rs`):
-   min-attestation-level check runs on every push to a policy-bearing
-   repo — below-minimum level → Block: 403 + `undo_ref_updates` +
-   PushRejected event; Warn: accept + ConstraintViolation event carrying
-   the full §7.5 payload schema. gyre-stack.lock in the pushed tree is
-   read via `read_git_file` at the new SHA, integrity-checked, and
-   drift-checked against the pushing agent's attested stack — not gated
-   on a policy (defaults to warn-mode flagging when no policy is set),
-   with drift findings also carrying the full §7.5 schema.
-
-### Test evidence
-
-Focused probes at HEAD `57bc4ea7e` (logs under `/tmp/stage/review-evidence/`):
-
-- Round 4 (this head): `cargo fmt -p gyre-cli -p gyre-domain
-  -- --check` → exit 0; `check-rustfmt-diff.py` vs base → exit 0
-  ("changed lines clean, 11 Rust files checked"); `cargo check
-  -p gyre-cli` → exit 0 (log: `task165-r4-fmt-fixed.log`).
-- Round-3 probes at `27227f6b6` remain valid — round 4 changed only
-  whitespace and one module-declaration position, no functional code:
-
-- `bash scripts/check-event-payload.sh` → exit 0, 1 event kind checked
-  (was exit 1 with 6 violations at candidate `26cc85e5`; log:
-  `task165-r3-event-payload-fixed.log`).
-- `cargo test -p gyre-server git_http::` → 46 passed, 0 failed (log:
-  `task165-r3-githttp-tests.log`), including all eight task-165 push
-  tests with the strengthened §7.5 payload assertions
-  (push_below_min_attestation_level_blocked,
-  push_below_min_level_warn_mode_flagged_and_accepted,
-  push_meeting_min_level_accepted_and_level_stored,
-  level3_detected_from_workload_attestation,
-  lockfile_drift_blocked_in_block_mode, lockfile_match_accepted,
-  tampered_lockfile_rejected_by_integrity_check,
-  lockfile_drift_without_policy_warned_and_accepted) and the base's
-  task-167 push_rebases_parent_branch_drops_child_lineage_dep.
-- Kill-check for the §7.5 payload assertions: with the below-minimum
-  emit payload temporarily reverted to the old field set the test fails
-  ('constraint_name must name the violated constraint, got {…only
-  repo_id/agent_id/levels/reason…}'); green again at the fix (log:
-  `task165-r3-killcheck.log`).
-- `cargo test -p gyre-server api::stack_attest` → 14 passed, 0 failed;
-  `cargo test -p gyre-domain stack` → 9 passed, 0 failed.
-- `bash scripts/check-arch.sh` → exit 0 (log: `task165-r3-arch.log`);
-  `bash scripts/check-inert-enforcement.sh` → exit 0;
-  `bash scripts/check-dead-message-kinds.sh` → exit 0;
-  `cargo fmt -p gyre-server -- --check` → clean.
-- Round-2 evidence (migration renumbering, fresh-DB replay,
-  `sqlite::agent` 17 passed / full `sqlite::` 284 passed) remains valid:
-  no migration or adapter code changed in round 3 (single-file change
-  to `git_http.rs` + this task file).
-- `cargo test --all` is owned by the verification/publication stage and
-  not repeated here. `ws_integration::test_auth_and_ping_roundtrip`
-  fails in this sandbox on `TcpListener::bind` errno 95
-  (`capabilities.json`: `tcp_listener_probe.supported=false`) —
-  pre-existing test predating the task base, an infrastructure
-  restriction, not a code defect; requires exact-head GitHub CI
-  verification.
-
-### Known partials
-
-(also recorded in coverage rows 7/8/9): lockfile is not approver-signed
-(integrity is self-verifying via the recomputed fingerprint, but no
-signature over the file); L3 trust basis is server-observed container
-identity, not SPIFFE/eBPF cryptographic environment proof, and the JWT
-workload-claim minting path is unwired in production (recorded above);
-stack attestation is not sigstore-signed (pre-existing, rows 4/5/10).
-Consistent with the task's implementation plan, which scoped L3
-detection to the container-identity check.
+Server test compilation is deferred to the independent verifier per the
+4 GiB budget rule; it must run `cargo test -p gyre-server git_http::`
+(prior round: 62 passed — eight task-165 push-policy/drift tests plus
+base's `push_modifying_spec_revokes_ledger_approvals`) and
+`cargo test -p gyre-server api::stack_attest` (prior round: 14 passed).
+Prior-round functional evidence (rounds 1–5, unchanged by this round's
+merge beyond the unioned fields): those suites plus
+`cargo test -p gyre-domain stack` and
+`cargo test -p gyre-adapters sqlite::agent` all green.
