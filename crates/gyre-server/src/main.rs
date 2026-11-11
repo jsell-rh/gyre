@@ -118,6 +118,17 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Trust suggestion check (HSI §2 Trust Suggestions) — daily per
+    // workspace: 0 gate failures + 0 reverted MRs in 30 days suggests the
+    // next trust level to Admin/Owner members via priority-8
+    // TrustSuggestion notifications. Registered alone this job would only
+    // be manually triggerable; spawn_job is the executing daily loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "trust_suggestion_check".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.

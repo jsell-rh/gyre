@@ -120,12 +120,19 @@ class RequirementTests(unittest.TestCase):
         self.spec.write_text(self.spec.read_text().replace('Unrelated','Sibling amended'))
         self.store.put_task('task-001','invalidated',BODY,{'requirements':self.snap(),
              'repair':{'category':'requirements_changed'},'candidate':'retained-new-work'})
+        ident=self.store.enqueue('review','task-001','invalidated',{'candidate':'retained-new-work'})
+        running=self.store.claim('review','reviewer')
+        self.assertEqual(plan(self.store,self.root),[])  # Defer while work is running.
+        self.store.finish(ident,running['token'],{'approved':True})
         entries=plan(self.store,self.root)
         self.assertTrue(entries[0]['equivalent'])
         applied=apply(self.store,entries);self.assertEqual(applied,['task-001'])
         data=self.store.task('task-001')['data']
         self.assertEqual(data['delivered']['sha'],sha)
         self.assertEqual(data['candidate'],'retained-new-work')
+        self.assertEqual(plan(self.store,self.root),[])
+        # Reconsideration never reopens a satisfied delivered task.
+        self.assertEqual(plan(self.store,self.root,reconsider=['task-001']),[])
         self.assertEqual(cockpit(self.store)['confirmed_merges'],1)
 
     def test_gap_creates_durable_repair_without_running_no_gap_verifier(self):
@@ -159,7 +166,7 @@ class RequirementTests(unittest.TestCase):
             body=(root/'specs/tasks'/f'task-{number}.md').read_text()
             if snapshot(before,body,contract)['fingerprint']!=snapshot(root,body,contract)['fingerprint']:
                 affected.append(number)
-        self.assertEqual(affected,['077','085'])
+        self.assertEqual(affected,['085'])
 
     def test_catalog_compare_and_swap_does_not_erase_a_concurrent_delivery(self):
         self.sync();old=self.store.task('task-001')
@@ -222,6 +229,85 @@ class RequirementTests(unittest.TestCase):
         task=cockpit(self.store)['tasks'][0]
         self.assertEqual(task['state'],'merged');self.assertIsNone(task['condition'])
         self.assertEqual(self.store.db.execute('select state from work where id=?',(ident,)).fetchone()[0],'attention')
+
+    def test_no_gap_keeps_unmerged_source_work_on_the_publication_path(self):
+        ex=Mock();ex.claim={'input':{'candidate':'main','base':'main','requirements':'fp'}}
+        ex.directory=Path(self.tmp.name)
+        report={'candidate':'main','requirements':'fp','decision':'still_satisfied','gaps':[],
+                'evidence':[{'requirement':'task','file':'src.rs:1','detail':'Behavior is real'}]}
+        ex.cloud_step.return_value={'valid':True,'task_body':BODY,'assessment':report}
+        task={'name':'task-001','generation':'g','body':BODY,'data':{'candidate':'saved-patch',
+                'review':{'candidate':'saved-patch','approved':True}}}
+        proof={'candidate':'saved-patch','base':'main','paths':['scripts/fix-guard.sh']}
+        with patch('pipeline.stages.prompt',return_value='prompt'),patch('pipeline.stages.checkout'),patch('pipeline.assessment.retained_contribution',return_value=proof),patch('pipeline.verification.run') as verify:
+            result,updates,findings=run(ex,task)
+        verify.assert_not_called()
+        self.assertIsNone(updates['resolved']);self.assertIsNone(updates['delivered'])
+        self.assertNotIn('review',updates)
+        self.assertEqual(updates['assessment']['retained_work'],proof)
+
+    def test_backfill_preserves_approved_source_and_requires_normal_verification(self):
+        from pipeline.assessment import resume_retained
+        self.store.put_task('task-001','g',BODY,{'dependencies':[], 'candidate':'patch','candidate_base':'main',
+            'requirements':{'fingerprint':'fp'},'review':{'candidate':'patch','approved':True},
+            'resolved':{'source':'main'},'assessment':{'decision':'still_satisfied','generation':'g','requirements':'fp'}})
+        task=self.store.task('task-001');proof={'candidate':'patch','base':'main','paths':['scripts/check.sh']}
+        self.assertTrue(resume_retained(self.store,task,proof))
+        self.assertFalse(resume_retained(self.store,task,proof))
+        data=self.store.task('task-001')['data']
+        self.assertIsNone(data['resolved']);self.assertTrue(data['review']['approved'])
+        self.assertEqual(len(discover(self.store,'verify','main')),1)
+        self.assertEqual(len(discover(self.store,'implement','main')),0)
+        self.assertEqual(self.store.db.execute('select count(*) from task_history').fetchone()[0],1)
+
+    def test_retained_contribution_ignores_ancestral_and_document_only_work(self):
+        import subprocess
+        from pipeline.assessment import retained_contribution
+        repo=self.root
+        def git(*args):return subprocess.check_output(['git',*args],cwd=repo,text=True).strip()
+        git('init','-q');git('config','user.name','Test');git('config','user.email','test@example.com')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','base');base=git('rev-parse','HEAD')
+        (repo/'specs/reviews').mkdir();(repo/'specs/reviews/task-001.md').write_text('notes')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','notes');notes=git('rev-parse','HEAD')
+        (repo/'guard.py').write_text('real guard correction')
+        git('add','.');git('-c','core.hooksPath=/dev/null','commit','-qm','guard fix');patch_sha=git('rev-parse','HEAD')
+        ex=Mock()
+        def command(*args,cwd=None,check=True,**kwargs):
+            if args[:2]==('git','fetch'):return subprocess.CompletedProcess(args,0,stdout='')
+            return subprocess.run(args,cwd=cwd,text=True,capture_output=True,check=check)
+        ex.command.side_effect=command
+        self.assertIsNone(retained_contribution(ex,repo,notes,base,'task-001'))
+        self.assertIsNone(retained_contribution(ex,repo,base,notes,'task-001'))
+        proof=retained_contribution(ex,repo,base,patch_sha,'task-001')
+        self.assertEqual(proof['paths'],['guard.py'])
+        self.assertEqual(git('rev-parse','HEAD'),patch_sha)
+
+    def test_semantic_triage_can_record_conflicting_findings_without_becoming_coding(self):
+        inputs={'candidate':'main','base':'main','requirements':'fp'}
+        fact={'requirement':'task','file':'spec.md:1','detail':'Two approved specs conflict'}
+        report={'candidate':'main','requirements':'fp','decision':'needs_triage','evidence':[fact],'gaps':[fact]}
+        self.assertEqual(validate(report,inputs),report)
+        self.store.put_task('task-001','g',BODY,{'requirements':{'fingerprint':'fp'},'assessment_pending':{'changes':{}}})
+        ident=discover(self.store,'assess','main')[0];claim=self.store.claim('assess','actor')
+        self.store.retry(ident,claim['token'],{'category':'requirements_triage','message':'Approved specs conflict'},attention=True)
+        discover(self.store,'assess','new-main')
+        self.assertIsNone(self.store.claim('assess','actor',eligible=lambda w:eligible(self.store,w)))
+        self.assertEqual(discover(self.store,'implement','new-main'),[])
+        view=cockpit(self.store)['tasks'][0]
+        self.assertEqual(view['state'],'needs-triage');self.assertEqual(view['condition'],'Approved specs conflict')
+
+    def test_catalog_bindings_cover_every_declared_coverage_document(self):
+        import re
+        root=Path(__file__).resolve().parents[1]
+        registry=json.loads((root/'specs/task-spec-inputs.json').read_text())
+        from pipeline.catalog import metadata
+        for path in (root/'specs/tasks').glob('task-*.md'):
+            body=path.read_text();front=contract.requirement_parts(body)[0]
+            block=re.search(r'^coverage_sections:[^\n]*(?:\n[ \t]+[^\n]*)*',front,re.M)
+            declared=set(re.findall(r'[\w-]+\.md',block[0])) if block else set()
+            ids=registry['bindings'][metadata(body)['spec_ref']]+registry.get('shared',[])
+            bound={Path(registry['sections'][key]['file']).name for key in ids}
+            self.assertFalse(declared-bound,(path.name,declared-bound))
 
     def test_fenced_markdown_headings_are_not_inputs(self):
         nodes=sections('# Real\n```sh\n## Fake\n```\n## Actual\ntext\n')
