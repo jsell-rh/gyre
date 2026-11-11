@@ -60,6 +60,10 @@ tokio-stream = { version = "0.1", features = ["net"] }
 parking_lot = "0.12"
 
 [dev-dependencies]
+# tokio test-only utilities (#[tokio::test(start_paused = true)] in
+# signal_chain.rs) — dev-scoped so production builds never compile
+# tokio's test-util code (task-118 review finding).
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.24"
 http = "1"
 tower = { workspace = true, features = ["util"] }
