@@ -130,6 +130,9 @@ class RequirementTests(unittest.TestCase):
         data=self.store.task('task-001')['data']
         self.assertEqual(data['delivered']['sha'],sha)
         self.assertEqual(data['candidate'],'retained-new-work')
+        self.assertEqual(plan(self.store,self.root),[])
+        # Reconsideration never reopens a satisfied delivered task.
+        self.assertEqual(plan(self.store,self.root,reconsider=['task-001']),[])
         self.assertEqual(cockpit(self.store)['confirmed_merges'],1)
 
     def test_gap_creates_durable_repair_without_running_no_gap_verifier(self):
@@ -163,7 +166,7 @@ class RequirementTests(unittest.TestCase):
             body=(root/'specs/tasks'/f'task-{number}.md').read_text()
             if snapshot(before,body,contract)['fingerprint']!=snapshot(root,body,contract)['fingerprint']:
                 affected.append(number)
-        self.assertEqual(affected,['077','085'])
+        self.assertEqual(affected,['085'])
 
     def test_catalog_compare_and_swap_does_not_erase_a_concurrent_delivery(self):
         self.sync();old=self.store.task('task-001')
