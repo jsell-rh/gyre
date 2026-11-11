@@ -2,7 +2,7 @@
 title: "MCP HSI Parity — Resources and Tools"
 spec_ref: "human-system-interface.md §11 (CLI/MCP Parity Constraint)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-010.md
 coverage_sections: []
 commits: ["67985e8d9d51b99cf89a0f41ab7707b84ec18bce", "275692a808a228d725ba27365a5461d778a26602"]
