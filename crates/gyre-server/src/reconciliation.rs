@@ -1555,11 +1555,9 @@ async fn find_mr_attestation(
 ) -> Option<gyre_common::Attestation> {
     // By source branch head commit — the commit the agent produced.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        if let Some(source_sha) = crate::git_refs::resolve_ref(
-            &repo.path,
-            &format!("refs/heads/{}", mr.source_branch),
-        )
-        .await
+        if let Some(source_sha) =
+            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
+                .await
         {
             if let Ok(Some(att)) = state.chain_attestations.find_by_commit(&source_sha).await {
                 return Some(att);
@@ -1571,7 +1569,11 @@ async fn find_mr_attestation(
     if let Some(ref author_id) = mr.author_agent_id {
         if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
             if let Some(ref task_id) = agent.current_task_id {
-                if let Ok(atts) = state.chain_attestations.find_by_task(task_id.as_str()).await {
+                if let Ok(atts) = state
+                    .chain_attestations
+                    .find_by_task(task_id.as_str())
+                    .await
+                {
                     if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
                         return Some(leaf.clone());
                     }
@@ -3917,8 +3919,7 @@ mod tests {
         repo: &Repository,
         att: gyre_common::Attestation,
     ) -> gyre_domain::MergeRequest {
-        let mut agent =
-            gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", now());
+        let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", now());
         agent.workspace_id = Id::new(ws_id);
         agent.current_task_id = Some(Id::new(att.metadata.task_id.clone()));
         state.agents.create(&agent).await.unwrap();
@@ -3948,8 +3949,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-drift-1").await;
         let repo = make_repo(&state, "repo-drift-1", "ws-drift-1").await;
         put_set(&state, "ws-drift-1", &drift_test_set("ws-drift-1")).await;
-        let current =
-            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        let current = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
         assert!(!current.is_empty());
 
         // Provenance under the CURRENT set SHA → no drift (§9 pass case).
@@ -3966,15 +3966,16 @@ mod tests {
         let ws = make_workspace(&state, "ws-drift-2").await;
         let repo = make_repo(&state, "repo-drift-2", "ws-drift-2").await;
         put_set(&state, "ws-drift-2", &drift_test_set("ws-drift-2")).await;
-        let current =
-            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        let current = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
 
         // Provenance under an OLD set SHA → drift.
         let att = sample_attestation(repo.id.as_str(), "ws-drift-2", "deadbeef", now());
         let mr =
             make_mr_with_task_attestation(&state, "mr-drift-2", "ws-drift-2", &repo, att).await;
 
-        let drift = mr_meta_spec_drift(&state, &mr).await.expect("drift expected");
+        let drift = mr_meta_spec_drift(&state, &mr)
+            .await
+            .expect("drift expected");
         assert_eq!(drift.produced_set_sha, "deadbeef");
         assert_eq!(drift.current_set_sha, current);
 
@@ -3987,7 +3988,10 @@ mod tests {
             "warning must follow the §9 format: {warning}"
         );
         assert!(warning.ends_with(". Reconciliation may be needed."));
-        assert_eq!(parse_meta_spec_drift_warning(&warning).as_ref(), Some(&drift));
+        assert_eq!(
+            parse_meta_spec_drift_warning(&warning).as_ref(),
+            Some(&drift)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

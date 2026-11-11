@@ -8336,7 +8336,10 @@ mod tests {
         let ws_id = "ws-drift-warn";
         let repo = create_repo_in_workspace(&state, "repo-drift-warn", ws_id).await;
         let current = bind_drift_set(&state, ws_id).await;
-        assert!(!current.is_empty(), "set must be bound for the check to run");
+        assert!(
+            !current.is_empty(),
+            "set must be bound for the check to run"
+        );
 
         // Provenance under an OLD set SHA → drift.
         create_drift_mr(&state, "mr-drift-warn", ws_id, &repo, "deadbeef").await;
@@ -8422,7 +8425,10 @@ mod tests {
             .unwrap()
             .expect("entry exists");
         assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
-        let reason = entry.error_message.as_deref().expect("drift reason recorded");
+        let reason = entry
+            .error_message
+            .as_deref()
+            .expect("drift reason recorded");
         assert!(reason.contains("meta-spec drift"), "reason: {reason}");
         assert!(
             reason.contains("require_current_meta_spec_set"),
@@ -8670,7 +8676,11 @@ mod tests {
             .await
             .unwrap()
             .expect("head mr exists");
-        assert_eq!(head.status, MrStatus::Open, "strict drift holds the drifted MR");
+        assert_eq!(
+            head.status,
+            MrStatus::Open,
+            "strict drift holds the drifted MR"
+        );
         let head_entry = state
             .merge_queue
             .find_by_id(&Id::new("entry-mr-drift-starve-head"))
@@ -8745,8 +8755,7 @@ mod tests {
         let group_repo = create_repo_in_workspace(&state, "repo-drift-group-starve", ws_a).await;
         bind_drift_set(&state, ws_a).await;
         let drifted_author =
-            seed_drift_provenance(&state, "mr-drift-group-a", ws_a, &group_repo, "deadbeef")
-                .await;
+            seed_drift_provenance(&state, "mr-drift-group-a", ws_a, &group_repo, "deadbeef").await;
         create_mr_in_group(
             &state,
             "mr-drift-group-a",

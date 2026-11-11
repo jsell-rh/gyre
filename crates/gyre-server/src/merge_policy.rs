@@ -48,7 +48,10 @@ pub async fn get_merge_policy(
     match raw {
         None => Ok(WorkspaceMergePolicy::default()),
         Some(json) => serde_json::from_str::<WorkspaceMergePolicy>(&json).map_err(|e| {
-            anyhow::anyhow!("corrupt merge policy for workspace {}: {e}", workspace_id.as_str())
+            anyhow::anyhow!(
+                "corrupt merge policy for workspace {}: {e}",
+                workspace_id.as_str()
+            )
         }),
     }
 }
@@ -124,7 +127,11 @@ mod tests {
         let ws = Id::new("ws-mp-2");
         state
             .kv_store
-            .kv_set(MERGE_POLICY_KV_NAMESPACE, ws.as_str(), "not json".to_string())
+            .kv_set(
+                MERGE_POLICY_KV_NAMESPACE,
+                ws.as_str(),
+                "not json".to_string(),
+            )
             .await
             .unwrap();
 
