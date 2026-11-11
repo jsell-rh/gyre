@@ -1012,6 +1012,7 @@ mod tests {
         // Developer-role OIDC JWT.
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
@@ -1681,6 +1682,7 @@ mod tests {
         // ReadOnly OIDC JWT.
         let ro_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -3224,6 +3226,7 @@ mod registry_tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
@@ -3713,7 +3716,7 @@ mod registry_tests {
             .filter(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift)
             .collect();
         assert_eq!(drift.len(), 1, "expected exactly one drift notification");
-        assert_eq!(drift[0].priority, 6);
+        assert_eq!(drift[0].priority_rank, 6);
         assert!(drift[0].title.contains("system/stale.md"));
         assert!(drift[0].title.contains("v1"));
         assert!(drift[0].title.contains("v2"));
@@ -3938,6 +3941,7 @@ mod registry_tests {
         // Developer-role OIDC JWT (no Admin role).
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-registry",
                 "preferred_username": "dev-registry",
                 "realm_access": { "roles": ["developer"] }

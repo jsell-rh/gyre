@@ -535,7 +535,8 @@ async fn notify_stale_pin(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(binding.spec_id.clone());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = binding.spec_id.clone();
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(
                 user = %member.user_id,

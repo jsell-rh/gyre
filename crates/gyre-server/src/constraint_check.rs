@@ -1409,8 +1409,9 @@ async fn create_violation_notifications(
                 })
                 .to_string(),
             );
-            notif.repo_id = Some(repo_id.to_string());
-            notif.entity_ref = Some(format!("task:{task_id}"));
+            notif.source.entity_type = "task".to_string();
+            notif.source.repo_id = Some(Id::new(repo_id.to_string()));
+            notif.source.entity_id = format!("task:{task_id}");
 
             if let Err(e) = state.notifications.create(&notif).await {
                 warn!(
@@ -1943,10 +1944,13 @@ mod tests {
             notifications[0].notification_type,
             NotificationType::ConstraintViolation
         );
-        assert_eq!(notifications[0].priority, 2);
+        assert_eq!(notifications[0].priority_rank, 2);
         assert!(notifications[0].title.contains("Constraint violation"));
         assert!(notifications[0].title.contains("path scope"));
-        assert_eq!(notifications[0].repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(
+            notifications[0].source.repo_id.as_ref().map(|r| r.as_str()),
+            Some("repo-1")
+        );
     }
 
     // ── Integration: merge-time constraint evaluation ─────────────────

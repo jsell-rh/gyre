@@ -444,6 +444,35 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
+    // Task-134: scoped gate-agent tokens are read-only — a `review:submit`
+    // reviewer or `validation:report` validator may read MR context, never
+    // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
+    // Caller-scoped capability, exact-match (review F3): checked before
+    // workspace/repo resolution so the denial does not depend on (or leak
+    // the existence of) the target.
+    if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
+            || scope == crate::auth::VALIDATION_REPORT_SCOPE
+        {
+            warn!(
+                agent_id = %auth.agent_id,
+                workspace_slug = %workspace_slug,
+                repo_name = %repo_name,
+                "git-receive-pack 403: scoped gate-agent token cannot push"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                "push rejected: gate-agent scoped tokens are read-only".to_string(),
+            )
+                .into_response();
+        }
+    }
+
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -2177,8 +2206,9 @@ async fn process_persona_changes(
                                  human review.",
                                 repo.name
                             ));
-                            notif.entity_ref = Some(format!("persona:{slug}"));
-                            notif.repo_id = Some(repo.id.to_string());
+                            notif.source.entity_type = "persona".to_string();
+                            notif.source.entity_id = slug.clone();
+                            notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.notifications.create(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
@@ -2565,7 +2595,8 @@ async fn notify_cross_workspace_dependents(
                 now as i64,
             );
             notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.entity_id = changed_spec_path.to_string();
 
             if let Err(e) = state.notifications.create(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
@@ -3805,12 +3836,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
@@ -7145,8 +7181,9 @@ mod tests {
             })
             .expect("owner must be notified");
         assert_eq!(notif.title, title);
-        assert_eq!(notif.entity_ref.as_deref(), Some("persona:security"));
-        assert_eq!(notif.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(notif.source.entity_type, "persona");
+        assert_eq!(notif.source.entity_id, "security");
+        assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
     }

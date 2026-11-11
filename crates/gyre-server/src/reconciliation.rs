@@ -1746,7 +1746,8 @@ async fn notify_drift_members(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(ws.id.to_string());
+        notif.source.entity_type = "workspace".to_string();
+        notif.source.entity_id = ws.id.to_string();
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(
                 user = %member.user_id,

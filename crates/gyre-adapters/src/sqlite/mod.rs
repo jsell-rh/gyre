@@ -15,6 +15,7 @@ pub mod audit;
 pub mod budget;
 pub mod budget_call;
 pub mod chain_attestation;
+pub mod commit_signature;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
