@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c"]
 ---
 
 ## Spec Excerpt
@@ -336,6 +336,68 @@ blocks server test binaries here, so compilation-level probes only):
 `cargo check -p gyre-server --lib` and `cargo check -p gyre-server
 --tests` both clean; `rustfmt --check` clean on all touched files.
 
+### Review-repair round 4 (commit 16e740051)
+
+Repaired the round-4 review finding (parent-id leak on the
+merge-requests/agents parent-scoped collection routes):
+
+- **Code** — `extract_path_attributes`'s parent-id suppression guard
+  covered only the `/api/v1/workspaces/` and `/api/v1/repos/` prefixes,
+  so `/api/v1/merge-requests/:id/gates` (gate),
+  `/api/v1/merge-requests/:id/dependencies` (dependency) and
+  `/api/v1/agents/:id/messages` (message) — none of which carries a
+  `{resource_type}_id` param — populated `resource.id` with the PARENT
+  MR/agent id (§Attributes defines `resource.id` as the addressed
+  entity's identity; on these routes the addressed entity is a
+  gate/dependency/message collection, so `resource.id` must be unset,
+  failing conditions closed). Consequence: a policy keyed on
+  `resource.id` for gate/dependency/message types silently evaluated
+  against the parent id — an Allow keyed on the MR id granted gate
+  operations on that MR's gates, and a Deny keyed on a real gate id
+  never fired on the collection route. Fix: the guard is generalized
+  rather than prefix-enumerated — `:id` is treated as the parent
+  whenever the route carries path segments beyond the `:id` AND the
+  registered resource type differs from the entity type the leading
+  prefix collection names (`prefix_entity_type`: mechanical
+  singularization — `-ies`→`-y`, else strip `s`, hyphens→underscores —
+  with `meta-specs-registry` mapped to `meta_spec`, since that compound
+  collection names a registry OF meta-specs). A full-registry
+  simulation over all 206 registered routes (old vs new guard, synthetic
+  paths) confirms the only final `resource.id` delta is exactly the
+  three flagged routes: parent id → unset. Everything else — including
+  the `:workspace_id`-param workspace collection routes and the
+  parent-typed `/merge-requests/:id` and `/agents/:id/status` routes —
+  is unchanged (transcript:
+  `/tmp/stage/review-evidence/task-128-guard-delta.txt`).
+- **Tests** — `path_attributes_mr_and_agent_parented_child_routes`
+  pins the three flagged routes (resource.id unset) plus same-prefix
+  controls (parent-typed routes keep `:id`; the message-ack child route
+  still surfaces `:message_id`); the new
+  `registry_routes_never_leak_parent_id_into_resource_id` replays
+  extraction for EVERY registered non-exempt route with a synthetic
+  `:id` sentinel and asserts both directions — no parent-id leak on
+  parent-scoped child routes, and `:id` still surfaces on entity routes
+  (over-suppression is caught too) — so a future route registered under
+  a new parent-scoped prefix without a `{resource_type}_id` param fails
+  CI instead of silently reintroducing the leak; live-middleware
+  reproductions
+  `mr_parented_collection_routes_do_not_leak_parent_mr_id` and
+  `agent_parented_message_route_does_not_leak_parent_agent_id` prove a
+  Deny keyed on `resource.id == <parent id>` does not fire (200 via the
+  Developer Allow) while a subject-keyed control Deny fires (403) on
+  the very same routes, so the non-deny is not vacuous. New
+  route/URI literals are hoisted into consts
+  (`MERGE_REQUESTS_GATES_ROUTE`, `MERGE_REQUESTS_DEPENDENCIES_ROUTE`,
+  `AGENTS_MESSAGES_ROUTE`, ...) to hold the frozen duplicate-literal
+  count at 17 (verified: 17).
+- **Probes at this head** — `cargo check -p gyre-server --tests` clean;
+  `cargo clippy -p gyre-server --lib --tests` introduces no warnings in
+  `abac_middleware.rs`; `cargo fmt` clean; `check-arch`,
+  `check-abac-route-registry` (duplicate count 17), and
+  `check-abac-exempt-handlers` pass. The build wrapper blocks gyre-server
+  test binaries in this sandbox (4 GiB budget), so the test additions
+  above are recorded for the independent verifier.
+
 ### Test evidence (run at merge head ec1f694d5, after the base-dbf9edaea
 rebase)
 
@@ -361,16 +423,18 @@ rebase)
   `check-unwired-port-methods`, and `check-task-commit-attribution`.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
-verification/publication gates. For the current head (7502a9eec, after
-the base-65f71e657 merge and the verification-repair round) the verifier
-must execute:
+verification/publication gates. For the current head (16e740051, after
+the round-4 review repair) the verifier must execute:
 
 - `cargo test -p gyre-server --lib -- abac policy_engine` (the focused
-  ABAC suites; the base merge touched `abac_middleware.rs` additively —
-  new resolver entries for search suggest/facets and commit-signature
-  verification routes, `bearer_token` on test auth contexts — and this
-  round's changes are formatting, doc-comment attachment, `.expect`
-  bindings in tests, and one `#[allow]` attribute);
+  ABAC suites; the round-4 additions are
+  `path_attributes_mr_and_agent_parented_child_routes`,
+  `registry_routes_never_leak_parent_id_into_resource_id`,
+  `mr_parented_collection_routes_do_not_leak_parent_mr_id`, and
+  `agent_parented_message_route_does_not_leak_parent_agent_id` —
+  mutation direction: with the guard reverted to the
+  workspaces/repos-prefix form, the three resource.id-keyed Deny tests
+  fail with 403 where 200 is asserted);
 - `cargo test -p gyre-server --lib` in full (prior rounds: 1694 passed /
   0 failed at ec1f694d5; the base contributed additional tests since);
 - `cargo check -p gyre-cli`;
