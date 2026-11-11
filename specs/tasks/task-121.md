@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
   - "user-management.md §Repo Access"
-commits: ["64fa14fd4fbb1feecbd69c04d3cb8020fc4a237f", "8fc4245da30d5c96d1c0cb2568ef70e573ed84d3", "93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
+commits: ["887fc7bc39e288960ae7e9e372edfe7d7160c608", "64fa14fd4fbb1feecbd69c04d3cb8020fc4a237f", "8fc4245da30d5c96d1c0cb2568ef70e573ed84d3", "93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
 ---
 
 ## Spec Excerpt
@@ -95,8 +95,8 @@ Read `specs/system/user-management.md` §Workspace Membership through §Repo Acc
 
 Workspace membership, ownership transfer/reclamation, and repo access are implemented
 end-to-end (user-management.md §Workspace Membership, §Ownership Transfer & Reclamation,
-§Repo Access), across the feature round, two review/verification repair rounds, and this
-duplicate-override 409 repair round.
+§Repo Access), across the feature round, two review/verification repair rounds, a
+duplicate-override 409 repair round, and this rebase repair round.
 
 ### Behavior (feature)
 
@@ -135,7 +135,7 @@ duplicate-override 409 repair round.
   denial responses are dereferenced unchanged at all git_http call sites, so 403/500
   behavior is identical.
 
-### Behavior (this repair round: duplicate override 409 on all adapters)
+### Behavior (repair round 3: duplicate override 409 on all adapters)
 
 - The duplicate-override 409 in `set_repo_access_override` previously matched only the
   top-level message "already exists" — the mem adapter's guard text. The SQLite and
@@ -151,6 +151,24 @@ duplicate-override 409 repair round.
   ("UNIQUE constraint failed"), and PostgreSQL ("duplicate key value violates unique
   constraint") duplicate shapes while leaving non-duplicate storage failures as 500.
 
+### Behavior (this round: rebase repair onto fbf1a63)
+
+- Rebased the task-121 branch onto base fbf1a63 (task-085 HSI, task-134 gate agents,
+  task-generation/gate-validation migrations). Single content conflict in
+  `abac_middleware.rs`: the base's task-134 scoped-token allow-list requires `action`
+  before attribute-context building (via the base's pattern-wide `action_override`
+  destructure), while task-121 moved action resolution to `RouteResourceMapping::resolve_action`
+  (method-scoped overrides -> pattern override -> method mapping) after `subject.workspace_role`
+  resolution. Resolved by resolving the action once, early, through `resolve_action`, so the
+  scoped-token deny record and the policy evaluation share the same per-method action; the
+  later duplicate block was dropped. No behavior change for either feature: task-121 routes
+  with method-scoped overrides resolve identically, and the base's pattern-wide override is
+  still consulted (second priority) by `resolve_action`.
+- All task-121 surfaces verified intact after the merge: repo_access duplicate-409 guard +
+  error-chain mapping, git_http `authorize_repo_access` enforcement, ownerless tracking
+  (`workspace_ownership.rs`, jobs, scim), ABAC registry entries for member and
+  override routes.
+
 ### Test evidence
 
 - Prior rounds (focused runs via `/tmp/stage/bin/cargo`, summaries retained under
@@ -161,15 +179,26 @@ duplicate-override 409 repair round.
   `api::users::tests` 23/23; `git_http` 61/61 (incl. repo-access enforcement on the git
   transport); `abac_middleware` 14/14; full gyre-server lib suite 1727/1727;
   `cargo test -p gyre-domain repo_access` 8/8; clippy 0 findings on changed lines vs base.
-- This round: `cargo check -p gyre-server --lib` passes (exit 0);
+- Round 3: `cargo check -p gyre-server --lib` passes (exit 0);
   `cargo clippy -p gyre-server --lib` reports no findings in repo_access.rs; a rustc
   behavior probe against the cached anyhow rlib reproduced each adapter's exact error
   chain and proved the old top-level-only check misses the SQLite/Postgres shapes
   (top-level message is exactly "insert repo access override") while
   `is_duplicate_override_error` matches all three duplicate shapes and rejects a
-  non-duplicate failure (evidence: /tmp/stage/review-evidence/task-121-duplicate-409-repair.md).
+  non-duplicate failure (evidence: /tmp/stage/review-evidence/task-1....md).
+- This round (rebase): `cargo check -p gyre-server --lib`, `cargo check --workspace`, and
+  `cargo check -p gyre-server --tests` all exit 0 (the merge, including the resolved
+  conflict, type-checks against both sides' code); `cargo test -p gyre-domain repo_access`
+  8/8; `cargo clippy -p gyre-server --lib` exit 0 with no findings in `abac_middleware.rs`
+  or `repo_access.rs`; `scripts/check-abac-route-registry.sh`, `scripts/check-arch.sh`, and
+  `scripts/check-migration-versions.sh` all pass (evidence:
+  /tmp/stage/review-evidence/task-121-rebase-887fc7bc.md).
 - Deferred to the independent verifier (server test-profile compilation exceeds this
-  sandbox's 4 GiB budget): `cargo test -p gyre-server --lib api::repo_access` — notably
-  `override_create_is_idempotent_rejected` (guard path → 409 through the production ABAC
-  pipeline) and the new `duplicate_override_error_mapping_covers_all_adapter_chains`
-  (chain-shape mapping per adapter), plus the regression suites listed above.
+  sandbox's 4 GiB cgroup budget): `cargo test -p gyre-server --lib api::repo_access` —
+  notably `override_create_is_idempotent_rejected` (guard path → 409 through the production
+  ABAC pipeline) and `duplicate_override_error_mapping_covers_all_adapter_chains`
+  (chain-shape mapping per adapter) — plus `workspace_ownership`, `api::workspaces::tests`,
+  `api::users::tests`, `git_http`, `abac_middleware`, and the task-134 integration test
+  `tests/task134_review_probe.rs` (both sides of the resolved conflict now share one
+  action-resolution path, so the scoped-token allow-list and policy evaluation must be
+  re-exercised together).
