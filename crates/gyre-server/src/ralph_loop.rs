@@ -599,10 +599,10 @@ async fn resolve_workspace_target(
             return Ok(Some(e));
         }
     }
-    Ok(state
+    state
         .compute_targets
         .get_default_for_tenant(&workspace.tenant_id)
-        .await?)
+        .await
 }
 
 #[cfg(test)]

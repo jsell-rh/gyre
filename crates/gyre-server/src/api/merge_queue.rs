@@ -289,8 +289,7 @@ mod tests {
     async fn enqueue_is_idempotent_per_open_mr() {
         let (app, state) = make_app().await;
         seed_mr(&state, "mr-1").await;
-        let body = serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" }))
-            .unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" })).unwrap();
 
         let first = app
             .clone()

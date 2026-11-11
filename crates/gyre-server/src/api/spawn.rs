@@ -1012,7 +1012,7 @@ pub(crate) async fn spawn_agent_core(
     // output attestation at push time.
     if !is_interrogation {
         create_derived_input_for_agent(
-            &state,
+            state,
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
@@ -1032,7 +1032,7 @@ pub(crate) async fn spawn_agent_core(
     let _ = state.analytics.record(&ev).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
+    super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
 
     // Agent-runtime §2: meta-spec set SHA from the assembled prompt set
     // (required tenant → required workspace → spec bindings at pinned
