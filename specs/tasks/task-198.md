@@ -225,20 +225,24 @@ task-198-rebase-cfeefbd/`):
 - `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
   verification per the assignment).
 
-### Contract restoration (this round, finding e270b1ae)
+### Contract restorations (findings e270b1ae, 34597faa)
 
-The executor restored the assigned task document (checkboxes unchecked,
-`commits:` emptied, Shipped notes stripped) while keeping the production
-fix on the branch. No source changed this round. Re-verified at HEAD
-f28e7a8b (logs under `/tmp/stage/review-evidence/task-198-contract-restore/`):
+The executor restored the assigned task document twice (checkboxes
+unchecked, `commits:` emptied, Shipped notes stripped) while keeping the
+production fix on the branch. No source changed in either round. Latest
+re-verification at HEAD b71c76c05 (finding 34597faa; log under
+`/tmp/stage/review-evidence/contract-restore-round.log`):
 
-- `cargo check --all` — clean (7m48s, exit 0).
+- `cargo check -p gyre-server` — clean (7m47s, exit 0).
 - `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
   (round-trip every link type + option columns, reopen-durability, replace
   scoping, repo-scoped delete).
+- `cargo test -p gyre-adapters duplicate_migration` — ok, 1 passed (no
+  duplicate Diesel migration version prefixes after the 000061 renumber).
 - `scripts/check-task-commit-attribution.sh` — passes once the frontmatter
   commit list is restored (it fails against the executor-stripped file by
-  construction; no new product-surface commits since 6ab2e89cc).
+  construction; no new product-surface commits since 6ab2e89cc — the three
+  commits after it are docs/process-only).
 
 ### Prior repair history (condensed)
 
