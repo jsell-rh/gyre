@@ -1561,7 +1561,7 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
         // (own bindings plus inherited tenant defaults, §8) — inheritance
         // changes the governing set, so code produced under the pre-inheritance
         // set is drift.
-        let current_sha = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        let current_sha = crate::compute_meta_spec_set_sha(state, &ws.id).await;
         if current_sha.is_empty() {
             // No set bound — nothing to conform to (§10: only repos whose
             // workspace binds a meta-spec set are in scope).

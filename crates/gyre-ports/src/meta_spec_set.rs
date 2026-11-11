@@ -29,7 +29,7 @@ pub trait MetaSpecSetRepository: Send + Sync {
 /// meta-spec set overrides them (workspace pin wins on conflict). Persistence
 /// model mirrors `MetaSpecSetRepository` — raw JSON in, raw JSON out;
 /// serialization to `TenantMetaSpecSet` happens in the server layer.
-
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait TenantMetaSpecSetRepository: Send + Sync {
     /// Get the raw JSON for a tenant's meta-spec set, or `None` if not set.
