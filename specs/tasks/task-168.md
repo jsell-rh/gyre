@@ -2,12 +2,12 @@
 title: "Repo lifecycle — archive push rejection, admin repos tab, gate config UI"
 spec_ref: "repo-lifecycle.md §API Summary"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["26fc7b32667bf8d3121ec07f837d1a960d0681d7", "0237af23cb7403ef2489b1247a52f2601f1bab66", "219780c5aef6f0a9fc88da61185949decc8e97a8", "4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "730f9df11e81dfe1644d2b464cec1352f72bda35", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "36e401fbd899a48fc15a4bf430f25ef904747e1e", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -57,70 +57,3 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 ## Agent Instructions
 
 Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. Repo Configuration — Gates", and §"6. Domain Changes — API Summary". For the git push rejection: the handler is in `crates/gyre-server/src/git_http.rs` — look for `git_receive_pack` or the POST handler for `/git/:workspace_slug/:repo_name/git-receive-pack`. The repo status check should go after `resolve_repo_by_slug()`. For UI: follow existing Svelte 5 patterns in `web/src/` (e.g., WorkspaceSettings.svelte, RepoSettings.svelte). The gate API routes are at `GET/POST /api/v1/repos/:id/gates`.
-
-## Shipped
-
-All three coverage sections are implemented in production code on this branch
-(assignment base `cfeefbda` merged at `78e9dfe3`, with the full chain of earlier
-checkpoints and repair rounds listed in `commits:`). This round repaired the
-two verification findings from candidate `6c0ef4c` (`26fc7b32`):
-
-- **Duplicate Diesel migration version** -- the base merge brought
-  `2026-10-08-000059_spec_lifecycle_configs` (mainline task-109 owns version
-  `20261008000059`), colliding with our gate-position migration. Renamed to
-  `2026-10-08-000061_gate_position` (next unused sequence); only the
-  alphabetically-first directory runs per version, so the duplicate silently
-  dropped one migration on fresh databases.
-- **E0063 in `gyre-adapters` lib test** -- the merged `sample_gate()` had lost
-  the `position` field added with gate ordering. Restored it and extended the
-  task-134 upsert regression guard to flip `position` too (its contract: the
-  upsert `.set(...)` must update every mutable config column -- drag-to-reorder
-  persists through the same path).
-
-### Git push rejection for archived repos (§API Summary)
-
-- `git_info_refs` rejects the `git-receive-pack` advertisement for archived
-  repos with a 200 response whose pkt-line stream carries
-  `ERR push rejected: repository is archived` -- the git-smart-HTTP convention
-  so `git push` actually prints the reason. `git_receive_pack` (POST) keeps a
-  defense-in-depth 403 before the packfile is processed; clone/fetch still
-  works on archived repos (read-only, not invisible).
-- Unit tests in `git_http.rs` (archived-repo ERR pkt-line, POST 403,
-  clone-still-works) and integration test `push_to_archived_repo_rejected` in
-  `crates/gyre-server/tests/git_integration.rs`, which runs a real `git push`
-  against a live server and asserts the push fails with an "archived" reason.
-
-### Admin Repos tab (§Admin → Workspace Scope → Repos Tab)
-
-- `WorkspaceSettings.svelte` has a workspace-scope **Repos** tab listing all
-  repos with name, status badge (Active/Archived), agent count, and last
-  activity, plus "+ New Repo" and "Import Repo" buttons wired to the existing
-  creation/import forms; clicking a repo navigates to repo scope.
-
-### Gate configuration UI (§Gates)
-
-- `RepoSettings.svelte` gate panel lists gates ordered by `position`, with
-  per-gate name/type/enabled toggle, per-type configuration fields (test
-  command, lint command, reviewer persona), "+ Add Gate" with a gate type
-  selector, and drag-to-reorder persisting `position` via
-  `PUT /api/v1/repos/:id/gates/:gate_id`.
-- Server side: `api/gates.rs` sorts by `(position, created_at)`, appends new
-  gates after the current max, and accepts `position` updates; covered by
-  `list_gates_orders_by_position` and the upsert regression guard in
-  `sqlite/quality_gate.rs`.
-
-### Evidence (this round)
-
-- `cargo test -p gyre-adapters quality_gate` → 1 passed
-  (`save_upsert_updates_all_config_columns`, now also asserts position
-  round-trip).
-- `cargo test -p gyre-adapters no_duplicate_migration_version_prefixes` →
-  1 passed.
-- `cargo check -p gyre-server --tests` → clean (server test code now
-  compiles; the failed round never reached it past the adapters error).
-- All 19 mechanical `scripts/check-*.sh` gates pass, including
-  `check-migration-versions.sh` and `check-task-commit-attribution.sh`.
-- Verifier must run (deferred per 4 GiB budget): full `cargo test --all`
-  (notably `gyre-server` git_http unit tests and
-  `tests/git_integration.rs::push_to_archived_repo_rejected`) and
-  `cd web && npm test`.
