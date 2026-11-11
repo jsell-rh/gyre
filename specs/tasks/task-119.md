@@ -3,7 +3,7 @@ title: "Implement budget enforcement cascade"
 spec_ref: "agent-runtime.md §4 Budget Enforcement"
 depends_on:
   - task-118
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-runtime.md §4. Budget Enforcement"
   - "agent-runtime.md §Cascade"
@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -104,62 +104,3 @@ From §5 (Agent Prompt Structure): Describes the three-section prompt assembly (
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Prompt Structure) in full. Existing budget code: `gyre-server/src/api/budget.rs` and `gyre-domain/src/budget.rs`. Agent usage reporting: `POST /api/v1/agents/:id/usage` in `gyre-server/src/api/spawn.rs`. BudgetWarning/BudgetExhausted message kinds: `gyre-common/src/message.rs`. Compute target kill: grep for `kill_process` in server. MCP prompt delivery: `gyre-server/src/mcp.rs` — look for `system://persona` or `system://context`. Background jobs: grep for `tokio::spawn` or `interval` in `gyre-server/src/main.rs` or `lib.rs`.
-
-## Shipped
-
-agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) implemented in production code — no stubs, no audit-only
-paths. The cascade, enforcement levels, tracking, reset, and prompt
-structure shipped in commit 4bfdf85b8; review-round repairs (BudgetExhausted
-inbox delivery, repo concurrent/lifetime override enforcement, priority-7
-spec reconciliation, persona-only `system://persona`) in 7bdc60603.
-
-This round repaired review finding 9af67822 F1: the repo-level
-`max_agent_lifetime_secs` override could exceed the tenant absolute
-ceiling.
-
-### Repair: lifetime override bounded by the effective ceiling
-
-- **Validation (api/repos.rs):** PUT /api/v1/repos/:id now validates
-  every set repo budget field against the EFFECTIVE workspace limit
-  (min of workspace config and tenant ceiling) instead of the raw
-  workspace config. A dimension the workspace leaves unset inherits
-  the tenant (platform-model.md §1) — previously the `(Some, Some)`
-  guard skipped the check, so tenant {lifetime: 1800} + workspace
-  unset + repo {lifetime: 3600} was accepted; it is now a 400.
-- **Enforcement (api/budget.rs `effective_lifetime_limit_secs`):** the
-  repo override is min'd against the effective workspace limit rather
-  than replacing it, so a later workspace/tenant reduction below a
-  previously-legitimate override binds immediately — the same live
-  recomputation semantics the token/cost/concurrent dimensions honor.
-
-### Test evidence
-
-Three regression tests added:
-
-- `repo_budget_validated_against_effective_workspace_limit` (repos.rs):
-  the review's exact repro (tenant 1800 / workspace unset / repo 3600 →
-  400, not persisted), the tokens dimension at the same corner, valid
-  values persisting, and a post-reduction re-assertion of a
-  previously-valid override rejected.
-- `repo_lifetime_override_bounded_by_tenant_ceiling_workspace_unset`
-  (budget.rs): a stale repo override of 3600s under a tenant ceiling of
-  1800s budget-kills an agent aged 2000s (min(3600, 1800) = 1800).
-- `repo_lifetime_override_rebinds_after_workspace_reduction`
-  (budget.rs): an override of 3000s under a 3600s workspace keeps an
-  agent aged 2000s Active; after the workspace budget drops to 1800s
-  the same agent is budget-killed with the worktree preserved.
-
-Sandbox probes: `cargo check -p gyre-server` and `cargo check -p
-gyre-server --lib --tests` both exit 0 (test code type-checks).
-gyre-server test compilation exceeds this sandbox's 4 GiB budget
-(build wrapper refuses; recorded in
-/tmp/stage/review-evidence/task119-repair.md), so the independent
-verifier must run:
-
-```
-cargo test -p gyre-server --lib lifetime
-cargo test -p gyre-server --lib repo_budget
-```
-
-plus the full `cargo test --all` gate.
