@@ -5345,6 +5345,7 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
