@@ -57,3 +57,50 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — rebase onto base cfeefbda (verdict: needs-revision)
+
+Candidate `38e4097bb` vs assigned base `cfeefbda9`. The three scripts — the task's core
+deliverable — verify clean and are stronger than spec letter:
+
+- **check-hierarchy.sh**: clean pass; kills `Task.workspace_id → Option<Id>` (exit 1,
+  task.rs:60) and field-deletion (`repo_id` rename, exit 1); `GYRE_CHECK_HIERARCHY=0`
+  opt-out honored; mawk 1.3.4 clean; wired blocking in pre-commit AND CI.
+- **check-tenant-filter.sh**: clean pass, 116 read methods on migration-derived
+  tenant-column tables checked / 0 violations; kills a stripped filter in
+  `sqlite/workspace.rs::find_by_slug` and `sqlite/secret.rs::resolve_for_agent` (exit 1,
+  exact file:line); documented SKIP_LIST; visible backlog for tenant-less tables.
+- **check-api-auth.sh**: clean pass; kills a deleted `RouteResourceMapping` (delegated
+  Check 3 folds in the frozen-baseline registry check).
+- Adapter tenant-filter fixes are real (verified in analytics.rs: real-tenant create
+  stamps + read filters); `tenant_isolation.rs` 2/2 passed; `cargo check -p gyre-server`
+  clean; `check-scope-literal-defaults` exemptions pruned 12→2 and honest (zero-exemption
+  scan finds exactly the 2 remaining entries); `check-task-commit-attribution` OK at HEAD.
+
+**F1 (material) — the final merge resolution c96170ce3 silently reverted upstream work in
+`crates/gyre-server/src/api/admin.rs`** (-315/+60 vs base; the resolution kept the branch's
+stale admin.rs wholesale — diff vs merge parent1 is empty). Dropped vs base:
+token revocation on admin kill (`revoke_agent_token`, base :370 — a force-killed agent's
+token now stays valid), task-scoped secret revocation on kill (`revoke_agent_task_secrets`,
+base :375 — every other teardown path still revokes), AgentKilled/AgentReassigned audit
+events with caller attribution + `attested_pid` (task-103), backend-aware kill from task-117
+(docker/kubectl/SSH → now LocalTarget-only, so container-backed agents are not actually
+killed), the `AuthenticatedAgent` extractors on kill/reassign (authz itself still holds —
+routes are ABAC-mapped admin/write, abac_middleware.rs:369-373), and persona seeding for
+admin-created tenants (`seed_builtin_personas_for_tenant`, base :583). The Shipped notes
+document resolutions for the other conflicted files but say nothing about admin.rs.
+
+**F2 (material) — the regression is test-masked**: the three base tests pinning the removed
+behavior (`admin_kill_revokes_task_scoped_secrets`, `admin_kill_emits_lifecycle_audit_events`,
+`admin_reassign_emits_agent_reassigned_audit_event`) were deleted with the features, so
+`cargo test --all` stays green.
+
+Repair: re-resolve admin.rs against base cfeefbda keeping BOTH sides — the branch's
+emit_telemetry test semantics (test_workspace helper, unresolvable-scope drop test) AND
+upstream's kill-path revocation/audit/backend-kill + the three tests; restore
+`seed_builtin_personas_for_tenant` in admin_seed.
+
+Evidence: `/tmp/stage/review-evidence/` (SUMMARY.txt with all commands/exit codes; mutation
+kill probes; zero-exemption scan; cargo check + tenant_isolation runs; attribution at HEAD).
+Verifier must run (deferred per 4 GiB budget): `cargo test --all`, `cargo test -p gyre-server`,
+`cargo test -p gyre-adapters`, and the three task scripts.
