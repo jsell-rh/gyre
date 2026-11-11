@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "11a702b89c608d1b843aa098922a729c5a97b2b1", "333030908ce0ff64b2810ea0003fc0e28598abf3", "bd83468915b374048847de7dc7d4551aaa95f857", "631e821555325960b44efb361a527ef8f52fe59b", "4ab6c017e0b264afd773c0a77df02890112cfc29"]
+commits: ["2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
 ---
 
 ## Spec Excerpt
