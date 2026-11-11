@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "95dde8040bdd953e828df10bce4432bcec2a2fd2"]
 ---
 
 ## Spec Excerpt
@@ -60,7 +60,7 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 ownership of the 256-capacity mpsc receiver via `AppState::take_message_dispatch_rx()`
 (single-owner — a second call is a logged no-op) and spawns the background drain
 task. `MessageDispatcher` holds `Vec<Arc<dyn MessageConsumer>>` and dispatches
-every drained message to all consumers. The first registered consumer is
+every drained message to all registered consumers. The first registered consumer is
 `NotificationBridge`, which derives Inbox notifications from Event-tier messages
 (ranks per the unified user-management taxonomy):
 
@@ -106,31 +106,21 @@ emit_event → dispatcher → bridge → exactly one rank-3 notification). The
 reconciliation wave-completion test drains the bus via the real dispatcher,
 proving the p6 path.
 
-### Rebase repair onto cfeefbda
+### Rebase repair onto cba416b46 (this round)
 
-Rebased onto the assigned base cfeefbda (task-123 notification taxonomy
-unification), merge commit 717739096. Two textual conflicts resolved:
-notifications.rs keeps the base's `notify_gate_passed` (called by the merged
-gate_executor.rs) while keeping task-162's removal of the synchronous
-`notify_gate_failure` (the bridge is the single GateFailure creation path); the
-HSI coverage row 43 combines task-162's dispatcher-based #3 description with
-base's task-123 gap closures. Semantic fallout fixed after `cargo check`: the
-bridge was adapted to the restructured `Notification` (nested
-`NotificationSource`, `priority_rank`) and renamed taxonomy
-(`AgentBudgetWarning` rank 4, `AgentEscalation` rank 2), now delegating to
-`notify_rich` to preserve the base's deep links; affected tests updated to the
-new fields/ranks; the gate-failure deep-link test now drives the bridge
-directly.
-
-### Contract repair (this round)
-
-Restored the assigned task document body verbatim (acceptance checkboxes
-unticked, Agent Instructions section preserved) after the prior round's
-protected-text edit; the production fix above is unchanged. Fresh probes at
-head d2841a5bd: `cargo check -p gyre-server --tests` clean (9m28s),
-`cargo test -p gyre-common` 124 passed, mechanical checks clean (arch,
-dead-message-kinds, mem-port-contracts, inert-enforcement). Gyre-server test
-compilation remains deferred to the independent verifier (4 GiB budget):
+Merged the assigned base cba416b46 (task-118 agent spawning / Ralph loop)
+into the branch, merge commit 95dde8040. Single textual conflict in
+specs/coverage/SUMMARY.md resolved mechanically by regenerating the file with
+scripts/update-coverage-summary.sh from the auto-merged individual coverage
+files — the resulting rows keep the base's upstream coverage numbers
+(merge-dependencies 100%, meta-spec-reconciliation 45%, observability 88%)
+alongside task-162's message-bus closures (message-bus.md 100%). lib.rs,
+mem.rs, and the task-118 files auto-merged cleanly; the implementation above
+is unchanged. Fresh probes at merge commit 95dde8040:
+`cargo check -p gyre-server --tests` clean (9m30s), `cargo test -p gyre-common`
+124 passed, mechanical checks clean (arch, dead-message-kinds,
+mem-port-contracts, inert-enforcement). Gyre-server test compilation remains
+deferred to the independent verifier (4 GiB budget):
 `cargo test -p gyre-server --lib message_dispatcher`, `--lib gate_executor`,
 `--lib notifications`, `--lib reconciliation`, and the full `cargo test --all`
-gate. Evidence: /tmp/stage/review-evidence/.
+gate. Evidence: /tmp/stage/review-evidence/rebase-repair.md.
