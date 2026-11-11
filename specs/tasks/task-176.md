@@ -111,23 +111,34 @@ meta-specs, no repo context) rendered the State 1 chat permanently disabled:
   meta_spec_id})`. The dead `specsAssistGlobal` 404 stand-in was removed
   from `api.js`.
 
-### This round: merge integration with base 22ca8fd8 (task-175)
+### This round: merge integration with base cba416b46 (task-118)
 
-- Merged assignment base 22ca8fd805dc3a7ef98b938672d270c14217bffa
-  (task-175 Specs/Inbox layouts) as commit 4361d5501. The integration
-  points — `web/src/lib/api.js`, `web/src/locales/en.json` (both modified
-  by task-175 on the base side and by this task), and
-  `crates/gyre-server/src/api/specs_assist.rs` (task-175 added ~405 lines
-  to the module carrying `assist_meta_spec`) — were verified: §9 strings,
-  `metaSpecsAssist`, and `assist_meta_spec` all present at HEAD.
+- Resolved the in-progress merge of assignment base
+  cba416b46a73d3568f745d7b4eae49a0700a90a6 (task-118 Ralph loop /
+  agent-runtime backend) as commit 61d5c50fb. The only content conflict
+  was `specs/coverage/SUMMARY.md`: resolved by keeping the base side's
+  newer agent-runtime.md row (16/16, from task-118's merged coverage
+  file) and this task's ui-layout.md row (36 assigned / 2 implemented,
+  §9 implemented), with the TOTAL recomputed mechanically — resolution
+  verified byte-identical to `scripts/update-coverage-summary.sh`
+  output. `specs/coverage/system/ui-layout.md` merged keeping this
+  task's implemented §9 row.
+- §9 source integrity on the merged tree confirmed: `locked-diff` ×18 in
+  `web/src/lib/EditorSplit.svelte`, `metaSpecsAssist` in
+  `web/src/lib/api.js`, `lineDiff.js`/`lineDiff.test.js` present,
+  `showResultTabs` Iterate retention in place; server route
+  `POST /workspaces/:id/meta-specs/assist` → `assist_meta_spec`
+  registered in `api/mod.rs` with its ABAC resolver entry.
 - Focused frontend tests on the merged tree: EditorSplit + MetaSpecs +
-  lineDiff — 169 passed; Inbox (task-175 surface sharing the merged
-  api.js/en.json) — 74 passed. `SKIP_WEB_BUILD=1 cargo check -p
-  gyre-server` — clean. Evidence:
-  `/tmp/stage/review-evidence/round4-verification.log`.
+  lineDiff — 169 passed. `SKIP_WEB_BUILD=1 cargo check -p gyre-server` —
+  clean (7m12s). Evidence:
+  `/tmp/stage/review-evidence/task-176-round5-frontend.log`,
+  `task-176-round5-cargo-check.log`.
 - Server tests for the verifier: `cargo test -p gyre-server specs_assist`
-  (covers `assist_meta_spec_*` and the task-175 assist tests in the same
-  module); full `cd web && npm test`.
+  (covers `assist_meta_spec_*`); `cargo test -p gyre-server ralph_loop
+  signal_chain e2e_ralph_loop` (merged task-118 surfaces sharing
+  `signal_chain.rs`/`mcp.rs` with the assist route's module neighbors);
+  full `cd web && npm test`.
 
 ### web/dist publication
 
