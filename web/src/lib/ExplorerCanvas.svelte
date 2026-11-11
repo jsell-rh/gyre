@@ -1,8 +1,9 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
+  import FlowCanvas from './FlowCanvas.svelte';
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
@@ -15,7 +16,39 @@
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
+  import { applyDensityPolicy } from './canvas-density.js';
+  import { dispatchViewEvent, viewEventFromDom } from './viewEvents.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
+  import {
+    gateStatusDecoration,
+    evaluativeNodeDecorations,
+  } from './lens-rendering.js';
+  import {
+    activeAgentNodeIds as computeActiveAgentNodeIds,
+    computeRecentChanges,
+    recentChangeAlpha,
+    computeNodeGateStatus,
+    edgeGateStatus,
+  } from './liveness.svelte.js';
+  import {
+    hasCausalEdges,
+    computeTraceOrder,
+    governingSpecFor,
+    buildTraceSteps,
+  } from './causal-trace.js';
+  import {
+    SUCCESS_PARTICLE_COLOR,
+    TRAIL_FADE_MS,
+    rootSpanCases,
+    spanRootMap,
+    testCaseColor,
+    particlesAtTime,
+    nextSpanStart,
+    spansTraversingEdge,
+    nearestParticleToNode,
+    trailSegments,
+  } from './flow-particles.js';
+  import { WEBGL_PARTICLE_THRESHOLD, drawParticles2D, ParticleLayer } from './particle-layer.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -25,6 +58,9 @@
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = $bindable('all'),
     lens = $bindable('structural'),
+    layout = 'graph', // active ViewSpec layout; 'flow' delegates rendering to FlowCanvas
+    gateStatusBySpec = {},   // HSI §3 Evaluative lens: spec path → 'pass' | 'fail' (most recent gate results)
+    specApprovals = [],     // HSI §3 Evaluative lens: spec approval ledger records
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
@@ -35,6 +71,14 @@
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    playbackRequest = null, // { nonce } — start trace playback (generated "flow" views, HSI §3);
+    //                        // repeated requests re-trigger via a fresh nonce.
+    windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
+    //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
+    //                     closes overlays most-recent-first and clears the trace query itself, so it opts
+    //                     out (false); a second window listener there would clear the trace on the same
+    //                     keypress that closes an overlay, breaking the cascade ordering.
     rootLabel = '',          // breadcrumb root segment label (repo name at repo scope)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
@@ -44,6 +88,10 @@
     onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
     onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
     timelineDeltaStats = null, // { added, removed, modified, byType }
+    // HSI §3 Layer 1 gate status — MR gate evaluation records for the current
+    // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
+    // parent (ExplorerView); only rendered in the Evaluative lens.
+    gateRecords = [],
   } = $props();
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
@@ -110,6 +158,55 @@
     return idx;
   });
 
+  // ── Evaluative lens decorations (HSI §3 Three Lenses) ─────────────────
+  // Lens decorations compose on the structural base: the same layout and
+  // the same spec-governance coloring are reused; the evaluative lens only
+  // adds visual encodings (coverage badges, gate rings, approval icons,
+  // gate-colored edges) on top.
+  let nodesById = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) m.set(n.id, n);
+    return m;
+  });
+
+  // Spec approval ledger records (GET /api/v1/specs/approvals) by spec path.
+  let approvalRecordsByPath = $derived.by(() => {
+    const m = new Map();
+    for (const rec of specApprovals ?? []) {
+      if (!rec?.spec_path) continue;
+      if (!m.has(rec.spec_path)) m.set(rec.spec_path, []);
+      m.get(rec.spec_path).push(rec);
+    }
+    return m;
+  });
+
+  // Composed evaluative decorations per node: coverage badge (green/yellow/
+  // red from GraphNode.test_coverage), gate status ring (most recent gate
+  // results joined via the node's governing specs), and spec approval icon
+  // (✓ approved / ⏳ pending / ✗ rejected from the approval ledger).
+  let evaluativeDecorationsByNodeId = $derived.by(() => {
+    const m = new Map();
+    if (lens !== 'evaluative') return m;
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = evaluativeNodeDecorations(n, { gateStatusBySpec, approvalRecordsByPath, edges, nodesById });
+      if (d) m.set(n.id, d);
+    }
+    return m;
+  });
+
+  // Gate outcome per node id, precomputed so the per-edge render loop stays
+  // O(1) per edge (edges leaving a governed node get the gate color).
+  let gateStatusByNodeId = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const d = gateStatusDecoration(n, gateStatusBySpec, edges, nodesById);
+      if (d) m.set(n.id, d.status);
+    }
+    return m;
+  });
+
   function specBorderColor(node) {
     if (!node) return '#64748b';
     const conf = node.spec_confidence;
@@ -172,9 +269,35 @@
   const MIN_ZOOM = 0.05;
   const MAX_ZOOM = 20.0;
   const LERP_SPEED = 0.15;
+  // Active-agent glow pulse period (HSI §3): one full glow cycle every 2s —
+  // a subtle ambient pulse, not a flash.
+  const ACTIVE_GLOW_PERIOD_MS = 2000;
 
   // ── Canvas state ─────────────────────────────────────────────────────
   let canvasEl = $state(null);
+  // WebGL2 particle overlay host (ui-layout.md §4 "Rendering": >100
+  // concurrent particles switch to WebGL — a canvas element permanently
+  // keeps the first context type it is given, so the WebGL particle pass
+  // needs its own element above this component's 2D canvas).
+  let particleOverlayEl = $state(null);
+  let particleLayer = null; // created/destroyed by the effect below
+
+  // Flow-layout delegation (ui-layout.md §4): when the active layout is
+  // "flow", node/edge/particle rendering is delegated to FlowCanvas (SVG
+  // node/edge layer + Canvas 2D/WebGL2 particle overlay). This component
+  // keeps the chrome — toolbar, lens toggle, breadcrumb, search — and
+  // forwards interaction callbacks.
+  const isFlowLayout = $derived(layout === 'flow');
+
+  $effect(() => {
+    const el = particleOverlayEl;
+    if (!el) return;
+    particleLayer = new ParticleLayer(el, { className: 'particle-overlay-canvas' });
+    return () => {
+      particleLayer?.destroy();
+      particleLayer = null;
+    };
+  });
   let minimapEl = $state(null);
   let containerEl = $state(null);
   let W = $state(900);
@@ -294,6 +417,9 @@
 
   let tooltipNode = $state(null);
   let tooltipPos = $state({ x: 0, y: 0 });
+  // Span id of the hovered trace particle (evaluative lens) — drives the
+  // I/O summary tooltip and the on-hover particle scale-up.
+  let hoveredParticleSpanId = $state(null);
 
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
@@ -337,6 +463,47 @@
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
+  // ── HSI §3 Layer 1: liveness indicators ──────────────────────────────
+  // Active-agent glow: nodes governed by the spec of any currently running
+  // agent (RunStarted/RunFinished telemetry tracked in liveness.svelte.js,
+  // wired to the WebSocket in App.svelte) pulse with a subtle glow.
+  let activeAgentNodeIds = $derived.by(() => computeActiveAgentNodeIds(nodes, edges));
+  // Recent changes: nodes added/modified in the last hour per
+  // ArchitecturalDelta records get a fading highlight ring. `changedAtMs` is
+  // stored per node; the fade itself is computed at draw time from the
+  // clock so the ring keeps fading without a per-frame timer.
+  let recentChanges = $derived.by(() => computeRecentChanges(nodes, timeline, Date.now()));
+  // Slow refresh: while unfaded recent changes exist, redraw once a minute
+  // so the fade progresses even without user interaction. (The alpha is
+  // recomputed at draw time; this only nudges a redraw.)
+  $effect(() => {
+    if (recentChanges.size === 0) return;
+    const hasUnfaded = [...recentChanges.values()].some((e) => recentChangeAlpha(e) > 0);
+    if (!hasUnfaded) return;
+    const t = setInterval(() => scheduleRedraw(), 60_000);
+    return () => clearInterval(t);
+  });
+  // Gate status: per-node pass/fail from MR gate records — ONLY computed
+  // for the Evaluative lens so the Structural lens (default) never shows
+  // gate colors (spec: "default Structural lens hides gate colors").
+  let nodeGateStatus = $derived.by(() =>
+    lens === 'evaluative' ? computeNodeGateStatus(nodes, edges, gateRecords) : new Map()
+  );
+  let hasGateEdges = $derived(nodeGateStatus.size > 0);
+  // Redraw when liveness indicator state changes — a run starting/finishing,
+  // its spec resolving, or gate records loading must be reflected on the
+  // canvas without waiting for the next user interaction. The redraw is
+  // deferred to a macrotask: this effect is created before the layout
+  // effects, and drawing synchronously mid-flush (before layoutNodes is
+  // populated) would render an empty frame inside the mount flush.
+  $effect(() => {
+    void activeAgentNodeIds.size;
+    void recentChanges.size;
+    void nodeGateStatus.size;
+    const t = setTimeout(() => scheduleRedraw(), 0);
+    return () => clearTimeout(t);
+  });
+
   // ── Ghost overlay state (spec editing preview) ──────────────────────
   // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
   let ghostById = $derived.by(() => {
@@ -355,9 +522,53 @@
   let ghostPulsePhase = $state(0); // 0..1 pulsing animation
   let ghostAnimCycles = $state(0); // count of completed pulse cycles
 
-  // Trace path numbering state (DFS execution order badges for "Trace from here")
+  // Trace path numbering state (BFS execution order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
-  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in DFS order
+  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
+  // Set when "Trace from here" is requested but the graph has no Calls/RoutesTo
+  // edges at all — the spec requires a warning instead of a silent empty trace.
+  let traceWarning = $state(false);
+  // Node that started the current trace. Plain (non-reactive) vars: written by
+  // event handlers, read by the trace effect once the query round-trips back
+  // as the activeQuery prop — keeping them untracked means the activating
+  // click itself cannot trigger an intermediate effect run that would clear
+  // them before the query lands (effects are batched with the query update in
+  // production, but staying untracked removes the ordering assumption).
+  let traceStartNodeId = null;
+  // Dedupe guard for detail-panel emission: the trace effect re-runs on data
+  // reloads while a trace is active; re-emitting would clobber the user's
+  // current detail selection.
+  let lastTraceDetailEmittedFor = null;
+
+  // Start a causal flow trace from `node` (explorer-canvas.md §6).
+  // Shared by the right-click context menu and the toolbar Trace button.
+  // If the loaded graph contains no causal (Calls/RoutesTo) edges, trace mode
+  // cannot show any flow: warn instead of entering a degenerate trace.
+  function startTraceFromNode(node) {
+    if (!node) return;
+    if (!hasCausalEdges(edges)) {
+      traceWarning = true;
+      return;
+    }
+    traceWarning = false;
+    traceStartNodeId = node.id;
+    lastTraceDetailEmittedFor = null;
+    // Trace from here: show causal flow using Calls + RoutesTo edges.
+    // Depth 15 to capture full reachable subgraph while staying responsive.
+    onInteractiveQuery({
+      scope: { type: 'focus', node: node.qualified_name ?? node.name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
+      // Spec: unreachable nodes dim to 20% opacity (edges dim further via the
+      // query edge filter's ×0.1 factor on unmatched edges).
+      emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.2 },
+      edges: { filter: ['calls', 'routes_to'] },
+      zoom: 'fit',
+      annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
+      _trace: true,
+    });
+  }
+
+  // Whether a causal flow trace is currently active (the "Clear trace" affordances key off this).
+  let traceActive = $derived(!!activeQuery?._trace);
 
   // Pre-compute incoming call counts to avoid O(N*E) per anomaly check
   let incomingCallCounts = $derived.by(() => {
@@ -802,9 +1013,46 @@
 
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
-  let evalSpeed = $state(1.0); // Clamped to [0.25, 5.0] per spec
+  let evalSpeed = $state(1.0); // Clamped to [0.25, 10.0]: union of
+  //                           // explorer-canvas.md §4 (0.25x–5x) and
+  //                           // human-system-interface.md §3a (1x/10x).
   let evalScrubber = $state(0); // 0..1 normalized time position
-  let evalParticles = $state([]); // [{edgeKey, progress, span, color}]
+  let evalParticles = $state([]); // [{fromId, toId, progress, span, rootSpanId, caseIndex, color, glow}]
+  let evalTestFilter = $state(null); // Test selector (ui-layout.md §4): root
+  //                                 // span id to animate, null = all cases.
+
+  // Root spans are the test cases (ui-layout.md §4 "Multiple test cases"):
+  // each root span is one traced test request. `color` is the hue-shifted
+  // success-palette swatch used by the legend.
+  let evalRootCases = $derived.by(() => {
+    return rootSpanCases(traceData?.spans).map((c) => ({
+      ...c,
+      color: testCaseColor(SUCCESS_PARTICLE_COLOR, c.index),
+    }));
+  });
+  let evalSpanRoots = $derived.by(() => spanRootMap(traceData?.spans));
+  let evalCaseIndexByRoot = $derived.by(() => {
+    const m = new Map();
+    for (const c of evalRootCases) m.set(c.spanId, c.index);
+    return m;
+  });
+
+  // A new trace (different MR) invalidates the selected test case — reset
+  // the filter rather than animate nothing against a stale root span id.
+  $effect(() => {
+    const cases = evalRootCases;
+    if (evalTestFilter && !cases.some((c) => c.spanId === evalTestFilter)) {
+      evalTestFilter = null;
+    }
+  });
+
+  // Particle trail position history (ui-layout.md §4 "Trail": opacity decay
+  // over 200ms, 20px trail length). Keyed by span id; pruned by age inside
+  // trailSegments on every draw.
+  const particleTrails = new Map(); // spanId → [{x, y, t}]
+  function clearParticleTrails() {
+    particleTrails.clear();
+  }
 
   // Pre-compute span-to-graph-node mapping and edge call frequencies
   let traceEdgeFrequency = $derived.by(() => {
@@ -878,59 +1126,129 @@
 
   function tickParticles(dt) {
     if (!traceSpanTimeline || !evalPlaying) return;
-    const { minTime, totalDuration, spans } = traceSpanTimeline;
-    const spanById = new Map();
-    for (const s of spans) spanById.set(s.span_id, s);
+    const { minTime, totalDuration } = traceSpanTimeline;
 
     // Advance scrubber: playback duration is proportional to actual trace duration.
     // Convert totalDuration (microseconds) to seconds, then clamp to [0.5s, 30s]
     // so very short traces don't flash by and very long traces don't drag.
     const traceSeconds = totalDuration / 1_000_000;
     const normalizedDuration = Math.max(0.5, Math.min(30.0, traceSeconds));
-    const clampedSpeed = Math.max(0.25, Math.min(5.0, evalSpeed));
-    const step = (dt / 1000) * clampedSpeed / normalizedDuration;
-    evalScrubber = Math.min(1, evalScrubber + step);
+    const clampedSpeed = Math.max(0.25, Math.min(10.0, evalSpeed));
+    // dt ≥ 0: a regressing rAF timestamp (jsdom mocks, background-tab
+    // throttling anomalies) must not rewind the scrubber below 0.
+    const step = Math.max(0, dt / 1000) * clampedSpeed / normalizedDuration;
+    evalScrubber = Math.min(1, Math.max(0, evalScrubber + step));
     if (evalScrubber >= 1) {
       evalPlaying = false; // Stop at end (single-play mode)
       evalScrubber = 1;
     }
 
-    const currentTime = minTime + evalScrubber * totalDuration;
-    const newParticles = [];
-
-    for (const span of spans) {
-      if (!span.graph_node_id || !span.parent_span_id) continue;
-      const parent = spanById.get(span.parent_span_id);
-      if (!parent?.graph_node_id) continue;
-
-      // Scope particles to drill level: only show particles where both
-      // endpoints are currently visible (in layoutNodeMap).
-      if (!layoutNodeMap.has(parent.graph_node_id) || !layoutNodeMap.has(span.graph_node_id)) continue;
-
-      const spanStart = span.start_time;
-      const spanEnd = span.start_time + span.duration_us;
-
-      if (currentTime >= spanStart && currentTime <= spanEnd) {
-        const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = (span.status ?? '').toLowerCase() === 'error';
-        newParticles.push({
-          fromId: parent.graph_node_id,
-          toId: span.graph_node_id,
-          progress: Math.min(1, Math.max(0, progress)),
-          span,
-          color: isError ? '#ef4444' : '#60a5fa',
-          glow: isError ? '#ef4444' : '#3b82f6',
-        });
-      }
-    }
-    evalParticles = newParticles;
+    evalParticles = computeParticlesAtTime(minTime + evalScrubber * totalDuration);
   }
+
+  // Shared particle resolution for live playback, paused scrubbing, and
+  // step-through: the same timestamp must produce the same positions on
+  // every path (ui-layout.md §4 "All particles freeze at their positions at
+  // that timestamp").
+  function computeParticlesAtTime(currentTime) {
+    if (!traceSpanTimeline) return [];
+    return particlesAtTime(traceSpanTimeline.spans, currentTime, {
+      visibleNodeIds: layoutNodeMap,
+      testFilter: evalTestFilter,
+      rootOf: evalSpanRoots,
+      caseIndexByRoot: evalCaseIndexByRoot,
+    });
+  }
+
+  // Paused interaction must still reposition particles: dragging the
+  // scrubber, changing the test filter, or stepping while paused all
+  // resolve particles at the (new) scrubber timestamp. Without this the
+  // particles stay at their last-played positions while the scrubber
+  // moves — the freeze-on-scrub contract broken.
+  $effect(() => {
+    if (lens !== 'evaluative' || evalPlaying) return;
+    const tl = traceSpanTimeline;
+    if (!tl) {
+      if (evalParticles.length > 0) evalParticles = [];
+      return;
+    }
+    evalParticles = computeParticlesAtTime(tl.minTime + evalScrubber * tl.totalDuration);
+    untrack(() => scheduleRedraw());
+  });
 
   // Redraw when highlighted span changes (evaluative tab click)
   $effect(() => {
     // Access highlightedSpanId to create a dependency
     const _spanId = highlightedSpanId;
     if (lens === 'evaluative') scheduleRedraw();
+  });
+
+  /**
+   * HSI §3 Layer 2: start replaying the captured trace. Invoked from a
+   * node's ▶ play badge (any lens) or the playback toolbar. Switches to the
+   * Evaluative lens — the particle animation renders there — rewinds to the
+   * start of the trace, and starts the animated data flow along the span tree.
+   */
+  function startTracePlayback() {
+    lens = 'evaluative';
+    onLensChange('evaluative');
+    evalScrubber = 0;
+    evalPlaying = true;
+    clearParticleTrails();
+    scheduleRedraw();
+  }
+
+  /**
+   * HSI §3a step-through: advance to the next span start (span by span),
+   * pausing playback. Repeated steps walk the trace in execution order;
+   * stepping past the last span pins the scrubber at the end.
+   */
+  function stepTracePlayback() {
+    const tl = traceSpanTimeline;
+    if (!tl) return;
+    evalPlaying = false;
+    const currentTime = tl.minTime + evalScrubber * tl.totalDuration;
+    const next = nextSpanStart(tl.spans, currentTime, evalSpanRoots, evalTestFilter);
+    evalScrubber = next == null ? 1 : (next - tl.minTime) / tl.totalDuration;
+    clearParticleTrails();
+    scheduleRedraw();
+  }
+
+  // External playback request (HSI §3 Generated Views: a "flow" layout
+  // view starts the particle animation along the span tree). Nonce-based so
+  // a repeated request for the same view re-triggers.
+  $effect(() => {
+    const req = playbackRequest;
+    if (!req?.nonce) return;
+    // Only meaningful when trace data exists — the parent only fires this
+    // for trace-backed flow views, but guard anyway: without spans there is
+    // nothing to animate.
+    if ((traceData?.spans?.length ?? 0) === 0) return;
+    if (isFlowLayout) {
+      // Flow layout delegates rendering — including playback start — to
+      // FlowCanvas; this component still owns the lens switch the request
+      // implies (trace particles render on the evaluative lens).
+      untrack(() => {
+        lens = 'evaluative';
+        onLensChange('evaluative');
+      });
+      return;
+    }
+    untrack(() => startTracePlayback());
+  });
+
+  // Pan/zoom the camera to a node on external request (detail-panel trace
+  // step click — explorer-canvas.md §6 step 6). `nonce` lets repeated clicks
+  // on the same step re-fire. The layoutNodes lookup stays TRACKED so a
+  // request arriving before the layout settles re-fires once nodes exist;
+  // the zoom itself is untracked so later layout changes don't re-zoom.
+  $effect(() => {
+    const req = focusRequest;
+    if (!req?.nodeId) return;
+    if (isFlowLayout) return; // FlowCanvas owns the camera in flow layout
+    const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === req.nodeId);
+    if (!ln) return; // not laid out yet — retried when layoutNodes changes
+    untrack(() => zoomToNode(req.nodeId));
   });
 
   // Computed elapsed time string for trace playback display
@@ -1226,11 +1544,20 @@
   let prevNodeCount = 0;
   let prevBreadcrumbLen = -1;
 
+  // Rendering density policy (ui-layout.md §10 Canvas Rendering): >500
+  // nodes auto-filter to public-only with a banner + [Show All]; the >1000
+  // list fallback is owned by the Explorer shell (ExplorerView).
+  let densityShowAll = $state(false);
+  let densityMode = $state('full');
+  let densityHiddenCount = $state(0);
+  let densityVisibleCount = $state(0);
+
   $effect(() => {
     const { childToParent, parentToChildren, nodeById } = treeData;
     const _bc = breadcrumb;
     const _f = filter;
     const _n = nodes.length;
+    const _d = densityShowAll;
 
     const isDataChange = _n !== prevNodeCount || breadcrumb.length !== prevBreadcrumbLen;
     prevNodeCount = _n;
@@ -1239,6 +1566,9 @@
     if (nodes.length === 0) {
       layoutNodes = [];
       layoutNodeMap = new Map();
+      densityMode = 'full';
+      densityHiddenCount = 0;
+      densityVisibleCount = 0;
       return;
     }
 
@@ -1261,6 +1591,15 @@
     } else {
       visibleNodes = nodes;
     }
+
+    // ui-layout.md §10 — auto-filter: >500 nodes render public-only (with a
+    // banner and a [Show All] override). The >1000 list fallback is a shell
+    // concern (ExplorerView swaps the canvas for a virtualized list).
+    const density = applyDensityPolicy(visibleNodes, { showAll: _d });
+    densityMode = density.mode;
+    densityHiddenCount = density.hiddenCount;
+    densityVisibleCount = density.nodes.length;
+    visibleNodes = density.nodes;
 
     // Get root nodes (no Contains parent within the visible set)
     const visibleSet = new Set(visibleNodes.map(n => n.id));
@@ -2392,9 +2731,19 @@
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
-    // Draw evaluative trace particles (above edges, below nodes)
+    // Draw evaluative trace particles (above edges, below nodes). Above
+    // the spec's >100-concurrent-particle threshold (ui-layout.md §4), the
+    // particle pass moves to the WebGL2 overlay; at or below it particles
+    // composite into this 2D context between edges and nodes.
     if (lens === 'evaluative' && evalParticles.length > 0) {
-      drawTraceParticles(ctx);
+      if (evalParticles.length > WEBGL_PARTICLE_THRESHOLD && particleLayer) {
+        drawTraceParticlesViaLayer();
+      } else {
+        if (particleLayer) particleLayer.clear();
+        drawTraceParticles(ctx);
+      }
+    } else if (particleLayer) {
+      particleLayer.clear();
     }
 
     // Draw view query group boundaries
@@ -2671,10 +3020,13 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(stepNum), bx, by);
-        // Show governing spec annotation below badge if space permits
+        // Show governing spec annotation below badge if space permits.
+        // Checks GovernedBy edges too, not just the spec_path field (spec §6
+        // step 5: "annotated with its governing spec (if any)").
         const n = ln.node;
-        if (n?.spec_path && sw > 60 && sh > 30) {
-          const specLabel = n.spec_path.split('/').pop()?.replace('.md', '') ?? '';
+        const govSpec = governingSpecFor(n, edges);
+        if (govSpec && sw > 60 && sh > 30) {
+          const specLabel = govSpec.split('/').pop()?.replace('.md', '') ?? '';
           if (specLabel) {
             const specFs = Math.max(7, Math.min(9, sw * 0.06));
             ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
@@ -3130,6 +3482,16 @@
     }
   }
 
+  /**
+   * Screen-space circle for the Layer 2 trace play icon on a node.
+   * Shared by the drawer and the click hit-test so the clickable region is
+   * exactly the drawn region. Positioned at the node's bottom-right corner.
+   */
+  function playIconRect(s, sw, sh) {
+    const r = Math.max(5, Math.min(9, Math.min(sw, sh) * 0.22));
+    return { cx: s.x + sw / 2 - r - 2, cy: s.y + sh / 2 - r - 2, r: r + 2 };
+  }
+
   function drawLeafNode(ctx, ln, s, sw, sh, op) {
     const n = ln.node;
     const r = Math.min(6, sw * 0.08);
@@ -3172,6 +3534,44 @@
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.restore();
+    }
+
+    // ── HSI §3 Layer 1: active-agent glow ────────────────────────────
+    // Nodes where an agent is currently working (RunStarted telemetry, glow
+    // removed on RunFinished) pulse with a subtle glow. Time-based sine so
+    // the pulse is smooth at any frame rate; the render loop stays alive
+    // while any glowing node is on screen (see animLoop).
+    if (activeAgentNodeIds.has(ln.id) && sw > 14 && sh > 10) {
+      const phase = (Date.now() % ACTIVE_GLOW_PERIOD_MS) / ACTIVE_GLOW_PERIOD_MS;
+      const pulse = 0.5 + 0.5 * Math.sin(phase * Math.PI * 2);
+      ctx.save();
+      ctx.globalAlpha = op * (0.25 + 0.45 * pulse);
+      ctx.strokeStyle = '#38bdf8'; // sky-400 — distinct from spec-border colors
+      ctx.lineWidth = 1.5 + pulse;
+      ctx.shadowColor = '#38bdf8';
+      ctx.shadowBlur = 4 + 8 * pulse;
+      roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // ── HSI §3 Layer 1: recent-change fading ring ───────────────────
+    // Nodes added/modified in the last hour (ArchitecturalDelta records)
+    // carry a highlight ring that fades over the hour — full opacity at the
+    // change, linear fade to zero at 60 minutes (never an instant on/off).
+    const recentChange = recentChanges.get(ln.id);
+    if (recentChange && sw > 14 && sh > 10) {
+      const fade = recentChangeAlpha(recentChange);
+      if (fade > 0) {
+        ctx.save();
+        ctx.globalAlpha = op * (0.2 + 0.65 * fade);
+        ctx.strokeStyle = '#fbbf24'; // amber-400
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, s.x - sw / 2 - 5, s.y - sh / 2 - 5, sw + 10, sh + 10, r + 3);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Border — colored by spec confidence, width scaled by churn
@@ -3252,6 +3652,63 @@
       ctx.restore();
     }
 
+    // ── Evaluative lens decorations (HSI §3 Three Lenses) ──────────────
+    // Composed on top of the structural base: gate status ring, spec
+    // approval icon, and coverage badge. The structural fill, spec border,
+    // and label above remain visible underneath (lenses compose — the
+    // Evaluative overlay never replaces the Structural rendering).
+    const evalDeco = evaluativeDecorationsByNodeId.get(n?.id);
+    if (evalDeco && sw > 25 && sh > 16) {
+      // Gate status ring — green (pass) / red (fail) from the most recent
+      // gate results of the node's governing specs.
+      if (evalDeco.gate && sw > 30) {
+        ctx.save();
+        ctx.strokeStyle = evalDeco.gate.color;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Spec approval icon — ✓ approved / ⏳ pending / ✗ rejected from the
+      // spec approval ledger (bottom-left; TEST/metric badges own the top).
+      if (evalDeco.approval) {
+        const fs = Math.max(9, Math.min(12, sw * 0.12));
+        ctx.save();
+        ctx.font = `700 ${fs}px system-ui`;
+        const pillW = measureText(ctx, evalDeco.approval.icon, ctx.font) + 6;
+        const ax = s.x - sw / 2 + 2;
+        const ay = s.y + sh / 2 - fs - 4;
+        ctx.fillStyle = 'rgba(15,15,26,0.85)';
+        ctx.beginPath();
+        roundRect(ctx, ax, ay, pillW, fs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.approval.color;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.approval.icon, ax + 3, ay + 2);
+        ctx.restore();
+      }
+      // Test coverage badge — green/yellow/red heatmap from
+      // GraphNode.test_coverage (bottom-right).
+      if (evalDeco.coverage && sw > 40 && sh > 22) {
+        const bfs = Math.max(7, Math.min(10, sw * 0.09));
+        ctx.save();
+        ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
+        const bw = measureText(ctx, evalDeco.coverage.label, ctx.font) + 6;
+        const bx = s.x + sw / 2 - 2;
+        const by = s.y + sh / 2 - bfs - 4;
+        ctx.fillStyle = evalDeco.coverage.bg;
+        ctx.beginPath();
+        roundRect(ctx, bx - bw, by, bw, bfs + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = evalDeco.coverage.fg;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(evalDeco.coverage.label, bx - 2, by + 2);
+        ctx.restore();
+      }
+    }
+
     // Label — LOD: skip text on leaf nodes at low zoom for performance
     // At zoom < 0.5, leaf labels are too small to read anyway
     if (sw > 30 && sh > 14 && cam.zoom >= 0.5) {
@@ -3327,38 +3784,47 @@
           ctx.restore();
         }
       }
-      // Evaluative metric badge (when evaluative lens is active)
-      if (evalColor && n && sw > 50 && sh > 30) {
-        let metricVal = 0;
-        let metricLabel = '';
-        // Evaluative lens only shows trace-based (behavioral) metrics
-        if (evaluativeMetric === 'span_duration') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.meanDuration; metricLabel = metricVal < 1000 ? `${Math.round(metricVal)}\u00B5s` : `${(metricVal / 1000).toFixed(1)}ms`; }
-        }
-        else if (evaluativeMetric === 'span_count') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.spanCount; metricLabel = `${metricVal} spans`; }
-        }
-        else if (evaluativeMetric === 'error_rate') {
-          const stats = nodeSpanStats.get(n.id);
-          if (stats) { metricVal = stats.errorRate * 100; metricLabel = `${metricVal.toFixed(0)}% err`; }
-        }
-        if (metricVal > 0) {
+      // Evaluative metric badges (when evaluative lens is active).
+      // Spec §4: node badges show span count, error rate, AND mean duration —
+      // all three are rendered as a chip row, independent of which metric
+      // drives the heat coloring (heat metric selection only changes color).
+      if (lens === 'evaluative' && n && sw > 50 && sh > 30) {
+        const stats = nodeSpanStats.get(n.id);
+        if (stats && stats.spanCount > 0) {
           const bx = s.x + sw / 2 - 4;
           const by = s.y - sh / 2 + 4;
           const bfs = Math.max(7, Math.min(9, sw * 0.08));
           ctx.save();
           ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
-          const bw = measureText(ctx, metricLabel, ctx.font) + 6;
-          ctx.fillStyle = evalColor + '88';
-          ctx.beginPath();
-          ctx.roundRect(bx - bw, by - 2, bw, bfs + 4, 3);
-          ctx.fill();
-          ctx.fillStyle = '#fff';
           ctx.textAlign = 'right';
           ctx.textBaseline = 'top';
-          ctx.fillText(metricLabel, bx - 3, by);
+          // Chips are laid out right-to-left from the node's top-right corner:
+          // [mean duration] [error rate] [span count]
+          const meanUs = stats.meanDuration;
+          const chips = [
+            { label: `${stats.spanCount} spans`, bg: (evalColor ?? '#3b82f6') + '88', fg: '#fff' },
+            {
+              label: `${Math.round(stats.errorRate * 100)}% err`,
+              bg: stats.errorRate > 0 ? '#7f1d1d' : '#1e293b',
+              fg: stats.errorRate > 0 ? '#fca5a5' : '#94a3b8',
+            },
+            {
+              label: meanUs < 1000 ? `${Math.round(meanUs)}\u00B5s` : `${(meanUs / 1000).toFixed(1)}ms`,
+              bg: '#1e293b',
+              fg: '#e2e8f0',
+            },
+          ];
+          let cursorX = bx;
+          for (const chip of chips) {
+            const cw = measureText(ctx, chip.label, ctx.font) + 6;
+            ctx.fillStyle = chip.bg;
+            ctx.beginPath();
+            ctx.roundRect(cursorX - cw, by - 2, cw, bfs + 4, 3);
+            ctx.fill();
+            ctx.fillStyle = chip.fg;
+            ctx.fillText(chip.label, cursorX - 3, by);
+            cursorX -= cw + 2;
+          }
           ctx.restore();
         }
       }
@@ -3376,6 +3842,35 @@
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText('TEST', bx + 2, by + 1);
+        ctx.restore();
+      }
+
+      // ── HSI §3 Layer 2 scaffolding: trace play icon ──────────────────
+      // Nodes with trace data (spans linked to this graph node) show a ▶
+      // badge. Clicking it replays the captured request flow through the
+      // architecture (switches to the Evaluative lens and starts particle
+      // playback following the span tree).
+      if (n?.id && nodeSpanStats.has(n.id) && sw > 30 && sh > 18) {
+        const rect = playIconRect(s, sw, sh);
+        ctx.save();
+        // Subtle backdrop circle so the glyph reads on any fill color
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = '#0f172a';
+        ctx.beginPath();
+        ctx.arc(rect.cx, rect.cy, rect.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = evalPlaying ? '#93c5fd' : '#60a5fa';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // ▶ triangle
+        ctx.fillStyle = evalPlaying ? '#93c5fd' : '#60a5fa';
+        const t = rect.r * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(rect.cx - t * 0.7, rect.cy - t);
+        ctx.lineTo(rect.cx - t * 0.7, rect.cy + t);
+        ctx.lineTo(rect.cx + t, rect.cy);
+        ctx.closePath();
+        ctx.fill();
         ctx.restore();
       }
     }
@@ -3450,7 +3945,11 @@
     }
   }
 
-  function drawTraceParticles(ctx) {
+  // Particle drawables shared by the in-canvas 2D path and the WebGL2
+  // overlay: screen positions, hover/highlight radii and trail segments.
+  // Trail history is updated here so both paths consume identical state.
+  function particleDrawables(now) {
+    const drawables = [];
     for (const p of evalParticles) {
       const sln = layoutNodeMap.get(p.fromId);
       const tln = layoutNodeMap.get(p.toId);
@@ -3467,40 +3966,62 @@
       if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
 
       const isHighlighted = highlightedSpanId && p.span?.span_id === highlightedSpanId;
-      const radius = isHighlighted ? 8 + cam.zoom * 0.8 : 4 + cam.zoom * 0.5;
+      const isHovered = hoveredParticleSpanId && p.span?.span_id === hoveredParticleSpanId;
+      // ui-layout.md §4: 4px particles scale up on hover (base 4 → 6).
+      const radius = isHighlighted ? 8 + cam.zoom * 0.8
+        : isHovered ? 6 + cam.zoom * 0.5
+        : 4 + cam.zoom * 0.5;
 
-      // Glow
-      ctx.save();
-      ctx.shadowColor = isHighlighted ? '#f59e0b' : p.glow;
-      ctx.shadowBlur = isHighlighted ? 20 : 10;
-      ctx.globalAlpha = isHighlighted ? 1.0 : 0.8;
-      ctx.fillStyle = isHighlighted ? '#f59e0b' : p.color;
-      ctx.beginPath();
-      ctx.arc(px, py, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-
-      // Highlight ring for selected span
-      if (isHighlighted) {
-        ctx.save();
-        ctx.globalAlpha = 0.6;
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px, py, radius + 4, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
+      // Trail (ui-layout.md §4: fading — opacity decay over 200ms, 20px
+      // trail length). trailSegments prunes the history in place and caps
+      // the polyline at TRAIL_LENGTH_PX; stationary points emit nothing so
+      // paused/scrub-frozen particles leave no trail.
+      let history = particleTrails.get(p.span.span_id);
+      if (!history) {
+        history = [];
+        particleTrails.set(p.span.span_id, history);
       }
+      history.push({ x: px, y: py, t: now });
+      const trail = trailSegments(history, now);
 
-      // Core
-      ctx.save();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      drawables.push({
+        x: px,
+        y: py,
+        radius,
+        color: isHighlighted ? '#f59e0b' : p.color,
+        alpha: isHighlighted ? 1.0 : 0.8,
+        glowColor: isHighlighted ? '#f59e0b' : p.glow,
+        glowBlur: isHighlighted ? 20 : 10,
+        highlight: isHighlighted,
+        trail,
+      });
     }
+
+    // Drop history for spans no longer animating — a finished span's trail
+    // expires with its last point and must not pin map entries forever.
+    for (const [spanId, hist] of particleTrails) {
+      if (hist.length === 0 || now - hist[hist.length - 1].t > TRAIL_FADE_MS) {
+        particleTrails.delete(spanId);
+      }
+    }
+    return drawables;
+  }
+
+  function drawTraceParticles(ctx) {
+    if (evalParticles.length === 0) {
+      particleTrails.clear();
+      return;
+    }
+    drawParticles2D(ctx, particleDrawables(performance.now()));
+  }
+
+  // >100 concurrent particles (ui-layout.md §4 "Rendering"): the particle
+  // pass moves from this 2D context to the WebGL2 overlay canvas owned by
+  // particle-layer.js (which swaps its canvas element for a WebGL2 one —
+  // a canvas keeps the first context type it is given).
+  function drawTraceParticlesViaLayer() {
+    const drawables = particleDrawables(performance.now());
+    particleLayer.render(drawables, { width: W, height: H, dpr: window.devicePixelRatio || 1 });
   }
 
   function drawEdges(ctx) {
@@ -3565,6 +4086,40 @@
         // In structural lens, thicken high-traffic edges by incoming call count
         const inCount = (adjacency.get(tgtId) ?? []).filter(nb => nb.edgeType === 'calls' && nb.reverse).length;
         if (inCount > 1) lineWidth = 1.2 + Math.min(inCount / 5, 3);
+      }
+
+      // ── HSI §3 Layer 1: gate status colors (Evaluative lens only) ─────
+      // Green when all gates passed for both connected nodes, red when at
+      // least one has a failed gate. nodeGateStatus is only populated in the
+      // Evaluative lens — the default Structural lens never shows gate colors.
+      if (lens === 'evaluative' && hasGateEdges) {
+        const gateSt = edgeGateStatus(nodeGateStatus, srcId, tgtId);
+        if (gateSt === 'passed') {
+          color = '#22c55e'; // green — all gates passed
+          edgeAlpha = Math.max(edgeAlpha, 0.55);
+          lineWidth = Math.max(lineWidth, 1.6);
+        } else if (gateSt === 'failed') {
+          color = '#ef4444'; // red — at least one gate failed
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 2);
+        }
+      }
+
+      // Evaluative lens: gate status edge coloring (HSI §3) — edges leaving
+      // a node governed by a spec with a concluded gate run are colored
+      // green (pass) / red (fail), with the most recent MR per spec path
+      // deciding the outcome. When both data sources are present this
+      // per-spec recency join overrides the record-aggregate coloring above
+      // (it resolves "most recent gate results" per spec, per HSI §3);
+      // either way the structural layout and topology are unchanged
+      // (lenses compose).
+      if (lens === 'evaluative') {
+        const gateStatus = gateStatusByNodeId.get(srcId);
+        if (gateStatus) {
+          color = gateStatus === 'pass' ? '#22c55e' : '#ef4444';
+          edgeAlpha = Math.max(edgeAlpha, 0.75);
+          lineWidth = Math.max(lineWidth, 1.8);
+        }
       }
 
       // Connected highlight
@@ -3915,19 +4470,86 @@
     const dz = Math.abs(cam.zoom - targetCam.zoom);
     const ghostNeedsAnim = hasGhosts && lens !== 'structural' && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
+    // HSI §3 Layer 1: active-agent glow is a continuous ambient pulse — keep
+    // the render loop alive while any glowing node exists. Bounded to nodes
+    // actually on screen (layoutNodeMap) so a glowing node off-canvas or
+    // filtered out does not burn frames.
+    const glowAnimating = activeAgentNodeIds.size > 0 && [...activeAgentNodeIds].some((id) => layoutNodeMap.has(id));
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning || glowAnimating) {
       needsAnim = false;
-      animFrame = requestAnimationFrame(animLoop);
+      // Re-frame directly rather than via scheduleAnim(): animScheduled must
+      // stay true across the frame boundary (a frame is still pending), and
+      // a mid-frame scheduleRedraw() must coalesce into this tail decision,
+      // not start a re-entrant frame chain on the same stack.
+      if (syncFrameDepth < SYNC_FRAME_DEPTH_MAX) {
+        syncFrameDepth++;
+        try {
+          animFrame = requestAnimationFrame(runFrame);
+        } finally {
+          syncFrameDepth--;
+        }
+      } else {
+        // Synchronous rAF (jsdom mocks, sync-rAF webview polyfills): the
+        // re-frame chain recurses on one stack, and conditions that are not
+        // frame-count-bounded (drill transitions keyed on wall-clock time,
+        // evaluative playback) never settle when the mock advances no time
+        // between frames — the chain would exhaust the stack. Stop cleanly
+        // here so a later scheduleRedraw() can start a fresh chain. Real
+        // browsers (async rAF) never accumulate depth and never reach this.
+        stopLoop();
+      }
     } else {
-      animFrame = null;
+      stopLoop();
     }
+  }
+
+  // ── Frame scheduling ──────────────────────────────────────────────
+  // A frame is "pending" from scheduleAnim() until animLoop's tail decides
+  // to stop. Scheduling is guarded by this flag, NOT by the animFrame handle:
+  // a synchronous requestAnimationFrame implementation (jsdom test mocks,
+  // embedded webviews with sync rAF polyfills) runs the callback BEFORE
+  // requestAnimationFrame returns, so `animFrame = requestAnimationFrame(...)`
+  // re-enters, and when the re-entered loop stops and writes `animFrame =
+  // null`, the outer assignment overwrites it with a stale handle. Every
+  // subsequent scheduleRedraw() would see a non-null animFrame and bail —
+  // the canvas would never redraw again. The flag is only cleared when the
+  // loop actually stops, so it stays accurate under both async and sync rAF.
+  let animScheduled = false;
+  // Depth of the synchronous re-frame chain (see the cap comment in
+  // animLoop's tail). Async rAF returns before the callback runs, so the
+  // finally-decrement always restores 0 and real browsers never accumulate
+  // depth; only a synchronous rAF grows this counter.
+  let syncFrameDepth = 0;
+  const SYNC_FRAME_DEPTH_MAX = 100;
+
+  function stopLoop() {
+    animFrame = null;
+    animScheduled = false;
+  }
+
+  function runFrame(ts) {
+    // untrack: the render loop must never register reactive dependencies in
+    // whatever effect scheduled it. Under a synchronous rAF, animLoop's
+    // reads — including the needsAnim $state it consumes and toggles in its
+    // tail — would be attributed to the calling effect, so every needsAnim
+    // flip would re-run that effect, re-schedule the loop, and flip it again:
+    // an infinite effect↔redraw cycle. Under async rAF the callback runs
+    // outside any effect and tracking is moot, but untrack keeps the
+    // invariant explicit for both execution models.
+    untrack(() => animLoop(ts));
+  }
+
+  function scheduleAnim() {
+    if (destroyed || animScheduled) return;
+    animScheduled = true;
+    animFrame = requestAnimationFrame(runFrame);
   }
 
   function scheduleRedraw() {
     if (destroyed) return;
     needsAnim = true;
-    if (!animFrame) animFrame = requestAnimationFrame(animLoop);
+    scheduleAnim();
   }
 
   // ── Interaction handlers ──────────────────────────────────────────
@@ -3985,6 +4607,7 @@
       if (hit) {
         tooltipNode = hit.node;
         tooltipPos = { x: e.clientX, y: e.clientY };
+        emitCanvasViewEvent(e, 'node', hit.node.id, hit.node);
       } else {
         tooltipNode = null;
       }
@@ -3993,12 +4616,37 @@
       tooltipPos = { x: e.clientX, y: e.clientY };
     }
 
+    // Particle hover (HSI §3a: hovering a span during playback shows the
+    // input/output summary in a tooltip; ui-layout.md §4: the particle
+    // scales up while hovered). Only when no node is under the cursor.
+    if (!hit && lens === 'evaluative' && !isPanning) {
+      const p = particleHitTest(e.clientX, e.clientY);
+      const newSpanId = p?.span?.span_id ?? null;
+      if (newSpanId !== hoveredParticleSpanId) {
+        hoveredParticleSpanId = newSpanId;
+        if (p) {
+          tooltipNode = spanTooltipNode(p.span);
+          tooltipPos = { x: e.clientX, y: e.clientY };
+          emitCanvasViewEvent(e, 'node', `span-${p.span.span_id}`, p.span);
+        } else {
+          tooltipNode = null;
+        }
+        scheduleRedraw();
+      } else if (p && tooltipNode) {
+        tooltipPos = { x: e.clientX, y: e.clientY };
+      }
+    } else if (hoveredParticleSpanId) {
+      hoveredParticleSpanId = null;
+      scheduleRedraw();
+    }
+
     // Edge hover detection (only when no node is hovered)
     if (!hit && !isPanning) {
       const edgeHover = edgeHitTest(e.clientX, e.clientY);
       const newEdgeHover = edgeHover ? `${edgeSrc(edgeHover.edge)}->${edgeTgt(edgeHover.edge)}` : null;
       if (newEdgeHover !== hoveredEdgeId) {
         hoveredEdgeId = newEdgeHover;
+        if (edgeHover) emitCanvasViewEvent(e, 'edge', newEdgeHover, edgeHover.edge);
         scheduleRedraw();
       }
     } else if (hoveredEdgeId) {
@@ -4007,7 +4655,7 @@
     }
 
     if (canvasEl) {
-      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId) ? 'pointer' : 'grab';
+      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId || hoveredParticleSpanId) ? 'pointer' : 'grab';
     }
 
     if (isPanning) {
@@ -4026,6 +4674,7 @@
   function onMouseLeave() {
     isPanning = false;
     hoveredNodeId = null;
+    hoveredParticleSpanId = null;
     tooltipNode = null;
     scheduleRedraw();
   }
@@ -4106,6 +4755,22 @@
     return null;
   }
 
+  // Span-shaped tooltip payload (HSI §3a: hover on a span shows the
+  // input/output summary). Rendered by the shared tooltip template with a
+  // dedicated span section.
+  function spanTooltipNode(span) {
+    return {
+      id: `span-${span.span_id}`,
+      name: span.operation_name ?? span.span_id,
+      node_type: 'span',
+      span_id: span.span_id,
+      duration_us: span.duration_us,
+      status: span.status,
+      input_summary: span.input_summary,
+      output_summary: span.output_summary,
+    };
+  }
+
   // Edge hit testing: find edge closest to click point within a threshold
   function edgeHitTest(clientX, clientY) {
     const rect = canvasEl?.getBoundingClientRect();
@@ -4143,12 +4808,73 @@
     return best;
   }
 
+  // ── ViewEvent emission (ui-layout.md §10 Interaction Events) ──────────────
+  // Every canvas interaction dispatches a standardized ViewEvent so global
+  // listeners (chat context, analytics) observe clicks/drills/hovers/menus
+  // uniformly. The canvas performs the shell actions for its own interactions
+  // directly (onNodeDetail / drillInto / tooltip / context menu), so its
+  // events carry `handled: true` — the Explorer shell's uniform handler skips
+  // re-performing actions an integrated emitter already serviced.
+  function emitCanvasViewEvent(domEvent, entityType, entityId, data) {
+    const ev = viewEventFromDom(domEvent, entityType, entityId, data);
+    ev.handled = true;
+    dispatchViewEvent(canvasEl, ev);
+  }
+
+  // FlowCanvas node detail: keeps the canvas path's enrichment contract —
+  // graph nodes (not span/edge pseudo-nodes) update
+  // canvasState.selectedNode (LLM context, deep links) and the interaction
+  // trail before the host's detail callback opens the panel.
+  function onFlowNodeDetail(node) {
+    if (node?.id && node.node_type !== 'span' && node.node_type !== 'edge') {
+      trackInteraction(`click:${node.name ?? node.id}(${node.node_type ?? 'node'})`);
+      canvasState = {
+        ...canvasState,
+        selectedNode: {
+          id: node.id,
+          name: node.name ?? '',
+          node_type: node.node_type ?? '',
+          qualified_name: node.qualified_name ?? '',
+        },
+        zoom: cam.zoom,
+        breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
+        recent_interactions: recentInteractions,
+      };
+    }
+    onNodeDetail(node);
+  }
+
   function onClick(e) {
     if (drillTransitioning) return;
     if (Math.abs(e.clientX - panStart.x) > 4 || Math.abs(e.clientY - panStart.y) > 4) return;
 
     const hit = hitTest(e.clientX, e.clientY);
     if (hit) {
+      // HSI §3 Layer 2: clicking a node's ▶ trace badge starts replay of the
+      // captured request flow (Evaluative lens + particle playback) instead
+      // of selecting the node.
+      if (hit.node?.id && nodeSpanStats.has(hit.node.id) && !e.shiftKey) {
+        const sln = layoutNodeMap.get(hit.id);
+        if (sln) {
+          const s = worldToScreen(sln.x, sln.y);
+          const rect = canvasEl.getBoundingClientRect();
+          const sx = e.clientX - rect.left;
+          const sy = e.clientY - rect.top;
+          const icon = playIconRect(s, sln.w * cam.zoom, sln.h * cam.zoom);
+          const dist = Math.sqrt((sx - icon.cx) ** 2 + (sy - icon.cy) ** 2);
+          if (dist <= icon.r) {
+            startTracePlayback();
+            return;
+          }
+        }
+      }
+      // ui-layout.md §4 flow interaction: clicking a node during animation
+      // pauses playback — the detail panel (opened below) shows the span
+      // data for the particle currently at/nearest this node. The ▶ play
+      // badge above already returned for clicks that start playback.
+      if (lens === 'evaluative' && nodeSpanStats.has(hit.node.id) && evalPlaying) {
+        evalPlaying = false;
+      }
       // Shift+Click: multi-select for concept creation
       if (e.shiftKey) {
         const newSet = new Set(multiSelectedIds);
@@ -4183,6 +4909,22 @@
       };
       // Enrich with trace path data if a trace is active
       const enrichedNode = { ...hit.node };
+      if (lens === 'evaluative') {
+        // Span data for the particle at/nearest the clicked node (the
+        // click-node-during-animation payload from ui-layout.md §4).
+        const np = nearestParticleToNode(evalParticles, hit.node.id);
+        if (np) {
+          enrichedNode._activeSpan = {
+            span_id: np.span.span_id,
+            operation_name: np.span.operation_name,
+            duration_us: np.span.duration_us,
+            status: np.span.status,
+            input_summary: np.span.input_summary,
+            output_summary: np.span.output_summary,
+            progress: np.progress,
+          };
+        }
+      }
       if (tracePathOrder.size > 0) {
         const stepNum = tracePathOrder.get(hit.node.id);
         if (stepNum != null) {
@@ -4193,6 +4935,7 @@
         }
       }
       onNodeDetail(enrichedNode);
+      emitCanvasViewEvent(e, 'node', hit.node.id, enrichedNode);
 
       // Interactive $clicked mode: re-evaluate query template with the clicked node
       if (interactiveQueryTemplate) {
@@ -4210,6 +4953,9 @@
       // No node hit — check for particle click (evaluative lens)
       const particleHit = particleHitTest(e.clientX, e.clientY);
       if (particleHit) {
+        // ui-layout.md §4: clicking a particle pauses playback before the
+        // span detail is shown.
+        if (evalPlaying) evalPlaying = false;
         // Show span detail in the detail panel
         const span = particleHit.span;
         onNodeDetail({
@@ -4225,6 +4971,7 @@
           output_summary: span.output_summary,
           graph_node_id: span.graph_node_id,
         });
+        emitCanvasViewEvent(e, 'node', `span-${span.span_id}`, particleHit.span);
         scheduleRedraw();
         return;
       }
@@ -4242,7 +4989,18 @@
           file_path: edgeHit.source?.file_path,
           doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
         };
+        // ui-layout.md §4 "Click edge during animation": in the evaluative
+        // lens, list every span that traversed this edge with its timings.
+        if (lens === 'evaluative' && traceData?.spans?.length) {
+          const traversing = spansTraversingEdge(
+            traceData.spans,
+            edgeHit.source?.id,
+            edgeHit.target?.id,
+          );
+          if (traversing.length > 0) edgeInfo.traversing_spans = traversing;
+        }
         onNodeDetail(edgeInfo);
+        emitCanvasViewEvent(e, 'edge', `${edgeHit.source?.id ?? '?'}->${edgeHit.target?.id ?? '?'}`, edgeInfo);
         selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
         // Compute midpoint screen position for the floating edge detail panel
         const srcLn = layoutNodeMap.get(edgeSrc(edgeHit.edge));
@@ -4400,6 +5158,7 @@
     if (drillTransitioning) return;
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
+    emitCanvasViewEvent(e, 'node', hit.node?.id ?? hit.id, hit.node);
 
     const node = hit.node;
 
@@ -4456,6 +5215,7 @@
       contextMenu = null;
       return;
     }
+    emitCanvasViewEvent(e, 'node', hit.node?.id ?? hit.id, hit.node);
     const rect = containerEl?.getBoundingClientRect();
     let menuX = e.clientX - (rect?.left ?? 0);
     let menuY = e.clientY - (rect?.top ?? 0);
@@ -4480,17 +5240,11 @@
     const drillTarget = contextMenu.drillTarget;
     contextMenu = null;
     ctxMoreOpen = false;
-    if (action === 'trace') {
-      // Trace from here: show causal flow using Calls + RoutesTo edges.
-      // Depth 15 to capture full reachable subgraph while staying responsive.
-      onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
-        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
-        edges: { filter: ['calls', 'routes_to'] },
-        zoom: 'fit',
-        annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
-        _trace: true,
-      });
+    if (action === 'clear_trace') {
+      // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
+      onInteractiveQuery(null);
+    } else if (action === 'trace') {
+      startTraceFromNode(node);
     } else if (action === 'blast') {
       onInteractiveQuery({
         scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements', 'field_of', 'depends_on'], direction: 'incoming', depth: 10 },
@@ -4580,28 +5334,34 @@
 
   // Build a step-by-step trace list for the detail panel.
   // Returns an array of { step, nodeId, name, type, specPath, edges } sorted by step number.
+  // Spec resolution checks GovernedBy edges, not just the spec_path field.
   function buildTraceStepList() {
-    if (tracePathOrder.size === 0) return [];
-    const nodeMap = new Map();
-    for (const n of nodes) nodeMap.set(n.id, n);
-    const steps = [];
-    for (const [nodeId, stepNum] of tracePathOrder) {
-      const n = nodeMap.get(nodeId);
-      if (!n) continue;
-      // Find edges from this step to the next
-      const outEdges = tracePathEdges.filter(e => e.fromId === nodeId);
-      steps.push({
-        step: stepNum,
-        nodeId,
-        name: n.name ?? n.qualified_name ?? '?',
-        qualifiedName: n.qualified_name ?? '',
-        type: n.node_type ?? '',
-        specPath: n.spec_path ?? null,
-        outEdges: outEdges.map(e => ({ toId: e.toId, edgeType: e.edgeType, toStep: e.toStep })),
+    return buildTraceSteps(nodes, edges, tracePathOrder, tracePathEdges);
+  }
+
+  // Emit the trace start node to the detail panel, enriched with the full
+  // numbered step list (explorer-canvas.md §6 step 6: the detail panel shows
+  // the trace when trace mode activates — via the toolbar Trace button or
+  // right-click "Trace from here" — not only after a subsequent canvas
+  // click). Called from the trace effect once the BFS order is computed.
+  // Deduped per start node so effect re-runs (data reloads) keep the user's
+  // current detail selection; a new "Trace from here" resets the guard.
+  function emitTraceDetailFromEffect(order, pathEdges) {
+    if (!traceStartNodeId) return;
+    if (lastTraceDetailEmittedFor === traceStartNodeId) return;
+    const stepNum = order.get(traceStartNodeId);
+    if (stepNum == null) return;
+    const startNode = nodes.find(n => n.id === traceStartNodeId);
+    if (!startNode) return;
+    lastTraceDetailEmittedFor = traceStartNodeId;
+    untrack(() => {
+      onNodeDetail({
+        ...startNode,
+        _traceStep: stepNum,
+        _traceTotal: order.size,
+        _traceSteps: buildTraceSteps(nodes, edges, order, pathEdges),
       });
-    }
-    steps.sort((a, b) => a.step - b.step);
-    return steps;
+    });
   }
 
   // Navigate breadcrumb with smooth zoom-out animation.
@@ -4881,16 +5641,23 @@
       if (lastTouchDist > 0) {
         const scale = dist / lastTouchDist;
         const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * scale));
-        // Zoom toward the pinch center (midpoint between two fingers)
+        // Zoom toward the pinch center (midpoint between two fingers).
+        // Solve targetCam so the world point under the midpoint stays under
+        // the midpoint at the new zoom — computed against targetCam (the
+        // authoritative pose being mutated), exactly like applyZoomAtMouse.
+        // Reading the world point via screenToWorld() here would use the
+        // lagging display camera `cam`, whose zoom does not change between
+        // the two reads — making the correction identically zero and
+        // anchoring every pinch at the screen center instead.
         const rect = canvasEl?.getBoundingClientRect();
         if (rect) {
           const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
           const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-          const worldBefore = screenToWorld(cx, cy);
+          const worldX = (cx - W / 2) / targetCam.zoom + targetCam.x;
+          const worldY = (cy - H / 2) / targetCam.zoom + targetCam.y;
           targetCam.zoom = newZoom;
-          const worldAfter = screenToWorld(cx, cy);
-          targetCam.x -= (worldAfter.x - worldBefore.x);
-          targetCam.y -= (worldAfter.y - worldBefore.y);
+          targetCam.x = worldX - (cx - W / 2) / newZoom;
+          targetCam.y = worldY - (cy - H / 2) / newZoom;
         } else {
           targetCam.zoom = newZoom;
         }
@@ -4956,36 +5723,32 @@
   });
 
   // Compute trace path ordering and connecting edges when a trace query is active.
-  // Uses depth-first ordering to represent call-stack execution order: when A calls B
-  // and B calls C, the order is A(1)→B(2)→C(3) — which matches the actual execution
-  // stack (callee executes before returning to caller to call the next function).
-  // BFS would incorrectly assign all direct callees the same depth-level number.
-  // For functions with multiple sequential callees, children are sorted alphabetically
-  // for determinism (we lack intra-function call ordering from static analysis).
+  // BFS ordering (explorer-canvas.md §6): all direct callees of a node are
+  // numbered before second-level callees, better approximating execution
+  // order than DFS (which numbers entire subtrees before siblings). Siblings
+  // are sorted alphabetically for determinism (static call graphs lack
+  // intra-function call ordering). The traversal itself lives in
+  // causal-trace.js (computeTraceOrder) so it is directly unit-testable.
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
       (activeQuery.scope.direction === 'outgoing' || activeQuery._trace) &&
       queryMatchedWithDepth;
     if (!isTrace) {
-      tracePathOrder = new Map();
-      tracePathEdges = [];
+      traceStartNodeId = null;
+      lastTraceDetailEmittedFor = null;
+      if (tracePathOrder.size > 0 || tracePathEdges.length > 0) {
+        tracePathOrder = new Map();
+        tracePathEdges = [];
+        // untrack: with a synchronous rAF mock (tests), drawFrame would
+        // otherwise execute inside this effect's reactive context and its
+        // reads would become effect dependencies, re-triggering the effect.
+        untrack(() => scheduleRedraw());
+      }
       return;
     }
 
-    // Build outgoing adjacency for DFS from matched edges
     const matchedIds = new Set(queryMatchedWithDepth.keys());
-    const outAdj = new Map();
-    for (const e of edges) {
-      const srcId = edgeSrc(e);
-      const tgtId = edgeTgt(e);
-      const et = edgeType(e);
-      if ((et === 'calls' || et === 'routes_to' || et === 'routesto') &&
-          matchedIds.has(srcId) && matchedIds.has(tgtId)) {
-        if (!outAdj.has(srcId)) outAdj.set(srcId, []);
-        outAdj.get(srcId).push({ toId: tgtId, edgeType: et });
-      }
-    }
 
     // Find root node (the focus node)
     const rootNode = activeQuery.scope.node;
@@ -4999,65 +5762,46 @@
     }
 
     if (!rootId || !matchedIds.has(rootId)) {
-      // Fallback: use BFS depth ordering
+      // Fallback: use BFS depth ordering from the query resolver
       const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
       const ordered = new Map();
       for (let i = 0; i < entries.length; i++) ordered.set(entries[i][0], i + 1);
       tracePathOrder = ordered;
       tracePathEdges = [];
+      emitTraceDetailFromEffect(ordered, []);
       return;
     }
 
-    // BFS traversal to assign execution order — visits all direct calls
-    // of a function before going deeper, better approximating execution
-    // order than DFS (which numbers entire subtrees before siblings).
-    const ordered = new Map();
-    const traceEdges = [];
-    const visited = new Set();
-    let step = 0;
+    // BFS over outgoing Calls/RoutesTo edges (restricted to matched nodes so
+    // the numbers agree with the dimmed subgraph the query selected).
+    const matchedEdges = edges.filter(e => {
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
+      return matchedIds.has(srcId) && matchedIds.has(tgtId);
+    });
+    const { order, pathEdges } = computeTraceOrder(nodes, matchedEdges, rootId);
 
-    const queue = [rootId];
-    visited.add(rootId);
-    step++;
-    ordered.set(rootId, step);
-
-    while (queue.length > 0) {
-      const nodeId = queue.shift();
-
-      const children = outAdj.get(nodeId) ?? [];
-      // Sort children by name for deterministic ordering
-      children.sort((a, b) => {
-        const na = nodes.find(n => n.id === a.toId)?.name ?? '';
-        const nb = nodes.find(n => n.id === b.toId)?.name ?? '';
-        return na.localeCompare(nb);
-      });
-
-      for (const child of children) {
-        if (!visited.has(child.toId)) {
-          visited.add(child.toId);
-          step++;
-          ordered.set(child.toId, step);
-          traceEdges.push({
-            fromId: nodeId, toId: child.toId,
-            edgeType: child.edgeType,
-            fromStep: ordered.get(nodeId),
-            toStep: step
-          });
-          queue.push(child.toId);
-        }
-      }
-    }
-
-    // Add remaining matched nodes not reachable via DFS (disconnected components)
+    // Add remaining matched nodes not reachable via the causal BFS
+    // (disconnected components)
+    let step = order.size;
     for (const nodeId of matchedIds) {
-      if (!ordered.has(nodeId)) {
+      if (!order.has(nodeId)) {
         step++;
-        ordered.set(nodeId, step);
+        order.set(nodeId, step);
       }
     }
 
-    tracePathOrder = ordered;
-    tracePathEdges = traceEdges;
+    tracePathOrder = order;
+    tracePathEdges = pathEdges;
+    // Populate the detail panel with the trace step list as soon as the
+    // trace activates (spec §6 step 6), not only after a later canvas click.
+    emitTraceDetailFromEffect(order, pathEdges);
+    // The trace overlay (numbered badges + path arrows) is drawn by
+    // drawFrame; without a redraw request it only appears on the next
+    // unrelated pan/zoom once the camera has settled. untrack keeps
+    // drawFrame's reads (synchronous under a sync rAF mock) out of this
+    // effect's dependency set.
+    untrack(() => scheduleRedraw());
   });
 
   // Sync canvasState zoom
@@ -5088,6 +5832,26 @@
       };
     }
   });
+
+  // Escape anywhere on the page exits trace mode (explorer-canvas.md §6
+  // "Exit trace mode: Press Escape"). The canvas element only sees keydown
+  // while focused — after clicking the toolbar Trace button or a detail-panel
+  // trace step, focus is no longer on the canvas, so the affordance must be
+  // window-level. Inputs (search box) keep their own Escape handling.
+  // Skipped when the host owns the window Escape cascade (windowEscape=false):
+  // ExplorerView's handler clears trace queries through its overlay cascade
+  // (spec editor → query editor → detail panel → active view query), so the
+  // trace must survive the Escape that closes an overlay above it.
+  function onWindowKeyDown(e) {
+    if (!windowEscape) return;
+    if (e.key !== 'Escape') return;
+    if (!activeQuery?._trace) return;
+    const tag = (e.target?.tagName ?? '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+    onInteractiveQuery(null);
+  }
+  window.addEventListener('keydown', onWindowKeyDown);
+  onDestroy(() => window.removeEventListener('keydown', onWindowKeyDown));
 
   let destroyed = false;
   onDestroy(() => {
@@ -5128,12 +5892,29 @@
     ['High flow', 'hsl(0,70%,45%)'],
     ['OK span', '#60a5fa'],
     ['Error span', '#ef4444'],
+    ['Coverage ok', '#22c55e'],
+    ['Coverage partial', '#eab308'],
+    ['Coverage low', '#ef4444'],
+    ['Gate pass', '#22c55e'],
+    ['Gate fail', '#ef4444'],
+    ['Approved', '#22c55e'],
+    ['Pending', '#eab308'],
+    ['Rejected', '#ef4444'],
+    // Record-aggregate gate entries only while the per-spec join above has
+    // no data — the two families describe the same gate outcomes, and the
+    // per-spec recency join's entries subsume the aggregate ones.
+    ...(hasGateEdges && gateStatusByNodeId.size === 0
+      ? [['Gates passed', '#22c55e'], ['Gate failed', '#ef4444']]
+      : []),
   ] : [
     ['Has spec', '#22c55e'],
     ['Suggested', '#eab308'],
     ['No spec', '#ef4444'],
     ['Calls', '#60a5fa'],
     ['Implements', '#34d399'],
+    // HSI §3 Layer 1 liveness legends — only when the indicators are live
+    ...(activeAgentNodeIds.size > 0 ? [['Agent active', '#38bdf8']] : []),
+    ...(recentChanges.size > 0 ? [['Recent change', '#fbbf24']] : []),
   ]);
 </script>
 
@@ -5161,6 +5942,19 @@
       </button>
       <button class="concept-clear-btn" type="button" onclick={() => { multiSelectedIds = new Set(); scheduleRedraw(); }}>Clear</button>
       <span class="concept-hint">Shift+Click to add/remove</span>
+    </div>
+  {/if}
+
+  <!-- Causal Flow Trace warning: no Calls/RoutesTo edges in the graph
+       (explorer-canvas.md §6 data requirement). Shown instead of entering a
+       degenerate empty trace mode. -->
+  {#if traceWarning}
+    <div class="trace-warning" role="alert" data-testid="trace-warning">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>Call graph not available — run code sync to extract call edges</span>
+      <button class="trace-warning-dismiss" onclick={() => { traceWarning = false; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
   {/if}
 
@@ -5282,6 +6076,27 @@
       Risk
     </button>
 
+    <!-- Causal Flow Trace (explorer-canvas.md §6): toolbar activation for the
+         selected node + exit affordance when a trace is active. -->
+    {#if traceActive}
+      <button class="tb-btn" class:active={true} onclick={() => { onInteractiveQuery(null); }} title="Exit trace mode (Escape)" type="button" aria-pressed={true} data-testid="toolbar-clear-trace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+        Clear trace
+      </button>
+    {:else}
+      <button
+        class="tb-btn"
+        onclick={() => startTraceFromNode(canvasState?.selectedNode)}
+        disabled={!canvasState?.selectedNode}
+        title={canvasState?.selectedNode ? `Trace causal flow from ${canvasState.selectedNode.name ?? canvasState.selectedNode.qualified_name ?? 'selection'} (Calls/RoutesTo)` : 'Select a node, then trace its causal flow'}
+        type="button"
+        data-testid="toolbar-trace"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Trace
+      </button>
+    {/if}
+
     {#if anomalies.length > 0 && !anomalyPanelOpen}
       <button class="tb-btn anomaly-reopen" onclick={() => { anomalyPanelOpen = true; }} title="Show anomalies ({anomalies.length})" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -5290,15 +6105,37 @@
     {/if}
 
     <span class="zoom-ind">{cam.zoom.toFixed(2)}x</span>
-    <span class="treemap-stats">{nodes.length} nodes</span>
+    <span class="treemap-stats">{densityMode === 'public-only' ? densityVisibleCount : nodes.length} nodes</span>
   </div>
 
   <!-- Canvas -->
   <div class="treemap-canvas-area" bind:this={containerEl}>
+    {#if densityMode === 'public-only'}
+      <!-- ui-layout.md §10: >500 nodes → public-only with banner + [Show All] -->
+      <div class="density-banner" role="status">
+        <span>Showing public API only — {densityHiddenCount} private nodes hidden.</span>
+        <button type="button" class="density-show-all" onclick={() => { densityShowAll = true; }}>Show All</button>
+      </div>
+    {/if}
     {#if nodes.length === 0}
       <EmptyState
         title={$t('explorer_treemap.empty_title')}
         description={$t('explorer_treemap.empty_desc')}
+      />
+    {:else if isFlowLayout}
+      <!-- ui-layout.md §4 Flow Layout: ExplorerCanvas delegates to
+           FlowCanvas — an SVG node/edge layer (clickable, accessible) with
+           a Canvas 2D / WebGL2 particle overlay on top. -->
+      <FlowCanvas
+        {nodes}
+        {edges}
+        {traceData}
+        {lens}
+        {playbackRequest}
+        {highlightedSpanId}
+        {focusRequest}
+        onNodeDetail={onFlowNodeDetail}
+        onScopeDrill={onScopeDrill}
       />
     {:else}
       <canvas
@@ -5321,6 +6158,12 @@
         aria-label="Architecture explorer canvas"
         tabindex="0"
       ></canvas>
+
+      <!-- WebGL2 particle overlay (ui-layout.md §4: >100 concurrent
+           particles switch to WebGL; the overlay element is needed because
+           a canvas keeps the first context type it is given, and the main
+           canvas is 2D). -->
+      <div class="particle-overlay" bind:this={particleOverlayEl} aria-hidden="true"></div>
 
       <!-- Screen reader: announce selected node -->
       <div class="sr-only" aria-live="polite" aria-atomic="true">
@@ -5348,6 +6191,20 @@
           {/if}
           {#if tooltipNode.spec_path}
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
+          {/if}
+          {#if tooltipNode.node_type === 'span' && tooltipNode.span_id}
+            <div class="tooltip-span-io">
+              <span class="tooltip-span-meta">
+                {tooltipNode.duration_us < 1000 ? `${Math.round(tooltipNode.duration_us)}\u00B5s` : `${(tooltipNode.duration_us / 1000).toFixed(1)}ms`}
+                · {tooltipNode.status ?? 'ok'}
+              </span>
+              {#if tooltipNode.input_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">in</span> {tooltipNode.input_summary}</span>
+              {/if}
+              {#if tooltipNode.output_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">out</span> {tooltipNode.output_summary}</span>
+              {/if}
+            </div>
           {/if}
           <div class="tooltip-eval">
             {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
@@ -5378,6 +6235,19 @@
                   <span class="insight-risk">Risk: complex + undertested</span>
                 {/if}
               </div>
+            {/if}
+            {#if lens === 'evaluative'}
+              {@const evalDeco = evaluativeDecorationsByNodeId.get(tooltipNode.id)}
+              {#if evalDeco?.gate || evalDeco?.approval}
+                <div class="tooltip-insight">
+                  {#if evalDeco?.gate}
+                    <span class={evalDeco.gate.status === 'pass' ? 'insight-ok' : 'insight-warn'}>Gates: {evalDeco.gate.status === 'pass' ? 'passed' : 'failed'} (most recent run)</span>
+                  {/if}
+                  {#if evalDeco?.approval}
+                    <span class={evalDeco.approval.status === 'approved' ? 'insight-ok' : evalDeco.approval.status === 'pending' ? 'insight-note' : 'insight-warn'}>Spec approval: {evalDeco.approval.label}</span>
+                  {/if}
+                </div>
+              {/if}
             {/if}
             {#if nodeSpanStats.get(tooltipNode.id)}
               {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
@@ -5449,6 +6319,19 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
             Blast radius
           </button>
+          <!-- Causal Flow Trace (explorer-canvas.md §6): one of the three
+               spec-named right-click actions alongside View spec / View
+               provenance, so it lives in the primary section, not "More..." -->
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')} data-testid="ctx-trace">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trace from here
+          </button>
+          {#if traceActive}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('clear_trace')} data-testid="ctx-clear-trace">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+              Clear trace
+            </button>
+          {/if}
           {#if contextMenu.node.file_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -5465,10 +6348,6 @@
           </button>
           {#if ctxMoreOpen}
             <div class="ctx-submenu">
-              <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                Trace from here
-              </button>
               <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 View history
@@ -5686,8 +6565,10 @@
     onDismiss={() => { observableBannerVisible = false; }}
   />
 
-  <!-- Evaluative trace playback overlay bar -->
-  {#if lens === 'evaluative'}
+  <!-- Evaluative trace playback overlay bar — hidden in the flow layout,
+       where FlowCanvas renders its own controls (ui-layout.md §4 control
+       bar belongs to the flow renderer). -->
+  {#if lens === 'evaluative' && !isFlowLayout}
     <PlaybackControls
       {evalPlaying}
       {evalScrubber}
@@ -5696,9 +6577,13 @@
       {traceData}
       {traceElapsedDisplay}
       {traceTotalDisplay}
+      rootCases={evalRootCases}
+      testFilter={evalTestFilter}
       onPlayToggle={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }}
-      onScrubberChange={(v) => { evalScrubber = v; scheduleRedraw(); }}
+      onScrubberChange={(v) => { evalScrubber = v; clearParticleTrails(); scheduleRedraw(); }}
       onSpeedChange={(v) => { evalSpeed = v; }}
+      onStep={() => { stepTracePlayback(); }}
+      onTestFilterChange={(id) => { evalTestFilter = id; clearParticleTrails(); scheduleRedraw(); }}
     />
   {/if}
 
@@ -5795,8 +6680,24 @@
   .treemap-stats { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
 
   .treemap-canvas-area { flex: 1; position: relative; overflow: hidden; min-height: 200px; }
+  .particle-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
+
+  /* Density banner (ui-layout.md §10: >500 nodes → public-only + banner) */
+  .density-banner {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    z-index: 60; display: flex; align-items: center; gap: 12px;
+    background: rgba(30,41,59,0.95); border: 1px solid #fbbf24; border-radius: 8px;
+    padding: 6px 14px; font-size: 12.5px; color: #fbbf24;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5); white-space: nowrap;
+  }
+  .density-show-all {
+    background: transparent; border: 1px solid #fbbf24; color: #fbbf24;
+    border-radius: 6px; padding: 2px 10px; font-size: 12px; cursor: pointer;
+  }
+  .density-show-all:hover { background: rgba(251,191,36,0.15); }
 
   .treemap-tooltip {
     position: fixed; z-index: 100; background: rgba(15,15,26,0.95); border: 1px solid #334155;
@@ -5809,6 +6710,10 @@
   .tooltip-qname { font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-count, .tooltip-spec { font-size: 10px; color: #64748b; }
+  .tooltip-span-io { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  .tooltip-span-meta { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
+  .tooltip-span-line { font-size: 10px; color: #cbd5e1; font-family: 'SF Mono', Menlo, monospace; word-break: break-all; }
+  .tooltip-span-k { color: #60a5fa; font-weight: 600; margin-right: 4px; }
   .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
   .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }
@@ -5835,6 +6740,22 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 12px; background: #172554; border-bottom: 1px solid #1e3a5f; flex-shrink: 0;
   }
+  .trace-warning {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: rgba(120, 53, 15, 0.4);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #fbbf24;
+  }
+  .trace-warning-dismiss {
+    display: flex; align-items: center; justify-content: center;
+    margin-left: auto;
+    width: 24px; height: 24px; background: transparent; border: none;
+    border-radius: 4px; color: #94a3b8; cursor: pointer;
+  }
+  .trace-warning-dismiss:hover { background: #1e293b; color: #e2e8f0; }
   .annotation-content { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .annotation-title { font-size: 13px; font-weight: 600; color: #e2e8f0; }
   .annotation-desc { font-size: 11px; color: #94a3b8; }

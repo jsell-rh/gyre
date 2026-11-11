@@ -92,6 +92,12 @@ pub struct SpecApprovalEventResponse {
     pub approver_type: String,
     pub approver_id: String,
     pub persona: Option<String>,
+    /// Agent attestation level captured from the approving agent's verified
+    /// JWT workload claims (null for humans) — spec-registry.md §9.
+    pub attestation_level: Option<u32>,
+    /// Agent stack fingerprint captured from the approving agent's verified
+    /// JWT `wl_stack_hash` claim (null for humans) — spec-registry.md §5/§9.
+    pub stack_hash: Option<String>,
     pub approved_at: u64,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
@@ -109,6 +115,8 @@ impl From<SpecApprovalEvent> for SpecApprovalEventResponse {
             approver_type: e.approver_type,
             approver_id: e.approver_id,
             persona: e.persona,
+            attestation_level: e.attestation_level,
+            stack_hash: e.stack_hash,
             approved_at: e.approved_at,
             revoked_at: e.revoked_at,
             revoked_by: e.revoked_by,
@@ -154,6 +162,10 @@ pub struct RevokeSpecApprovalRequest {
 pub struct ListSpecsQuery {
     /// Filter by spec kind, e.g. "meta:persona"
     pub kind: Option<String>,
+    /// Filter by owning workspace (ui-navigation.md §2/§10): only entries
+    /// scoped to this workspace — directly via `workspace_id`, or via their
+    /// owning repo — are returned. Without it, all ledger entries are listed.
+    pub workspace_id: Option<String>,
 }
 
 pub async fn list_specs(
@@ -191,6 +203,21 @@ pub async fn list_specs(
         }
     }
 
+    // repo_id → workspace_id, for entries whose workspace_id was never
+    // backfilled but whose owning repo places them in a workspace.
+    let repo_workspaces: HashMap<String, String> = if params.workspace_id.is_some() {
+        state
+            .repos
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.id.to_string(), r.workspace_id.to_string()))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     let mut specs: Vec<SpecLedgerResponse> = state
         .spec_ledger
         .list_all()
@@ -199,10 +226,26 @@ pub async fn list_specs(
         .into_iter()
         .filter(|e| {
             if let Some(kind_filter) = &params.kind {
-                e.kind.as_deref() == Some(kind_filter.as_str())
-            } else {
-                true
+                if e.kind.as_deref() != Some(kind_filter.as_str()) {
+                    return false;
+                }
             }
+            if let Some(ws) = &params.workspace_id {
+                // A scoped listing must only return entries the workspace
+                // owns: either directly (workspace_id) or through the owning
+                // repo. Entries with no resolvable scope belong to no
+                // workspace and are excluded rather than attributed to one.
+                let in_workspace = e.workspace_id.as_deref() == Some(ws.as_str())
+                    || (e.workspace_id.is_none()
+                        && e.repo_id
+                            .as_deref()
+                            .and_then(|r| repo_workspaces.get(r).map(String::as_str))
+                            == Some(ws.as_str()));
+                if !in_workspace {
+                    return false;
+                }
+            }
+            true
         })
         .map(|mut e| {
             e.linked_tasks = task_map.get(&e.path).cloned().unwrap_or_default();
@@ -278,11 +321,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            let short_sha = if e.current_sha.len() >= 8 {
-                &e.current_sha[..8]
-            } else {
-                &e.current_sha
-            };
+            // char-boundary-safe truncation: `get(..8)` returns None when the
+            // index falls inside a multibyte character (task-095 F4 flaw class).
+            let short_sha = e.current_sha.get(..8).unwrap_or(&e.current_sha);
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
@@ -407,6 +448,11 @@ pub async fn approve_spec(
         && !auth.roles.contains(&gyre_domain::UserRole::Agent)
         && auth.agent_id != "system"
     {
+        // task-104: every live role-check rejection must be audited. The
+        // minimum approving role is Agent (Admin > Developer > Agent all
+        // pass), so the required role is expressed as Agent-or-above.
+        crate::rbac::record_rbac_denied(&state, &auth, "Agent", "POST /api/v1/specs/:path/approve")
+            .await;
         return Err(ApiError::Forbidden(
             "ReadOnly users cannot approve specs".to_string(),
         ));
@@ -419,10 +465,30 @@ pub async fn approve_spec(
         ));
     }
 
-    // Verify spec is in the ledger.
-    if state.spec_ledger.find_by_path(&spec_path).await?.is_none() {
-        return Err(ApiError::NotFound(format!(
-            "spec '{spec_path}' not in registry"
+    // Verify spec is in the ledger, and that the caller is approving the
+    // version that is actually current. The ledger's `current_sha` is the git
+    // blob SHA synced from the manifest at push (agent-gates.md §The
+    // Provenance Chain, step 8): accepting a fabricated or stale SHA would
+    // mint an approval `verify_spec_ref` honors at merge even though nobody
+    // ever saw that content. An empty `current_sha` means the manifest entry
+    // has no resolvable file at HEAD — there is no version to approve.
+    let ledger_current = match state.spec_ledger.find_by_path(&spec_path).await? {
+        Some(entry) if !entry.current_sha.is_empty() => entry.current_sha,
+        Some(_) => {
+            return Err(ApiError::Conflict(format!(
+                "spec '{spec_path}' has no current version to approve (ledger current_sha is empty)"
+            )));
+        }
+        None => {
+            return Err(ApiError::NotFound(format!(
+                "spec '{spec_path}' not in registry"
+            )));
+        }
+    };
+    if req.sha != ledger_current {
+        return Err(ApiError::Conflict(format!(
+            "sha {} does not match current spec version {} — refresh and approve the current version",
+            req.sha, ledger_current
         )));
     }
 
@@ -485,10 +551,58 @@ pub async fn approve_spec(
 
     // Determine approver type from auth token kind (not request body).
     // JWT bearer tokens → agent; global token / API key → human.
-    let (approver_type, approver_id) = if auth.jwt_claims.is_some() {
-        ("agent".to_string(), format!("agent:{}", auth.agent_id))
+    let (approver_type, approver_id, attestation_level, stack_hash) = if let Some(claims) =
+        auth.jwt_claims.as_ref()
+    {
+        // Gyre agent JWT (scope="agent"): capture the verified workload claims
+        // so §9 agent-approval validity (attestation_level >= manifest minimum,
+        // stack_hash exact match) can be evaluated from the recorded event.
+        // Keycloak user JWTs do not carry agent workload claims; their scope
+        // is not "agent", so they are treated as human approvals.
+        let is_agent = claims.get("scope").and_then(|s| s.as_str()) == Some("agent");
+        if is_agent {
+            // Stack hash: from the verified JWT `wl_stack_hash` claim
+            // (spec §5: "the forge verifies the agent's OIDC token contains
+            // a matching stack_hash claim").
+            let wl_stack_hash = claims
+                .get("wl_stack_hash")
+                .and_then(|h| h.as_str())
+                .map(|s| s.to_string());
+            // Attestation level: derived from the agent's workload attestation
+            // record — the same derivation `build_agent_context` uses
+            // (supply-chain.md §2 levels 0-3). Never invented.
+            let workload = state
+                .kv_store
+                .kv_get("workload_attestations", &auth.agent_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|json| {
+                    serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
+                        .ok()
+                });
+            let level = crate::constraint_check::derive_attestation_level(workload.as_ref()) as u32;
+            (
+                "agent".to_string(),
+                format!("agent:{}", auth.agent_id),
+                Some(level),
+                wl_stack_hash,
+            )
+        } else {
+            (
+                "human".to_string(),
+                format!("user:{}", auth.agent_id),
+                None,
+                None,
+            )
+        }
     } else {
-        ("human".to_string(), format!("user:{}", auth.agent_id))
+        (
+            "human".to_string(),
+            format!("user:{}", auth.agent_id),
+            None,
+            None,
+        )
     };
 
     let event = SpecApprovalEvent {
@@ -496,8 +610,10 @@ pub async fn approve_spec(
         spec_path: spec_path.clone(),
         spec_sha: req.sha.clone(),
         approver_type,
-        approver_id,
-        persona: req.persona,
+        approver_id: approver_id.clone(),
+        persona: req.persona.clone(),
+        attestation_level,
+        stack_hash,
         approved_at: now,
         revoked_at: None,
         revoked_by: None,
@@ -506,6 +622,44 @@ pub async fn approve_spec(
 
     // Record in approval history.
     let _ = state.spec_approval_history.record(&event).await;
+
+    // Record in the durable spec-approvals ledger (agent-gates.md §Spec
+    // Approval Ledger): create the entry for this spec version (Pending),
+    // then transition it to Approved. A fresh entry per (path, sha, approver)
+    // approval; re-approving the same SHA records another ledger row.
+    let ledger_entry = gyre_domain::SpecApproval {
+        id: new_id(),
+        spec_path: spec_path.clone(),
+        spec_sha: req.sha.clone(),
+        approver_id,
+        signature: req.signature.clone(),
+        approved_at: None,
+        revoked_at: None,
+        revoked_by: None,
+        revocation_reason: None,
+        rejected_at: None,
+        rejected_reason: None,
+        rejected_by: None,
+    };
+    let ledger_id = ledger_entry.id.clone();
+    if let Err(e) = state.spec_approvals.create(&ledger_entry).await {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "failed to record spec approval in ledger: {e}"
+        )));
+    }
+    match state.spec_approvals.approve(&ledger_id, now).await {
+        Ok(Some(())) => {}
+        Ok(None) => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "spec approval ledger entry vanished after create"
+            )))
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "invalid spec approval transition: {e}"
+            )))
+        }
+    }
 
     // TASK-006: Produce SignedInput when a KeyBinding is available AND the client
     // provides a user_content_signature (Phase 1, non-enforcing).
@@ -669,41 +823,71 @@ pub async fn approve_spec(
         }
     }
 
-    // Update ledger approval_status based on new approval.
-    // For simplicity: any valid approval for the current SHA sets status to Approved.
+    // Update ledger approval_status via mode-based resolution (spec-registry.md §9).
+    // The status is computed from the approval_mode and ALL active approvals for
+    // current_sha — human_and_agent requires both, agent_only requires the
+    // manifest's attestation/stack_hash constraints to hold, human_only ignores
+    // agent approvals entirely.
     if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
         if entry.current_sha == req.sha {
-            entry.approval_status = ApprovalStatus::Approved;
-            entry.updated_at = now;
-            let _ = state.spec_ledger.save(&entry).await;
+            let prior_status = entry.approval_status.clone();
+            let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
+            if entry.approval_status != new_status {
+                entry.approval_status = new_status;
+                entry.updated_at = now;
+                let _ = state.spec_ledger.save(&entry).await;
+            }
 
-            // Emit SpecApproved event on the message bus (agent-runtime.md §1).
+            // Emit SpecApproved event on the message bus (agent-runtime.md §1)
+            // only when the entry transitions INTO Approved — i.e. all required
+            // approvals are now present. Partial approvals (e.g. the human half
+            // of a human_and_agent pair) must not trigger the signal chain.
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
             // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
-            // A ledger entry without a workspace scope cannot be targeted safely:
-            // the event is skipped (and logged), never broadcast under a
-            // fabricated tenant identity.
-            if let Some(ws_id) = entry.workspace_id.as_deref() {
-                state
-                    .emit_event(
-                        gyre_common::Id::new(ws_id),
-                        gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id)),
-                        gyre_common::message::MessageKind::SpecApproved,
-                        Some(serde_json::json!({
-                            "repo_id": entry.repo_id,
-                            "spec_path": spec_path,
-                            "spec_sha": req.sha,
-                            "approved_by": event.approver_id,
-                            "approval_id": event.id,
-                        })),
-                    )
-                    .await;
-            } else {
-                tracing::warn!(
-                    "spec approval: ledger entry {spec_path} has no workspace \
-                     scope; skipping SpecApproved event"
-                );
+            // A ledger entry without a workspace scope cannot be targeted
+            // safely: the event is skipped (and logged), never broadcast
+            // under a fabricated tenant identity. The signal chain mirrors
+            // this — on_spec_approved routes nothing without a workspace.
+            if prior_status != ApprovalStatus::Approved
+                && entry.approval_status == ApprovalStatus::Approved
+            {
+                if let Some(ws_id) = entry.workspace_id.as_deref() {
+                    let ws = gyre_common::Id::new(ws_id);
+                    let payload = serde_json::json!({
+                        "repo_id": entry.repo_id,
+                        "spec_path": spec_path,
+                        "spec_sha": req.sha,
+                        "approved_by": event.approver_id,
+                        "approval_id": event.id,
+                        // workspace_id is consumed by the server-side signal chain
+                        // (not part of the spec'd bus payload — the bus destination
+                        // already carries it) to scope the orchestrator registry.
+                        "workspace_id": entry.workspace_id,
+                    });
+                    state
+                        .emit_event(
+                            ws.clone(),
+                            gyre_common::message::Destination::Workspace(ws),
+                            gyre_common::message::MessageKind::SpecApproved,
+                            Some(payload.clone()),
+                        )
+                        .await;
+
+                    // Task-115 (agent-runtime.md §1 Phases 1–3): intercept the
+                    // workspace-destined SpecApproved signal server-side and route
+                    // it through the orchestrator registry — ensure exactly one
+                    // active workspace orchestrator, deliver the message to its
+                    // inbox, and run its cross-repo delegation processing. Internal
+                    // server mechanism, not a message bus feature (the bus message
+                    // above is unaffected).
+                    crate::signal_chain::on_spec_approved(&state, &payload).await;
+                } else {
+                    tracing::warn!(
+                        "spec approval: ledger entry {spec_path} has no workspace \
+                         scope; skipping SpecApproved event"
+                    );
+                }
             }
         }
     }
@@ -769,6 +953,73 @@ pub async fn approve_spec(
     Ok((StatusCode::CREATED, Json(event.into())))
 }
 
+/// Resolve the ledger `approval_status` for a spec from its manifest policy
+/// and recorded approval history (spec-registry.md §9).
+///
+/// Called after any mutation of the approval history (approval recorded,
+/// approval revoked) so the ledger always reflects the §9 resolution over the
+/// current events rather than a hard-coded transition.
+///
+/// Reads the manifest entry for the spec (via the ledger entry's repo) and
+/// applies the pure `resolve_approval_status` resolver over the full approval
+/// history for the spec path. When the manifest cannot be read — the ledger
+/// entry has no repo, the repo is gone, or the repo has no manifest — falls
+/// back to the legacy single-approval behavior so approvals in manifest-less
+/// repos keep working.
+async fn resolve_new_approval_status(
+    state: &crate::AppState,
+    spec_path: &str,
+    entry: &SpecLedgerEntry,
+) -> ApprovalStatus {
+    let resolved = async {
+        let repo_id = entry.repo_id.as_deref()?;
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(repo_id))
+            .await
+            .ok()
+            .flatten()?;
+        let manifest = crate::spec_registry::read_manifest(&repo.path, "HEAD").await?;
+        // Manifest paths are relative to `specs/`; the ledger/API path is the
+        // same relative form (e.g. "system/design-principles.md") — the same
+        // normalization `sync_spec_ledger` uses when keying the ledger.
+        let spec_entry = manifest.specs.iter().find(|e| e.path == spec_path)?;
+        Some((spec_entry.clone(), manifest.defaults.clone()))
+    }
+    .await;
+
+    let events = state
+        .spec_approval_history
+        .list_by_path(spec_path)
+        .await
+        .unwrap_or_default();
+
+    let Some((manifest_entry, defaults)) = resolved else {
+        tracing::debug!(
+            spec_path,
+            "spec-approval: no manifest entry for spec — falling back to single-approval status"
+        );
+        // Manifest-less fallback: any active approval for the current SHA
+        // approves the spec (the pre-§9 behavior). Evaluated over real events
+        // so a revoke that removes the last approval demotes to Pending.
+        let has_valid = events
+            .iter()
+            .any(|e| e.spec_sha == entry.current_sha && e.is_active());
+        return if has_valid {
+            ApprovalStatus::Approved
+        } else {
+            ApprovalStatus::Pending
+        };
+    };
+
+    crate::spec_registry::resolve_approval_status(
+        &manifest_entry,
+        &defaults,
+        &entry.current_sha,
+        &events,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/v1/specs/:path/revoke — revoke an approval
 // ---------------------------------------------------------------------------
@@ -782,6 +1033,14 @@ pub async fn revoke_spec_approval(
     let spec_path = encoded_path;
     let now = now_secs();
 
+    // Revocation requires a reason (agent-gates.md §Spec Approval Ledger).
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "revocation requires a reason".to_string(),
+        ));
+    }
+
     // Find the most recent active approval for this spec path.
     let events = state
         .spec_approval_history
@@ -790,50 +1049,121 @@ pub async fn revoke_spec_approval(
         .unwrap_or_default();
     let active_event = events.into_iter().rev().find(|e| e.is_active());
 
-    match active_event {
-        None => Err(ApiError::NotFound(format!(
+    let Some(ev) = active_event else {
+        return Err(ApiError::NotFound(format!(
             "no active approval for spec '{spec_path}'"
-        ))),
-        Some(ev) => {
-            // Only the original approver or an Admin can revoke.
-            let is_admin =
-                auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
-            let caller_id = format!(
-                "{}:{}",
-                if auth.jwt_claims.is_some() {
-                    "agent"
-                } else {
-                    "user"
-                },
-                auth.agent_id
-            );
-            if ev.approver_id != caller_id && !is_admin {
-                return Err(ApiError::Forbidden(
-                    "only the original approver or an Admin can revoke".to_string(),
-                ));
+        )));
+    };
+
+    // Only the original approver or an Admin can revoke.
+    let is_admin = auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
+    let caller_id = format!(
+        "{}:{}",
+        if auth.jwt_claims.is_some() {
+            "agent"
+        } else {
+            "user"
+        },
+        auth.agent_id
+    );
+    if ev.approver_id != caller_id && !is_admin {
+        return Err(ApiError::Forbidden(
+            "only the original approver or an Admin can revoke".to_string(),
+        ));
+    }
+
+    // Revoke in the durable spec-approvals ledger: the most recent active
+    // approval row for this path transitions Approved → Revoked. The domain
+    // enforces the transition and mutual exclusivity (clears approved_at).
+    let caller_label = if auth.jwt_claims.is_some() {
+        format!("agent:{}", auth.agent_id)
+    } else {
+        format!("user:{}", auth.agent_id)
+    };
+    let mut ledger_revoked_id = None;
+    {
+        let active_ledger = state
+            .spec_approvals
+            .list_active_by_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        if let Some(latest) = active_ledger.first() {
+            match state
+                .spec_approvals
+                .revoke(&latest.id, &caller_label, &reason, now)
+                .await
+            {
+                Ok(Some(())) => ledger_revoked_id = Some(latest.id.clone()),
+                Ok(None) => {
+                    return Err(ApiError::NotFound(format!(
+                        "approval {} vanished from ledger",
+                        latest.id
+                    )))
+                }
+                Err(e) => {
+                    return Err(ApiError::Conflict(format!(
+                        "cannot revoke spec approval: {e}"
+                    )))
+                }
             }
-
-            let _ = state
-                .spec_approval_history
-                .revoke_event(&ev.id, now, &auth.agent_id, &req.reason)
-                .await;
-
-            // Reset ledger approval_status to Pending.
-            if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
-                entry.approval_status = ApprovalStatus::Pending;
-                entry.updated_at = now;
-                let _ = state.spec_ledger.save(&entry).await;
-            }
-
-            Ok(Json(serde_json::json!({
-                "spec_path": spec_path,
-                "revoked_by": auth.agent_id,
-                "revoked_at": now,
-            })))
         }
     }
-}
 
+    let _ = state
+        .spec_approval_history
+        .revoke_event(&ev.id, now, &auth.agent_id, &reason)
+        .await;
+
+    // Audit the revocation (spec: "Revocation requires a reason and is
+    // audited") in the audit_events table.
+    {
+        let audit = gyre_domain::AuditEvent::new(
+            new_id(),
+            gyre_domain::AuditEventType::Custom("spec_approval_revoked".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "spec".to_string(),
+            ledger_revoked_id.as_ref().map(|id| id.to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({
+                "spec_path": spec_path,
+                "spec_sha": ev.spec_sha,
+                "revoked_by": caller_label,
+                "reason": reason,
+            }),
+            None,
+            None,
+            now,
+        );
+        if let Err(e) = state.audit.record(&audit).await {
+            tracing::warn!("failed to audit spec approval revocation: {e}");
+        }
+    }
+
+    // Recompute the ledger approval_status via §9 resolution over the
+    // remaining active approvals. Revoking one approval of a
+    // human_and_agent pair that still has the other half must not
+    // demote an otherwise-satisfied entry; revoking the last valid
+    // approval demotes it to Pending.
+    if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
+        let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
+        if entry.approval_status != new_status {
+            entry.approval_status = new_status;
+            entry.updated_at = now;
+            let _ = state.spec_ledger.save(&entry).await;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "spec_path": spec_path,
+        "revoked_by": caller_label,
+        "revoked_at": now,
+        "ledger_approval_id": ledger_revoked_id,
+    })))
+}
 // ---------------------------------------------------------------------------
 // POST /api/v1/specs/:path/reject — reject a spec (human decision)
 // ---------------------------------------------------------------------------
@@ -857,6 +1187,13 @@ pub async fn reject_spec(
         || auth.roles.contains(&gyre_domain::UserRole::Admin)
         || auth.roles.contains(&gyre_domain::UserRole::Developer);
     if !is_authorized {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/specs/:path/reject",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin or Developer roles can reject specs".to_string(),
         ));
@@ -873,6 +1210,35 @@ pub async fn reject_spec(
     entry.approval_status = ApprovalStatus::Rejected;
     entry.updated_at = now;
     let _ = state.spec_ledger.save(&entry).await;
+
+    // Wire the rejection into the durable spec-approvals ledger
+    // (agent-gates.md §Spec Approval Ledger: Pending → Rejected, and
+    // "Rejection closes associated MR" — handled above). Active approvals
+    // for the current SHA are transitioned; already-approved rows whose
+    // spec version was later superseded keep their own lifecycle.
+    {
+        let caller_label = format!("user:{}", auth.agent_id);
+        let pending = state
+            .spec_approvals
+            .list_by_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        for approval in pending {
+            if approval.status() == gyre_domain::spec_approval::ApprovalStatus::Pending {
+                if let Err(e) = state
+                    .spec_approvals
+                    .reject(&approval.id, &caller_label, &req.reason, now)
+                    .await
+                {
+                    tracing::warn!(
+                        approval_id = %approval.id,
+                        error = %e,
+                        "failed to reject pending ledger approval for spec"
+                    );
+                }
+            }
+        }
+    }
 
     // Close any associated MRs from spec-edit/* branches that reference this spec.
     // A spec-edit MR has spec_ref set to "spec_path@sha" and source_branch "spec-edit/...".
@@ -929,6 +1295,12 @@ pub async fn reject_spec(
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;
 
+                    // Platform Model §7: the task is cancelled and the agent
+                    // stopped (terminal) — its task-scoped one-time secrets
+                    // must not outlive the task. Mirrors the repo-archive
+                    // stop path (review F3).
+                    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+
                     // Send shutdown message to agent's inbox. The message is
                     // scoped to the cancelled task's workspace — the agent's
                     // scope, never a fabricated identity.
@@ -952,7 +1324,7 @@ pub async fn reject_spec(
 
     // Agent-runtime §1: Create priority-2 "Spec rejected" notification for
     // workspace Admin/Developer members.
-    if let Some(ref ws_id) = entry.workspace_id {
+    if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
         // Resolve tenant_id from the workspace's real scope row (§Access
         // Scoping). A lookup failure means the scope cannot be determined —
@@ -1001,6 +1373,8 @@ pub async fn reject_spec(
         approver_type: "human".to_string(),
         approver_id: format!("user:{}", auth.agent_id),
         persona: None,
+        attestation_level: None,
+        stack_hash: None,
         approved_at: now,
         revoked_at: Some(now),
         revoked_by: Some(auth.agent_id.clone()),
@@ -2037,6 +2411,141 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn list_specs_honors_workspace_id_scope() {
+        let state = test_state();
+
+        // repo-a lives in ws-a: resolves entries whose workspace_id was never
+        // backfilled but whose owning repo places them in a workspace.
+        let repo = gyre_domain::Repository {
+            id: gyre_common::Id::new("repo-a"),
+            name: "repo-a".to_string(),
+            path: "/repos/repo-a".to_string(),
+            workspace_id: gyre_common::Id::new("ws-a"),
+            default_branch: "main".to_string(),
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+        };
+        state.repos.create(&repo).await.unwrap();
+
+        let seed_spec = |state: &std::sync::Arc<crate::AppState>,
+                         path: &str,
+                         workspace_id: Option<&str>,
+                         repo_id: Option<&str>| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    state
+                        .spec_ledger
+                        .save(&SpecLedgerEntry {
+                            path: path.to_string(),
+                            title: format!("Spec {path}"),
+                            owner: "user:jsell".to_string(),
+                            kind: None,
+                            current_sha: "b".repeat(40),
+                            approval_mode: "human_only".to_string(),
+                            approval_status: ApprovalStatus::Pending,
+                            linked_tasks: vec![],
+                            linked_mrs: vec![],
+                            drift_status: "unknown".to_string(),
+                            created_at: 1700000000,
+                            updated_at: 1700000000,
+                            repo_id: repo_id.map(|s| s.to_string()),
+                            workspace_id: workspace_id.map(|s| s.to_string()),
+                        })
+                        .await
+                        .unwrap();
+                })
+            });
+        };
+        seed_spec(&state, "system/ws-a.md", Some("ws-a"), None);
+        seed_spec(&state, "system/ws-b.md", Some("ws-b"), None);
+        seed_spec(&state, "system/repo-scoped.md", None, Some("repo-a"));
+        seed_spec(&state, "system/unscoped.md", None, None);
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // ws-a sees its own entry plus the repo-scoped one resolved via repo-a.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-a")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let paths: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["system/repo-scoped.md", "system/ws-a.md"]);
+
+        // ws-b sees only its own entry — no cross-workspace bleed.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-b")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let paths: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["system/ws-b.md"]);
+
+        // A workspace with no specs gets an empty scoped result, and the
+        // unscoped listing is unchanged (all four entries).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs?workspace_id=ws-c")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.as_array().unwrap().is_empty());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_spec_not_found() {
         let resp = app()
             .oneshot(
@@ -2118,6 +2627,309 @@ mod tests {
         assert_eq!(entry.approval_status, ApprovalStatus::Approved);
     }
 
+    // Task-115 / agent-runtime.md §1 Phase 1→2: approving a workspace-scoped
+    // spec must (a) emit the SpecApproved message on the bus with the
+    // spec'd payload shape, and (b) trigger the server-side signal chain —
+    // a workspace orchestrator is spawned and creates a Delegation task
+    // referencing the approved spec_ref path@sha.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_emits_spec_approved_and_triggers_chain() {
+        let state = test_state();
+
+        // Seed a workspace + repo so the spec is workspace-scoped and the
+        // chain has a repo to delegate to.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ws = gyre_domain::Workspace::new(
+                    gyre_common::Id::new("ws-9"),
+                    gyre_common::Id::new("t1"),
+                    "Ws",
+                    "ws",
+                    0,
+                );
+                state.workspaces.create(&ws).await.unwrap();
+                let repo = gyre_domain::Repository::new(
+                    gyre_common::Id::new("r-9"),
+                    gyre_common::Id::new("ws-9"),
+                    "r-9",
+                    "/tmp/gyre-r-9",
+                    0,
+                );
+                state.repos.create(&repo).await.unwrap();
+                // Production seeds approved orchestrator personas at startup
+                // (seed_builtin_personas); the spawn cores fail closed
+                // without one (task-099 F2), so mirror that seeding here.
+                for slug in ["workspace-orchestrator", "repo-orchestrator"] {
+                    let mut persona = gyre_domain::Persona::new(
+                        gyre_common::Id::new(format!("{slug}-persona")),
+                        slug,
+                        slug,
+                        gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+                        "test orchestrator persona",
+                        0,
+                    );
+                    persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+                    state.personas.create(&persona).await.unwrap();
+                }
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/auth.md".to_string(),
+                        title: "Auth".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "b".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("r-9".to_string()),
+                        workspace_id: Some("ws-9".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let sha = "b".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // (a) The SpecApproved bus message exists, workspace-destined, with
+        // the spec'd payload fields (repo_id, spec_path, spec_sha,
+        // approved_by, approval_id).
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("ws-9"),
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+            )
+            .await
+            .unwrap();
+        let bus_msg = msgs
+            .iter()
+            .find(|m| m.kind == gyre_common::message::MessageKind::SpecApproved)
+            .expect("SpecApproved emitted on the bus");
+        let payload = bus_msg.payload.as_ref().expect("payload present");
+        for field in [
+            "repo_id",
+            "spec_path",
+            "spec_sha",
+            "approved_by",
+            "approval_id",
+        ] {
+            assert!(
+                payload.get(field).is_some_and(|v| !v.is_null()),
+                "payload field {field} missing: {payload}"
+            );
+        }
+        assert_eq!(payload["spec_sha"], serde_json::json!(sha));
+        assert_eq!(
+            payload["repo_id"],
+            serde_json::json!("r-9"),
+            "payload carries the ledger entry's repo"
+        );
+        assert!(
+            matches!(
+                &bus_msg.to,
+                gyre_common::message::Destination::Workspace(ws) if *ws == gyre_common::Id::new("ws-9")
+            ),
+            "SpecApproved routed to Destination::Workspace(ws-9), got {:?}",
+            bus_msg.to
+        );
+        let agents = state
+            .agents
+            .list_by_workspace(&gyre_common::Id::new("ws-9"))
+            .await
+            .unwrap();
+        assert!(
+            agents.iter().any(
+                |a| a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator
+            ),
+            "workspace orchestrator spawned by the approve handler"
+        );
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(gyre_domain::TaskType::Delegation))
+            .expect("delegation task created by the signal chain");
+        assert_eq!(delegation.repo_id, gyre_common::Id::new("r-9"));
+        assert_eq!(
+            delegation.spec_path.as_deref(),
+            Some("system/auth.md"),
+            "spec_path is the bare path so list_by_spec_path (rejection cancellation, progress) matches"
+        );
+        assert_eq!(
+            delegation.spec_ref.as_deref(),
+            Some(format!("system/auth.md@{sha}")).as_deref(),
+            "delegation task pins spec_ref path@sha"
+        );
+    }
+
+    /// Review finding F1 regression (task-115): chain-created tasks must
+    /// remain reachable by spec-rejection cancellation. The chain pins the
+    /// approved blob in `spec_ref` ("path@sha") and stores the BARE path in
+    /// `spec_path`, because `reject_spec` cancels via
+    /// `list_by_spec_path` exact bare-path match. If the chain ever stores
+    /// "path@sha" in `spec_path` again, approval→rejection leaves the
+    /// delegation task in-flight forever against a rejected spec (and it
+    /// stays eligible for worker spawning).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_cancels_chain_created_delegation_task() {
+        let state = test_state();
+
+        // Same seed as the approve chain test: workspace, repo, Pending
+        // spec entry so approval triggers the signal chain.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ws = gyre_domain::Workspace::new(
+                    gyre_common::Id::new("ws-10"),
+                    gyre_common::Id::new("t1"),
+                    "Ws",
+                    "ws",
+                    0,
+                );
+                state.workspaces.create(&ws).await.unwrap();
+                let repo = gyre_domain::Repository::new(
+                    gyre_common::Id::new("r-10"),
+                    gyre_common::Id::new("ws-10"),
+                    "r-10",
+                    "/tmp/gyre-r-10",
+                    0,
+                );
+                state.repos.create(&repo).await.unwrap();
+                // Same persona seeding as the approve chain test: the spawn
+                // cores fail closed without an approved persona (task-099 F2).
+                for slug in ["workspace-orchestrator", "repo-orchestrator"] {
+                    let mut persona = gyre_domain::Persona::new(
+                        gyre_common::Id::new(format!("{slug}-persona")),
+                        slug,
+                        slug,
+                        gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+                        "test orchestrator persona",
+                        0,
+                    );
+                    persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+                    state.personas.create(&persona).await.unwrap();
+                }
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/auth.md".to_string(),
+                        title: "Auth".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "c".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("r-10".to_string()),
+                        workspace_id: Some("ws-10".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // 1. Approve — the chain runs synchronously in the handler and
+        //    creates the Delegation task for the spec's repo.
+        let sha = "c".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let delegation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.task_type == Some(gyre_domain::TaskType::Delegation))
+            .expect("chain created the delegation task");
+        // The pre-fix bug this test kills: spec_path carried "path@sha".
+        assert_eq!(
+            delegation.spec_path.as_deref(),
+            Some("system/auth.md"),
+            "spec_path must be the bare path for list_by_spec_path consumers"
+        );
+        assert_eq!(
+            delegation.spec_ref.as_deref(),
+            Some(format!("system/auth.md@{sha}")).as_deref()
+        );
+        assert_eq!(delegation.status, gyre_domain::TaskStatus::Backlog);
+
+        // 2. Reject the same spec — mid-flight cancellation must reach the
+        //    delegation task via its bare spec_path.
+        let reject_body = serde_json::json!({ "reason": "requirements changed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&reject_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = state
+            .tasks
+            .find_by_id(&delegation.id)
+            .await
+            .unwrap()
+            .expect("delegation task survives rejection");
+        assert_eq!(
+            after.status,
+            gyre_domain::TaskStatus::Cancelled,
+            "chain-created delegation task must be cancelled when its spec is rejected"
+        );
+        assert!(after
+            .cancelled_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("spec rejected"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn approve_then_revoke() {
         let (app, state) = app_with_spec();
@@ -2162,6 +2974,398 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // §9 mode-based approval resolution — end-to-end API tests.
+    // Real git repo + manifest, real minted agent JWT with workload claims,
+    // real KV-stored workload attestation, assertions on the ledger status
+    // and the recorded event.
+    // -----------------------------------------------------------------------
+
+    /// Manifest for the E2E approval tests: three specs covering the three
+    // approval modes plus the attestation/stack_hash agent constraints.
+    const E2E_APPROVAL_MANIFEST: &str = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/both.md
+    title: Both Required
+    owner: user:jsell
+    approval:
+      mode: human_and_agent
+      human_approvers:
+        - user:jsell
+      agent_approvers:
+        - persona: accountability
+  - path: system/agent-min.md
+    title: Agent With Minimum Attestation
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          min_attestation_level: 3
+  - path: system/agent-pinned.md
+    title: Agent With Pinned Stack
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          stack_hash: "sha256:pinned"
+"#;
+
+    /// Build a real git repo containing the E2E approval manifest and spec
+    /// files. Returns (tempdir, map of spec path → blob SHA at HEAD).
+    async fn make_manifest_repo() -> (tempfile::TempDir, std::collections::HashMap<String, String>)
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@gyre.dev"]);
+        run(&["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(path.join("specs/system")).unwrap();
+        std::fs::write(path.join("specs/manifest.yaml"), E2E_APPROVAL_MANIFEST).unwrap();
+        for spec in [
+            "system/both.md",
+            "system/agent-min.md",
+            "system/agent-pinned.md",
+        ] {
+            std::fs::write(path.join("specs").join(spec), format!("# {}\n", spec)).unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-m", "manifest + specs"]);
+
+        // Blob SHA for each spec file at HEAD — the ledger's current_sha.
+        let mut shas = std::collections::HashMap::new();
+        for spec in [
+            "system/both.md",
+            "system/agent-min.md",
+            "system/agent-pinned.md",
+        ] {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", &format!("HEAD:specs/{spec}")])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            shas.insert(
+                spec.to_string(),
+                String::from_utf8(out.stdout).unwrap().trim().to_string(),
+            );
+        }
+        (dir, shas)
+    }
+
+    /// Seed workspace, repo, and ledger entries for all three E2E specs.
+    async fn seed_e2e_specs(
+        state: &crate::AppState,
+        dir: &tempfile::TempDir,
+        shas: &std::collections::HashMap<String, String>,
+    ) {
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-e2e"),
+            tenant_id: gyre_common::Id::new("default"),
+            name: "E2E WS".to_string(),
+            slug: "e2e-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-e2e"),
+            gyre_common::Id::new("ws-e2e"),
+            "e2e-repo",
+            dir.path().to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        for (spec, sha) in shas {
+            state
+                .spec_ledger
+                .save(&SpecLedgerEntry {
+                    path: spec.clone(),
+                    title: spec.clone(),
+                    owner: "user:jsell".to_string(),
+                    kind: None,
+                    current_sha: sha.clone(),
+                    approval_mode: "human_and_agent".to_string(),
+                    approval_status: ApprovalStatus::Pending,
+                    linked_tasks: vec![],
+                    linked_mrs: vec![],
+                    drift_status: "unknown".to_string(),
+                    created_at: 0,
+                    updated_at: 0,
+                    repo_id: Some("repo-e2e".to_string()),
+                    workspace_id: Some("ws-e2e".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Mint an agent JWT with workload claims, register it in agent_tokens,
+    /// and store a workload attestation deriving the requested level.
+    /// Level 3 = stack fingerprint + container_id + image_hash.
+    async fn register_e2e_agent(
+        state: &crate::AppState,
+        agent_id: &str,
+        stack_hash: &str,
+        level: u32,
+    ) -> String {
+        let jwt = state
+            .agent_signing_key
+            .mint_with_workload(
+                agent_id,
+                "task-e2e",
+                "system",
+                &state.base_url,
+                3600,
+                None,                         // wl_pid
+                None,                         // wl_hostname
+                Some("local".to_string()),    // wl_compute_target
+                Some(stack_hash.to_string()), // wl_stack_hash
+                if level >= 3 {
+                    Some("container-1".to_string())
+                } else {
+                    None
+                },
+                if level >= 3 {
+                    Some("sha256:image".to_string())
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, jwt.clone())
+            .await
+            .unwrap();
+
+        let attestation = crate::workload_attestation::attest_agent_with_container(
+            agent_id,
+            None,
+            "local",
+            stack_hash,
+            if level >= 3 {
+                Some("container-1".to_string())
+            } else {
+                None
+            },
+            if level >= 3 {
+                Some("sha256:image".to_string())
+            } else {
+                None
+            },
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                agent_id,
+                serde_json::to_string(&attestation).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        jwt
+    }
+
+    async fn approve_via_api(
+        app: &Router,
+        token: &str,
+        spec_path: &str,
+        sha: &str,
+        persona: Option<&str>,
+    ) -> axum::response::Response {
+        let mut body = serde_json::json!({ "sha": sha });
+        if let Some(p) = persona {
+            body["persona"] = serde_json::json!(p);
+        }
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/specs/{}/approve",
+                        spec_path.replace('/', "%2F")
+                    ))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn ledger_status(state: &crate::AppState, spec_path: &str) -> ApprovalStatus {
+        state
+            .spec_ledger
+            .find_by_path(spec_path)
+            .await
+            .unwrap()
+            .unwrap()
+            .approval_status
+    }
+
+    /// Seed a real human user `jsell` (Admin) with an API key registered in
+    /// the auth-resolving store, so a human approval flows through the real
+    /// API-key auth path and resolves to `user:jsell` — matching the
+    /// manifest's `human_approvers` list. Returns the raw API key.
+    async fn register_e2e_human(state: &crate::AppState) -> String {
+        let mut user = gyre_domain::User::new(
+            gyre_common::Id::new("user-jsell"),
+            "local:jsell",
+            "jsell",
+            0,
+        );
+        user.roles = vec![gyre_domain::UserRole::Admin];
+        // API-key auth resolves the tenant scope from the user's stored
+        // binding and fail-closes when it is absent (task-099 F1), so the
+        // fixture binds jsell to the seeded specs' tenant ("default", the
+        // tenant of ws-e2e) for the approval to authenticate.
+        user.tenant_id = Some(gyre_common::Id::new("default"));
+        state.users.create(&user).await.unwrap();
+
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(&raw_key),
+                &user.id,
+                "e2e-approval",
+            )
+            .await
+            .unwrap();
+        raw_key
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_and_agent_requires_both_approvals_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let agent_jwt = register_e2e_agent(&state, "agent-e2e-1", "sha256:free", 3).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let spec = "system/both.md";
+        let sha = &shas[spec];
+
+        let human_key = register_e2e_human(&state).await;
+
+        // Agent approval alone → still Pending (would be Approved if the
+        // resolver were reverted to "any valid approval").
+        let resp = approve_via_api(&app, &agent_jwt, spec, sha, Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Human approval from a real user in human_approvers completes the
+        // pair → Approved.
+        let resp = approve_via_api(&app, &human_key, spec, sha, None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_only_rejects_attestation_below_minimum_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let spec = "system/agent-min.md";
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Level 2 agent (stack, no container) — manifest requires 3.
+        let weak_jwt = register_e2e_agent(&state, "agent-e2e-2", "sha256:free", 2).await;
+        let resp =
+            approve_via_api(&app, &weak_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Level 3 agent on the same spec → Approved.
+        let strong_jwt = register_e2e_agent(&state, "agent-e2e-3", "sha256:free", 3).await;
+        let resp =
+            approve_via_api(&app, &strong_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_only_requires_exact_stack_hash_match_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let spec = "system/agent-pinned.md";
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Agent running a different stack → Pending.
+        let other_jwt = register_e2e_agent(&state, "agent-e2e-4", "sha256:other", 3).await;
+        let resp =
+            approve_via_api(&app, &other_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Agent running the pinned stack → Approved.
+        let pinned_jwt = register_e2e_agent(&state, "agent-e2e-5", "sha256:pinned", 3).await;
+        let resp =
+            approve_via_api(&app, &pinned_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_attestation_fields_round_trip_via_history_api() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let agent_jwt = register_e2e_agent(&state, "agent-e2e-6", "sha256:pinned", 3).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let spec = "system/agent-pinned.md";
+        let resp =
+            approve_via_api(&app, &agent_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The recorded event carries the JWT-derived attestation fields.
+        let events = state
+            .spec_approval_history
+            .list_by_path(spec)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].approver_type, "agent");
+        assert_eq!(events[0].attestation_level, Some(3));
+        assert_eq!(events[0].stack_hash.as_deref(), Some("sha256:pinned"));
+        assert_eq!(events[0].persona.as_deref(), Some("accountability"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2939,6 +4143,136 @@ specs:
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review F3): the spec-reject cascaded
+        // shutdown cancels the task and stops its Active agents (terminal) —
+        // the cancelled task's Task-scoped one-time secrets must be revoked,
+        // mirroring the repo-archive stop path.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/secret-teardown.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // A resolvable workspace so the teardown can derive the tenant
+        // without fabricating a scope.
+        let ws_id = Id::new("ws-reject-secrets");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                "Reject Secrets WS",
+                "reject-secrets-ws",
+                1700000000,
+            ))
+            .await
+            .unwrap();
+
+        // In-flight task linked to the spec.
+        let task_id = Id::new("reject-secret-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Secret teardown", 1700000000);
+        task.spec_path = Some("system/secret-teardown.md".to_string());
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        state.tasks.create(&task).await.unwrap();
+
+        // Active agent working on that task in the resolvable workspace.
+        let agent_id = Id::new("reject-secret-agent-1");
+        let mut agent = gyre_domain::Agent::new(agent_id.clone(), "reject-worker", 1700000000);
+        agent.workspace_id = ws_id.clone();
+        agent.assign_task(task_id.clone());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let tenant = "default".to_string();
+        let now = 1700000000u64;
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.clone(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-reject-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    task_id.to_string(),
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-reject-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fsecret-teardown.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The stopped agent's task-scoped secret is revoked; unrelated
+        // tasks' secrets survive.
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-reject-task"), &tenant)
+                .await
+                .unwrap()
+                .is_none(),
+            "spec-reject shutdown must revoke the cancelled task's secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-reject-other"), &tenant)
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive spec rejection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn reject_spec_skips_already_done_tasks() {
         let state = test_state();
         state
@@ -3005,6 +4339,163 @@ specs:
             .unwrap()
             .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Rejected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_notification_uses_workspace_tenant() {
+        let state = test_state();
+
+        // Workspace with a real tenant identity. The seeded spec carries a
+        // repo_id, which the legacy code misused as the notification tenant
+        // (and fabricated "default" when absent) — task-097 F3.
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-x"),
+            tenant_id: gyre_common::Id::new("tenant-x"),
+            name: "ws-x".to_string(),
+            slug: "ws-x".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let admin = gyre_domain::WorkspaceMembership {
+            id: gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: gyre_common::Id::new("admin1"),
+            workspace_id: gyre_common::Id::new("ws-x"),
+            role: gyre_domain::WorkspaceRole::Admin,
+            invited_by: gyre_common::Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(1_000_000),
+            created_at: 1_000_000,
+        };
+        state.workspace_memberships.create(&admin).await.unwrap();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/ws-scoped.md".to_string(),
+                        title: "WS Scoped".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "c".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("repo-x".to_string()),
+                        workspace_id: Some("ws-x".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "superseded" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fws-scoped.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &gyre_common::Id::new("admin1"),
+                Some(&gyre_common::Id::new("ws-x")),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1, "Admin should receive the notification");
+        assert_eq!(
+            notifs[0].notification_type,
+            gyre_common::NotificationType::SpecRejected
+        );
+        // The tenant scope is the workspace's real tenant — not the repo id
+        // and not a fabricated "default" identity.
+        assert_eq!(notifs[0].tenant_id, "tenant-x");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_skips_notifications_when_workspace_unresolvable() {
+        let state = test_state();
+
+        // Spec whose workspace_id does not resolve to any workspace record:
+        // the tenant scope cannot be determined, so the notification fanout
+        // must be skipped — never filed under a fabricated "default" tenant.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/orphaned.md".to_string(),
+                        title: "Orphaned".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "d".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: Some("ws-missing".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "orphaned" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Forphaned.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The rejection itself succeeded; no notification was fabricated.
+        let recent = state.notifications.list_recent(10).await.unwrap();
+        assert!(
+            recent
+                .iter()
+                .all(|n| n.notification_type != gyre_common::NotificationType::SpecRejected),
+            "unresolvable workspace must skip the notification fanout, not file it under a fabricated tenant"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3293,7 +4784,7 @@ specs:
 
         // No KeyBinding pre-created → should skip SignedInput.
         let body = serde_json::json!({
-            "sha": "b".repeat(40),
+            "sha": "a".repeat(40),
         });
         let resp = app
             .oneshot(
@@ -3340,7 +4831,7 @@ specs:
         state.key_bindings.store("default", &kb).await.unwrap();
 
         let body = serde_json::json!({
-            "sha": "d".repeat(40),
+            "sha": "a".repeat(40),
         });
         let resp = app
             .oneshot(
@@ -3391,7 +4882,7 @@ specs:
         // Pre-compute the InputContent the server will build (default scope, no persona).
         let input_content = gyre_common::InputContent {
             spec_path: "system/design-principles.md".to_string(),
-            spec_sha: "c".repeat(40),
+            spec_sha: "a".repeat(40),
             workspace_id: String::new(),
             repo_id: String::new(),
             persona_constraints: vec![],
@@ -3405,7 +4896,7 @@ specs:
 
         // Approve with output_constraints but no scope.
         let body = serde_json::json!({
-            "sha": "c".repeat(40),
+            "sha": "a".repeat(40),
             "output_constraints": [
                 {"name": "no new deps", "expression": "output.changed_files.all(f, f != \"Cargo.toml\")"}
             ],
@@ -3462,7 +4953,7 @@ specs:
 
         // Provide a bogus user_content_signature that won't verify.
         let body = serde_json::json!({
-            "sha": "e".repeat(40),
+            "sha": "a".repeat(40),
             "user_content_signature": base64::engine::general_purpose::STANDARD
                 .encode(b"this-is-not-a-valid-signature-at-all-needs-to-be-long-enough-for-ed25519!!")
         });
@@ -3480,6 +4971,60 @@ specs:
             .unwrap();
         // Should reject with 400 — signature verification failed.
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_mismatched_sha_rejected() {
+        let (app, state) = app_with_spec();
+
+        // Approve a fabricated 40-hex SHA that does not match the ledger's
+        // current version — must be rejected (agent-gates.md §The Provenance
+        // Chain, step 8: approvals bind the version that actually exists).
+        let body = serde_json::json!({
+            "sha": "f".repeat(40),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // No partial writes: no ledger approval row, no history event.
+        let approvals = state
+            .spec_approvals
+            .list_by_path("system/design-principles.md")
+            .await
+            .unwrap();
+        assert!(
+            approvals.is_empty(),
+            "mismatched sha must not create a spec approval ledger row"
+        );
+        let history = state
+            .spec_approval_history
+            .list_by_path("system/design-principles.md")
+            .await
+            .unwrap();
+        assert!(
+            history.is_empty(),
+            "mismatched sha must not record an approval history event"
+        );
+
+        // Ledger approval_status unchanged (still Pending).
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .expect("seeded ledger entry must exist");
+        assert_eq!(entry.approval_status, ApprovalStatus::Pending);
     }
 
     // ── Constraint validation (§7.6 dry-run) ─────────────────────────────

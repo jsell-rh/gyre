@@ -4,6 +4,18 @@ export default defineConfig({
   testDir: './tests/e2e',
   use: {
     baseURL: 'http://localhost:2222',
+    // Chromium's own OS-level sandbox (SUID/namespace credentials setup) and
+    // zygote pre-fork cannot initialize inside containers/restricted environments
+    // — the GPU/zygote processes die with "Check failed: Operation not permitted".
+    // --no-sandbox (chromiumSandbox: false) and --no-zygote are safe here:
+    // Playwright still isolates each test in its own browser context, and the
+    // tests only ever talk to the local test server. Neither flag affects the
+    // rendering pipeline, so screenshot baselines remain valid on both
+    // restricted containers and normal CI runners.
+    chromiumSandbox: false,
+    launchOptions: {
+      args: ['--no-zygote'],
+    },
   },
   screenshot: 'only-on-failure',
   timeout: 30_000,

@@ -28,8 +28,11 @@ pub struct CreateTaskRequest {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Option<Vec<String>>,
-    /// Spec path this task implements (e.g. "system/hello-world.md").
+    /// Spec path this task implements (e.g. "system/hello-world.md"). Bare path.
     pub spec_path: Option<String>,
+    /// Pinned approved spec blob this task implements: "path@sha". Optional;
+    /// when absent, decomposition falls back to the ledger's current SHA.
+    pub spec_ref: Option<String>,
     /// Workspace ID to scope this task to.
     pub workspace_id: Option<String>,
     /// Repository ID this task targets.
@@ -78,6 +81,8 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<u32>,
@@ -103,6 +108,7 @@ impl From<Task> for TaskResponse {
             created_at: t.created_at,
             updated_at: t.updated_at,
             spec_path: t.spec_path,
+            spec_ref: t.spec_ref,
             task_type: t.task_type.map(|tt| task_type_str(&tt)),
             order: t.order,
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
@@ -197,6 +203,7 @@ pub async fn create_task(
         .map(Id::new)
         .collect();
     task.spec_path = req.spec_path;
+    task.spec_ref = req.spec_ref;
     if let Some(ws_id) = req.workspace_id {
         task.workspace_id = Id::new(ws_id);
     }
@@ -342,7 +349,9 @@ pub async fn transition_task_status(
 
     // meta-spec-reconciliation.md §11: ReconciliationCompleted /
     // MetaSpecDriftResolved fire when the last open reconciliation /
-    // drift-review task for a workspace reaches terminal status.
+    // drift-review task for a workspace reaches terminal status. The
+    // shared hook also advances a §7 rolling rollout (next batch) before
+    // the completion check.
     if matches!(
         task.status,
         gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
@@ -350,9 +359,7 @@ pub async fn transition_task_status(
         l == crate::reconciliation::RECONCILIATION_LABEL
             || l == crate::reconciliation::DRIFT_REVIEW_LABEL
     }) {
-        crate::reconciliation::maybe_emit_reconciliation_completed(&state, &task.workspace_id)
-            .await;
-        crate::reconciliation::maybe_emit_drift_resolved(&state, &task.workspace_id).await;
+        crate::reconciliation::on_reconciliation_task_terminal(&state, &task.workspace_id).await;
     }
 
     // Auto-track status transition as analytics event

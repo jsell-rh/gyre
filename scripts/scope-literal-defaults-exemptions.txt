@@ -1,31 +1,25 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-# Frozen at 10 entries (seeded at 24 by the task-099 process revision;
+# Frozen at 2 entries (seeded at 24 by the task-099 process revision;
 # lowered to 18 by task-160 — the four adapter create() sites now stamp
 # the storage's real tenant; lowered to 12 in the task-160 repair round —
 # the six record-conversion From-impl / analytics create-stamp sites now
 # carry the storage's real tenant too; lowered to 10 in the task-160
-# verification-repair round — emit_event/emit_telemetry now resolve the
+# verification-repair round — emit_event/emit_telemetry resolve the
 # owning tenant from the workspace record and drop messages whose scope
-# cannot be determined). Fix a site by resolving the real scope (or
-# refusing to create the entity without it), then DELETE its line and
-# lower FROZEN_EXEMPTION_COUNT in
+# cannot be determined; lowered to 2 in the task-160 rebase onto base
+# cfeefbda — the seven auth.rs AuthenticatedAgent/admin sites were fixed
+# upstream by the task-099 F1 revision (admin user never bound to a
+# tenant; API-key callers resolve the real principal), and the domain
+# Agent constructor default was fixed upstream via the documented
+# `bootstrap_workspace` helper; both fix sets are present in this tree,
+# verified by running the checker's scan on the merged tree). Fix a site
+# by resolving the real scope (or refusing to create the entity without
+# it), then DELETE its line and lower FROZEN_EXEMPTION_COUNT in
 # scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
 
-# task-099 F1 revision round owns these (admin user is never bound to a
-# tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
-# identity):
-crates/gyre-server/src/auth.rs:512
-crates/gyre-server/src/auth.rs:550
-crates/gyre-server/src/auth.rs:583
-crates/gyre-server/src/auth.rs:624
-crates/gyre-server/src/auth.rs:654
-crates/gyre-server/src/auth.rs:678
-crates/gyre-server/src/auth.rs:1001
-
 # Unowned legacy (domain constructor defaults fabricating tenant on the
 # wire) — opportunistic fixes welcome:
-crates/gyre-domain/src/agent.rs:147
-crates/gyre-domain/src/merge_request.rs:119
-crates/gyre-domain/src/task.rs:92
+crates/gyre-domain/src/merge_request.rs:124
+crates/gyre-domain/src/task.rs:99

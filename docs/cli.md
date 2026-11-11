@@ -170,6 +170,46 @@ Notes:
 
 ---
 
+## Secrets (platform-model.md §7)
+
+```bash
+# Create (or update) a secret in the current workspace — workspace inferred
+# from the git remote (Admin only server-side)
+gyre secret set DATABASE_URL "postgres://user:pass@host/db"
+
+# Repo-scoped secret (workspace from --workspace-name or the git remote)
+gyre secret set --repo gyre DATABASE_URL "postgres://..."
+
+# Tenant-scoped rotated secret with an expiry (unix epoch seconds)
+gyre secret set --scope tenant --secret-type rotated --expires-at 1893456000 \
+  API_KEY "secret-value"
+
+# List secret metadata for a scope (names, types, rotation/expiry state —
+# values are never returned by the API)
+gyre secret list
+
+# Force-rotate a secret's value
+gyre secret rotate API_KEY "new-value"
+
+# Delete a secret by name
+gyre secret delete API_KEY
+```
+
+Notes:
+
+- Calls the real Admin API (`POST/GET /api/v1/secrets`,
+  `DELETE /api/v1/secrets/:id`, `POST /api/v1/secrets/:id/rotate`); every
+  operation requires the Admin role.
+- Secret values are write-only: they are sent on set/rotate and never
+  displayed or returned — the list response physically contains no value
+  field.
+- Scope selection: `--repo <name>` selects repo scope; `--scope tenant`
+  selects the caller's tenant; otherwise workspace scope via
+  `--workspace-name <slug>` or the git remote. `gyre secret delete/rotate`
+  are name-keyed and resolve the id via the scope's list.
+
+---
+
 ## Search
 
 ```bash

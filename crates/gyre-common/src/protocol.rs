@@ -161,6 +161,14 @@ pub enum WsMessage {
     ReplayCatchUp {
         truncated: bool,
     },
+    /// Server → user push: an Inbox notification was created for the
+    /// authenticated user (identity-security.md §Impersonation delivers the
+    /// approval code and the impersonation alert this way when the user is
+    /// online). Delivered on the connection's targeted channel; connections
+    /// are matched by verified user identity, not by any client-supplied id.
+    NotificationPush {
+        notification: crate::Notification,
+    },
     /// Catch-all for unrecognized message types — silently ignored for forward compatibility.
     #[serde(other)]
     Unknown,

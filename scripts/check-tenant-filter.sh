@@ -159,6 +159,7 @@ SKIP_LIST=(
     "user_workspace_state.rs|table keyed by (workspace_id, user); workspace_id is globally unique so isolation is structural. No tenant_id column, no UUID-guessing surface (no REST endpoint)."
     "workspace_membership.rs|workspace_memberships has no tenant_id column; rows are addressed only via globally-unique workspace_id, which is tenant-bound."
     "tenant.rs|the tenants table IS the tenant registry: find_by_id/find_by_slug resolve tenant identity itself (used by the OIDC/SCIM resolvers before tenant context exists), so a self-tenant filter is impossible by construction."
+    "user.rs|users resolve IDENTITY, not tenant-scoped data: find_by_external_id/find_by_username run in the OIDC/API-key login path before any tenant context exists (same construction as tenant.rs), and users.tenant_id is a NULLABLE home-tenant binding (migration 000058: legacy OIDC rows are unbound and the auth extractor fail-closes on them), so a tenant_id filter would silently hide those rows from identity resolution. The binding is enforced at the auth layer, not by these lookups."
     "kv_store.rs|generic namespace+key store: no tenant_id column. KvJsonStore namespaces are a documented backlog item (spec §3 'KvJsonStore gap'), not Diesel-table adapters."
 )
 

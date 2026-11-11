@@ -9,7 +9,7 @@
 //! | Language   | Tool                                   |
 //! |------------|----------------------------------------|
 //! | Go         | `scripts/go-callgraph/go-callgraph` (CHA binary) |
-//! | Rust       | `scripts/rust-callgraph.sh` (rust-analyzer LSP)  |
+//! | Rust       | native rust-analyzer LSP client (`call_graph_rust`) |
 //! | Python     | `scripts/python-callgraph.sh` (pyright LSP)      |
 //! | TypeScript | `scripts/ts-callgraph.mjs` (typescript-language-server LSP) |
 //!
@@ -55,13 +55,14 @@ impl CallGraphExtractor for SubprocessCallGraphExtractor {
                     return Ok(Vec::new());
                 }
             },
-            Language::Rust => match find_script("rust-callgraph.sh") {
-                Some(s) => (PathBuf::from("bash"), vec![s]),
-                None => {
-                    tracing::info!("rust-callgraph.sh not found; skipping Rust Pass 2");
-                    return Ok(Vec::new());
-                }
-            },
+            // Rust does not go through a JSON-emitting helper script: it is
+            // driven directly over LSP by the native rust-analyzer client in
+            // `call_graph_rust` (task-073, spec §5 "Rust: rust-analyzer",
+            // Option B). The function honors the same graceful-degradation
+            // contract as the script tools below.
+            Language::Rust => {
+                return crate::call_graph_rust::extract_rust_call_edges(repo_path).await;
+            }
             Language::Python => match find_script("python-callgraph.sh") {
                 Some(s) => (PathBuf::from("bash"), vec![s]),
                 None => {
