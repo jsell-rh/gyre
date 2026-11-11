@@ -18,6 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use crate::{
+    auth::AuthenticatedAgent, policy_engine, policy_engine::AttrValue,
+    policy_engine::AttributeContext, AppState,
+};
 use axum::{
     body::Body,
     extract::{FromRequestParts, MatchedPath},
@@ -31,10 +35,6 @@ use gyre_domain::policy::{
     Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
 };
 use serde_json::json;
-use crate::{
-    auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, policy_engine::AttrValue,
-    AppState,
-};
 
 // ---------------------------------------------------------------------------
 // Resource resolver
@@ -295,11 +295,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/links", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
                 // ── Spec editing backend (S3.3) ────────────────────────────
-                RouteResourceMapping::api(
-                    REPOS_SPECS_ASSIST_ROUTE,
-                    "spec",
-                    Some("generate"),
-                ),
+                RouteResourceMapping::api(REPOS_SPECS_ASSIST_ROUTE, "spec", Some("generate")),
                 RouteResourceMapping::api("/api/v1/repos/:id/specs/save", "spec", Some("write")),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/spec-assertions/check",
@@ -602,6 +598,15 @@ fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
     out
 }
 
+/// Path prefix for workspace-scoped routes; shared by the workspace-id,
+/// repo-id and resource-id extraction branches below so the literal is
+/// spelled once (the ABAC registry check flags duplicate `/api/v1/...`
+/// literals).
+const WORKSPACES_PATH_PREFIX: &str = "/api/v1/workspaces/";
+
+/// Path prefix for repo-scoped routes; see [`WORKSPACES_PATH_PREFIX`].
+const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
+
 /// Extract resource identity attributes from the request path into the
 /// attribute context (§Attributes: `resource.id`, `resource.workspace_id`,
 /// `resource.repo_id` — source "Request path").
@@ -632,16 +637,6 @@ fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
 /// `approval_status`, `visibility`) are populated by
 /// [`extract_entity_attributes`] below. Nested child ids like `:node_id` are
 /// not resource identity attributes and stay unpopulated.
-
-/// Path prefix for workspace-scoped routes; shared by the workspace-id,
-/// repo-id and resource-id extraction branches below so the literal is
-/// spelled once (the ABAC registry check flags duplicate `/api/v1/...`
-/// literals).
-const WORKSPACES_PATH_PREFIX: &str = "/api/v1/workspaces/";
-
-/// Path prefix for repo-scoped routes; see [`WORKSPACES_PATH_PREFIX`].
-const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
-
 fn extract_path_attributes(
     ctx: &mut AttributeContext,
     pattern: &str,
@@ -778,12 +773,10 @@ async fn set_tenant_from_repo(state: &AppState, ctx: &mut AttributeContext, repo
     if ctx.has("resource.tenant_id") {
         return;
     }
-    match state
-        .repos
-        .find_by_id(&gyre_common::Id::new(repo_id))
-        .await
-    {
-        Ok(Some(repo)) => set_tenant_from_workspace(state, ctx, &repo.workspace_id.to_string()).await,
+    match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+        Ok(Some(repo)) => {
+            set_tenant_from_workspace(state, ctx, &repo.workspace_id.to_string()).await
+        }
         Ok(None) => {}
         Err(e) => tracing::warn!(
             repo_id = %repo_id,
@@ -836,7 +829,9 @@ async fn extract_entity_attributes(
         // and the repo/workspace scope (§Attributes: "Entity lookup",
         // "Entity field").
         "spec" => {
-            let Some(raw) = params.get("path") else { return };
+            let Some(raw) = params.get("path") else {
+                return;
+            };
             let Some(spec_path) = percent_decode(raw) else {
                 tracing::warn!(%raw, "spec path is not valid percent-encoding; entity attributes unset");
                 return;
@@ -1674,7 +1669,10 @@ pub async fn abac_middleware(
                 // index (no per-user team lookup port).
                 let mut team_ids: Vec<String> = Vec::new();
                 for membership in &memberships {
-                    if let Ok(teams) = state.teams.list_by_workspace(&membership.workspace_id).await
+                    if let Ok(teams) = state
+                        .teams
+                        .list_by_workspace(&membership.workspace_id)
+                        .await
                     {
                         for team in teams {
                             if team.member_ids.contains(user_id) {
@@ -2838,17 +2836,12 @@ pub mod tests {
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         // Pre-create the user the JWT will resolve to (external_id = sub).
         let user_id = gyre_common::Id::new("11111111-1111-1111-1111-111111111111");
-        let mut user = User::new(
-            user_id.clone(),
-            "member-sub",
-            "member-user",
-            0,
-        );
+        let mut user = User::new(user_id.clone(), "member-sub", "member-user", 0);
         user.roles = vec![gyre_domain::UserRole::Developer];
         state.users.create(&user).await.unwrap();
 
@@ -2861,7 +2854,11 @@ pub mod tests {
             gyre_common::Id::new("inviter"),
             0,
         );
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         // Team membership in ws-1.
         let mut team = Team::new(
@@ -3045,7 +3042,7 @@ pub mod tests {
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         let user_id = gyre_common::Id::new("22222222-2222-2222-2222-222222222222");
@@ -3812,7 +3809,7 @@ pub mod tests {
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         // Mint a worker JWT scoped to repo-7 with a stack hash claim.
@@ -3914,7 +3911,7 @@ pub mod tests {
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         // Mint with workload claims directly.
@@ -4037,7 +4034,7 @@ pub mod tests {
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         // Two agents: one with a persona + full attestation, one with neither.
@@ -4157,10 +4154,7 @@ pub mod tests {
             StatusCode::OK
         }
         let app = Router::new()
-            .route(
-                SPECS_ROUTE,
-                axum::routing::post(ok_handler),
-            )
+            .route(SPECS_ROUTE, axum::routing::post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 abac_middleware,
@@ -4212,14 +4206,18 @@ pub mod tests {
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         // Raw agent token (no JWT): tenant_id can only come from the
         // auth context line in the middleware.
         state
             .kv_store
-            .kv_set("agent_tokens", "agent-tenant-1", "raw-uuid-token".to_string())
+            .kv_set(
+                "agent_tokens",
+                "agent-tenant-1",
+                "raw-uuid-token".to_string(),
+            )
             .await
             .unwrap();
 
@@ -4261,7 +4259,7 @@ pub mod tests {
 
         init_resolver();
         async fn ok_handler() -> StatusCode {
-           StatusCode::OK
+            StatusCode::OK
         }
         let app = Router::new()
             .route(SPECS_ROUTE, get(ok_handler))
@@ -4313,14 +4311,17 @@ pub mod tests {
             .unwrap();
         state
             .budget_usages
-            .set_usage(&crate::api::budget::workspace_key("ws-1"), &gyre_domain::BudgetUsage {
-                entity_type: "workspace".to_string(),
-                entity_id: gyre_common::Id::new("ws-1"),
-                tokens_used_today: 400,
-                cost_today: 0.0,
-                active_agents: 0,
-                period_start: 0,
-            })
+            .set_usage(
+                &crate::api::budget::workspace_key("ws-1"),
+                &gyre_domain::BudgetUsage {
+                    entity_type: "workspace".to_string(),
+                    entity_id: gyre_common::Id::new("ws-1"),
+                    tokens_used_today: 400,
+                    cost_today: 0.0,
+                    active_agents: 0,
+                    period_start: 0,
+                },
+            )
             .await
             .unwrap();
 
@@ -4388,14 +4389,17 @@ pub mod tests {
         // Burn the budget down to 950 used → 50 remaining < 500 → deny.
         state
             .budget_usages
-            .set_usage(&crate::api::budget::workspace_key("ws-1"), &gyre_domain::BudgetUsage {
-                entity_type: "workspace".to_string(),
-                entity_id: gyre_common::Id::new("ws-1"),
-                tokens_used_today: 950,
-                cost_today: 0.0,
-                active_agents: 0,
-                period_start: 0,
-            })
+            .set_usage(
+                &crate::api::budget::workspace_key("ws-1"),
+                &gyre_domain::BudgetUsage {
+                    entity_type: "workspace".to_string(),
+                    entity_id: gyre_common::Id::new("ws-1"),
+                    tokens_used_today: 950,
+                    cost_today: 0.0,
+                    active_agents: 0,
+                    period_start: 0,
+                },
+            )
             .await
             .unwrap();
         let resp = app
@@ -4500,10 +4504,7 @@ pub mod tests {
         );
         crate::merge_processor::pause_merge_queue(&state, &repo, "test pause").await;
 
-        let resp = app
-            .oneshot(req("POST", REPO_HEALTH_URI))
-            .await
-            .unwrap();
+        let resp = app.oneshot(req("POST", REPO_HEALTH_URI)).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
@@ -4519,13 +4520,13 @@ pub mod tests {
     async fn setup_entity_state() -> Arc<AppState> {
         use crate::auth::test_helpers::make_test_state_with_jwt;
         use gyre_domain::{
-            Repository as DomainRepo, SpecLedgerEntry, Tenant, Workspace, ApprovalStatus,
+            ApprovalStatus, Repository as DomainRepo, SpecLedgerEntry, Tenant, Workspace,
         };
 
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
         state

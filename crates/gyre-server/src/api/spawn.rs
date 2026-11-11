@@ -623,16 +623,14 @@ pub(crate) async fn spawn_agent_core(
             None,
             // identity-security.md attestation levels: 1=raw subprocess,
             // 2=CLI-managed, 3=Gyre-managed container with attestation.
-            resolved_ct_entity
-                .as_ref()
-                .map(|ct| match ct.target_type {
-                    ComputeTargetType::Container => 3,
-                    ComputeTargetType::Ssh => 2,
-                    // No target (None) is a plain local subprocess: level 1.
-                    // Kubernetes falls back to 1 until the runtime reports
-                    // workload attestations for pods (tracked by task-129).
-                    ComputeTargetType::Kubernetes => 1,
-                }),
+            resolved_ct_entity.as_ref().map(|ct| match ct.target_type {
+                ComputeTargetType::Container => 3,
+                ComputeTargetType::Ssh => 2,
+                // No target (None) is a plain local subprocess: level 1.
+                // Kubernetes falls back to 1 until the runtime reports
+                // workload attestations for pods (tracked by task-129).
+                ComputeTargetType::Kubernetes => 1,
+            }),
             wl_image_hash,
         )
         .unwrap_or_else(|e| {

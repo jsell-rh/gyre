@@ -2275,7 +2275,10 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
         let mut store = self.policies.lock().await;
         let to_delete: Vec<String> = store
             .values()
-            .filter(|p| p.name.starts_with(prefix) && p.scope_id.as_ref().map(|i| i.as_str()) == Some(scope_id))
+            .filter(|p| {
+                p.name.starts_with(prefix)
+                    && p.scope_id.as_ref().map(|i| i.as_str()) == Some(scope_id)
+            })
             .map(|p| p.id.to_string())
             .collect();
         let count = to_delete.len() as u64;

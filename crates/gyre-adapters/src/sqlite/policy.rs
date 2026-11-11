@@ -307,8 +307,7 @@ impl PolicyRepository for SqliteStorage {
                     policies::name.eq(&p.name),
                     policies::description.eq(&p.description),
                     policies::scope.eq(scope_to_str(&p.scope)),
-                    policies::scope_id
-                        .eq(p.scope_id.as_ref().map(|id| id.as_str().to_string())),
+                    policies::scope_id.eq(p.scope_id.as_ref().map(|id| id.as_str().to_string())),
                     policies::priority.eq(p.priority as i32),
                     policies::effect.eq(effect_to_str(&p.effect)),
                     policies::conditions.eq(serde_json::to_string(&p.conditions)?),
@@ -583,13 +582,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
-        assert!(storage.find_by_id("trust:deny-push").await.unwrap().is_none());
-        assert!(
-            storage
-                .find_by_id("trust:deny-push-other")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(storage
+            .find_by_id("trust:deny-push")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .find_by_id("trust:deny-push-other")
+            .await
+            .unwrap()
+            .is_some());
     }
 }

@@ -1093,7 +1093,12 @@ mod tests {
             operator: ConditionOp::Contains,
             value: ConditionValue::String("$resource.repo_id".to_string()),
         };
-        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond.clone()])],
+            &ctx,
+            "read",
+            "repo",
+        );
         assert_eq!(result.effect, PolicyEffect::Allow);
 
         // Same policy, different resource: the reference resolves to the
@@ -1116,7 +1121,12 @@ mod tests {
             operator: ConditionOp::Equals,
             value: ConditionValue::String("$subject.tenant_id".to_string()),
         };
-        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond.clone()])],
+            &ctx,
+            "read",
+            "repo",
+        );
         assert_eq!(result.effect, PolicyEffect::Allow);
 
         // Cross-tenant resource: reference resolves to tenant-a, mismatch denies.
@@ -1176,7 +1186,12 @@ mod tests {
             operator: ConditionOp::GreaterThan,
             value: ConditionValue::String("$resource.min_depth".to_string()),
         };
-        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "attestation");
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond])],
+            &ctx,
+            "push",
+            "attestation",
+        );
         assert_eq!(result.effect, PolicyEffect::Allow);
 
         // A list-valued reference in scalar (StringList element) position
@@ -1340,10 +1355,7 @@ mod tests {
             vec![Condition {
                 attribute: "subject.workspace_role".to_string(),
                 operator: ConditionOp::NotIn,
-                value: ConditionValue::StringList(vec![
-                    "Owner".to_string(),
-                    "Admin".to_string(),
-                ]),
+                value: ConditionValue::StringList(vec!["Owner".to_string(), "Admin".to_string()]),
             }],
         );
         let allow = allow_policy(50, vec![]);
