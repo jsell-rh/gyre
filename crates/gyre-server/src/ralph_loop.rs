@@ -526,6 +526,49 @@ pub(crate) async fn notify_task_blocked(
         .await;
 }
 
+/// Collect every `TaskBlocked` message observable for a workspace, from
+/// BOTH bus tiers the routing in [`notify_task_blocked`] uses: the
+/// workspace event tier (`list_by_workspace`) when no orchestrator could
+/// be ensured, and the repo orchestrator's Directed inbox
+/// (`list_unacked`) when one was spawned on demand. Tests must not assert
+/// Directed delivery through `list_by_workspace` — the port contract
+/// excludes agent-destined messages from that listing (they are accessed
+/// via `list_after`/`list_unacked`), so the primary routing is invisible
+/// there.
+#[cfg(test)]
+pub(crate) async fn collect_task_blocked_messages(
+    state: &Arc<AppState>,
+    workspace_id: &Id,
+) -> Vec<gyre_common::message::Message> {
+    let mut msgs = state
+        .messages
+        .list_by_workspace(
+            workspace_id,
+            Some(MessageKind::TaskBlocked.as_str()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_default();
+    if let Ok(agents) = state.agents.list_by_workspace(workspace_id).await {
+        for orch in agents
+            .iter()
+            .filter(|a| a.orchestrator_type == gyre_domain::OrchestratorType::RepoOrchestrator)
+        {
+            if let Ok(inbox) = state.messages.list_unacked(&orch.id, 100).await {
+                msgs.extend(
+                    inbox
+                        .into_iter()
+                        .filter(|m| m.kind == MessageKind::TaskBlocked),
+                );
+            }
+        }
+    }
+    msgs
+}
+
 /// Re-spawn an agent session on the workspace's compute target
 /// (agent-runtime.md §1 Phase 7 re-spawn + §8: system-initiated agents use
 /// the same compute target as their workspace).
@@ -988,18 +1031,9 @@ mod tests {
         // TaskBlocked message on the bus, routed to the repo
         // orchestrator spawned on demand (or workspace-destined when none
         // could be ensured) — the same routing as the max-iterations path.
-        let msgs = state
-            .messages
-            .list_by_workspace(
-                &Id::new("ws-1"),
-                Some(MessageKind::TaskBlocked.as_str()),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        // Directed (orchestrator-inbox) delivery is invisible to
+        // list_by_workspace by the port contract, so collect both tiers.
+        let msgs = collect_task_blocked_messages(&state, &Id::new("ws-1")).await;
         assert!(
             msgs.iter()
                 .any(|m| m.payload.as_ref().and_then(|p| p["task_id"].as_str()) == Some("task-1")),
@@ -1046,19 +1080,11 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Failed);
         assert_eq!(agent.iteration, 1);
 
-        // TaskBlocked message exists, carrying the reason.
-        let msgs = state
-            .messages
-            .list_by_workspace(
-                &Id::new("ws-1"),
-                Some(MessageKind::TaskBlocked.as_str()),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        // TaskBlocked message exists, carrying the reason. Directed
+        // (orchestrator-inbox) delivery is invisible to list_by_workspace
+        // by the port contract, so collect both tiers; the routing itself
+        // is asserted precisely below via the orchestrator's inbox.
+        let msgs = collect_task_blocked_messages(&state, &Id::new("ws-1")).await;
         assert!(
             msgs.iter().any(|m| {
                 m.payload.as_ref().and_then(|p| p["task_id"].as_str()) == Some("task-1")

@@ -2921,9 +2921,20 @@ mod tests {
 
         // Dependency complete: a later cycle re-spawns the released task
         // with a FRESH worker (the dead agent does not keep the claim).
-        let mut dep = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
-        dep.transition_status(TaskStatus::Done).unwrap();
-        state.tasks.update(&dep).await.unwrap();
+        // The first cycle spawned the dependency ITSELF (it is an eligible
+        // Backlog Implementation task), so walk it to Done from whichever
+        // state that spawn left it in — the same walk
+        // scheduler_defers_until_depends_on_complete uses; a direct
+        // →Done transition is invalid from Backlog and InProgress alike.
+        let mut done = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
+        if done.status == TaskStatus::Backlog {
+            done.transition_status(TaskStatus::InProgress).unwrap();
+        }
+        if done.status == TaskStatus::InProgress {
+            done.transition_status(TaskStatus::Review).unwrap();
+        }
+        done.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.update(&done).await.unwrap();
         scheduler_run_once(&state).await.unwrap();
         let respawned = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
         assert_eq!(
@@ -3078,18 +3089,10 @@ mod tests {
 
         // TaskBlocked message on the bus, routed to the repo orchestrator
         // the failure path ensured (spawned on demand when none was live).
-        let ws_msgs = state
-            .messages
-            .list_by_workspace(
-                &Id::new("ws-1"),
-                Some(gyre_common::MessageKind::TaskBlocked.as_str()),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        // Directed (orchestrator-inbox) delivery is invisible to
+        // list_by_workspace by the port contract, so collect both tiers.
+        let ws_msgs =
+            crate::ralph_loop::collect_task_blocked_messages(&state, &Id::new("ws-1")).await;
         assert!(
             ws_msgs
                 .iter()
