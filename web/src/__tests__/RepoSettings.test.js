@@ -236,8 +236,10 @@ describe('RepoSettings', () => {
     it('renders policy toggles when policy data exists', async () => {
       api.repoSpecPolicy.mockResolvedValue({
         require_spec_ref: true,
-        require_approval: false,
-        stale_spec_warning: true,
+        require_approved_spec: false,
+        warn_stale_spec: true,
+        require_current_spec: false,
+        require_signed_approval: false,
       });
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openPoliciesTab(container);
@@ -247,6 +249,41 @@ describe('RepoSettings', () => {
       expect(container.querySelector('[data-testid="toggle-require-spec-ref"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="toggle-require-approval"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="toggle-stale-warning"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-current-spec"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-signed-approval"]')).toBeTruthy();
+    });
+
+    it('binds toggles to the API policy field names', async () => {
+      // Regression: the toggles used to bind `require_approval` /
+      // `stale_spec_warning`, which the API never returns — the toggles
+      // silently did nothing. They must bind the real field names so a
+      // saved policy round-trips.
+      api.repoSpecPolicy.mockResolvedValue({
+        require_spec_ref: true,
+        require_approved_spec: true,
+        warn_stale_spec: false,
+        require_current_spec: true,
+        require_signed_approval: true,
+      });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openPoliciesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      expect(container.querySelector('[data-testid="toggle-require-spec-ref"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-require-approval"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-stale-warning"]').checked).toBe(false);
+      expect(container.querySelector('[data-testid="toggle-require-current-spec"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-require-signed-approval"]').checked).toBe(true);
+
+      // Saving sends the full policy object back, keyed by the API field names.
+      await fireEvent.click(container.querySelector('[data-testid="save-spec-policy-btn"]'));
+      await new Promise(r => setTimeout(r, 0));
+      expect(api.setRepoSpecPolicy).toHaveBeenCalledWith('repo-1', expect.objectContaining({
+        require_spec_ref: true,
+        require_approved_spec: true,
+        warn_stale_spec: false,
+        require_current_spec: true,
+        require_signed_approval: true,
+      }));
     });
   });
 
