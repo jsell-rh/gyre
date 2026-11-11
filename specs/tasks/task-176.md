@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "91fe1e86da29a2c68cdb5cf32137da69b36e3132", "42a10469f62f8968f37d708a64ea125e619d390e"]
 ---
 
 ## Spec Excerpt
@@ -92,8 +92,8 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
 ### Test evidence
 
 - `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
+  src/__tests__/MetaSpecs.test.js` — 153 passed (re-run this round at
+  42a10469f; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
 - The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
   shapes, runs the poll to completion, clicks Iterate, and asserts the
   selector AND the retained Architecture/Code Diff results stay visible.
@@ -103,6 +103,20 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
 - Preview cancellation, state transitions, architecture delta display,
   and 404-rejection handling are covered in the same suites.
 
+### Shipped bundle
+
+Round-2/3 reviews found the committed `web/dist` was byte-identical to the
+assigned base (the mid-assignment merges had resolved it back to the
+task-091 bundle), so the documented Rust-only deployment
+(`SKIP_WEB_BUILD=1`, gyre-server RustEmbeds `web/dist`) served none of the
+§9 UI. This round regenerates and commits the verified bundle as
+`42a10469f` ("build(web): regenerate verified assets (task-176)"):
+`git diff --shortstat fbf1a63b HEAD -- web/dist` now shows 5 files changed,
+and `git grep` finds `locked-diff`, `pending_changes`, `Pending changes`,
+`meta-impact`, `tab-architecture`, and `tab-code-diff` in
+`web/dist/assets/` (log in
+  /tmp/stage/review-evidence/task-176-dist-regen.log).
+
 ### Known limitation
 
 The State 1 LLM chat input is rendered but disabled in the workspace-level
@@ -111,13 +125,3 @@ API layer has no workspace-scoped assist endpoint (the repo-scoped
 `specs/assist` is what produces inline suggestion blocks). This is outside
 this task's acceptance criteria and blocked by the existing repo-scoped
 API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
