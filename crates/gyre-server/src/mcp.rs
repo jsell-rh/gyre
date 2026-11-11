@@ -5975,6 +5975,7 @@ mod tests {
                 "workspace_id": workspace_id,
                 "repo_id": repo_id,
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         }
@@ -6479,6 +6480,7 @@ mod tests {
             roles: vec![UserRole::ReadOnly],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -6509,6 +6511,7 @@ mod tests {
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
