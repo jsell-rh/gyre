@@ -53,6 +53,12 @@ const REPOS_GATES_ROUTE: &str = "/api/v1/repos/:id/gates";
 const REPOS_GATES_ID_ROUTE: &str = "/api/v1/repos/:id/gates/:gate_id";
 const REPOS_WORKTREES_ID_ROUTE: &str = "/api/v1/repos/:id/worktrees/:worktree_id";
 const REPOS_SPECS_ASSIST_ROUTE: &str = "/api/v1/repos/:id/specs/assist";
+const MERGE_REQUESTS_GATES_ROUTE: &str = "/api/v1/merge-requests/:id/gates";
+const MERGE_REQUESTS_DEPENDENCIES_ROUTE: &str = "/api/v1/merge-requests/:id/dependencies";
+const AGENTS_MESSAGES_ROUTE: &str = "/api/v1/agents/:id/messages";
+const MERGE_REQUESTS_ID_ROUTE: &str = "/api/v1/merge-requests/:id";
+const AGENTS_ID_STATUS_ROUTE: &str = "/api/v1/agents/:id/status";
+const AGENTS_MESSAGES_ACK_ROUTE: &str = "/api/v1/agents/:id/messages/:message_id/ack";
 
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
@@ -194,16 +200,12 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/agents/spawn", "agent", Some("spawn")),
                 RouteResourceMapping::api("/api/v1/agents/discover", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id", "agent", None),
-                RouteResourceMapping::api("/api/v1/agents/:id/status", "agent", Some("write")),
+                RouteResourceMapping::api(AGENTS_ID_STATUS_ROUTE, "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/heartbeat", "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/complete", "agent", Some("complete")),
                 RouteResourceMapping::api("/api/v1/agents/:id/card", "agent", Some("write")),
-                RouteResourceMapping::api("/api/v1/agents/:id/messages", "message", None),
-                RouteResourceMapping::api(
-                    "/api/v1/agents/:id/messages/:message_id/ack",
-                    "message",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api(AGENTS_MESSAGES_ROUTE, "message", None),
+                RouteResourceMapping::api(AGENTS_MESSAGES_ACK_ROUTE, "message", Some("write")),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:workspace_id/messages",
                     "message",
@@ -225,7 +227,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/tasks/:id/status", "task", Some("write")),
                 // ── Merge Requests ─────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/merge-requests", "merge_request", None),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id", "merge_request", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_ID_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/status",
                     "merge_request",
@@ -247,18 +249,14 @@ impl ResourceResolver {
                     "merge_request",
                     None,
                 ),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/gates", "gate", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_GATES_ROUTE, "gate", None),
                 // MR SDLC timeline (S2.5 — HSI §3)
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/timeline",
                     "merge_request",
                     None,
                 ),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/dependencies",
-                    "dependency",
-                    None,
-                ),
+                RouteResourceMapping::api(MERGE_REQUESTS_DEPENDENCIES_ROUTE, "dependency", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/dependencies/:dependency_id",
                     "dependency",
@@ -607,6 +605,51 @@ const WORKSPACES_PATH_PREFIX: &str = "/api/v1/workspaces/";
 /// Path prefix for repo-scoped routes; see [`WORKSPACES_PATH_PREFIX`].
 const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
 
+/// Entity type named by the `:id` param on a parent-scoped route prefix.
+///
+/// A parent-scoped prefix is `/api/v1/<collection>/...` where the leading
+/// `<collection>` segment (plural) names the entity its `:id` addresses:
+/// `workspaces` → `workspace`, `repos` → `repo`, `merge-requests` →
+/// `merge_request`, `agents` → `agent`. Singularization is mechanical
+/// (plural `-ies` → `-y`, else strip the plural `-s`; hyphens are the URL
+/// form of underscores) except for compound collection names that name a
+/// registry OF another entity type (`meta-specs-registry` addresses
+/// `meta_spec` entities, so its `:id` is a meta_spec id, not a
+/// "meta_spec_registry" id).
+///
+/// Returns `None` when the pattern is not a `/api/v1/<collection>/...`
+/// route (missing or param-valued collection segment) — such routes carry
+/// no prefix entity, so `:id` is never treated as a parent id by virtue of
+/// the prefix alone.
+fn prefix_entity_type(pattern: &str) -> Option<String> {
+    let rest = pattern.strip_prefix("/api/v1/")?;
+    let collection = rest.split('/').next()?;
+    if collection.is_empty() || collection.starts_with(':') {
+        return None;
+    }
+    if collection == "meta-specs-registry" {
+        return Some("meta_spec".to_string());
+    }
+    let singular = if let Some(stem) = collection.strip_suffix("ies") {
+        format!("{stem}y")
+    } else {
+        collection
+            .strip_suffix('s')
+            .unwrap_or(collection)
+            .to_string()
+    };
+    Some(singular.replace('-', "_"))
+}
+
+/// True when the route pattern carries path segments AFTER the `:id`
+/// segment — i.e. the route addresses a sub-collection or sub-resource of
+/// the `:id` entity (`/repos/:id/gates`), rather than the `:id` entity
+/// itself (`/repos/:id`).
+fn has_child_segments_after_id(pattern: &str) -> bool {
+    let mut segments = pattern.split('/');
+    segments.any(|s| s == ":id") && segments.next().is_some()
+}
+
 /// Extract resource identity attributes from the request path into the
 /// attribute context (§Attributes: `resource.id`, `resource.workspace_id`,
 /// `resource.repo_id` — source "Request path").
@@ -622,10 +665,14 @@ const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
 ///   over `:id`.
 /// - Elsewhere `:id` names the route's own entity → `resource.id`.
 ///   On parent-scoped child routes (e.g. `/workspaces/:id/tasks`,
-///   `/repos/:id/gates` — resource type ≠ parent type) the `:id` is the
-///   parent, not the addressed entity, so no `resource.id` is fabricated
-///   from it; the addressed entity surfaces via its `{resource_type}_id`
-///   param when the route names one (e.g. `/repos/:id/worktrees/:worktree_id`).
+///   `/repos/:id/gates`, `/merge-requests/:id/gates`,
+///   `/agents/:id/messages` — the route carries segments beyond the `:id`
+///   AND its resource type ≠ the prefix collection's entity type) the `:id`
+///   is the parent, not the addressed entity, so no `resource.id` is
+///   fabricated from it; the addressed entity surfaces via its
+///   `{resource_type}_id` param when the route names one (e.g.
+///   `/repos/:id/worktrees/:worktree_id`), else it stays unset and
+///   conditions on it fail closed.
 /// - A `:path` param names the addressed entity by its registry path,
 ///   URL-encoded (spec and meta-spec routes: `/specs/:path`,
 ///   `/repos/:id/specs/:path/assertions`, `/meta-specs/:path/blast-radius`).
@@ -674,11 +721,20 @@ fn extract_path_attributes(
     let child_param = format!("{resource_type}_id");
     let resource_id = params.get(&child_param).cloned().or_else(|| {
         // On parent-scoped child routes (`/workspaces/:id/tasks`,
-        // `/repos/:id/gates`, ...) the `:id` names the PARENT entity — already
-        // exposed as resource.workspace_id / resource.repo_id above — not the
-        // addressed entity, so it must not leak into resource.id.
-        if (pattern.starts_with(WORKSPACES_PATH_PREFIX) && resource_type != "workspace")
-            || (pattern.starts_with(REPOS_PATH_PREFIX) && resource_type != "repo")
+        // `/repos/:id/gates`, `/merge-requests/:id/gates`,
+        // `/agents/:id/messages`, ...) the `:id` names the PARENT entity —
+        // already exposed as resource.workspace_id / resource.repo_id above
+        // where applicable — not the addressed entity, so it must not leak
+        // into resource.id. A route is parent-scoped when it carries path
+        // segments beyond the `:id` AND its registered resource type
+        // differs from the entity type the prefix collection names
+        // ([`prefix_entity_type`]). The classification is derived from the
+        // pattern itself, so any prefix's child routes are covered — the
+        // round-4 review finding flagged merge-requests/agents routes
+        // leaking the parent MR/agent id precisely because an earlier fix
+        // hardcoded only the workspaces/repos prefixes.
+        if has_child_segments_after_id(pattern)
+            && prefix_entity_type(pattern).is_some_and(|entity| entity != resource_type)
         {
             None
         } else {
@@ -1893,6 +1949,9 @@ pub mod tests {
     const REPO_GATES_URI: &str = "/api/v1/repos/repo-1/gates";
     const REPO_WORKTREE_URI: &str = "/api/v1/repos/repo-1/worktrees/wt-42";
     const REPO_SPECS_ASSIST_URI: &str = "/api/v1/repos/repo-1/specs/assist";
+    const MR_GATES_URI: &str = "/api/v1/merge-requests/mr-9/gates";
+    const MR_DEPENDENCIES_URI: &str = "/api/v1/merge-requests/mr-9/dependencies";
+    const AGENT_MESSAGES_URI: &str = "/api/v1/agents/ag-1/messages";
 
     fn build_test_app(state: Arc<AppState>) -> Router {
         init_resolver();
@@ -3379,6 +3438,159 @@ pub mod tests {
         assert_eq!(attr_str(&ctx, "resource.id"), Some("dep-3"));
     }
 
+    /// Unit-level check of the path-attribute conventions on the
+    /// merge-requests/agents parent-scoped collection routes (review
+    /// round 4: the parent-id suppression guard covered only the
+    /// workspaces/repos prefixes, so `/merge-requests/:id/gates`,
+    /// `/merge-requests/:id/dependencies` and `/agents/:id/messages` — none
+    /// of which carries a `{resource_type}_id` param — fabricated
+    /// `resource.id` from the PARENT MR/agent id; any policy keyed on
+    /// `resource.id` for gate/dependency/message types silently evaluated
+    /// against the parent id).
+    #[test]
+    fn path_attributes_mr_and_agent_parented_child_routes() {
+        // MR gate collection: `:id` names the parent MR; the addressed
+        // entity is the gate collection, so no resource.id may be
+        // fabricated from it (conditions on resource.id fail closed).
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(&mut ctx, MERGE_REQUESTS_GATES_ROUTE, MR_GATES_URI, "gate");
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            None,
+            "gate collection route under an MR must not expose the parent MR id as resource.id"
+        );
+
+        // MR dependency collection: same convention.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            MERGE_REQUESTS_DEPENDENCIES_ROUTE,
+            MR_DEPENDENCIES_URI,
+            "dependency",
+        );
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            None,
+            "dependency collection route under an MR must not expose the parent MR id as resource.id"
+        );
+
+        // Agent message collection: `:id` names the parent agent.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            AGENTS_MESSAGES_ROUTE,
+            AGENT_MESSAGES_URI,
+            "message",
+        );
+        assert_eq!(
+            attr_str(&ctx, "resource.id"),
+            None,
+            "message collection route under an agent must not expose the parent agent id as resource.id"
+        );
+
+        // Controls — the parent-typed routes on the SAME prefixes keep
+        // `:id` as resource.id (the generalized guard must not
+        // over-suppress):
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            MERGE_REQUESTS_ID_ROUTE,
+            "/api/v1/merge-requests/mr-9",
+            "merge_request",
+        );
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("mr-9"));
+
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            AGENTS_ID_STATUS_ROUTE,
+            "/api/v1/agents/ag-1/status",
+            "agent",
+        );
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("ag-1"));
+
+        // The message child route surfaces the message id via its
+        // `{resource_type}_id` param, not the parent agent id.
+        let mut ctx = AttributeContext::default();
+        extract_path_attributes(
+            &mut ctx,
+            AGENTS_MESSAGES_ACK_ROUTE,
+            "/api/v1/agents/ag-1/messages/msg-7/ack",
+            "message",
+        );
+        assert_eq!(attr_str(&ctx, "resource.id"), Some("msg-7"));
+    }
+
+    /// Registry-wide invariant (review round 4): no registered route may
+    /// fabricate `resource.id` from a PARENT entity id. Walks EVERY
+    /// registered non-exempt route, replays path extraction against a
+    /// synthetic concrete path (`:id` → a recognizable sentinel), and
+    /// asserts:
+    /// - on parent-scoped child routes (`:id` followed by more segments,
+    ///   registered resource type ≠ the prefix collection's entity type),
+    ///   `resource.id` never carries the `:id` sentinel;
+    /// - on entity routes (`:id` names the route's own resource type and
+    ///   the route has no `{resource_type}_id`/`:path` param), `resource.id`
+    ///   DOES carry the `:id` sentinel — the guard must not over-suppress.
+    ///
+    /// The classification uses the same helpers as the guard, so this test
+    /// does not re-derive the convention — it pins the RESULT on the live
+    /// registry: a future route registered under a new parent-scoped prefix
+    /// without a `{resource_type}_id` param fails the first assertion (the
+    /// round-4 defect class, caught for every prefix at once), and a guard
+    /// that suppresses too broadly fails the second.
+    #[test]
+    fn registry_routes_never_leak_parent_id_into_resource_id() {
+        init_resolver();
+        let resolver = RESOURCE_RESOLVER.get().unwrap();
+        let parent_value = "PARENT-ID";
+        for mapping in &resolver.routes {
+            if mapping.exempt {
+                continue;
+            }
+            let pattern = mapping.pattern;
+            let resource_type = mapping.resource_type;
+
+            // Synthetic concrete path: each `:param` binds a distinct
+            // recognizable value (`:id` → the parent sentinel, `:path` → a
+            // plainly decodable slug).
+            let path = pattern
+                .split('/')
+                .map(|seg| match seg.strip_prefix(':') {
+                    Some("id") => parent_value.to_string(),
+                    Some("path") => "doc.md".to_string(),
+                    Some(name) => format!("VAL-{name}"),
+                    None => seg.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+
+            let mut ctx = AttributeContext::default();
+            extract_path_attributes(&mut ctx, pattern, &path, resource_type);
+
+            let child_param = format!(":{resource_type}_id");
+            let names_child = pattern.split('/').any(|s| s == child_param);
+            let has_id = pattern.split('/').any(|s| s == ":id");
+            let parent_scoped = has_child_segments_after_id(pattern)
+                && prefix_entity_type(pattern).is_some_and(|entity| entity != resource_type);
+
+            if parent_scoped {
+                assert_ne!(
+                    attr_str(&ctx, "resource.id"),
+                    Some(parent_value),
+                    "{pattern}: parent-scoped child route (resource type {resource_type}) \
+                     must not leak the parent `:id` into resource.id"
+                );
+            } else if has_id && !names_child && !pattern.contains("/:path") {
+                assert_eq!(
+                    attr_str(&ctx, "resource.id"),
+                    Some(parent_value),
+                    "{pattern}: `:id` names the {resource_type} entity — resource.id must carry it"
+                );
+            }
+        }
+    }
+
     /// Unit-level check of the `:path` convention (review round 3: spec
     /// routes address the resource by a URL-encoded registry path, and
     /// `resource.id` was never populated — no `:id` or `{resource_type}_id`
@@ -3601,6 +3813,293 @@ pub mod tests {
             resp2.status(),
             StatusCode::FORBIDDEN,
             "control: resource.repo_id names the parent repo — the Deny must fire"
+        );
+    }
+
+    /// Review round 4 (code finding), live-middleware reproduction: on the
+    /// gate and dependency collection routes under a merge request,
+    /// `resource.id` must NOT carry the parent MR id. A Deny keyed on
+    /// `resource.id == <mr id>` must not fire; a control Deny keyed on a
+    /// subject attribute (extracted for every caller) must fire on the very
+    /// same routes — proving the policy machinery is live there, so the
+    /// non-deny is not vacuous. Mirrors the repos-prefix coverage
+    /// (`repos_parented_collection_route_does_not_leak_parent_repo_id`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mr_parented_collection_routes_do_not_leak_parent_mr_id() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny gate/dependency reads when resource.id equals the parent MR
+        // id. With the round-4 defect (resource.id = MR id) these fire →
+        // 403; correct behavior leaves resource.id unset, the conditions
+        // fail, and the Developer role Allow (priority 800) grants the read.
+        for (policy_id, name, resource_type) in [
+            (
+                "test-mr-gate-resource-id-deny",
+                "mr-gate-resource-id-deny",
+                "gate",
+            ),
+            (
+                "test-mr-dep-resource-id-deny",
+                "mr-dep-resource-id-deny",
+                "dependency",
+            ),
+        ] {
+            state
+                .policies
+                .create(&Policy {
+                    id: gyre_common::Id::new(policy_id),
+                    name: name.to_string(),
+                    description: String::new(),
+                    scope: PolicyScope::Tenant,
+                    scope_id: None,
+                    priority: 810,
+                    effect: PolicyEffect::Deny,
+                    conditions: vec![Condition {
+                        attribute: "resource.id".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("mr-9".to_string()),
+                    }],
+                    actions: vec!["read".to_string()],
+                    resource_types: vec![resource_type.to_string()],
+                    enabled: true,
+                    built_in: false,
+                    immutable: false,
+                    created_by: Id::new("system"),
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .await
+                .unwrap();
+        }
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(MERGE_REQUESTS_GATES_ROUTE, get(ok_handler))
+            .route(MERGE_REQUESTS_DEPENDENCIES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        for uri in [MR_GATES_URI, MR_DEPENDENCIES_URI] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "resource.id must not carry the parent MR id on {uri}"
+            );
+        }
+
+        // Control on a fresh state: the same Denies keyed on
+        // subject.global_role — extracted for every caller — must fire on
+        // these very routes, proving evaluation is live.
+        let (state2, _user_id2) = setup_membership_state().await;
+        for (policy_id, name, resource_type) in [
+            ("test-mr-gate-subject-deny", "mr-gate-subject-deny", "gate"),
+            (
+                "test-mr-dep-subject-deny",
+                "mr-dep-subject-deny",
+                "dependency",
+            ),
+        ] {
+            state2
+                .policies
+                .create(&Policy {
+                    id: gyre_common::Id::new(policy_id),
+                    name: name.to_string(),
+                    description: String::new(),
+                    scope: PolicyScope::Tenant,
+                    scope_id: None,
+                    priority: 810,
+                    effect: PolicyEffect::Deny,
+                    conditions: vec![Condition {
+                        attribute: "subject.global_role".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("Developer".to_string()),
+                    }],
+                    actions: vec!["read".to_string()],
+                    resource_types: vec![resource_type.to_string()],
+                    enabled: true,
+                    built_in: false,
+                    immutable: false,
+                    created_by: Id::new("system"),
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .await
+                .unwrap();
+        }
+
+        let app2 = Router::new()
+            .route(MERGE_REQUESTS_GATES_ROUTE, get(ok_handler))
+            .route(MERGE_REQUESTS_DEPENDENCIES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state2.clone(),
+                abac_middleware,
+            ))
+            .with_state(state2);
+
+        for uri in [MR_GATES_URI, MR_DEPENDENCIES_URI] {
+            let resp = app2
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "control: subject-keyed Deny must fire on {uri} — evaluation is live"
+            );
+        }
+    }
+
+    /// Review round 4 (code finding), live-middleware reproduction: on the
+    /// message collection route under an agent, `resource.id` must NOT
+    /// carry the parent agent id. Same structure as the MR coverage above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_parented_message_route_does_not_leak_parent_agent_id() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny message reads when resource.id equals the parent agent id.
+        // With the round-4 defect (resource.id = agent id) this fires →
+        // 403; correct behavior leaves resource.id unset.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-message-resource-id-deny"),
+                name: "message-resource-id-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("ag-1".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["message".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(AGENTS_MESSAGES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(AGENT_MESSAGES_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "resource.id must not carry the parent agent id on the message collection route"
+        );
+
+        // Control on a fresh state: the same Deny keyed on
+        // subject.global_role must fire on this very route.
+        let (state2, _user_id2) = setup_membership_state().await;
+        state2
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-message-subject-deny"),
+                name: "message-subject-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.global_role".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("Developer".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["message".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let app2 = Router::new()
+            .route(AGENTS_MESSAGES_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state2.clone(),
+                abac_middleware,
+            ))
+            .with_state(state2);
+
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(AGENT_MESSAGES_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::FORBIDDEN,
+            "control: subject-keyed Deny must fire on the message collection route"
         );
     }
 
