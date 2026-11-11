@@ -2,14 +2,14 @@
 title: "LLM Endpoint Contract — SSE streaming, prompt templates, rate limiting"
 spec_ref: "ui-layout.md §2 LLM Endpoint Contract"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "ui-layout.md §LLM Endpoint Contract"
   - "ui-layout.md §Role"
   - "ui-layout.md §Available Data"
   - "ui-layout.md §Output Format"
   - "ui-layout.md §Constraints"
-commits: ["3025f256e61a9198cd7f060c2b4d5907585cdd8f", "c5eb3911b4d66871de7b3541667565a63272fa6d", "f7219be28b55cfce7a28a913d6a9538f0fdff116", "7fcbf2723c67e4ee7f289965bfa4a1e55f0fc9be", "ed457c45c87bc569a6aabcfd2e1b11d26b33abfa", "8c5468225eda8d28476bb8ff824a23c2c52de23b", "8da4333aaf3c17fd0d8e5068815efc647a16559f", "932ef894d0dfbfd7952d2a2c9babbe9857e13ebd", "93d0f4b995f15a0c00878228dfc080ba54b425fa", "daf00443522544ff1c56bed4ae092fadcd6a8f0b", "046663dbd9f4dc1f45fbbfb792cecdbf2b54f026", "8259c9413c9862d0a49bc6e920a63fadea24d3ba", "dd322e125c3fff0a964387467ee90d8059ea1ce3", "c2d61905b9eebd2bedee4664cf34f3b261d1f0c3", "cd206b555cbf5053060b92c862b3824241e2d011", "4489f0f44e7375d8ce2c0f5fe7e84f6a24636796", "33ead7c1309bfef123974a7135c189931c1d3b31", "f7bf82e9dd77b992d2138e95592b2cd6efc58bf1"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -75,28 +75,3 @@ Prompt template format uses `{{variable}}` substitution. Templates are committed
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check existing endpoint registration in `crates/gyre-server/src/api/mod.rs`. The `explorer-views/generate` endpoint already has a route registered — verify at `mod.rs`. Use the existing budget and ABAC infrastructure. For SSE, use axum's `Sse` response type. The rate limiter should be a simple `HashMap<(UserId, WorkspaceId), VecDeque<Instant>>` behind a `Mutex`, not a complex middleware.
-
-## Shipped
-
-All eight acceptance criteria are implemented (SSE helper with `partial`/`complete`/`error` events, git-tree prompt templates with `{{...}}` substitution, per-(user, workspace) sliding-window rate limiter with 429 + `Retry-After`, `llm_query` budget cost entries with prompt-SHA audit, three SSE endpoints, ABAC mappings, `prompts/save` direct-to-default-branch commits, tests). Implementation history: `8c546822`…`f7bf82e9` plus review repairs `7fcbf272`/`f7219be2`/`c5eb3911b` (grammar grounding) and rebase merges — see prior shipped notes in git history.
-
-### This round: verification-finding repair (3025f256)
-
-The merged candidate failed `checks.sh` on four findings; all are repaired:
-
-- **rustfmt changed-line failures** (mock.rs:318, explorer_views.rs, specs_assist.rs, llm_helpers.rs): `cargo fmt` applied; `cargo fmt --check` now exits 0 workspace-wide.
-- **clippy `double_must_use` at gyre-ports/src/llm.rs:83**: the `#[async_trait]` macro expansion on `LlmPort` triggers the lint; fixed with the repo-conventional `#[allow(clippy::double_must_use)]` (identical to every other async port trait — user.rs, tenant.rs, compute.rs, git_ops.rs, …). `cargo clippy -p gyre-ports` now reports zero warnings for llm.rs.
-- **clippy `redundant_closure` at explorer_views.rs:569**: `.map(|r| Id::new(r))` → `.map(Id::new)` in `generate_explorer_view`; clippy reports no warnings for any task-touched server file.
-- **ABAC resolver duplicate FAIL (22 vs frozen 17)**: already resolved by the base merge 327c01ad0 — the production-region duplicate count is 2 (the two documented false positives), matching the frozen baseline; `check-abac-route-registry.sh` passes.
-
-### Verification evidence (this round)
-
-- `cargo check -p gyre-server --tests` — exit 0, zero workspace warnings (log under `/tmp/stage/review-evidence/task-171-repair/`).
-- `cargo test -p gyre-adapters llm::mock` — exit 0, 11 passed / 0 failed.
-- Full check-script battery (arch, ABAC registry, ABAC exempt handlers, MCP write tools, migrations, message kinds, byte-slice, relative paths, fail-open refs, mem port contracts, scope defaults, lossy secrets, inert enforcement, forged scope fields, forwarded headers, in-memory stores, unbounded HTTP, template substitution) — all exit 0.
-- Remaining clippy warnings in graph.rs/mcp.rs/mem.rs are on lines unchanged by this task's diff (pre-existing, outside the changed-line gate).
-
-### Deferred to the independent verifier
-
-- `cargo test -p gyre-server explorer_views`, `cargo test -p gyre-server specs_assist`, `cargo test -p gyre-server llm_helpers llm_rate_limit` (test compilation exceeds this sandbox's 4 GiB build budget).
-- `cargo clippy --all-targets` (full workspace) and `cargo fmt --check`/web build (verification-owned).
