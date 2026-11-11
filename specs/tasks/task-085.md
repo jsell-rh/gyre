@@ -3,7 +3,7 @@ title: "HSI Trust Suggestions Background Job"
 spec_ref: "human-system-interface.md §2 Trust Suggestions"
 depends_on:
   - task-077
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §2 Trust Suggestions"
 commits: ["a1020c2b702664bbf1e25cdebaace4cea097d8b7", "bbcc71c4b7e14a7a3aef220d6eef3f473c378e53", "6d2732817b4c580208a7ccc11b62325ff1186152", "dfdd6cdeb72ce6f8439c9f778f83bc44ef33b853"]
