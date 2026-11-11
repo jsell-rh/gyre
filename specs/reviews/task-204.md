@@ -1,0 +1,41 @@
+# Review — task-204 (spec-lifecycle accountability patrol: task-age checks + orchestrator escalation)
+
+Spec: `specs/system/spec-lifecycle.md` §Accountability Integration.
+Candidate under review: `002a5676` (base `cfeefbda`; branch includes rebase merge `1f460064` + process commits).
+Verdict: **needs-revision** — one blocking finding (F1: the two escalation-verification tests fail at the candidate HEAD). Everything else in the implementation is genuine and well-built.
+
+## Round 1
+
+Probes run (checkout at candidate `002a5676`):
+
+- `SKIP_WEB_BUILD=1 /tmp/stage/bin/cargo check -p gyre-server --tests` → exit 0 (7m41s cold; type-checks module + tests).
+- `bash scripts/check-arch.sh` → pass. `check-abac-route-registry.sh` → pass (new route registered in the resolver, not the frozen exemption file). `check-dead-message-kinds.sh` → pass. `check-abac-exempt-handlers.sh` → pass (75 handlers). `check-byte-slice-truncation`, `check-fabricated-scope-defaults`, `check-scope-literal-defaults`, `check-lossy-secret-conversion`, `check-inert-enforcement`, `check-relative-path-defaults`, `check-fail-open-ref-resolution`, `check-in-memory-state-stores`, `check-unbounded-external-http` → all pass.
+- gawk-based test-quality scripts (`check-assertionless-tests`, `check-self-confirming-tests`, `check-mirrored-logic-tests`, `check-event-emission-coverage`, `check-test-coverage-depth`) exit 2 in this sandbox for environmental reasons only (they require gawk's 3-arg `match()`; here `/usr/bin/awk` is mawk 1.3.4). Equivalent manual review by full-file read: every new test has real assertions.
+- gyre-server test *execution* is wrapper-blocked in the review stage; the two failing tests were established by a complete source trace (evidence: `/tmp/stage/review-evidence/`) and are recorded as deferred verifier probes.
+
+## Verified working (no findings)
+
+- **All three checks are real and run against real storage.** `run_spec_lifecycle_patrol` (`spec_lifecycle_patrol.rs`) queries `TaskRepository::list` and `SpecLedgerRepository::list_all`, and check 3 resolves task coverage per spec via `TaskRepository::list_by_spec_path` — no client-side replay, no in-memory stand-ins. Storage failures propagate (`anyhow::Result`, 500 at the handler), never an empty finding list.
+- **Check 1** flags exactly non-terminal (`Done`/`Cancelled` excluded) `spec-drift-review` tasks with `now - created_at > drift_review_max_age_secs`; **check 2** flags `spec-implementation` + `status == Backlog` past `implementation_backlog_max_age_secs`; thresholds are request parameters with documented defaults (`DEFAULT_DRIFT_REVIEW_MAX_AGE_SECS` = 24h, `DEFAULT_IMPLEMENTATION_BACKLOG_MAX_AGE_SECS` = 7d) — no magic numbers in check bodies, task-109 feed-ready.
+- **Check 3** is faithfully ported to the post-rebase world: watched paths come from the repo's `SpecLifecycleConfig` via `state.spec_lifecycle_configs.get_for_repo` — the same config `git_http::process_spec_lifecycle` consults — with `enabled = false` repos skipped (mirroring the hook's early return), `Deprecated`/no-`current_sha`/within-grace entries excluded, both path spellings (`system/x.md`, `specs/system/x.md`) queried, and repo-scoped coverage so an identically-named spec in another repo cannot mask a gap. The per-repo-config test (`check3_watched_paths_follow_per_repo_config`) proves the filter is config-driven, not hardcoded.
+- **Findings tests are strong.** Exact-set assertions (`flags_stale_drift_review_tasks_only`, `flags_stale_implementation_backlog_only`, `flags_watched_specs_without_tasks`) distinguish stale/fresh, Backlog/non-Backlog, terminal, covered (both spellings), repo-mismatched, unwatched, deprecated, and in-grace cases; `thresholds_are_not_hardcoded_in_the_checks` kills both no-op and inverted-threshold mutants.
+- **Route + ABAC**: `POST /api/v1/patrol/spec-lifecycle` registered in `api/mod.rs` next to `/patrol/spec-links`, with a real `RouteResourceMapping` (`spec` resource, POST→write) in the resolver — stronger gating than the exempted legacy spec-links route, and registry checks confirm no exemption-file growth and no dangling route.
+- **Escalation design is right**: `MessageKind::Escalation` (existing variant, has emitter) via `state.emit_event` to `Destination::Workspace(ws)`, `Broadcast` fallback for unknown scope with no fabricated `"default"` scope (unit-tested in `escalation_routing_never_fabricates_a_scope`), payload identifies finding_type/task_id/spec_path/message and passes `MessageKind::Escalation::validate_payload`.
+- The rebase conflict resolutions are correct: `git_http.rs` and `.github/workflows/e2e.yml` net-match base (base already carried the per-repo config work and the equivalent e2e runner pin), and check 3 was properly re-based onto `SpecLifecycleConfig`.
+- Docs (`api-reference.md`) and coverage rows updated; `spec_patrol.rs` `PatrolFinding` extended with `task_id`/`workspace_id` via serde defaults (backward compatible), all existing construction sites updated.
+
+## Findings
+
+- [**F1 (blocking): the two escalation-verification tests fail at the candidate — the acceptance criteria "`cargo test --all` ... pass" and "escalation verified by asserting the message was enqueued/emitted" are not met.**]
+  `spec_lifecycle_patrol.rs:805` `flags_and_escalates_only_the_accountability_gaps` asserts (line 905) that 4 escalation messages are persisted for workspace `"ws1"`; `api/specs.rs:6349` `spec_lifecycle_patrol_endpoint_flags_and_escalates` asserts (line 6379) 1 persisted message. But neither test ever creates workspace `"ws1"` in the workspace repository, and the rebase (merge `1f460064`, bringing base `cfeefbda`/task-099 lineage) replaced the old `emit_event` — which fabricated `tenant_id: Id::new("default")` — with `message_tenant_id` (lib.rs:541-560) + early-return (lib.rs:586-588) that **silently skips emission** when `workspaces.find_by_id` returns None. `test_state()` builds an empty workspace store (mem.rs:4055-4064; `find_by_id` is a plain HashMap get, mem.rs:2015-2017). Trace: escalate_findings → `emit_event(Some(ws1), Workspace(ws1), …)` → tenant unresolvable → return **before** `messages.store`/broadcast → `list_by_workspace(ws1, "escalation")` returns `[]` → both assertions fail (expected 4/1, actual 0). The tests were written (and earlier rounds approved) against the pre-rebase fabricating `emit_event`; the rebase repair round ported check 3 to the new config system but did not re-validate the escalation tests, so the shipped notes' claim that the test "asserts … 4 persisted escalations" is false at HEAD.
+
+  Reproduce (verifier): `SKIP_WEB_BUILD=1 cargo test -p gyre-server spec_lifecycle_patrol` and `SKIP_WEB_BUILD=1 cargo test -p gyre-server spec_lifecycle_patrol_endpoint` — expect exactly those two tests to fail. (gyre-server test execution is wrapper-blocked in this review stage; the failure is established by the complete source trace saved under `/tmp/stage/review-evidence/`.)
+
+  Repair (test-side only; the production emit path is sound — real tasks/ledger entries carry workspace ids that exist): seed the workspace in both tests, mirroring the sibling module's pattern at `spec_patrol.rs:1034` (`make_workspace("ws1")` + `state.workspaces.create(&ws)`), then re-run both probes. Note the repair must not weaken the assertions (they are the acceptance criterion's verification that escalation is real enforcement).
+
+Minor (non-blocking, recorded for completeness):
+
+- `clean_patrol_escalates_nothing` would pass even if escalation were entirely broken (it asserts an absence). It is acceptable as a companion to the strong test, but only the strong test carries the criterion — which is exactly why F1 matters.
+- Coverage row 8's note cites `abac_middleware.rs:289`; the mapping is at line 309. Trivial drift, no action required beyond the F1 repair round's usual note touch-up.
+
+Test-inflation check: none found beyond F1's context — the findings tests use exact-set assertions against seeded literals, the threshold test kills no-op/inversion mutants, and the escalation assertions read the persisted message store (not a mock). The one weak test (`clean_patrol_escalates_nothing`) asserts absence only and is documented above.
