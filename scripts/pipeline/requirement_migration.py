@@ -34,14 +34,14 @@ def old_snapshot(root, sha, name, registry):
         return legacy,snapshot(checkout,body,contract),body
 
 
-def plan(store,root,change_revision=None):
+def plan(store,root,change_revision=None,reconsider=()):
     root=Path(root)
     registry=(root/'specs/task-spec-inputs.json').read_text()
     base=git(root,'rev-parse','HEAD').strip()
     results=[]
     for task in store.tasks():
         data=task['data'];requirements=data.get('requirements') or {}
-        if data.get('delivered') or requirements.get('version')!=2 or data.get('requirement_migration'):
+        if data.get('delivered') or requirements.get('version')!=2 or (data.get('requirement_migration') and task['name'] not in reconsider):
             continue
         if not ((data.get('assessment_pending') or {}).get('migration') or
                 (data.get('repair') or {}).get('category') == 'requirements_changed' or
@@ -103,10 +103,11 @@ def main():
     parser.add_argument('--state',type=Path,required=True)
     parser.add_argument('--checkout',type=Path,required=True)
     parser.add_argument('--change-revision',help='Restrict optional extra backlog recovery to this recorded catalog source')
+    parser.add_argument('--reconsider',action='append',default=[],metavar='TASK',help='Recheck a previously migrated task after correcting its explicit input binding')
     parser.add_argument('--apply',action='store_true')
     args=parser.parse_args();store=Store(args.state)
     try:
-        entries=plan(store,args.checkout,args.change_revision)
+        entries=plan(store,args.checkout,args.change_revision,args.reconsider)
         print(json.dumps([{k:v for k,v in entry.items() if k not in ('expected_data','historical_body')} for entry in entries],indent=2))
         if args.apply:print(json.dumps({'applied':apply(store,entries)}))
     finally:store.close()
