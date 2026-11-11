@@ -353,6 +353,7 @@ mod tests {
             required: true,
             gate_phase: GatePhase::PreMerge,
             timeout_secs: Some(30),
+            position: 1,
             created_at: 1000,
         }
     }
@@ -361,8 +362,9 @@ mod tests {
     /// EVERY mutable config column. The checkpoint that added
     /// `validation_type` accidentally dropped `required` from the set list —
     /// re-saving a gate silently kept the old blocking flag (PG kept it;
-    /// SQLite drifted). This test fails on that class of drift: flip both
-    /// columns, re-save, and assert the persisted row carries the new values.
+    /// SQLite drifted). This test fails on that class of drift: flip every
+    /// mutable column, re-save, and assert the persisted row carries the new
+    /// values.
     #[tokio::test]
     async fn save_upsert_updates_all_config_columns() {
         let (_tmp, storage) = tmp_storage();
@@ -372,6 +374,7 @@ mod tests {
         let mut updated = gate.clone();
         updated.required = false;
         updated.validation_type = Some("accessibility".to_string());
+        updated.position = 7;
         QualityGateRepository::save(&storage, &updated)
             .await
             .unwrap();
@@ -388,6 +391,10 @@ mod tests {
         assert!(
             !reloaded.required,
             "upsert must persist required changes — the task-134 checkpoint dropped this column from .set()"
+        );
+        assert_eq!(
+            reloaded.position, 7,
+            "upsert must persist position changes (drag-to-reorder, repo-lifecycle §3)"
         );
     }
 }
