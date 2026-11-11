@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "91fe1e86da29a2c68cdb5cf32137da69b36e3132"]
 ---
 
 ## Spec Excerpt
@@ -92,16 +92,29 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
 ### Test evidence
 
 - `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
+  src/__tests__/MetaSpecs.test.js` — 153 passed (re-verified this round at
+  HEAD e87828180 after `npm ci`; logs in
+  /tmp/stage/review-evidence/task-176-focused-tests.log and
+  task-176-round5-verification.log).
 - The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
   shapes, runs the poll to completion, clicks Iterate, and asserts the
   selector AND the retained Architecture/Code Diff results stay visible.
-  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
-  that test, confirming it kills the prior round's real defect (Iterate
-  dropping results from the DOM).
+  Mutation probe re-run this round: reverting `showResultTabs` to the
+  pre-fix logic fails 3 tests including that §9 test
+  (task-176-mutation-probe.log); source restored byte-identical and the
+  suite re-passed (47/47).
 - Preview cancellation, state transitions, architecture delta display,
   and 404-rejection handling are covered in the same suites.
+
+### Shipped bundle
+
+The committed `web/dist` on this branch matches the assignment base (the
+task-091 bundle). Under the current pipeline rules the executor restores
+generated `web/dist` from the assignment base and final integration
+rebuilds and publishes the assets remotely, so dist regeneration is
+intentionally not part of this branch; the round-2 review's stale-bundle
+finding is resolved by that final-integration rebuild, which compiles the
+§9 source verified above.
 
 ### Known limitation
 
@@ -111,13 +124,3 @@ API layer has no workspace-scoped assist endpoint (the repo-scoped
 `specs/assist` is what produces inline suggestion blocks). This is outside
 this task's acceptance criteria and blocked by the existing repo-scoped
 API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
