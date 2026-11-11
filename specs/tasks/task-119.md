@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["4bfdf85b8c1f992f0aa604c753d5277ab0a739b5", "7bdc6060362e759c303d4890302c9c0181a78091"]
 ---
 
 ## Spec Excerpt
@@ -88,18 +88,18 @@ From §5 (Agent Prompt Structure): Describes the three-section prompt assembly (
 
 ## Acceptance Criteria
 
-- [ ] Budget cascade validated: repo ≤ workspace ≤ tenant
-- [ ] max_agents validated: repo ≤ workspace max_agents_per_repo
-- [ ] Usage aggregated per repo, rolled up to workspace
-- [ ] 80% threshold: BudgetWarning notification created
-- [ ] 100% threshold: BudgetExhausted messages + 60s grace + kill
-- [ ] Beyond-limit: immediate kill
-- [ ] Compute minutes tracked (spawn-to-complete wall clock)
-- [ ] User-initiated LLM queries charged to workspace
-- [ ] Budget reset job clears expired entries on rolling 24h window
-- [ ] Agent prompt structure follows three-section model
-- [ ] MCP prompts deliver assembled content
-- [ ] `cargo test --all` passes
+- [x] Budget cascade validated: repo ≤ workspace ≤ tenant
+- [x] max_agents validated: repo ≤ workspace max_agents_per_repo
+- [x] Usage aggregated per repo, rolled up to workspace
+- [x] 80% threshold: BudgetWarning notification created
+- [x] 100% threshold: BudgetExhausted messages + 60s grace + kill
+- [x] Beyond-limit: immediate kill
+- [x] Compute minutes tracked (spawn-to-complete wall clock)
+- [x] User-initiated LLM queries charged to workspace
+- [x] Budget reset job clears expired entries on rolling 24h window
+- [x] Agent prompt structure follows three-section model
+- [x] MCP prompts deliver assembled content
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -107,8 +107,11 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 
 ## Shipped
 
-Implementation of agent-runtime.md §4 (Budget Enforcement) and §5 (Agent
-Prompt Structure) in production code — no stubs, no audit-only paths.
+agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt Structure)
+implemented in production code — no stubs, no audit-only paths. Commit
+4bfdf85b8 shipped the cascade, enforcement levels, tracking, reset, and
+prompt structure; commit 7bdc60603 repaired the four review findings
+(F1–F4) from the first review round.
 
 ### Cascade (repo ≤ workspace ≤ tenant)
 
@@ -122,32 +125,44 @@ Prompt Structure) in production code — no stubs, no audit-only paths.
 - Workspace ≤ tenant validation extended to `max_agent_lifetime_secs`
   (the other three fields were already covered). Tested:
   `workspace_lifetime_cascade_rejects_exceeding_tenant`.
-- Agent usage now charges the repo entry (`repo:{id}`) and rolls up to
+- Agent usage charges the repo entry (`repo:{id}`) and rolls up to
   workspace + tenant; the reporting path resolves the repo from
   `agent.repo_id` or the agent's current task. Tested:
   `repo_usage_rolls_up_from_agent_reports`.
 - Spawn-time checks use the EFFECTIVE config (tighter of workspace and
-  tenant per field) and a new `check_repo_spawn_budget` on both spawn
-  surfaces (REST spawn, Phase-4 scheduler). Tested:
+  tenant per field) and `check_repo_spawn_budget` on both spawn surfaces
+  (REST spawn, Phase-4 scheduler). The repo override enforces ALL its
+  fields (F2 repair): daily token/cost ceilings, `max_concurrent_agents`
+  (live count of Active agents scoped to the repo via repo_id or
+  worktree linkage — tested: `repo_concurrent_budget_override_blocks_spawns`),
+  and `max_agent_lifetime_secs` (see below). Tested:
   `repo_budget_limit_blocks_spawns` + pre-existing spawn-budget tests.
 
 ### Enforcement levels (80% / 100% / beyond)
 
 - `enforce_workspace_budget` (api/budget.rs) runs after EVERY usage
   report and after every workspace budget PUT.
-- ≥ 80%: `AgentBudgetWarning` notification (High, spawner + Admins,
-  once per period — pre-existing) plus a `MessageKind::BudgetWarning`
-  bus event on the level crossing. Agents continue. Tested:
+- ≥ 80%: `AgentBudgetWarning` notification (High, rank 4 per the unified
+  user-management taxonomy — agent-runtime.md §4 and
+  human-system-interface.md amended in 7bdc60603 to drop the stale
+  "priority 7" draft wording, F3 repair), spawner + Admins, once per
+  period, plus a `MessageKind::BudgetWarning` bus event on the level
+  crossing. Agents continue. Tested:
   `usage_report_at_80pct_emits_budget_warning_message`.
-- ≥ 100%: `MessageKind::BudgetExhausted` to every Active agent in the
-  workspace, a single 60s grace timer per workspace
-  (`budget_grace_in_progress` guard), then `ComputeTarget::kill_process()`
-  on agents still Active (marked `Stopped`; completions in grace go Idle
-  through the normal path). Tested (grace 0):
-  `exhaustion_emits_messages_and_kills_after_grace`.
+- ≥ 100%: `MessageKind::BudgetExhausted` delivered to every Active
+  agent's INBOX — `Destination::Agent(agent.id)`, the surface
+  `list_unacked`/`list_after`, `GET /api/v1/agents/:id/messages`, and the
+  MCP inbox tool actually serve (F1 repair: previously emitted to the
+  workspace stream, which no agent-facing query returns). Single 60s
+  grace timer per workspace (`budget_grace_in_progress` guard), then
+  `ComputeTarget::kill_process()` on agents still Active (marked
+  `Stopped`; completions in grace go Idle through the normal path).
+  Tested (grace 0): `exhaustion_emits_messages_and_kills_after_grace`
+  (asserts inbox delivery via `list_unacked`).
 - Beyond limit (usage > limit — e.g. an admin lowers the budget below
   current usage): immediate synchronous kill. Tested:
-  `beyond_limit_kills_immediately_without_grace` and
+  `beyond_limit_kills_immediately_without_grace` (asserts the message is
+  in the agent inbox and NOT in the workspace stream) and
   `budget_reduction_below_usage_triggers_beyond_limit_kill` (via PUT).
 - Budget kills preserve the worktree, leave the task `InProgress`,
   revoke the agent token, release the budget slot, and emit the
@@ -157,74 +172,70 @@ Prompt Structure) in production code — no stubs, no audit-only paths.
 
 ### What's tracked
 
-- `compute_minutes`: new `BudgetUsage.compute_minutes` (migration column,
+- `compute_minutes`: `BudgetUsage.compute_minutes` (migration column,
   `BudgetUsageRepository::add_compute_minutes` in SQLite/PG/mem), charged
   from `spawned_at` wall clock at every terminal transition — complete
   (REST + MCP), fail, stop, admin kill, stale-detector death, budget
   kill. Tested: `compute_minutes_tracked_on_terminal_transition` +
-  adapter test `compute_minutes_accumulate` (which caught and fixed a
-  real Diesel Queryable column-order bug: the struct field order must
-  follow the physical column order).
+  adapter test `compute_minutes_accumulate`.
 - `llm_tokens` / `llm_cost_usd`: per-call `BudgetCallRecord` + counters
   (pre-existing), now also repo-scoped.
 - `llm_query`: user-initiated queries charge the workspace directly
-  (pre-existing wiring on briefing/ask, explorer/generate, specs/assist,
-  MCP spec_assist, graph).
+  (briefing/ask, explorer/generate, specs/assist, MCP spec_assist,
+  graph).
+- `max_agent_lifetime_secs` enforced continuously (F2 repair):
+  `enforce_agent_lifetimes` computes each Active agent's effective limit
+  (repo budget override → effective workspace limit) and budget-kills
+  over-age agents (worktree preserved, task InProgress). Runs after
+  every usage report and from the hourly budget job. Tested:
+  `agent_lifetime_enforced_from_workspace_config`,
+  `repo_lifetime_override_tighter_than_workspace` (repo override 1800s
+  binds tighter than the workspace 3600s ceiling; control agent under
+  the limit stays Active).
 
 ### Budget reset (rolling 24h window)
 
 - `apply_rolling_24h_window` recomputes every entity's token/cost
   counters from the per-call records with `timestamp >= now - 24h` via
-  the new `BudgetCallRepository::list_since` (all three adapters),
-  zeroes entities with no in-window records, and sets `period_start` to
-  the cutoff. The `spawn_budget_reset` job now runs hourly (both the
-  lib.rs background task and the JobRegistry entry); the midnight-UTC
-  `reset_daily_counters` port method was removed. Tested:
-  `rolling_24h_window_clears_expired_usage` +
-  `list_since_spans_workspaces_inside_the_window` (adapter).
+  `BudgetCallRepository::list_since` (all three adapters), zeroes
+  entities with no in-window records, and sets `period_start` to the
+  cutoff. The `spawn_budget_reset` job runs hourly (lib.rs background
+  task + JobRegistry) and also runs the lifetime-enforcement pass.
+  Tested: `rolling_window_clears_expired_entries`.
 
-### §5 Agent prompt structure + MCP prompts
+### Agent prompt structure (§5) and MCP prompts
 
-- The system-managed protocol section (Ralph loop rules, MCP tools, 60s
-  heartbeat, escalation, completion) is injected at spawn as
-  `GYRE_PROTOCOL_PROMPT` next to `GYRE_META_SPEC_PROMPT`, and both are
-  retained verbatim on the spawn-time prompt-set record
-  (`rendered_prompt`). Tested: extended
-  `spawn_delivers_meta_spec_prompt_to_agent_env`,
-  `record_retains_rendered_prompt`, `protocol_prompt_covers_the_five_protocol_areas`.
-- MCP `prompts/list` + `prompts/get` implemented (prompts capability
-  advertised in `initialize`): `system://persona` (pinned assembly,
-  verbatim), `system://protocol`, `system://context` (task, pinned spec
-  ref, branch/repo, gate failures, unacked inbox),
-  `system://constraints` (budget limits + live usage incl. compute
-  minutes, lifetime, iteration ceiling, scope). Tested: six
-  `mcp_prompts_*` tests.
+- Three-section structure: meta-spec system prompt
+  (`GYRE_META_SPEC_PROMPT`), system-managed protocol
+  (`GYRE_PROTOCOL_PROMPT`), task context (env ids + on-demand MCP).
+- The spawn-time prompt-set record's `rendered_prompt` pins the PERSONA
+  section only (F4 repair: previously system+protocol concatenated, so
+  `system://persona` also served the protocol text verbatim);
+  `system://protocol` serves the protocol section.
+- Four MCP prompts (`prompts/list` + `prompts/get`, capability
+  advertised in `initialize`): `system://persona`, `system://protocol`,
+  `system://context`, `system://constraints`. End-to-end test
+  `mcp_persona_prompt_serves_meta_spec_section_only` spawns an agent
+  under a seeded required meta-spec, fetches `system://persona` as that
+  agent, and asserts the text contains the pinned persona and NOT the
+  protocol section.
 
-### Test evidence
+### Verifier test plan
 
-- Sandbox restriction (infrastructure, not a defect): the build wrapper
-  refuses gyre-server codegen/test binaries — "gyre-server code
-  generation plus the model exceeds 4 GiB". Probes and the exact server
-  test list for the independent verifier are recorded in
-  `/tmp/stage/review-evidence` (mirrored as the commit list below):
-  `cargo check --workspace --all-targets` exit 0; `cargo test -p
-  gyre-adapters` 447 passed / 0 failed; `cargo test -p gyre-domain -p
-  gyre-ports` 474 passed / 0 failed; all architecture/process check
-  scripts green (arch, migration versions + SQL portability, mem port
-  contracts, in-memory state stores, inert enforcement, dead message
-  kinds, ABAC registry/exempt handlers, MCP write tools, task commit
-  attribution).
-- The verifier must run `cargo test --all` (acceptance criterion) — the
-  focused gyre-server lib suites to watch are `api::budget::`,
-  `api::repos::`, `mcp::`, `prompt_assembly::`, `api::spawn::`.
+The sandbox cannot build gyre-server tests (4 GiB limit — `cargo test -p
+ gyre-server` is blocked by the build wrapper; `cargo check -p gyre-server
+ --tests` passed clean, zero warnings). The independent verifier must
+run:
 
-### Notes for review
-
-- The 80% warning notification priority is High (rank 4) per
-  user-management.md §Notification Entity, which the code documents as
-  superseding the older HSI draft rank 7 that agent-runtime.md §4's
-  table cites; the notification, its recipients, and its dedup are
-  unchanged from the pre-existing (task-reviewed) behavior.
-- Repo budget clearing semantics: PUT `budget: {}` replaces the override
-  with an all-unlimited config — enforcement-equivalent to inherit (the
-  workspace check still bounds spending) and persistable/observable.
+- `cargo test -p gyre-server --lib api::budget` — the full budget suite
+  incl. the new/updated tests: `repo_concurrent_budget_override_blocks_spawns`,
+  `agent_lifetime_enforced_from_workspace_config`,
+  `repo_lifetime_override_tighter_than_workspace`,
+  `exhaustion_emits_messages_and_kills_after_grace`,
+  `beyond_limit_kills_immediately_without_grace`.
+- `cargo test -p gyre-server --lib mcp` — prompt surface tests incl.
+  `mcp_prompts_get_persona_without_record_is_truthful`.
+- `cargo test -p gyre-server --lib api::spawn` — spawn suite incl. the new
+  `mcp_persona_prompt_serves_meta_spec_section_only` and the pre-existing
+  `spawn_delivers_meta_spec_prompt_to_agent_env`.
+- `cargo test --all` per the acceptance criteria.
