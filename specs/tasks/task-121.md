@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
   - "user-management.md §Repo Access"
-commits: ["64fa14fd4fbb1feecbd69c04d3cb8020fc4a237f", "8fc4245da30d5c96d1c0cb2568ef70e573ed84d3", "93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
+commits: ["64fa14fd4fbb1feecbd69c04d3cb8020fc4a237f", "8fc4245da30d5c96d1c0cb2568ef70e573ed84d3", "93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5", "7939a4a6663022b071ec9175001487d6bf44c54b"]
 ---
 
 ## Spec Excerpt
@@ -95,8 +95,8 @@ Read `specs/system/user-management.md` §Workspace Membership through §Repo Acc
 
 Workspace membership, ownership transfer/reclamation, and repo access are implemented
 end-to-end (user-management.md §Workspace Membership, §Ownership Transfer & Reclamation,
-§Repo Access), across the feature round, two review/verification repair rounds, a
-duplicate-override 409 repair round, and this rebase repair round.
+§Repo Access), across the feature round, three review/verification repair rounds, a
+rebase repair round, and this migration-collision repair round.
 
 ### Behavior (feature)
 
@@ -117,88 +117,54 @@ duplicate-override 409 repair round, and this rebase repair round.
   role is the more restrictive of workspace role and override (restrict-only). git_http
   read/write paths enforce the effective permission set via `authorize_repo_access`.
 
-### Behavior (review/verification repairs, rounds 1-2)
+### Behavior (prior repair rounds, retained)
 
-- `subject.workspace_role` is resolved for repo-addressed routes (`/api/v1/repos/:id/...`)
-  by loading the repo's workspace before policy evaluation, so the builtin
-  `repo-access-override-management` policy is live on the override routes (previously
-  default-denied 403 before the handler ran — dead policy).
-- `load_repo_scoped` is fail-closed on an unresolvable workspace scope: a dangling
-  repo→workspace reference or a failed lookup is NotFound, never a pass-through of the tenant
-  gate.
-- `create_workspace` seeds the creator's active Owner membership (same-tenant user
-  principals), and ownerless tracking fires only on owner departure (evidence: an Owner
-  membership row, which survives user deletion). Never-owned workspaces (system/agent-operated)
-  are not flagged orphaned and generate no TenantAdmin notification noise.
-- clippy-diff findings on the new surface cleared (`double_must_use` allow on the new port,
-  `doc_lazy_continuation`/`result_large_err` in git_http, test-only import scoping);
-  denial responses are dereferenced unchanged at all git_http call sites, so 403/500
-  behavior is identical.
+- `subject.workspace_role` is resolved for repo-addressed routes before policy evaluation,
+  so the builtin `repo-access-override-management` policy is live on the override routes;
+  `load_repo_scoped` is fail-closed on an unresolvable workspace scope (dangling
+  repo→workspace reference is NotFound, never a pass-through of the tenant gate).
+- `create_workspace` seeds the creator's active Owner membership; ownerless tracking fires
+  only on owner departure (an Owner membership row survives user deletion), so
+  never-owned workspaces are not flagged orphaned.
+- Duplicate repo-access override PUTs return 409 on all adapters via a
+  guard-before-insert (`find_by_repo_and_user`) plus `is_duplicate_override_error`, which
+  walks the whole error chain to recognize mem/SQLite/PostgreSQL duplicate shapes.
 
-### Behavior (repair round 3: duplicate override 409 on all adapters)
+### Behavior (this round: 000060 migration collision repair)
 
-- The duplicate-override 409 in `set_repo_access_override` previously matched only the
-  top-level message "already exists" — the mem adapter's guard text. The SQLite and
-  PostgreSQL adapters wrap the driver's UNIQUE violation with
-  `.context("insert repo access override")`, so a second
-  `PUT /api/v1/repos/{id}/access-overrides/{user_id}` for the same (repo, user) returned
-  500 instead of the documented 409 (docs/api-reference.md).
-- Fixed with the repo's guard-before-insert pattern (compute_targets, invite_member):
-  `find_by_repo_and_user` runs a real storage lookup before `create`, so the 409 no longer
-  depends on any adapter's error-message shape. The storage UNIQUE constraint remains as
-  the race-window backstop, now mapped by `is_duplicate_override_error`, which walks the
-  whole anyhow error chain to recognize the mem ("already exists"), SQLite
-  ("UNIQUE constraint failed"), and PostgreSQL ("duplicate key value violates unique
-  constraint") duplicate shapes while leaving non-duplicate storage failures as 500.
-
-### Behavior (this round: rebase repair onto fbf1a63)
-
-- Rebased the task-121 branch onto base fbf1a63 (task-085 HSI, task-134 gate agents,
-  task-generation/gate-validation migrations). Single content conflict in
-  `abac_middleware.rs`: the base's task-134 scoped-token allow-list requires `action`
-  before attribute-context building (via the base's pattern-wide `action_override`
-  destructure), while task-121 moved action resolution to `RouteResourceMapping::resolve_action`
-  (method-scoped overrides -> pattern override -> method mapping) after `subject.workspace_role`
-  resolution. Resolved by resolving the action once, early, through `resolve_action`, so the
-  scoped-token deny record and the policy evaluation share the same per-method action; the
-  later duplicate block was dropped. No behavior change for either feature: task-121 routes
-  with method-scoped overrides resolve identically, and the base's pattern-wide override is
-  still consulted (second priority) by `resolve_action`.
-- All task-121 surfaces verified intact after the merge: repo_access duplicate-409 guard +
-  error-chain mapping, git_http `authorize_repo_access` enforcement, ownerless tracking
-  (`workspace_ownership.rs`, jobs, scim), ABAC registry entries for member and
-  override routes.
+- Verification (checks.sh, exit 1) caught a duplicate Diesel migration version: task-121's
+  `repo_access_overrides` and base task-118's `repo_agent_limits` both claimed
+  `20261112000060`. Diesel runs only one migration per version and silently drops the
+  other, so fresh installs were missing one side of the collision (empirically the
+  `repo_access_overrides` table — the task-121 surface).
+- Fix: renumbered the newer task-121 migration to the next unused sequence
+  `2026-11-12-000061_repo_access_overrides` (SQL unchanged; `embed_migrations!` embeds by
+  directory, so the rename is transparent to both backends).
+- Regression guard: `migrations_create_000060_repo_columns_and_overrides`
+  (gyre-adapters sqlite tests) asserts both sides of the collision exist after startup —
+  `repositories.max_agents` / `max_agent_iterations` (task-118) and the
+  `repo_access_overrides` table (task-121) — and `repo_access_overrides` was added to the
+  `migrations_create_tables` list. Mutation probe: restoring the duplicate 000060 version
+  makes the new test fail (`table 'repo_access_overrides' missing`), so the test kills the
+  silent-drop regression on either side of the collision.
 
 ### Test evidence
 
-- Prior rounds (focused runs via `/tmp/stage/bin/cargo`, summaries retained under
-  /tmp/stage/review-evidence): `api::repo_access` through the production router
-  (api_router + abac_middleware + seeded builtin policies) with workspace-member API keys,
-  including the regression test that fails (403) when repo-addressed workspace-role
-  resolution is disabled; `workspace_ownership` 8/8; `api::workspaces::tests` 20/20;
-  `api::users::tests` 23/23; `git_http` 61/61 (incl. repo-access enforcement on the git
-  transport); `abac_middleware` 14/14; full gyre-server lib suite 1727/1727;
+- This round: `cargo test -p gyre-adapters --lib sqlite::tests` 9/9 pass (incl. the new
+  guard and the mutation probe above); `cargo fmt -p gyre-adapters -- --check` exit 0;
+  `cargo clippy -p gyre-adapters --lib --tests` — no findings on changed lines (all 13
+  crate warnings are pre-existing in other files); `scripts/check-migration-versions.sh`
+  and `scripts/check-migration-sql-portability.sh` both pass (evidence:
+  /tmp/stage/review-evidence/task-121-migration-renumber-7939a4a66.md).
+- Prior rounds (focused runs via `/tmp/stage/bin/cargo`): `api::repo_access` through the
+  production router (api_router + abac_middleware + seeded builtin policies), including
+  the regression test that fails (403) when repo-addressed workspace-role resolution is
+  disabled; `workspace_ownership` 8/8; `api::workspaces::tests` 20/20; `api::users::tests`
+  23/23; `git_http` 61/61 (incl. repo-access enforcement on the git transport);
+  `abac_middleware` 14/14; full gyre-server lib suite 1727/1727;
   `cargo test -p gyre-domain repo_access` 8/8; clippy 0 findings on changed lines vs base.
-- Round 3: `cargo check -p gyre-server --lib` passes (exit 0);
-  `cargo clippy -p gyre-server --lib` reports no findings in repo_access.rs; a rustc
-  behavior probe against the cached anyhow rlib reproduced each adapter's exact error
-  chain and proved the old top-level-only check misses the SQLite/Postgres shapes
-  (top-level message is exactly "insert repo access override") while
-  `is_duplicate_override_error` matches all three duplicate shapes and rejects a
-  non-duplicate failure (evidence: /tmp/stage/review-evidence/task-1....md).
-- This round (rebase): `cargo check -p gyre-server --lib`, `cargo check --workspace`, and
-  `cargo check -p gyre-server --tests` all exit 0 (the merge, including the resolved
-  conflict, type-checks against both sides' code); `cargo test -p gyre-domain repo_access`
-  8/8; `cargo clippy -p gyre-server --lib` exit 0 with no findings in `abac_middleware.rs`
-  or `repo_access.rs`; `scripts/check-abac-route-registry.sh`, `scripts/check-arch.sh`, and
-  `scripts/check-migration-versions.sh` all pass (evidence:
-  /tmp/stage/review-evidence/task-121-rebase-887fc7bc.md).
 - Deferred to the independent verifier (server test-profile compilation exceeds this
-  sandbox's 4 GiB cgroup budget): `cargo test -p gyre-server --lib api::repo_access` —
-  notably `override_create_is_idempotent_rejected` (guard path → 409 through the production
-  ABAC pipeline) and `duplicate_override_error_mapping_covers_all_adapter_chains`
-  (chain-shape mapping per adapter) — plus `workspace_ownership`, `api::workspaces::tests`,
-  `api::users::tests`, `git_http`, `abac_middleware`, and the task-134 integration test
-  `tests/task134_review_probe.rs` (both sides of the resolved conflict now share one
-  action-resolution path, so the scoped-token allow-list and policy evaluation must be
-  re-exercised together).
+  sandbox's 4 GiB cgroup budget): `cargo test -p gyre-server --lib` — notably
+  `api::repo_access` (override CRUD, restrict-only composition, duplicate-409 through the
+  production ABAC pipeline), `workspace_ownership`, `api::workspaces::tests`,
+  `api::users::tests`, `git_http`, and `abac_middleware`.
