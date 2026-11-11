@@ -63,11 +63,24 @@ pub async fn enqueue(
 ) -> Result<(StatusCode, Json<QueueEntryResponse>), ApiError> {
     let priority = req.priority.unwrap_or(50);
     let mr_id = Id::new(req.merge_request_id);
+    let entry = enqueue_core(&state, &mr_id, priority).await?;
+    Ok((StatusCode::CREATED, Json(QueueEntryResponse::from(entry))))
+}
+
+/// Shared enqueue core (agent-runtime.md §1 Phase 6): put a mergeable MR on
+/// the queue and trigger gate execution for it. Used by the REST handler
+/// and by the Ralph loop's automatic post-completion enqueue so both
+/// surfaces apply the same mergeable-status guard and gate trigger.
+pub(crate) async fn enqueue_core(
+    state: &Arc<AppState>,
+    mr_id: &Id,
+    priority: u32,
+) -> Result<MergeQueueEntry, ApiError> {
     // Verify the MR exists before enqueueing — prevents a FK constraint violation (500)
     // when the inbox retry button sends a fake or stale MR ID.
     let mr = state
         .merge_requests
-        .find_by_id(&mr_id)
+        .find_by_id(mr_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {} not found", mr_id)))?;
     // Only a mergeable MR may enter the queue (task-095 R3-F2,
@@ -86,9 +99,10 @@ pub async fn enqueue(
     state.merge_queue.enqueue(&entry).await?;
 
     // Trigger quality gate execution if this MR has an associated repo with gates.
-    crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id, mr.repository_id).await;
+    crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id.clone(), mr.repository_id)
+        .await;
 
-    Ok((StatusCode::CREATED, Json(QueueEntryResponse::from(entry))))
+    Ok(entry)
 }
 
 pub async fn list_queue(
