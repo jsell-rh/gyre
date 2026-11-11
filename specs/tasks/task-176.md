@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["f51cc2296bf96aeb0a151c7b19c55e73faf5e9b0", "91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["f51cc2296bf96aeb0a151c7b19c55e73faf5e9b0", "91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "4f1c1d72a5342a070d3d961114fdcf17f664445b"]
 ---
 
 ## Spec Excerpt
@@ -65,87 +65,49 @@ Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read 
 
 ## Shipped
 
-The §9 meta-specs preview loop runs through the shared EditorSplit (task-172)
-in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
+The §9 meta-specs preview loop runs through the shared EditorSplit
+(task-172) in `context="meta-spec"` and is mounted by the MetaSpecs
+workspace view:
 
-- **State 1 (Editing):** left panel is the persona/principle editor plus the
-  LLM chat input and Preview/Publish actions; right panel is the
-  target-spec checkbox selector (specs from repos in the workspace) with
-  Select All / Select None.
-- **State 2 (Preview Running):** the editor is locked and renders the
-  pending-changes diff (LCS line diff of the edited prompt against the
-  published registry prompt); the right panel shows per-spec ◐ running /
-  ✓ complete indicators from the real preview-status poll plus aggregate
-  progress, with a [Cancel Preview] action (button and Esc).
-- **State 3 (Preview Complete):** the right panel has [Architecture]
+- **State 1 (Editing):** left panel is the persona/principle editor plus
+  the LLM chat input (workspace-scoped assist, f51cc2296) and
+  Preview/Publish actions; right panel is the target-spec checkbox
+  selector (specs from repos in the workspace) with Select All / None.
+- **State 2 (Preview Running):** editor locked, rendering the
+  pending-changes LCS line diff against the published registry prompt;
+  right panel shows per-spec ◐ running / ✓ complete indicators from the
+  real preview-status poll plus aggregate progress, with
+  [Cancel Preview] (button and Esc).
+- **State 3 (Preview Complete):** right panel has [Architecture]
   (default) and [Code Diff] tabs rendering the server-computed
-  PreviewResponse fields (structural impact, blast radius, per-spec
-  statuses from the throwaway-branch agent runs).
-- **Iterate** returns to State 1 with the selector restored AND the last
-  preview results still visible (91fe1e86).
-- **Publish** PUTs the edited prompt to the meta-spec registry, resets the
-  spec's approval state to Pending, and refreshes the in-session diff
-  baseline (6e3bb1a).
+  PreviewResponse (structural impact, blast radius, per-spec statuses
+  from throwaway-branch agent runs).
+- **Iterate** returns to State 1 with the selector restored AND the
+  last preview results still visible (91fe1e86).
+- **Publish** PUTs the edited prompt to the meta-spec registry, resets
+  approval state to Pending, and refreshes the in-session diff baseline
+  (6e3bb1a).
 
-### §9 State 1 LLM chat — workspace-scoped assist
+### This round: shipped-bundle repair (round-5 review finding)
 
-Closes the round-1 finding that the production §9 surface (workspace
-meta-specs, no repo context) rendered the State 1 chat permanently disabled:
+`web/src` was already vetted and unchanged; only the committed
+`web/dist` was stale (byte-identical to the base after merge
+61d5c50fb resolved it to the base side, fifth consecutive round).
+Repaired with a real rebuild from the candidate's own `web/src`:
 
-- **Server** — `POST /api/v1/workspaces/:id/meta-specs/assist`
-  (`specs_assist::assist_meta_spec`, f51cc2296): workspace-scoped LLM assist
-  using the same SSE `{diff, explanation}` wire protocol as the repo-scoped
-  `/repos/:id/specs/assist` (protocol logic extracted into a shared
-  `assist_sse_events` helper, not duplicated). Effective content is the
-  caller's `draft_content` (the in-editor draft) or, when only
-  `meta_spec_id` is given, the stored registry prompt. Real behavior:
-  per-user/workspace 10 req/60 s rate limit, 503 when the LLM is
-  unconfigured, 404 for unknown workspace/meta-spec, 403 when a
-  Workspace-scoped meta-spec belongs to another workspace, 400 when neither
-  draft nor id is given, cost-entry + per-call budget recording keyed to
-  the workspace. ABAC resolver entry `meta_spec`/`generate` added to
-  `abac_middleware.rs` (no exemption-file growth).
-- **Frontend** — EditorSplit enables the chat when `repoId` OR (meta-spec
-  context + `workspaceId`); the §9 surface dispatches to
-  `api.metaSpecsAssist(workspaceId, {instruction, draft_content,
-  meta_spec_id})`. The dead `specsAssistGlobal` 404 stand-in was removed
-  from `api.js`.
+- `npm ci` (locked versions) + `npm run build`, committed as
+  `build(web): regenerate verified assets (task-176)` (4f1c1d72a).
+- Committed bundle `index-C1lqdB9v.js` now greps `locked-diff` ×2,
+  `metaSpecsAssist` ×2, `pending_changes` ×2 — previously 0 matches.
+- `git diff cba416b46 HEAD -- web/dist` is no longer empty
+  (5 files changed), so the RustEmbed/SKIP_WEB_BUILD deployment serves
+  the §9 UI. Evidence:
+  `/tmp/stage/review-evidence/task176-r6-dist-repair.log`.
 
-### This round: merge integration with base cba416b46 (task-118)
+### Test evidence
 
-- Resolved the in-progress merge of assignment base
-  cba416b46a73d3568f745d7b4eae49a0700a90a6 (task-118 Ralph loop /
-  agent-runtime backend) as commit 61d5c50fb. The only content conflict
-  was `specs/coverage/SUMMARY.md`: resolved by keeping the base side's
-  newer agent-runtime.md row (16/16, from task-118's merged coverage
-  file) and this task's ui-layout.md row (36 assigned / 2 implemented,
-  §9 implemented), with the TOTAL recomputed mechanically — resolution
-  verified byte-identical to `scripts/update-coverage-summary.sh`
-  output. `specs/coverage/system/ui-layout.md` merged keeping this
-  task's implemented §9 row.
-- §9 source integrity on the merged tree confirmed: `locked-diff` ×18 in
-  `web/src/lib/EditorSplit.svelte`, `metaSpecsAssist` in
-  `web/src/lib/api.js`, `lineDiff.js`/`lineDiff.test.js` present,
-  `showResultTabs` Iterate retention in place; server route
-  `POST /workspaces/:id/meta-specs/assist` → `assist_meta_spec`
-  registered in `api/mod.rs` with its ABAC resolver entry.
-- Focused frontend tests on the merged tree: EditorSplit + MetaSpecs +
-  lineDiff — 169 passed. `SKIP_WEB_BUILD=1 cargo check -p gyre-server` —
-  clean (7m12s). Evidence:
-  `/tmp/stage/review-evidence/task-176-round5-frontend.log`,
-  `task-176-round5-cargo-check.log`.
-- Server tests for the verifier: `cargo test -p gyre-server specs_assist`
-  (covers `assist_meta_spec_*`); `cargo test -p gyre-server ralph_loop
-  signal_chain e2e_ralph_loop` (merged task-118 surfaces sharing
-  `signal_chain.rs`/`mcp.rs` with the assist route's module neighbors);
-  full `cd web && npm test`.
-
-### web/dist publication
-
-Per the current controller contract for this assignment, the executor
-restores the committed web/dist from the assignment base and the final
-integration stage rebuilds and publishes those assets remotely from this
-branch's web/src (which carries the entire §9 preview loop:
-`locked-diff`, `pending_changes`, `metaSpecsAssist` all grep-positive in
-web/src at HEAD). No sandbox dist rebuild was performed, per the explicit
-assignment instruction.
+- Focused vitest on `src/__tests__/EditorSplit.test.js` +
+  `src/__tests__/MetaSpecs.test.js`: **156/156 passed** (state machine
+  1→2→3→1, preview cancellation, Architecture delta display,
+  meta-spec Iterate results-retention, workspace assist chat).
+- `npm run build` exit 0.
