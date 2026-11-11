@@ -247,11 +247,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api(MR_COMMENTS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MR_REVIEWS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MR_DIFF_ROUTE, "merge_request", None),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/spec",
-                    "merge_request",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/merge-requests/:id/spec", "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",

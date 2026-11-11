@@ -1264,29 +1264,27 @@ pub async fn get_spec(
         })?
         .to_string();
 
-    let (path, sha) = spec_ref
-        .rsplit_once('@')
-        .ok_or_else(|| {
-            ApiError::InvalidInput(format!(
-                "invalid spec_ref format '{spec_ref}': expected 'path@sha'"
-            ))
-        })?;
+    let (path, sha) = spec_ref.rsplit_once('@').ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "invalid spec_ref format '{spec_ref}': expected 'path@sha'"
+        ))
+    })?;
     let (path, sha) = (path.to_string(), sha.to_string());
 
     let repo = state
         .repos
         .find_by_id(&mr.repository_id)
         .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("repository {} not found", mr.repository_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
 
-    let content = crate::git_refs::read_blob(&repo.path, &sha).await.ok_or_else(|| {
-        ApiError::NotFound(format!(
-            "spec blob {sha} ({path}) not found in repository — the pinned \
+    let content = crate::git_refs::read_blob(&repo.path, &sha)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "spec blob {sha} ({path}) not found in repository — the pinned \
              spec version is not reachable from this repo"
-        ))
-    })?;
+            ))
+        })?;
 
     Ok(Json(MrSpecResponse {
         mr_id: mr.id.to_string(),
@@ -2699,7 +2697,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("pinned-spec-repo");
         std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
-        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v1\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(args)
@@ -2721,7 +2723,11 @@ mod tests {
         git(&["commit", "-m", "spec v1"]);
         let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
 
-        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v2 — EDITED AT HEAD\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2 — EDITED AT HEAD\n",
+        )
+        .unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "spec v2"]);
 

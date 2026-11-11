@@ -1089,8 +1089,14 @@ mod tests {
         let sha = "5".repeat(40);
 
         // Approved + signed → verifies.
-        let signed =
-            seed_signed_ledger_entry(&state, "apr-sig-1", "system/signed.md", &sha, Some("sigstore:meow")).await;
+        let signed = seed_signed_ledger_entry(
+            &state,
+            "apr-sig-1",
+            "system/signed.md",
+            &sha,
+            Some("sigstore:meow"),
+        )
+        .await;
         state
             .spec_approvals
             .approve(&signed, 1700000100)
@@ -1125,7 +1131,8 @@ mod tests {
         // Approved with a whitespace-only signature → treated as unsigned.
         let sha3 = "7".repeat(40);
         let blank =
-            seed_signed_ledger_entry(&state, "apr-sig-3", "system/blank.md", &sha3, Some("   ")).await;
+            seed_signed_ledger_entry(&state, "apr-sig-3", "system/blank.md", &sha3, Some("   "))
+                .await;
         state
             .spec_approvals
             .approve(&blank, 1700000100)
@@ -1153,9 +1160,26 @@ mod tests {
         // satisfies the policy (multiple approvals per version are allowed).
         let sha5 = "9".repeat(40);
         let a = seed_signed_ledger_entry(&state, "apr-sig-4", "system/multi.md", &sha5, None).await;
-        let b = seed_signed_ledger_entry(&state, "apr-sig-5", "system/multi.md", &sha5, Some("sigstore:second")).await;
-        state.spec_approvals.approve(&a, 1700000100).await.unwrap().expect("entry exists");
-        state.spec_approvals.approve(&b, 1700000110).await.unwrap().expect("entry exists");
+        let b = seed_signed_ledger_entry(
+            &state,
+            "apr-sig-5",
+            "system/multi.md",
+            &sha5,
+            Some("sigstore:second"),
+        )
+        .await;
+        state
+            .spec_approvals
+            .approve(&a, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        state
+            .spec_approvals
+            .approve(&b, 1700000110)
+            .await
+            .unwrap()
+            .expect("entry exists");
         assert!(
             verify_signed_spec_ref(&state, &format!("system/multi.md@{sha5}"))
                 .await

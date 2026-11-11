@@ -1936,8 +1936,9 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         // Blocking policies. `require_signed_approval` also implies a
         // spec_ref is present: an MR with no spec_ref has no referenced
         // approval, signed or otherwise.
-        let needs_spec_ref =
-            policy.require_spec_ref || policy.require_approved_spec || policy.require_signed_approval;
+        let needs_spec_ref = policy.require_spec_ref
+            || policy.require_approved_spec
+            || policy.require_signed_approval;
         let mut violation: Option<String> = if needs_spec_ref && mr.spec_ref.is_none() {
             Some("spec policy requires a spec_ref but MR has none".to_string())
         } else {
@@ -1965,7 +1966,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
             state
                 .merge_queue
-                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason.clone()))
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(reason.clone()),
+                )
                 .await?;
             report_spec_policy_violation(state, &mr, &repo.id, &reason).await;
             return Ok(());
@@ -9353,7 +9358,10 @@ mod tests {
                 .any(|n| n.title.contains("Spec policy blocked merge")
                     && n.title.contains("no Sigstore signature")),
             "author must receive a notification naming the violation, got: {:?}",
-            author_notifications.iter().map(|n| &n.title).collect::<Vec<_>>()
+            author_notifications
+                .iter()
+                .map(|n| &n.title)
+                .collect::<Vec<_>>()
         );
 
         // Control: the same MR with a SIGNED active approval merges.
@@ -9415,7 +9423,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("warn-stale-repo");
         std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
-        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v1\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(args)
@@ -9438,7 +9450,11 @@ mod tests {
         let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
 
         // Move HEAD past the referenced version.
-        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v2\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2\n",
+        )
+        .unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "spec v2"]);
 
@@ -9450,13 +9466,7 @@ mod tests {
             .unwrap()
             .is_none()
         {
-            let ws = gyre_domain::Workspace::new(
-                Id::new("ws-1"),
-                Id::new("t1"),
-                "ws-1",
-                "ws-1",
-                0,
-            );
+            let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "ws-1", "ws-1", 0);
             state.workspaces.create(&ws).await.unwrap();
         }
         let repo = Repository::new(
