@@ -175,7 +175,15 @@ def observe(execution, task):
             execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),task['name']))
             execution.store.event('priority_labels_observed',{'labels':priority_labels},task['name'],execution.claim['id'])
     if execution.claim['input'].get('priority_only'):
-        raise Wait('Watching PR priority labels while implementation handles the recorded finding')
+        task=execution.store.task(task['name'])
+        receipt=publication(execution.store,task)
+        if (task['data'].get('repair') or {}).get('category')=='ci' and receipt:
+            observation=read(execution,task,receipt)
+            recover_setup_handoff(execution,execution.store.task(task['name']),receipt,observation)
+            if observation['status']=='infrastructure':retry_infrastructure(execution,task,receipt,observation)
+        wait=Wait('Watching PR priority labels while implementation handles the recorded finding')
+        wait.retry_delay=execution.store.setting('priority_poll_seconds',600)
+        raise wait
     receipt = execution.claim['input']['published']
     observation = read(execution,task,receipt)
     rejected = failure(execution,task,receipt,observation)
@@ -185,8 +193,69 @@ def observe(execution, task):
         # Publication must still verify the authoritative merge tree.
         return observation, {'verified':receipt}, []
     if observation['status'] == 'infrastructure':
-        repo = execution.store.setting('repository','jsell-rh/gyre')
-        for ident in observation.get('runs',[]):
-            if ident is not None:
-                execution.command('gh','run','rerun',str(ident),'--failed','--repo',repo,timeout=30,check=False)
+        retry_infrastructure(execution,task,receipt,observation)
     raise Wait('PR CI readiness: ' + observation['status'])
+
+
+def retry_infrastructure(execution, task, receipt, observation):
+    """Bound reruns per exact head, deduplicate attempts and back off durably."""
+    from .execution import Attention
+    key='ci_infra_retry:'+task['name']+':'+receipt['head']
+    state=execution.store.setting(key,{})
+    now=time.time()
+    if state.get('next',0)>now:
+        error=Wait('GitHub infrastructure retry is backing off on the same head')
+        error.retry_delay=max(1,state['next']-now);raise error
+    count=state.get('count',0)
+    if count>=execution.store.setting('ci_infra_retry_limit',6):
+        error=Attention('GitHub setup infrastructure remains unavailable after bounded reruns; source is retained')
+        error.category='ci_infrastructure';raise error
+    repo=execution.store.setting('repository','jsell-rh/gyre')
+    attempts=[]
+    for ident in observation.get('runs',[]):
+        if ident is None:continue
+        run=json.loads(execution.command('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+        if run.get('head_sha')!=receipt['head']:raise Wait('Workflow head changed before infrastructure rerun')
+        attempt=[ident,run.get('run_attempt')]
+        if run.get('status')!='completed' or attempt in state.get('attempts',[]):continue
+        execution.command('gh','run','rerun',str(ident),'--failed','--repo',repo,timeout=30)
+        attempts.append(attempt)
+    delay=min(1800,60*2**min(count,5))
+    execution.store.set_setting(key,{'count':count+bool(attempts),'next':now+delay,
+        'attempts':state.get('attempts',[])+attempts})
+    if attempts:execution.store.event('ci_infrastructure_rerun',{'head':receipt['head'],'attempts':attempts,'delay':delay},task['name'],execution.claim['id'])
+    error=Wait('GitHub infrastructure checks retry on the same verified head; no coding requested')
+    error.retry_delay=delay;raise error
+
+
+def recover_setup_handoff(execution,task,receipt,observation):
+    """Undo an old CI-to-coding handoff only when exact-source evidence permits.
+
+    Running code work is never canceled. Source changed since publication is
+    retained for normal review. Only the unchanged published head can recover
+    its actual recorded independent approval and verification.
+    """
+    if observation['status'] not in ('infrastructure','passed','policy_pending','environment_refresh'):return False
+    data=task['data'];repair=data.get('repair') or {}
+    if (repair.get('category')!='ci' or repair.get('source')!=receipt['head']
+            or data.get('candidate')!=receipt['head'] or not receipt.get('passed')):return False
+    review=None
+    for row in execution.store.db.execute("SELECT * FROM work WHERE task=? AND generation=? AND stage='review' AND state='succeeded' ORDER BY updated DESC",(task['name'],task['generation'])):
+        result=json.loads(row['result'] or '{}');verdict=result.get('verdict') or {}
+        if (json.loads(row['input']).get('candidate')==receipt['candidate'] and result.get('valid')
+                and verdict.get('approved') is True and not verdict.get('findings')
+                and verdict.get('candidate')==receipt['candidate']):
+            review={'candidate':receipt['candidate'],'approved':True,'checkpoint':result['head'],
+                    'branch':result.get('branch'),'recovered_from':row['id']};break
+    if not review:return False
+    with execution.store.transaction():
+        current=execution.store.task(task['name'])
+        if current['generation']!=task['generation'] or current['data']!=data:return False
+        if execution.store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed' AND stage NOT IN ('observe','cleanup')",(task['name'],)).fetchone():return False
+        execution.store.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,?)',
+            (task['name'],task['generation'],task['body'],json.dumps(data),time.time()))
+        restored=data|{'candidate':receipt['candidate'],'candidate_base':receipt['base'],'repair':None,'review':review,'verified':receipt}
+        execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(restored),task['name']))
+        execution.store.db.execute("UPDATE work SET state='obsolete',token=token+1,updated=? WHERE task=? AND stage='implement' AND state IN ('ready','retry')",(time.time(),task['name']))
+        execution.store.event('ci_setup_handoff_recovered',{'head':receipt['head'],'review_work':review['recovered_from']},task['name'],execution.claim['id'])
+    return True
