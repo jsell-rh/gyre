@@ -39,6 +39,8 @@ def source(store):
             apply(store, plan(store, path, recovery))
         from pipeline.fulfillment import reconcile
         reconcile(store, path, revision)
+        from pipeline.repair_budget import reconcile_generated
+        reconcile_generated(store)
         store.set_setting('observed_main', revision)
         return revision
 

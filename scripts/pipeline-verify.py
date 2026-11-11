@@ -113,7 +113,7 @@ def main():
             value=json.loads(receipt.read_text())
         import runpy
         usage=runpy.run_path(str(STAGE/'pipeline-usage.py'))['usage']() if (STAGE/'pipeline-usage.py').exists() else {}
-        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive, 'cache_request':json.loads((STAGE/'cache-request.json').read_text()) if (STAGE/'cache-request.json').exists() else None}))
+        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive, 'cache_request':json.loads((STAGE/'cache-request.json').read_text()) if (STAGE/'cache-request.json').exists() and not (STAGE/'cache-ready.json').exists() else None}))
         return
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}

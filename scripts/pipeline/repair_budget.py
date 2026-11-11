@@ -32,3 +32,25 @@ def check(execution, task, path, candidate, findings):
     if count>=execution.store.setting('repair_stall_limit',3):
         error=Attention('Repair stalled: identical findings and unchanged production source across repeated rounds; retained checkpoint needs diagnosis')
         error.category='repair_stalled';error.diagnostic=record;raise error
+
+
+def reconcile_generated(store):
+    """Re-review old generated-only rejections without another coding round."""
+    resolved=[]
+    for task in store.tasks():
+        data=task['data'];repair=data.get('repair') or {};review=data.get('review') or {}
+        if (repair.get('category')!='review' or review.get('candidate')!=data.get('candidate')
+                or data.get('assessment_pending') or (data.get('requirements') or {}).get('errors')):continue
+        findings,deferred=source_findings(repair.get('details'))
+        if findings or not deferred:continue
+        with store.transaction():
+            current=store.task(task['name'])
+            if current['generation']!=task['generation'] or current['data']!=data:continue
+            if store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(task['name'],)).fetchone():continue
+            store.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,unixepoch())',
+                (task['name'],task['generation'],task['body'],json.dumps(data)))
+            store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data|{'repair':None,'review':None,'verified':None}),task['name']))
+            store.db.execute("UPDATE work SET state='obsolete',token=token+1,updated=unixepoch() WHERE task=? AND stage='implement' AND state IN ('ready','retry')",(task['name'],))
+            store.event('generated_only_review_rescheduled',{'candidate':data['candidate'],'deferred':deferred},task['name'])
+            resolved.append(task['name'])
+    return resolved

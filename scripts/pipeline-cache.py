@@ -12,7 +12,7 @@ import time
 MAX_ARCHIVE=2*1024**3
 MAX_EXPANDED=12*1024**3
 ROOT=Path('/tmp/gyre-build')
-PREFIXES=('target/','cargo/registry/','npm/')
+PREFIXES=('target/','cargo/registry/','npm/_cacache/content-v2/')
 
 
 def digest(path):
