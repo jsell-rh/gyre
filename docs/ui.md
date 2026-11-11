@@ -118,6 +118,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 - 9 node type shapes with distinct colors (package/module/type/interface/function/endpoint/component/table/constant).
 - **Edge type labels**: hover-to-show labels on edges (calls, contains, imports, implements, etc.).
 - Click node to open `DetailPanel` with file path, spec linkage, visibility, doc comment, complexity, churn.
+- **Moldable views** (system-explorer.md §2): `NodeDetailPanel.svelte` routes each node type to a tailored detail view component — **Type View** (`MoldableTypeView.svelte`: spec linkage, last-modified agent + time, fields with clickable types, Implements / Used by, Story, risk footer), **Trait View** (`MoldableTraitView.svelte`: crate, methods with signatures + per-method call counts, implementations with crate attribution, dependents with call-site counts), **Endpoint View** (`MoldableEndpointView.svelte`: route method + path from RoutesTo edge metadata, handler file:line, request/response shapes, call-flow diagram, gates, test count), and **Spec View** (`MoldableSpecView.svelte`: spec content fetched from the ledger and rendered as markdown alongside implementation realization — ✓ realized / ✗ removed nodes, completeness %, stored assertion results, Edit (opens the inline spec editor with the Preview / Publish workflow) and inline History actions). Every type reference navigates to that type, every spec reference opens the spec inline, and every agent reference opens the agent's provenance (app-level agent detail). Shared computation lives in `lib/moldable/model.js`.
 - **Bidirectional nav**: clicking a node with a `spec_path` shows a "Go to spec" button that opens the Specs tab with that spec's detail panel. Spec → Architecture nav is via the Architecture mini canvas in the spec detail.
 - **Sub-tabs: Graph | Briefing** — the Briefing sub-tab is the repo-scoped narrative (same shape as the workspace Briefing section, narrowed server-side via `?repo_id=` on `GET /api/v1/workspaces/:id/briefing` and `POST .../briefing/ask`); deep-linkable via `?subTab=briefing`.
 - `POST /api/v1/repos/{id}/graph/predict` — structural predictions surfaced in canvas and mini canvas.
@@ -161,6 +162,8 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 | `ArchPreviewCanvas.svelte` | Architecture mini canvas in spec detail panel |
 | `EditorSplit.svelte` | Side-by-side spec editor + architecture canvas |
 | `DetailPanel.svelte` | Slide-in right panel for entity drill-in |
+| `NodeDetailPanel.svelte` | Explorer node detail panel — routes node types to the moldable views (system-explorer.md §2) |
+| `moldable/Moldable{Type,Trait,Endpoint,Spec}View.svelte` | Moldable views — tailored detail views per entity type; shared computation in `moldable/model.js` |
 | `InlineChat.svelte` | SSE-driven LLM chat widget |
 | `PresenceAvatars.svelte` | Live presence avatars in status bar |
 | `ScopeBreadcrumb.svelte` | Top bar workspace/repo context breadcrumb |
