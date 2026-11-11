@@ -80,6 +80,7 @@ pub struct ToolCall {
 /// - Lives in gyre-ports. gyre-domain MUST NOT depend on this.
 /// - All concrete implementations live in gyre-adapters.
 /// - gyre-server wires the implementation into AppState.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait LlmPort: Send + Sync {
     /// Generate a single non-streaming completion.

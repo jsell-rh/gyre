@@ -1656,9 +1656,9 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
                     .unwrap(),
-                )
-                .await
-                .unwrap();
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Nested subdirectories inside specs/prompts/ remain allowed.
@@ -2020,12 +2020,11 @@ mod tests {
         // `event: error` — never a `complete` event built from the partial
         // text. Regression for the old `filter_map(|r| r.ok())` that silently
         // dropped the stream error and completed on the truncated text.
-        let app = app_with_llm_adapter(Arc::new(
-            gyre_adapters::MockLlmAdapter::stream_error_after(
+        let app =
+            app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
                 vec!["Good ".into(), "enough ".into(), "to look ".into()],
                 "dropped mid-generation by mock",
-            ),
-        ));
+            )));
         let repo_id = create_repo(&app, "assist-midfail-repo", "ws-assist-midfail").await;
 
         let assist_body = serde_json::json!({

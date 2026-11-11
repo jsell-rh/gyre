@@ -315,7 +315,10 @@ mod tests {
     #[tokio::test]
     async fn mock_predict_json_echo_returns_structured_response() {
         let adapter = MockLlmAdapter::echo();
-        let result = adapter.predict_json("sys", "my question", None).await.unwrap();
+        let result = adapter
+            .predict_json("sys", "my question", None)
+            .await
+            .unwrap();
         assert!(result.is_array());
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1);

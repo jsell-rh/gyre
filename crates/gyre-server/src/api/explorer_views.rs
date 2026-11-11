@@ -566,7 +566,7 @@ pub async fn generate_explorer_view(
         .ok_or_else(|| ApiError::NotFound(format!("workspace {} not found", workspace_id)))?;
     let workspace_name = ws.name.clone();
 
-    let repo_filter: Option<Id> = req.repo_id.as_ref().map(|r| Id::new(r));
+    let repo_filter: Option<Id> = req.repo_id.as_ref().map(Id::new);
     if repo_filter.is_some() {
         // A repo_id from another workspace must not leak its graph into
         // this prompt — validate the caller-supplied repo scope against
@@ -1326,7 +1326,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/explorer-views/generate"
+                    ))
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"question":"How does auth work?"}"#))
@@ -1349,7 +1351,8 @@ mod tests {
             serde_json::from_str(complete.trim_start_matches("data:").trim()).unwrap();
         assert!(payload["view_spec"].is_null(), "invalid spec must null");
         assert_eq!(
-            payload["explanation"], "Generated view was invalid — try rephrasing"
+            payload["explanation"],
+            "Generated view was invalid — try rephrasing"
         );
         assert_eq!(payload["fallback"]["layout"], "list");
     }
@@ -1370,7 +1373,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/explorer-views/generate"
+                    ))
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"question":"How does auth work?"}"#))
@@ -1456,8 +1461,7 @@ mod tests {
                 current_event = evt.trim().to_string();
             } else if let Some(data) = line.strip_prefix("data:") {
                 if current_event == "error" {
-                    let v: serde_json::Value =
-                        serde_json::from_str(data.trim()).unwrap();
+                    let v: serde_json::Value = serde_json::from_str(data.trim()).unwrap();
                     error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
                 } else if current_event == "complete" {
                     complete_count += 1;
@@ -1493,7 +1497,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/explorer-views/generate"
+                    ))
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"question":"q?"}"#))
@@ -1667,19 +1673,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/explorer-views/generate"
+                    ))
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"question":"q?","repo_id":"repo-foreign"}"#,
-                    ))
+                    .body(Body::from(r#"{"question":"q?","repo_id":"repo-foreign"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
-
 
     #[tokio::test]
     async fn generate_explorer_view_rate_limited_after_10_requests() {

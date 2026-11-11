@@ -83,11 +83,20 @@ pub fn substitute_template(template: &str, vars: &[(&str, &str)]) -> String {
 /// Kept pure (env lookup injected) so tests never mutate process-global
 /// environment state (env-mutating integration tests race under cargo
 /// test's multithreaded runner).
-pub fn max_tokens_for_function(function_key: &str, env_lookup: impl Fn(&str) -> Option<String>) -> Option<u32> {
+pub fn max_tokens_for_function(
+    function_key: &str,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Option<u32> {
     let (env_name, default) = match function_key {
-        "explorer-generate" => ("GYRE_LLM_MAX_TOKENS_GENERATE", Some(DEFAULT_MAX_TOKENS_GENERATE)),
+        "explorer-generate" => (
+            "GYRE_LLM_MAX_TOKENS_GENERATE",
+            Some(DEFAULT_MAX_TOKENS_GENERATE),
+        ),
         "briefing-ask" => ("GYRE_LLM_MAX_TOKENS_ASK", Some(DEFAULT_MAX_TOKENS_ASK)),
-        "specs-assist" => ("GYRE_LLM_MAX_TOKENS_ASSIST", Some(DEFAULT_MAX_TOKENS_ASSIST)),
+        "specs-assist" => (
+            "GYRE_LLM_MAX_TOKENS_ASSIST",
+            Some(DEFAULT_MAX_TOKENS_ASSIST),
+        ),
         _ => return None,
     };
     match env_lookup(env_name).and_then(|v| v.parse::<u32>().ok()) {
@@ -175,7 +184,14 @@ pub async fn resolve_prompt_template(
     // workspace (first whose default branch carries the file wins).
     let path = format!("specs/prompts/{function_key}.md");
     let candidates: Vec<gyre_domain::Repository> = match repo_hint {
-        Some(rid) => state.repos.find_by_id(rid).await.ok().flatten().into_iter().collect(),
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect(),
         None => state
             .repos
             .list_by_workspace(workspace_id)
@@ -241,7 +257,14 @@ pub async fn workspace_meta_spec_context(
     // Candidate repos whose git trees may carry the pinned meta-specs: the
     // request's own repo first, else every repo in the workspace.
     let repos: Vec<gyre_domain::Repository> = match repo_hint {
-        Some(rid) => state.repos.find_by_id(rid).await.ok().flatten().into_iter().collect(),
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect(),
         None => state
             .repos
             .list_by_workspace(workspace_id)
@@ -261,12 +284,7 @@ pub async fn workspace_meta_spec_context(
         let arr: Vec<(String, String)> = match &entries {
             serde_json::Value::Object(map) => map
                 .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v["sha"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
+                .map(|(k, v)| (k.clone(), v["sha"].as_str().unwrap_or_default().to_string()))
                 .collect(),
             serde_json::Value::Array(items) => items
                 .iter()
@@ -288,8 +306,7 @@ pub async fn workspace_meta_spec_context(
                 Some(content) => {
                     // Each bound meta-spec contributes its content, capped
                     // so one large pin cannot crowd out the spec itself.
-                    let capped: String =
-                        content.lines().take(80).collect::<Vec<&str>>().join("\n");
+                    let capped: String = content.lines().take(80).collect::<Vec<&str>>().join("\n");
                     format!("--- {path} ---\n{capped}\n")
                 }
                 None => format!("--- {path} ---\n(bound but unreadable in the repo git tree)\n"),
@@ -374,7 +391,10 @@ pub async fn workspace_graph_summary_parts(
 
     let total: u64 = counts.values().map(|c| *c as u64).sum();
     if counts.is_empty() {
-        return ("No graph nodes indexed for this workspace yet.".to_string(), 0);
+        return (
+            "No graph nodes indexed for this workspace yet.".to_string(),
+            0,
+        );
     }
 
     let mut lines: Vec<String> = counts
@@ -425,10 +445,7 @@ mod tests {
     fn substitute_does_not_partial_match_different_names() {
         // {{node_count}} must not clobber {{node_count_extra}}-style names:
         // replacement is exact-brace, not substring.
-        let out = substitute_template(
-            "{{a}} {{ab}}",
-            &[("a", "1"), ("ab", "2")],
-        );
+        let out = substitute_template("{{a}} {{ab}}", &[("a", "1"), ("ab", "2")]);
         assert_eq!(out, "1 2");
     }
 
@@ -459,10 +476,7 @@ mod tests {
             "GYRE_LLM_MAX_TOKENS_GENERATE" => Some("500".to_string()),
             _ => None::<String>,
         };
-        assert_eq!(
-            max_tokens_for_function("explorer-generate", env),
-            Some(500)
-        );
+        assert_eq!(max_tokens_for_function("explorer-generate", env), Some(500));
         // Other endpoints untouched by that env var.
         let none = |_: &str| None::<String>;
         assert_eq!(max_tokens_for_function("briefing-ask", none), Some(4000));
@@ -523,8 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_template_loads_from_repo_git_tree_with_sha() {
-        let (state, ws_id) =
-            state_with_prompt_in_git("# Git template\nvars: {{node_count}}").await;
+        let (state, ws_id) = state_with_prompt_in_git("# Git template\nvars: {{node_count}}").await;
 
         let resolved =
             resolve_prompt_template(&state, &ws_id, None, "briefing-ask", "FALLBACK").await;
@@ -556,12 +569,7 @@ mod tests {
 
         state
             .prompt_templates
-            .upsert_workspace(
-                &ws_id,
-                "briefing-ask",
-                "from db",
-                &Id::new("user-1"),
-            )
+            .upsert_workspace(&ws_id, "briefing-ask", "from db", &Id::new("user-1"))
             .await
             .unwrap();
 
