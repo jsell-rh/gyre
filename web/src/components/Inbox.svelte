@@ -145,6 +145,7 @@
         SpecChanged: 'spec_changed',
         MetaSpecDrift: 'meta_spec_drift',
         SpecAssertionFailure: 'spec_assertion_failure',
+        TrustSuggestion: 'trust_suggestion',
       };
       data = data.map(n => ({
         ...n,

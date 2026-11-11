@@ -466,8 +466,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_cross_repo_task` | Create a cross-repo coordination task scoped to the caller's workspace (task-093). Workspace-orchestrator JWT only. Params: `title` (required), `description`, `priority`, `labels`. |
 | `gyre_decompose_spec` | Decompose a parent task into Implementation subtasks bound to the caller's repo (task-093). Repo-orchestrator JWT only. Params: `parent_task_id` (required), `subtasks` (array of `{title, description?, priority?, order?}`). |
 | `gyre_spawn_worker` | Spawn a worker agent for a task in the caller's repo (task-093). Repo-orchestrator JWT only; delegates to the `/agents/spawn` core. Params: `task_id`, `name`, `branch` (required), plus optional spawn fields. |
-| `graph_concept` | Search knowledge graph by concept name. Params: `concept` (required), `repo_id` or `workspace_id` (one required), `depth` (optional, default 2). Returns matching nodes and edges. (HSI §11) |
-| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
+| `graph_concept` | Search knowledge graph by concept name (manifest-based concept-view projection). Params: `concept` (required), `repo_id` or `workspace_id` (one required). Returns matching nodes and edges. Also callable and listed as `graph.concept` — the HSI §11 parity-table spelling. (HSI §11) |
+| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. Also callable and listed as `spec.assist` — the HSI §11 parity-table spelling. (HSI §11) |
 
 **Available resources** (from `resources/list`):
 
