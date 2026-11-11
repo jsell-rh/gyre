@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1"]
 ---
 
 ## Spec Excerpt
@@ -304,6 +304,38 @@ Repaired the two round-3 review findings:
   `SPECS_PATH_ROUTE`/`REPOS_ID_ROUTE` consts so the frozen duplicate
   `/api/v1/...` literal count stays at 17.
 
+### Verification-repair round (commit 7502a9eec, after the base-65f71e657
+merge)
+
+Repaired the verification findings from the prior candidate (attempt
+0b0e5cd7, checks.sh exit 1; all architecture/registry/invariant scripts
+and the web build had passed — the failures were rustfmt and clippy
+only):
+
+- **rustfmt** — the changed-lines check flagged formatting drift in
+  `postgres/policy.rs`, `sqlite/policy.rs`, `abac_middleware.rs`,
+  `api/spawn.rs`, `api/workspaces.rs`, `mem.rs`, and `policy_engine.rs`;
+  all are now rustfmt-clean (`rustfmt --check` passes on every touched
+  file).
+- **clippy `empty_line_after_doc_comments`** (abac_middleware) — the
+  `extract_path_attributes` doc block was detached from its fn by the
+  two path-prefix consts inserted between them; the consts now sit
+  above the doc block so it attaches directly to the function it
+  documents.
+- **clippy `unused_must_use`** (abac_middleware tests) — the seven bare
+  `h.block_on(seed_builtin_policies(&state));` statements dropped the
+  `anyhow::Result`; they now bind it with `.expect("seed")` like every
+  sibling call in the file, so a seeding failure fails the test instead
+  of being silently swallowed.
+- **clippy `too_many_arguments`** (auth.rs `mint_orchestrator`, 9/7) —
+  added the same `#[allow(clippy::too_many_arguments)]` attribute the
+  sibling `mint_with_workload` already carries.
+
+No behavior change. Probes run at this round's head (build wrapper
+blocks server test binaries here, so compilation-level probes only):
+`cargo check -p gyre-server --lib` and `cargo check -p gyre-server
+--tests` both clean; `rustfmt --check` clean on all touched files.
+
 ### Test evidence (run at merge head ec1f694d5, after the base-dbf9edaea
 rebase)
 
@@ -329,7 +361,22 @@ rebase)
   `check-unwired-port-methods`, and `check-task-commit-attribution`.
 
 Full `cargo test --all` (integration/e2e binaries) and GitHub CI remain
-verification/publication gates.
+verification/publication gates. For the current head (7502a9eec, after
+the base-65f71e657 merge and the verification-repair round) the verifier
+must execute:
+
+- `cargo test -p gyre-server --lib -- abac policy_engine` (the focused
+  ABAC suites; the base merge touched `abac_middleware.rs` additively —
+  new resolver entries for search suggest/facets and commit-signature
+  verification routes, `bearer_token` on test auth contexts — and this
+  round's changes are formatting, doc-comment attachment, `.expect`
+  bindings in tests, and one `#[allow]` attribute);
+- `cargo test -p gyre-server --lib` in full (prior rounds: 1694 passed /
+  0 failed at ec1f694d5; the base contributed additional tests since);
+- `cargo check -p gyre-cli`;
+- the repo invariant scripts (all passed at the prior candidate's head;
+  nothing in this round touches registries, migrations, or exemption
+  files).
 
 ### Earlier repair rounds
 
