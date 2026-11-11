@@ -408,8 +408,13 @@ pub(crate) async fn spawn_agent_core(
         return Err(ApiError::Forbidden(reason));
     }
 
-    // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
+    // M22.2 / agent-runtime.md §4: Budget enforcement — check workspace
+    // concurrent-agent and daily limits, then the repo-level budget
+    // override (inherits the workspace limit when unset).
     super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
+        .await
+        .map_err(ApiError::TooManyRequests)?;
+    super::budget::check_repo_spawn_budget(&state, &repo)
         .await
         .map_err(ApiError::TooManyRequests)?;
 
@@ -927,6 +932,15 @@ pub(crate) async fn spawn_agent_core(
                 set_sha: prompt_set.set_sha.clone(),
                 assembled_at: now,
                 meta_specs_used: prompt_set.sections.iter().map(|s| s.used.clone()).collect(),
+                // agent-runtime.md §5: the rendered three-section prompt —
+                // meta-spec system prompt + system-managed protocol —
+                // recorded verbatim for the MCP `system://persona` /
+                // `system://protocol` prompt delivery.
+                rendered_prompt: Some(format!(
+                    "{}\n{}",
+                    crate::prompt_assembly::render_system_prompt(&prompt_set.sections),
+                    crate::prompt_assembly::render_protocol_prompt()
+                )),
             },
         )
         .await;
@@ -1226,6 +1240,14 @@ pub(crate) async fn launch_agent_process(
                 prompt_set.set_sha.clone(),
             );
         }
+        // agent-runtime.md §5 Agent Prompt Structure: the PROTOCOL section
+        // (Ralph loop rules, MCP tools, heartbeat, escalation, completion)
+        // is system-managed — injected at spawn and served on demand via
+        // the MCP `system://protocol` prompt.
+        container_env.insert(
+            "GYRE_PROTOCOL_PROMPT".to_string(),
+            crate::prompt_assembly::render_protocol_prompt(),
+        );
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
         container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
         container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
@@ -2235,6 +2257,9 @@ pub async fn complete_agent(
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
+    // agent-runtime.md §4 What's Tracked: charge the agent's wall-clock
+    // compute time (spawn → complete) to the workspace, in minutes.
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
@@ -2333,6 +2358,25 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
+    // agent-runtime.md §4 Cascade: agent usage charges against the repo's
+    // budget. Worker agents link their repo via the task (repo orchestrators
+    // carry `agent.repo_id`), so resolve the repo from the current task when
+    // the agent record has no direct binding.
+    let repo_id = match agent.repo_id.clone() {
+        Some(r) => Some(r),
+        None => match agent.current_task_id.as_ref() {
+            Some(task_id) => state
+                .tasks
+                .find_by_id(task_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.repo_id)
+                .filter(|r| !r.to_string().is_empty()),
+            None => None,
+        },
+    };
+
     // Platform-model.md §Budget Tracking: every usage report appends one
     // per-call budget record and rolls into the workspace + tenant
     // tokens_used_today / cost_today counters (the input check_spawn_budget
@@ -2342,7 +2386,7 @@ pub async fn record_agent_usage(
         &super::budget::LlmCallUsage {
             tenant_id: workspace.tenant_id.clone(),
             workspace_id: agent.workspace_id.clone(),
-            repo_id: agent.repo_id.clone(),
+            repo_id,
             agent_id: Some(agent.id.clone()),
             task_id: agent.current_task_id.clone(),
             usage_type: "agent_run".to_string(),
@@ -2394,6 +2438,8 @@ pub async fn fail_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → fail).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     // Platform Model §7: Failed is a terminal run-end (agent-runtime.md §1),
     // so the run's task-scoped ephemeral secrets must not outlive it —
@@ -2486,6 +2532,8 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → stop).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::OK)
 }
@@ -6089,6 +6137,20 @@ exit 1\n"
         assert!(
             env_prompt.contains(prompt_text),
             "rendered prompt must contain the seeded persona prompt text:\n{env_prompt}"
+        );
+
+        // agent-runtime.md §5: the system-managed PROTOCOL section is
+        // injected at spawn alongside the meta-spec system prompt.
+        let env_protocol = env
+            .get("GYRE_PROTOCOL_PROMPT")
+            .expect("pod manifest must carry GYRE_PROTOCOL_PROMPT");
+        assert!(
+            env_protocol.contains("Ralph loop rules"),
+            "protocol prompt must carry the Ralph loop rules:\n{env_protocol}"
+        );
+        assert!(
+            env_protocol.contains("agent.complete"),
+            "protocol prompt must carry completion signaling:\n{env_protocol}"
         );
     }
 

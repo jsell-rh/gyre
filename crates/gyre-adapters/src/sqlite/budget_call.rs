@@ -116,6 +116,23 @@ impl BudgetCallRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>> {
+        let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = budget_call_records::table
+                .filter(budget_call_records::tenant_id.eq(&tenant_id))
+                .filter(budget_call_records::timestamp.ge(since as i64))
+                .order(budget_call_records::timestamp.desc())
+                .limit(limit)
+                .load::<BudgetCallRow>(&mut *conn)
+                .context("list budget_call_records since cutoff")?;
+            Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +203,29 @@ mod tests {
         assert_eq!(since.len(), 2);
         let limited = s.list_by_workspace("ws-1", 0, 1).await.unwrap();
         assert_eq!(limited.len(), 1);
+    }
+
+    /// TASK-119 (agent-runtime.md §4 Budget Reset): list_since returns
+    /// records across ALL workspaces inside the rolling window, newest
+    /// first — the input the hourly window job recomputes counters from.
+    #[tokio::test]
+    async fn list_since_spans_workspaces_inside_the_window() {
+        let (_tmp, s) = setup();
+        for (id, ws, ts) in [("a", "ws-1", 10), ("b", "ws-2", 20), ("c", "ws-1", 30)] {
+            s.save(&record(id, ws, ts)).await.unwrap();
+        }
+
+        let in_window = s.list_since(15, 10).await.unwrap();
+        assert_eq!(
+            in_window.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"],
+            "records older than the cutoff drop out; newest first"
+        );
+
+        let all = s.list_since(0, 10).await.unwrap();
+        assert_eq!(all.len(), 3);
+        let limited = s.list_since(0, 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
     }
 
     #[tokio::test]

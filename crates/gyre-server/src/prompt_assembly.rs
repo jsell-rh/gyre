@@ -305,6 +305,35 @@ pub fn render_system_prompt(sections: &[PromptSection]) -> String {
     out
 }
 
+/// Render the system-managed PROTOCOL section of the agent prompt
+/// (agent-runtime.md §5): Ralph loop rules, MCP tool usage, heartbeat,
+/// escalation, and completion signaling. Not user-editable and not part of
+/// the meta-spec registry — it defines how agents interact with Gyre
+/// infrastructure. Delivered at spawn (GYRE_PROTOCOL_PROMPT) and on demand
+/// via the MCP `system://protocol` prompt.
+pub fn render_protocol_prompt() -> String {
+    let mut out = String::new();
+    out.push_str("# Gyre Agent Protocol (system-managed)\n\n");
+    out.push_str("## Ralph loop rules\n");
+    out.push_str("- Read your task via the MCP tools, implement the change, run focused tests.\n");
+    out.push_str("- Commit with conventional commit messages; push your branch.\n");
+    out.push_str("- Signal completion with `agent.complete` — never leave work uncommitted.\n");
+    out.push_str("- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n");
+    out.push_str("## MCP tools\n");
+    out.push_str("- `gyre_task_read` / task context: your task, spec ref, acceptance criteria.\n");
+    out.push_str("- `gyre_agent_complete`: create the completion MR and start review.\n");
+    out.push_str("- `gyre_agent_escalate`: ask a human when blocked on a decision.\n");
+    out.push_str("- See `tools/list` for the full set (resources, specs, graph, inbox).\n\n");
+    out.push_str("## Heartbeat\n");
+    out.push_str("- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead.\n\n");
+    out.push_str("## Escalation\n");
+    out.push_str("- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n");
+    out.push_str("  a decision requires human judgment, or infrastructure blocks progress.\n\n");
+    out.push_str("## Completion\n");
+    out.push_str("- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n");
+    out
+}
+
 /// Stored prompt-set record (kv namespace "agent_meta_spec_sets"), keyed by
 /// agent id. The merge processor reads this at merge time to populate
 /// `MergeAttestation.meta_specs_used`.
@@ -316,6 +345,14 @@ pub struct AgentPromptSetRecord {
     pub set_sha: String,
     pub assembled_at: u64,
     pub meta_specs_used: Vec<MetaSpecUsed>,
+    /// The rendered three-section system prompt (agent-runtime.md §5) as
+    /// delivered to the agent at spawn — meta-spec sections plus the
+    /// system-managed protocol section. Served verbatim by the MCP
+    /// `system://persona` prompt so on-demand reads return exactly what
+    /// the pinned assembly produced, not a re-render at current versions.
+    /// `None` on records written before task-119.
+    #[serde(default)]
+    pub rendered_prompt: Option<String>,
 }
 
 pub const PROMPT_SET_NAMESPACE: &str = "agent_meta_spec_sets";
@@ -964,6 +1001,7 @@ mod tests {
                 required: true,
                 scope: "global".to_string(),
             }],
+            rendered_prompt: None,
         };
         store_prompt_set_record(&state, &rec).await;
         let loaded = load_prompt_set_record(&state, "ag-1")
@@ -972,5 +1010,44 @@ mod tests {
         assert_eq!(loaded.set_sha, "abc");
         assert_eq!(loaded.meta_specs_used.len(), 1);
         assert_eq!(loaded.meta_specs_used[0].version, 3);
+    }
+
+    /// agent-runtime.md §5: the record retains the rendered prompt so the
+    /// MCP `system://persona` prompt can serve the pinned assembly verbatim.
+    #[tokio::test]
+    async fn record_retains_rendered_prompt() {
+        let state = test_state();
+        let rendered = format!(
+            "{}\n{}",
+            render_system_prompt(&[]),
+            render_protocol_prompt()
+        );
+        let rec = AgentPromptSetRecord {
+            agent_id: Id::new("ag-2"),
+            task_id: Id::new("t2"),
+            spec_path: None,
+            set_sha: "def".to_string(),
+            assembled_at: 43,
+            meta_specs_used: vec![],
+            rendered_prompt: Some(rendered),
+        };
+        store_prompt_set_record(&state, &rec).await;
+        let loaded = load_prompt_set_record(&state, "ag-2")
+            .await
+            .expect("record must load");
+        assert_eq!(loaded.rendered_prompt, rec.rendered_prompt);
+    }
+
+    /// The protocol section is system-managed content (§5): it must cover
+    /// the Ralph loop, MCP tools, heartbeat, escalation, and completion.
+    #[test]
+    fn protocol_prompt_covers_the_five_protocol_areas() {
+        let p = render_protocol_prompt();
+        assert!(p.contains("Ralph loop rules"));
+        assert!(p.contains("MCP tools"));
+        assert!(p.contains("Heartbeat"));
+        assert!(p.contains("Escalation"));
+        assert!(p.contains("Completion"));
+        assert!(p.contains("60 seconds"));
     }
 }

@@ -1461,6 +1461,9 @@ async fn complete_via_mr(
     crate::agent_audit::revoke_agent_token(state, agent, "agent_completed").await;
     // Release the workspace's active-agent budget slot.
     crate::api::budget::decrement_active_agents(state, &repo.workspace_id.to_string()).await;
+    // agent-runtime.md §4 What's Tracked: wall-clock compute time
+    // (spawn → complete), same as the REST completion surface.
+    crate::api::budget::record_compute_minutes_for_agent(state, agent).await;
     Some(mr)
 }
 
@@ -2666,7 +2669,11 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+async fn handle_spec_assist(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
     let repo_id = match require_str(args, "repo_id") {
         Ok(r) => r.to_string(),
         Err(_) => return tool_error("missing required field: repo_id"),
@@ -3068,6 +3075,243 @@ fn resource_definitions() -> Value {
     })
 }
 
+// ── MCP Prompts (agent-runtime.md §5 / platform-model.md §4) ──────────────────
+
+/// The four system prompts every Gyre agent can pull on demand
+/// (platform-model.md §4; agent-runtime.md §5 maps the three-section
+/// prompt structure onto them):
+/// - `system://persona`   — the assembled meta-spec prompt set
+/// - `system://protocol`  — the system-managed protocol section
+/// - `system://context`   — task context, gate failures, inbox messages
+/// - `system://constraints` — budget limits and operational parameters
+fn prompt_definitions() -> Value {
+    json!({
+        "prompts": [
+            {
+                "name": "system://persona",
+                "description": "The assembled meta-spec prompt set this agent was spawned under (required tenant + workspace meta-specs and spec-level bindings at pinned versions).",
+            },
+            {
+                "name": "system://protocol",
+                "description": "System-managed protocol: Ralph loop rules, MCP tool usage, heartbeat requirement, escalation rules, completion signaling.",
+            },
+            {
+                "name": "system://context",
+                "description": "Task context: task details, spec ref, branch/repo context, gate failure messages from previous iterations, inbox messages.",
+            },
+            {
+                "name": "system://constraints",
+                "description": "Budget limits and operational parameters: workspace budget limits and usage, agent lifetime, iteration ceiling, scope boundaries.",
+            }
+        ]
+    })
+}
+
+/// Wrap prompt content in an MCP `prompts/get` result.
+fn prompt_result(description: &str, text: String) -> Value {
+    json!({
+        "description": description,
+        "messages": [
+            {
+                "role": "user",
+                "content": { "type": "text", "text": text }
+            }
+        ]
+    })
+}
+
+/// `system://persona` — the assembled meta-spec prompt set, served verbatim
+/// from the spawn-time record (pinned versions, not a re-render).
+async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
+        Some(record) => match record.rendered_prompt {
+            Some(rendered) => prompt_result(
+                "Assembled meta-spec prompt set (pinned at spawn)",
+                rendered,
+            ),
+            None => prompt_result(
+                "Assembled meta-spec prompt set (pinned at spawn)",
+                format!(
+                    "# Meta-spec set {set_sha}\n(assembled {assembled_at}; \
+                     pre-task-119 record — the rendered text was not retained)",
+                    set_sha = record.set_sha,
+                    assembled_at = record.assembled_at,
+                ),
+            ),
+        },
+        None => prompt_result(
+            "Assembled meta-spec prompt set (pinned at spawn)",
+            "No meta-spec prompt set was assembled for this agent (no \
+             required meta-specs and no spec-level bindings applied at spawn)."
+                .to_string(),
+        ),
+    }
+}
+
+/// `system://context` — task details, spec ref, branch/repo context, gate
+/// failure messages from previous iterations, and inbox messages.
+async fn prompt_context(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let mut text = String::from("# Task Context\n\n");
+    let agent = state.agents.find_by_id(&Id::new(auth.agent_id.clone())).await.ok().flatten();
+    let Some(agent) = agent else {
+        return prompt_result(
+            "Task context",
+            "No agent record found for this identity — task context is agent-scoped."
+                .to_string(),
+        );
+    };
+
+    match agent.current_task_id.as_ref() {
+        Some(task_id) => match state.tasks.find_by_id(task_id).await {
+            Ok(Some(task)) => {
+                text.push_str(&format!("## Task {}\n", task.id.as_str()));
+                text.push_str(&format!("- Title: {}\n", task.title));
+                if let Some(desc) = task.description.as_ref() {
+                    text.push_str(&format!("- Description: {desc}\n"));
+                }
+                text.push_str(&format!(
+                    "- Status: {}\n",
+                    serde_json::to_string(&task.status).unwrap_or_default()
+                ));
+                text.push_str(&format!(
+                    "- Priority: {}\n",
+                    serde_json::to_string(&task.priority).unwrap_or_default()
+                ));
+                if let Some(spec_ref) = task.spec_ref.as_ref() {
+                    text.push_str(&format!("- Spec ref (pinned): {spec_ref}\n"));
+                }
+                if let Some(spec_path) = task.spec_path.as_ref() {
+                    text.push_str(&format!("- Spec path: {spec_path}\n"));
+                }
+                text.push_str(&format!("- Iteration: {}\n", agent.iteration));
+            }
+            _ => text.push_str("## Task\n(current task record unavailable)\n"),
+        },
+        None => text.push_str("## Task\n(no task assigned)\n"),
+    }
+
+    text.push_str("\n## Branch / repo context\n");
+    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+        for wt in worktrees {
+            text.push_str(&format!(
+                "- worktree branch {} (repo {})\n",
+                wt.branch,
+                wt.repository_id.as_str()
+            ));
+        }
+    }
+
+    text.push_str("\n## Gate failure messages & inbox (unacknowledged)\n");
+    match state.messages.list_unacked(&agent.id, 20).await {
+        Ok(msgs) if !msgs.is_empty() => {
+            for m in msgs {
+                text.push_str(&format!(
+                    "- [{}] {}\n",
+                    m.kind.as_str(),
+                    m.payload
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        _ => text.push_str("(none)\n"),
+    }
+
+    prompt_result("Task context", text)
+}
+
+/// `system://constraints` — budget limits and operational parameters.
+async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let mut text = String::from("# Constraints\n\n");
+    let agent = state.agents.find_by_id(&Id::new(auth.agent_id.clone())).await.ok().flatten();
+    let Some(agent) = agent else {
+        return prompt_result(
+            "Budget limits and operational parameters",
+            "No agent record found for this identity — constraints are agent-scoped."
+                .to_string(),
+        );
+    };
+
+    text.push_str("## Scope boundaries\n");
+    text.push_str(&format!("- Workspace: {}\n", agent.workspace_id.as_str()));
+    if let Some(repo_id) = agent.repo_id.as_ref() {
+        text.push_str(&format!("- Repo: {}\n", repo_id.as_str()));
+    }
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        text.push_str(&format!("- Task: {}\n", task_id.as_str()));
+    }
+
+    text.push_str("\n## Workspace budget\n");
+    let ws_key = crate::api::budget::workspace_key(&agent.workspace_id.to_string());
+    let config = state
+        .budget_configs
+        .get_config(&ws_key)
+        .await
+        .ok()
+        .flatten();
+    let usage = state.budget_usages.get_usage(&ws_key).await.ok().flatten();
+    match (config, usage) {
+        (Some(config), usage) => {
+            text.push_str(&format!(
+                "- max_tokens_per_day: {}\n",
+                config.max_tokens_per_day.map(|v| v.to_string()).unwrap_or_else(|| "unlimited".into())
+            ));
+            text.push_str(&format!(
+                "- max_cost_per_day: {}\n",
+                config.max_cost_per_day.map(|v| format!("${v:.4}")).unwrap_or_else(|| "unlimited".into())
+            ));
+            text.push_str(&format!(
+                "- max_concurrent_agents: {}\n",
+                config.max_concurrent_agents.map(|v| v.to_string()).unwrap_or_else(|| "unlimited".into())
+            ));
+            if let Some(u) = usage {
+                text.push_str(&format!(
+                    "- used today: {} tokens, ${:.4}, {} active agents, {} compute minutes\n",
+                    u.tokens_used_today, u.cost_today, u.active_agents, u.compute_minutes
+                ));
+            }
+        }
+        (None, _) => text.push_str("(no workspace budget configured)\n"),
+    }
+
+    text.push_str("\n## Operational parameters\n");
+    match agent.lifetime_budget_secs {
+        Some(secs) => text.push_str(&format!("- Lifetime budget: {secs}s\n")),
+        None => text.push_str("- Lifetime budget: unlimited\n"),
+    }
+    // Iteration ceiling: repo override, else the server default (10).
+    let mut max_iterations = 10;
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if let Ok(Some(repo)) = state.repos.find_by_id(&task.repo_id).await {
+                if let Some(repo_max) = repo.max_agent_iterations {
+                    max_iterations = repo_max;
+                }
+            }
+        }
+    }
+    text.push_str(&format!("- Max iterations (Ralph loop): {max_iterations}\n"));
+
+    prompt_result("Budget limits and operational parameters", text)
+}
+
+/// Dispatch `prompts/get`. Prompt content is agent-scoped: it resolves the
+/// caller's agent record (JWT claims or agent id) — one agent can never
+/// read another agent's context or constraints.
+async fn handle_prompt_get(state: &AppState, auth: &AuthenticatedAgent, name: &str) -> Value {
+    match name {
+        "system://persona" => prompt_persona(state, auth).await,
+        "system://protocol" => prompt_result(
+            "System-managed protocol section",
+            crate::prompt_assembly::render_protocol_prompt(),
+        ),
+        "system://context" => prompt_context(state, auth).await,
+        "system://constraints" => prompt_constraints(state, auth).await,
+        other => json!({"error": format!("unknown prompt: {other}")}),
+    }
+}
+
 async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: &str) -> Value {
     if uri == "conversation://context" {
         // HSI §4: Serve the original agent's conversation to the interrogation agent.
@@ -3399,13 +3643,25 @@ pub async fn mcp_handler(
                 },
                 "capabilities": {
                     "tools": {},
-                    "resources": {}
+                    "resources": {},
+                    "prompts": {}
                 }
             }),
         ),
         // Client sends this after init — no response body needed but we ack
         "notifications/initialized" => JsonRpcResponse::ok(id, json!(null)),
         "tools/list" => JsonRpcResponse::ok(id, tool_definitions()),
+        "prompts/list" => JsonRpcResponse::ok(id, prompt_definitions()),
+        "prompts/get" => {
+            let params = req.params.unwrap_or(json!({}));
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: name")
+            } else {
+                let result = handle_prompt_get(&state, &auth, name).await;
+                JsonRpcResponse::ok(id, result)
+            }
+        }
         "resources/list" => JsonRpcResponse::ok(id, resource_definitions()),
         "resources/read" => {
             let params = req.params.unwrap_or(json!({}));
@@ -3735,6 +3991,126 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── task-119: MCP prompts (agent-runtime.md §5 / platform-model.md §4) ──
+
+    #[tokio::test]
+    async fn mcp_prompts_list_returns_four_system_prompts() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "prompts/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let prompts = json["result"]["prompts"].as_array().unwrap();
+        let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        for expected in [
+            "system://persona",
+            "system://protocol",
+            "system://context",
+            "system://constraints",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "prompts/list must advertise {expected}, got: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_advertises_prompts_capability() {
+        let (_status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 72,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": { "name": "t", "version": "0" },
+                    "capabilities": {}
+                }
+            }),
+        )
+        .await;
+        assert!(json["result"]["capabilities"]["prompts"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_protocol_delivers_ralph_loop_rules() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 73,
+                "method": "prompts/get",
+                "params": { "name": "system://protocol" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("Ralph loop rules"), "protocol prompt: {text}");
+        assert!(text.contains("heartbeat"), "protocol must cover heartbeat: {text}");
+        assert!(text.contains("agent.complete"), "protocol must cover completion: {text}");
+        assert!(text.contains("escalate"), "protocol must cover escalation: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_persona_without_record_is_truthful() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 74,
+                "method": "prompts/get",
+                "params": { "name": "system://persona" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("No meta-spec prompt set"),
+            "an agent with no assembled set must get a truthful answer, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_unknown_prompt_errors() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 75,
+                "method": "prompts/get",
+                "params": { "name": "system://nonexistent" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_missing_name_is_invalid_params() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 76,
+                "method": "prompts/get",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], INVALID_PARAMS);
     }
 
     #[tokio::test]

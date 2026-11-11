@@ -25,4 +25,11 @@ pub trait BudgetCallRepository: Send + Sync {
         since: u64,
         limit: i64,
     ) -> Result<Vec<BudgetCallRecord>>;
+
+    /// List records across ALL workspaces, newest first, filtered to
+    /// `timestamp >= since`. `limit` caps the number of rows returned.
+    /// Input to the hourly rolling-24h-window budget reset job
+    /// (agent-runtime.md §4 Budget Reset), which recomputes the aggregate
+    /// counters from the per-call records inside the window.
+    async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>>;
 }

@@ -29,6 +29,12 @@ pub fn tenant_key() -> &'static str {
     "tenant:global"
 }
 
+/// Budget usage key for a repo-level budget (agent-runtime.md §4 Cascade:
+/// per-agent usage is charged to the repo and rolled up to the workspace).
+pub fn repo_key(repo_id: &str) -> String {
+    format!("repo:{repo_id}")
+}
+
 fn new_ws_usage(entity_id: &str) -> BudgetUsage {
     BudgetUsage {
         entity_type: "workspace".into(),
@@ -37,6 +43,7 @@ fn new_ws_usage(entity_id: &str) -> BudgetUsage {
         cost_today: 0.0,
         active_agents: 0,
         period_start: now_secs(),
+        compute_minutes: 0,
     }
 }
 
@@ -48,6 +55,7 @@ fn new_tenant_usage() -> BudgetUsage {
         cost_today: 0.0,
         active_agents: 0,
         period_start: now_secs(),
+        compute_minutes: 0,
     }
 }
 
@@ -164,6 +172,16 @@ pub async fn set_workspace_budget(
                 )));
             }
         }
+        if let (Some(ws), Some(t)) = (
+            new_config.max_agent_lifetime_secs,
+            tenant.max_agent_lifetime_secs,
+        ) {
+            if ws > t {
+                return Err(ApiError::InvalidInput(format!(
+                    "workspace max_agent_lifetime_secs ({ws}) exceeds tenant limit ({t})"
+                )));
+            }
+        }
     }
 
     let key = workspace_key(&id);
@@ -178,6 +196,17 @@ pub async fn set_workspace_budget(
         .await
         .map_err(ApiError::Internal)?
         .unwrap_or_else(|| new_ws_usage(&id));
+
+    // agent-runtime.md §4 Enforcement Levels — "Beyond limit": a budget
+    // reduced below current usage while agents are running triggers an
+    // immediate hard kill; a reduction to exactly 100% starts the graceful
+    // stop. Enforcement runs synchronously so the PUT response reflects
+    // the post-change enforcement state.
+    // Fire-and-forget side-effecting enforcement (kills agents, emits
+    // messages); the PUT result is the saved config, the kill outcome is
+    // independently observable in agent status.
+    enforce_workspace_budget(&state, &id, None, None, BUDGET_GRACE_PERIOD_SECS).await; // enforcement:ok — side-effecting kill/notify, no decision to consume
+
     Ok(Json(BudgetResponse {
         entity_type: "workspace".into(),
         entity_id: id,
@@ -251,63 +280,87 @@ pub async fn budget_summary(
 // ── Internal helpers (called from spawn handler and cost recording) ───────────
 
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
+/// Uses the EFFECTIVE workspace limits (tighter of workspace config and the
+/// tenant ceiling) so a lowered tenant ceiling binds immediately.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
     let key = workspace_key(project_id);
+    let config = effective_workspace_config(state, &key).await;
+    let usage = state
+        .budget_usages
+        .get_usage(&key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| new_ws_usage(project_id));
 
-    if let Ok(Some(config)) = state.budget_configs.get_config(&key).await {
-        let usage = state
-            .budget_usages
-            .get_usage(&key)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| new_ws_usage(project_id));
-
-        if let Some(max) = config.max_concurrent_agents {
-            if usage.active_agents >= max {
-                return Err(format!(
-                    "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
-                    usage.active_agents
-                ));
-            }
+    if let Some(max) = config.max_concurrent_agents {
+        if usage.active_agents >= max {
+            return Err(format!(
+                "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
+                usage.active_agents
+            ));
         }
-        if let Some(max_tokens) = config.max_tokens_per_day {
-            if usage.tokens_used_today >= max_tokens {
-                return Err(format!(
-                    "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
-                    usage.tokens_used_today
-                ));
-            }
+    }
+    if let Some(max_tokens) = config.max_tokens_per_day {
+        if usage.tokens_used_today >= max_tokens {
+            return Err(format!(
+                "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
+                usage.tokens_used_today
+            ));
         }
-        if let Some(max_cost) = config.max_cost_per_day {
-            if usage.cost_today >= max_cost {
-                return Err(format!(
-                    "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
-                    usage.cost_today
-                ));
-            }
+    }
+    if let Some(max_cost) = config.max_cost_per_day {
+        if usage.cost_today >= max_cost {
+            return Err(format!(
+                "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
+                usage.cost_today
+            ));
         }
     }
 
-    // Tenant-level concurrent agent check.
-    if let Ok(Some(t_config)) = state.budget_configs.get_config(tenant_key()).await {
-        if let Some(max) = t_config.max_concurrent_agents {
-            let current = state
-                .budget_usages
-                .get_usage(tenant_key())
-                .await
-                .ok()
-                .flatten()
-                .map(|u| u.active_agents)
-                .unwrap_or(0);
-            if current >= max {
-                return Err(format!(
-                    "tenant budget exceeded: max_concurrent_agents={max} ({current} active)"
-                ));
-            }
+    Ok(())
+}
+
+/// Check a repo-level budget override (agent-runtime.md §4 Cascade: "When no
+/// repo-level budget is set, the repo inherits the workspace limit" — the
+/// workspace check in `check_spawn_budget` covers that case). Called at
+/// agent spawn time alongside the workspace check.
+pub async fn check_repo_spawn_budget(state: &AppState, repo: &gyre_domain::Repository) -> Result<(), String> {
+    let Some(budget) = repo.budget.as_ref() else {
+        return Ok(()); // inherit the workspace limit
+    };
+    let key = repo_key(repo.id.as_str());
+    let usage = state
+        .budget_usages
+        .get_usage(&key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| BudgetUsage {
+            entity_type: "repo".into(),
+            entity_id: repo.id.clone(),
+            tokens_used_today: 0,
+            cost_today: 0.0,
+            active_agents: 0,
+            period_start: now_secs(),
+            compute_minutes: 0,
+        });
+    if let Some(max_tokens) = budget.max_tokens_per_day {
+        if usage.tokens_used_today >= max_tokens {
+            return Err(format!(
+                "repo budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
+                usage.tokens_used_today
+            ));
         }
     }
-
+    if let Some(max_cost) = budget.max_cost_per_day {
+        if usage.cost_today >= max_cost {
+            return Err(format!(
+                "repo budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
+                usage.cost_today
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -379,7 +432,7 @@ pub struct LlmCallUsage {
 /// Best-effort persistence: a failed append or counter increment is logged
 /// and never fails the caller's request (the LLM answer is already produced;
 /// usage recording must not discard it).
-pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
+pub async fn record_llm_call_usage(state: &Arc<AppState>, usage: &LlmCallUsage) {
     let record = BudgetCallRecord {
         id: new_id(),
         tenant_id: usage.tenant_id.clone(),
@@ -401,15 +454,456 @@ pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
             "failed to persist budget call record: {e}"
         );
     }
-    record_budget_usage(
+    let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+    record_budget_usage(state, &usage.workspace_id.to_string(), tokens, usage.cost_usd).await;
+
+    // agent-runtime.md §4 Cascade: agent usage is charged to the repo's
+    // budget (fine-grained control) and rolls up to the workspace total.
+    // User-initiated queries carry no repo context and charge the workspace
+    // directly (§4 What's Tracked).
+    if let Some(repo_id) = usage.repo_id.as_ref() {
+        let now = now_secs();
+        if let Err(e) = state
+            .budget_usages
+            .add_tokens_cost(
+                &repo_key(repo_id.as_str()),
+                "repo",
+                repo_id.as_str(),
+                now,
+                tokens,
+                usage.cost_usd,
+            )
+            .await
+        {
+            tracing::warn!(
+                repo_id = %repo_id,
+                "failed to charge repo budget usage: {e}"
+            );
+        }
+    }
+
+    // agent-runtime.md §4: "The server aggregates usage per workspace and
+    // checks against workspace limits on every report."
+    // Fire-and-forget side-effecting enforcement (kills agents, emits
+    // messages, notifies); usage recording must not fail the caller's
+    // request, and the kill outcome is independently observable in agent
+    // status.
+    enforce_workspace_budget( // enforcement:ok — side-effecting kill/notify, no decision to consume
         state,
         &usage.workspace_id.to_string(),
-        usage.input_tokens.saturating_add(usage.output_tokens),
-        usage.cost_usd,
+        usage.agent_id.as_ref(),
+        usage.repo_id.as_ref(),
+        BUDGET_GRACE_PERIOD_SECS,
+    )
+    .await;
+}
+
+// ── Threshold enforcement (agent-runtime.md §4 Enforcement Levels) ─────────────
+
+/// Grace period after a workspace reaches 100% of a daily budget: active
+/// agents receive `BudgetExhausted` and have this long to commit current
+/// work and call `agent.complete`; agents still Active afterwards are
+/// killed via `ComputeTarget::kill_process()` and marked `Stopped`.
+pub const BUDGET_GRACE_PERIOD_SECS: u64 = 60;
+
+/// Upper bound on per-call records scanned by the rolling-window reset
+/// job. One cycle re-syncs the aggregate counters from the audit trail;
+/// a workspace above this many LLM calls per 24h re-syncs on the next
+/// hourly cycle (the incremental counters stay authoritative in between).
+const ROLLING_WINDOW_SCAN_LIMIT: i64 = 100_000;
+
+/// Highest configured daily-limit utilization fraction (tokens and cost).
+/// `None` when no daily limit is configured — nothing to enforce.
+fn utilization_pct(config: &BudgetConfig, usage: &BudgetUsage) -> Option<f64> {
+    let token_pct = config
+        .max_tokens_per_day
+        .filter(|max| *max > 0)
+        .map(|max| usage.tokens_used_today as f64 / max as f64);
+    let cost_pct = config
+        .max_cost_per_day
+        .filter(|max| *max > 0.0)
+        .map(|max| usage.cost_today / max);
+    match (token_pct, cost_pct) {
+        (Some(t), Some(c)) => Some(t.max(c)),
+        (Some(t), None) => Some(t),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    }
+}
+
+fn min_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+fn min_opt_f64(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+fn min_opt_u32(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// Effective workspace limits: each field is the tighter of the workspace
+/// config and the tenant ceiling (agent-runtime.md §4 Cascade — the tenant
+/// budget is the absolute ceiling even when the workspace config is
+/// looser, e.g. after a tenant admin lowered the ceiling).
+async fn effective_workspace_config(state: &AppState, ws_key: &str) -> BudgetConfig {
+    let ws = state
+        .budget_configs
+        .get_config(ws_key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let tenant = state
+        .budget_configs
+        .get_config(tenant_key())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    BudgetConfig {
+        max_tokens_per_day: min_opt_u64(ws.max_tokens_per_day, tenant.max_tokens_per_day),
+        max_cost_per_day: min_opt_f64(ws.max_cost_per_day, tenant.max_cost_per_day),
+        max_concurrent_agents: min_opt_u32(
+            ws.max_concurrent_agents,
+            tenant.max_concurrent_agents,
+        ),
+        max_agent_lifetime_secs: min_opt_u64(
+            ws.max_agent_lifetime_secs,
+            tenant.max_agent_lifetime_secs,
+        ),
+    }
+}
+
+/// Check a workspace's aggregated usage against its effective limits and
+/// enforce agent-runtime.md §4 Enforcement Levels:
+///
+/// - ≥ 80%: `BudgetWarning` notification (Inbox) + `BudgetWarning` event on
+///   the message bus. Agents continue running.
+/// - ≥ 100%: `BudgetExhausted` events to every active agent in the
+///   workspace, a `grace_secs` grace period to commit + complete, then
+///   `kill_process()` on agents still Active (marked `Stopped`; worktree
+///   preserved; task remains InProgress).
+/// - Beyond limit (usage strictly greater than the limit — the budget was
+///   reduced below current usage): immediate `kill_process()`, no grace.
+///
+/// Called after every usage report and after every workspace budget
+/// update. Best-effort: enforcement failures are logged, never propagated
+/// to the caller (usage recording must not fail the request).
+pub async fn enforce_workspace_budget(
+    state: &Arc<AppState>,
+    workspace_id: &str,
+    trigger_agent: Option<&Id>,
+    trigger_repo: Option<&Id>,
+    grace_secs: u64,
+) {
+    let ws_key = workspace_key(workspace_id);
+    let effective = effective_workspace_config(state, &ws_key).await;
+    let usage = match state.budget_usages.get_usage(&ws_key).await {
+        Ok(Some(u)) => u,
+        Ok(None) => new_ws_usage(workspace_id),
+        Err(e) => {
+            tracing::warn!(workspace_id, "budget usage read failed: {e}");
+            return;
+        }
+    };
+
+    let Some(pct) = utilization_pct(&effective, &usage) else {
+        return;
+    };
+
+    if pct > 1.0 {
+        // Beyond limit — hard kill, immediately (agent-runtime.md §4).
+        tracing::warn!(
+            workspace_id,
+            usage_pct = format!("{:.2}", pct),
+            "workspace budget beyond limit: immediate hard kill of active agents"
+        );
+        let workspace = Id::new(workspace_id.to_string());
+        let agents = active_workspace_agents(state, &workspace).await;
+        for agent in &agents {
+            state
+                .emit_event(
+                    Some(workspace.clone()),
+                    gyre_common::Destination::Workspace(workspace.clone()),
+                    gyre_common::MessageKind::BudgetExhausted,
+                    Some(serde_json::json!({
+                        "agent_id": agent.id.as_str(),
+                        "workspace_id": workspace_id,
+                        "grace_secs": 0u64,
+                    })),
+                )
+                .await;
+        }
+        notify_budget_level(
+            state,
+            &workspace,
+            &effective,
+            &usage,
+            pct,
+            true,
+            trigger_agent,
+            trigger_repo,
+        )
+        .await;
+        kill_workspace_agents_for_budget(state, &workspace, "budget beyond limit").await;
+        return;
+    }
+
+    if pct >= 1.0 {
+        // 100% — graceful stop: notify every active agent, then grace timer.
+        tracing::warn!(
+            workspace_id,
+            usage_pct = format!("{:.2}", pct),
+            grace_secs,
+            "workspace budget exhausted: graceful stop with grace period"
+        );
+        let workspace = Id::new(workspace_id.to_string());
+        let agents = active_workspace_agents(state, &workspace).await;
+        for agent in &agents {
+            state
+                .emit_event(
+                    Some(workspace.clone()),
+                    gyre_common::Destination::Workspace(workspace.clone()),
+                    gyre_common::MessageKind::BudgetExhausted,
+                    Some(serde_json::json!({
+                        "agent_id": agent.id.as_str(),
+                        "workspace_id": workspace_id,
+                        "grace_secs": grace_secs,
+                    })),
+                )
+                .await;
+        }
+        notify_budget_level(
+            state,
+            &workspace,
+            &effective,
+            &usage,
+            pct,
+            true,
+            trigger_agent,
+            trigger_repo,
+        )
+        .await;
+        start_budget_grace_timer(Arc::clone(state), workspace, grace_secs).await;
+        return;
+    }
+
+    if pct >= 0.8 {
+        // 80% — warn; agents continue.
+        let workspace = Id::new(workspace_id.to_string());
+        let created = notify_budget_level(
+            state,
+            &workspace,
+            &effective,
+            &usage,
+            pct,
+            false,
+            trigger_agent,
+            trigger_repo,
+        )
+        .await;
+        // The BudgetWarning bus event rides the same level-crossing gate
+        // as the inbox notification (created > 0) so repeated usage reports
+        // within one period do not spam the event stream.
+        if created > 0 {
+            if let Some(agent_id) = trigger_agent {
+                state
+                    .emit_event(
+                        Some(workspace.clone()),
+                        gyre_common::Destination::Workspace(workspace.clone()),
+                        gyre_common::MessageKind::BudgetWarning,
+                        Some(serde_json::json!({
+                            "agent_id": agent_id.as_str(),
+                            "workspace_id": workspace_id,
+                            "usage_pct": (pct * 100.0).round(),
+                        })),
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
+/// Active (running) agents in a workspace — the enforcement targets.
+async fn active_workspace_agents(state: &AppState, workspace_id: &Id) -> Vec<gyre_domain::Agent> {
+    state
+        .agents
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.status == gyre_domain::AgentStatus::Active)
+        .collect()
+}
+
+/// Start the 60s grace timer for a workspace (at most one live timer per
+/// workspace — repeated usage reports at ≥100% must not stack timers).
+/// When the timer fires, agents still Active in the workspace are killed
+/// via `ComputeTarget::kill_process()` and marked `Stopped` — unless the
+/// budget was raised or the rolling window expired entries during the
+/// grace period, in which case enforcement stands down.
+async fn start_budget_grace_timer(state: Arc<AppState>, workspace_id: Id, grace_secs: u64) {
+    {
+        let mut guard = state.budget_grace_in_progress.lock().await;
+        if guard.contains(workspace_id.as_str()) {
+            return;
+        }
+        guard.insert(workspace_id.to_string());
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
+        state
+            .budget_grace_in_progress
+            .lock()
+            .await
+            .remove(workspace_id.as_str());
+        // Re-evaluate before killing: the limits or usage may have changed
+        // during the grace period (budget raised, entries rolled off).
+        let ws_key = workspace_key(workspace_id.as_str());
+        let effective = effective_workspace_config(&state, &ws_key).await;
+        let still_exhausted = match state.budget_usages.get_usage(&ws_key).await {
+            Ok(Some(usage)) => utilization_pct(&effective, &usage)
+                .map(|pct| pct >= 1.0)
+                .unwrap_or(false),
+            Ok(None) => false,
+            Err(_) => true, // cannot determine state — enforce, never fail open
+        };
+        if still_exhausted {
+            kill_workspace_agents_for_budget(
+                &state,
+                &workspace_id,
+                "budget grace period expired",
+            )
+            .await;
+        }
+    });
+}
+
+/// Kill every active agent in the workspace for budget enforcement
+/// (agent-runtime.md §4). Worktrees are preserved and tasks remain
+/// InProgress for human review — recovery, not failure.
+async fn kill_workspace_agents_for_budget(
+    state: &AppState,
+    workspace_id: &Id,
+    reason: &str,
+) -> Vec<Id> {
+    let agents = active_workspace_agents(state, workspace_id).await;
+    let mut killed = Vec::new();
+    for agent in &agents {
+        budget_stop_agent(state, agent, reason).await;
+        killed.push(agent.id.clone());
+    }
+    killed
+}
+
+/// Stop one agent for budget enforcement: mark `Stopped`, kill its process
+/// via the compute backend recorded at spawn, revoke its token, charge its
+/// wall-clock compute minutes, and release its budget slot.
+///
+/// Deliberately unlike the admin kill route: the worktree is preserved
+/// (recovery) and the task is NOT blocked — it remains `InProgress` for
+/// human review (agent-runtime.md §4 "Beyond limit").
+pub async fn budget_stop_agent(state: &AppState, agent: &gyre_domain::Agent, reason: &str) {
+    if agent.status != gyre_domain::AgentStatus::Active {
+        return; // completed within the grace period (Idle) or already gone
+    }
+    let mut stopped = agent.clone();
+    if let Err(e) = stopped.transition_status(gyre_domain::AgentStatus::Stopped) {
+        tracing::warn!(agent_id = %agent.id, "budget stop transition failed: {e}");
+        return;
+    }
+    if let Err(e) = state.agents.update(&stopped).await {
+        tracing::warn!(agent_id = %agent.id, "budget stop persist failed: {e}");
+    }
+
+    // Kill the actual process/container/Pod. The backend recorded at spawn
+    // time decides how (docker rm --force / kubectl delete pod / remote
+    // docker rm); LocalTarget (pid kill) only for agents whose backend is
+    // unknown (pre-task-117 records).
+    let mut killed_pid: Option<u32> = None;
+    if let Some(handle) = state.process_registry.lock().await.remove(agent.id.as_str()) {
+        killed_pid = handle.pid;
+        let backend = state.spawned_backends.lock().await.remove(agent.id.as_str());
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
+                .await
+            }
+        };
+        if let Err(e) = kill_result {
+            tracing::warn!(agent_id = %agent.id, "budget kill_process failed: {e}");
+        }
+    }
+    if killed_pid.is_none() {
+        killed_pid = crate::agent_audit::attested_pid(state, agent.id.as_str()).await;
+    }
+
+    // The agent process is dead — its token and audit trail must not
+    // outlive it.
+    crate::agent_audit::revoke_agent_token(state, &stopped, reason).await;
+    crate::agent_audit::emit_killed(
+        state,
+        &stopped,
+        reason,
+        "budget-enforcement",
+        killed_pid,
     )
     .await;
 
-    maybe_notify_budget_threshold(state, usage).await;
+    // Charge wall-clock compute minutes and release the budget slot.
+    record_compute_minutes_for_agent(state, &stopped).await;
+    decrement_active_agents(state, &stopped.workspace_id.to_string()).await;
+}
+
+/// Charge an agent's wall-clock compute time (spawn → complete/kill), in
+/// whole minutes, to the workspace and tenant usage entries — and to the
+/// repo entry when the agent is repo-bound (agent-runtime.md §4 What's
+/// Tracked: `compute_minutes`).
+pub async fn record_compute_minutes_for_agent(state: &AppState, agent: &gyre_domain::Agent) {
+    let now = now_secs();
+    let minutes = now.saturating_sub(agent.spawned_at) / 60;
+    if minutes == 0 {
+        return; // whole-minute accounting: sub-minute runs contribute 0
+    }
+    let ws_id = agent.workspace_id.to_string();
+    if let Err(e) = state
+        .budget_usages
+        .add_compute_minutes(&workspace_key(&ws_id), "workspace", &ws_id, now, minutes)
+        .await
+    {
+        tracing::warn!(agent_id = %agent.id, "compute-minute accounting failed: {e}");
+    }
+    if let Err(e) = state
+        .budget_usages
+        .add_compute_minutes(tenant_key(), "tenant", "global", now, minutes)
+        .await
+    {
+        tracing::warn!(agent_id = %agent.id, "tenant compute-minute accounting failed: {e}");
+    }
+    if let Some(repo_id) = agent.repo_id.as_ref() {
+        let _ = state
+            .budget_usages
+            .add_compute_minutes(&repo_key(repo_id.as_str()), "repo", repo_id.as_str(), now, minutes)
+            .await;
+    }
 }
 
 /// user-management.md §Notification Entity: `AgentBudgetWarning` (≥ 80% of a
@@ -420,48 +914,24 @@ pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
 /// spawning user plus workspace Admins (warning) / the workspace Owner
 /// (exhausted). Emitted at most once per user per budget period via
 /// `has_active_notification` so repeated usage reports within the same
-/// period do not spam the inbox. Best-effort: failures are logged, never
-/// propagated (usage recording must not fail the caller's request).
-async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
-    let ws_key = workspace_key(&usage.workspace_id.to_string());
-
-    let Ok(Some(config)) = state.budget_configs.get_config(&ws_key).await else {
-        return; // no limits configured — nothing to warn about
-    };
-    let Ok(Some(ws_usage)) = state.budget_usages.get_usage(&ws_key).await else {
-        return;
-    };
-
-    // Highest utilization across the configured daily limits.
-    let token_pct = config
-        .max_tokens_per_day
-        .filter(|max| *max > 0)
-        .map(|max| ws_usage.tokens_used_today as f64 / max as f64);
-    let cost_pct = config
-        .max_cost_per_day
-        .filter(|max| *max > 0.0)
-        .map(|max| ws_usage.cost_today / max);
-    let pct = match (token_pct, cost_pct) {
-        (Some(t), Some(c)) => Some(t.max(c)),
-        (Some(t), None) => Some(t),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
-    };
-    let Some(pct) = pct else {
-        return;
-    };
-
-    let exhausted = pct >= 1.0;
-    let warning = !exhausted && pct >= 0.8;
-    if !exhausted && !warning {
-        return;
-    }
-
+/// period do not spam the inbox. Returns the number of notifications
+/// newly created (0 when every recipient was already notified — the
+/// level-crossing signal the BudgetWarning bus event rides on).
+async fn notify_budget_level(
+    state: &AppState,
+    workspace_id: &Id,
+    config: &BudgetConfig,
+    ws_usage: &BudgetUsage,
+    pct: f64,
+    exhausted: bool,
+    agent_id: Option<&Id>,
+    repo_id: Option<&Id>,
+) -> usize {
     // The tenant scope comes from the workspace lookup — when it cannot be
     // resolved there is no scoperable tenant, so skip rather than fabricate
     // one (check-fabricated-scope-defaults.sh).
-    let Ok(Some(ws)) = state.workspaces.find_by_id(&usage.workspace_id).await else {
-        return;
+    let Ok(Some(ws)) = state.workspaces.find_by_id(workspace_id).await else {
+        return 0;
     };
     let tenant_id = ws.tenant_id.to_string();
 
@@ -483,7 +953,7 @@ async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
     // Recipients: the agent's spawning user (when the usage is
     // agent-attributed) plus workspace Admins (warning) / Owner (exhausted).
     let mut recipients: Vec<gyre_common::Id> = Vec::new();
-    if let Some(agent_id) = usage.agent_id.as_ref() {
+    if let Some(agent_id) = agent_id {
         if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
             if let Some(spawned_by) = agent.spawned_by {
                 recipients.push(gyre_common::Id::new(spawned_by));
@@ -492,7 +962,7 @@ async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
     }
     if let Ok(members) = state
         .workspace_memberships
-        .list_by_workspace(&usage.workspace_id)
+        .list_by_workspace(workspace_id)
         .await
     {
         recipients.extend(
@@ -513,13 +983,14 @@ async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
 
     // De-duplicate per period: the budget counters increment on every call,
     // so without this guard each call past the threshold would re-notify.
-    let entity_ref = usage.workspace_id.to_string();
+    let entity_ref = workspace_id.to_string();
     let since = ws_usage.period_start as i64;
+    let mut created = 0usize;
     for user_id in recipients {
         let already_notified = state
             .notifications
             .has_active_notification(
-                &usage.workspace_id,
+                workspace_id,
                 &user_id,
                 ntype.as_str(),
                 &entity_ref,
@@ -531,37 +1002,108 @@ async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
             continue;
         }
         let body = serde_json::json!({
-            "workspace_id": usage.workspace_id.as_str(),
+            "workspace_id": workspace_id.as_str(),
             "usage_pct": (pct * 100.0).round(),
             "tokens_used_today": ws_usage.tokens_used_today,
             "max_tokens_per_day": config.max_tokens_per_day,
             "cost_today": ws_usage.cost_today,
             "max_cost_per_day": config.max_cost_per_day,
-            "agent_id": usage.agent_id.as_ref().map(|a| a.as_str()),
+            "agent_id": agent_id.map(|a| a.as_str()),
         })
         .to_string();
         crate::notifications::notify_rich(
             state,
-            usage.workspace_id.clone(),
+            workspace_id.clone(),
             user_id,
             ntype.clone(),
             title.clone(),
             &tenant_id,
             Some(body),
             Some(entity_ref.clone()),
-            usage.repo_id.as_ref().map(|r| r.to_string()),
+            repo_id.map(|r| r.to_string()),
             "budget",
             None,
         )
         .await;
+        created += 1;
     }
+    created
 }
 
-/// Reset daily counters to zero. Called at midnight UTC by background job.
-pub async fn reset_daily_counters(state: &AppState) -> anyhow::Result<()> {
+/// Apply the rolling 24-hour budget window (agent-runtime.md §4 Budget
+/// Reset): recompute every entity's `tokens_used_today` / `cost_today`
+/// counters from the per-call audit records inside the window
+/// (`timestamp >= now - 24h`), so usage older than the window stops
+/// counting — time-based budgets (`max_tokens_per_day`,
+/// `max_cost_per_day`) reset on a rolling window, not a calendar day.
+///
+/// Runs hourly (`spawn_budget_reset` job). `compute_minutes` is cumulative
+/// tracking (no time-based limit consumes it) and `active_agents` is a
+/// live gauge — neither is windowed. A record saved between the scan and
+/// the counter write is picked up by the next hourly cycle; the
+/// incremental counters stay authoritative in between.
+pub async fn apply_rolling_24h_window(state: &AppState) -> anyhow::Result<()> {
     let now = now_secs();
-    state.budget_usages.reset_daily_counters(now).await?;
-    tracing::info!("Budget daily counters reset at {now}");
+    let cutoff = now.saturating_sub(24 * 60 * 60);
+    let records = state
+        .budget_calls
+        .list_since(cutoff, ROLLING_WINDOW_SCAN_LIMIT)
+        .await?;
+
+    let mut ws_sums: std::collections::HashMap<String, (u64, f64)> =
+        std::collections::HashMap::new();
+    let mut repo_sums: std::collections::HashMap<String, (u64, f64)> =
+        std::collections::HashMap::new();
+    let mut tenant_total = (0u64, 0.0f64);
+    for r in &records {
+        let tokens = r.input_tokens.saturating_add(r.output_tokens);
+        let e = ws_sums.entry(r.workspace_id.to_string()).or_default();
+        e.0 = e.0.saturating_add(tokens);
+        e.1 += r.cost_usd;
+        if let Some(repo_id) = r.repo_id.as_ref() {
+            let e = repo_sums.entry(repo_id.to_string()).or_default();
+            e.0 = e.0.saturating_add(tokens);
+            e.1 += r.cost_usd;
+        }
+        tenant_total.0 = tenant_total.0.saturating_add(tokens);
+        tenant_total.1 += r.cost_usd;
+    }
+
+    let entries = state.budget_usages.list_all_usage().await?;
+    let mut updated = 0usize;
+    for (key, mut entry) in entries {
+        let (tokens, cost) = match entry.entity_type.as_str() {
+            "workspace" => ws_sums
+                .get(entry.entity_id.as_str())
+                .copied()
+                .unwrap_or((0, 0.0)),
+            "repo" => repo_sums
+                .get(entry.entity_id.as_str())
+                .copied()
+                .unwrap_or((0, 0.0)),
+            // The tenant entry is the storage-wide roll-up (single
+            // `tenant:global` ceiling per deployment).
+            "tenant" => tenant_total,
+            _ => continue,
+        };
+        if entry.tokens_used_today == tokens
+            && (entry.cost_today - cost).abs() < f64::EPSILON
+            && entry.period_start == cutoff
+        {
+            continue;
+        }
+        entry.tokens_used_today = tokens;
+        entry.cost_today = cost;
+        entry.period_start = cutoff;
+        state.budget_usages.set_usage(&key, &entry).await?;
+        updated += 1;
+    }
+    tracing::info!(
+        cutoff,
+        records_scanned = records.len(),
+        entries_updated = updated,
+        "budget rolling 24h window applied"
+    );
     Ok(())
 }
 
@@ -1060,5 +1602,488 @@ mod tests {
                 "budget exhausted is Urgent per user-management.md"
             );
         }
+    }
+
+    // ── task-119: agent-runtime.md §4 enforcement + §5 prompt structure ──────
+
+    use gyre_domain::{Agent, AgentStatus, Task, TaskStatus, Workspace};
+
+    /// Shared fixture: a workspace, a config with a 1000-token daily limit,
+    /// and an Active agent bound to an InProgress task with a worktree.
+    fn now_secs_static() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    async fn enforcement_fixture(ws_name: &str) -> (Arc<crate::AppState>, gyre_common::Id, gyre_common::Id, gyre_common::Id) {
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new(ws_name);
+        let ws = Workspace::new(
+            ws_id.clone(),
+            gyre_common::Id::new("tenant-1"),
+            ws_name,
+            ws_name,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key(ws_name),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // InProgress task + Active agent.
+        let task_id = gyre_common::Id::new(format!("{ws_name}-task"));
+        let mut task = Task::new(task_id.clone(), "budget enforcement task", 0);
+        task.workspace_id = ws_id.clone();
+        task.repo_id = gyre_common::Id::new(format!("{ws_name}-repo"));
+        task.status = TaskStatus::InProgress;
+        state.tasks.create(&task).await.unwrap();
+
+        let agent_id = gyre_common::Id::new(format!("{ws_name}-agent"));
+        let mut agent = Agent::new(agent_id.clone(), "spender", now_secs_static());
+        agent.workspace_id = ws_id.clone();
+        agent.status = AgentStatus::Active;
+        agent.current_task_id = Some(task_id.clone());
+        // A spawning user gives the 80% warning a notification recipient —
+        // the BudgetWarning bus event rides the same level-crossing gate.
+        agent.spawned_by = Some("user-spawner".to_string());
+        state.agents.create(&agent).await.unwrap();
+
+        // A worktree that budget kills must PRESERVE.
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new(format!("{ws_name}-wt")),
+            agent_id.clone(),
+            gyre_common::Id::new(format!("{ws_name}-repo")),
+            Some(task_id.clone()),
+            format!("feat/{ws_name}"),
+            format!("/tmp/wt-{ws_name}"),
+            0,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+
+        (state, ws_id, agent_id, task_id)
+    }
+
+    async fn workspace_messages(
+        state: &crate::AppState,
+        ws_id: &gyre_common::Id,
+    ) -> Vec<gyre_common::Message> {
+        state
+            .messages
+            .list_by_workspace(ws_id, None, None, None, None, Some(50))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn usage_report_at_80pct_emits_budget_warning_message() {
+        let (state, ws_id, agent_id, _) =
+            enforcement_fixture("ws-warn-msg").await;
+        // 850/1000 = 85% — warning band.
+        super::record_llm_call_usage(
+            &state,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: ws_id.clone(),
+                repo_id: None,
+                agent_id: Some(agent_id.clone()),
+                task_id: None,
+                usage_type: "agent_run".to_string(),
+                input_tokens: 850,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                model: "test-model".to_string(),
+            },
+        )
+        .await;
+
+        let msgs = workspace_messages(state.as_ref(), &ws_id).await;
+        let warnings: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.kind == gyre_common::MessageKind::BudgetWarning)
+            .collect();
+        assert_eq!(warnings.len(), 1, "one BudgetWarning bus event at 80%+");
+        assert_eq!(
+            warnings[0].payload.as_ref().unwrap()["agent_id"],
+            agent_id.as_str()
+        );
+        assert_eq!(
+            warnings[0].payload.as_ref().unwrap()["workspace_id"],
+            ws_id.as_str()
+        );
+        // Agents continue: the agent must still be Active after a warning.
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(agent.status, AgentStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn exhaustion_emits_messages_and_kills_after_grace() {
+        let (state, ws_id, agent_id, task_id) =
+            enforcement_fixture("ws-grace").await;
+        // Push usage to exactly 100%.
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-grace"),
+                "workspace",
+                "ws-grace",
+                0,
+                1000,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        // grace 0: the grace timer fires immediately.
+        super::enforce_workspace_budget(&state, "ws-grace", None, None, 0).await;
+
+        // BudgetExhausted message to the active agent.
+        let msgs = workspace_messages(state.as_ref(), &ws_id).await;
+        let exhausted: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.kind == gyre_common::MessageKind::BudgetExhausted)
+            .collect();
+        assert_eq!(exhausted.len(), 1, "active agent must receive BudgetExhausted");
+        assert_eq!(
+            exhausted[0].payload.as_ref().unwrap()["grace_secs"],
+            serde_json::json!(0u64)
+        );
+
+        // The grace timer runs on the tokio runtime — poll for the kill.
+        let mut killed = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+            if agent.status == AgentStatus::Stopped {
+                killed = true;
+                break;
+            }
+        }
+        assert!(killed, "agent must be killed (Stopped) after the grace period");
+
+        // Worktree preserved + task remains InProgress for human review.
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1, "budget kill must preserve the worktree");
+        let task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            task.status,
+            TaskStatus::InProgress,
+            "task must remain InProgress after a budget kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn beyond_limit_kills_immediately_without_grace() {
+        let (state, ws_id, agent_id, task_id) =
+            enforcement_fixture("ws-beyond").await;
+        // Usage 1500 vs limit 1000 — the budget was "reduced" below usage.
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-beyond"),
+                "workspace",
+                "ws-beyond",
+                0,
+                1500,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        super::enforce_workspace_budget(&state, "ws-beyond", None, None, 60).await;
+
+        // Immediate, synchronous kill — no grace period.
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "beyond-limit must hard-kill immediately"
+        );
+        let msgs = workspace_messages(state.as_ref(), &ws_id).await;
+        assert!(
+            msgs.iter().any(|m| m.kind == gyre_common::MessageKind::BudgetExhausted),
+            "beyond-limit must emit BudgetExhausted (grace_secs 0)"
+        );
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1, "worktree preserved for recovery");
+        let task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn budget_reduction_below_usage_triggers_beyond_limit_kill() {
+        // The PUT path: an admin lowers the workspace budget below current
+        // usage while an agent is running → immediate kill.
+        let (state, ws_id, agent_id, _) = enforcement_fixture("ws-reduce").await;
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-reduce"),
+                "workspace",
+                "ws-reduce",
+                0,
+                900,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-reduce/budget")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(json_body(r#"{"max_tokens_per_day":500}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "reducing the budget below usage must hard-kill running agents"
+        );
+        assert_eq!(agent.workspace_id, ws_id);
+    }
+
+    #[tokio::test]
+    async fn compute_minutes_tracked_on_terminal_transition() {
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-minutes");
+        let ws = Workspace::new(
+            ws_id.clone(),
+            gyre_common::Id::new("tenant-1"),
+            "minutes",
+            "minutes",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Spawned 150 seconds ago → 2 whole minutes.
+        let mut agent = Agent::new(gyre_common::Id::new("agent-min"), "runner", 0);
+        agent.workspace_id = ws_id.clone();
+        agent.spawned_at = now_secs_static().saturating_sub(150);
+        state.agents.create(&agent).await.unwrap();
+
+        super::record_compute_minutes_for_agent(state.as_ref(), &agent).await;
+        let usage = state
+            .budget_usages
+            .get_usage(&super::workspace_key("ws-minutes"))
+            .await
+            .unwrap()
+            .expect("usage entry must exist");
+        assert_eq!(usage.compute_minutes, 2, "150s of wall clock = 2 minutes");
+
+        let tenant_usage = state
+            .budget_usages
+            .get_usage(super::tenant_key())
+            .await
+            .unwrap()
+            .expect("tenant usage entry must exist");
+        assert_eq!(tenant_usage.compute_minutes, 2);
+    }
+
+    #[tokio::test]
+    async fn rolling_24h_window_clears_expired_usage() {
+        let state = crate::mem::test_state();
+        let now = now_secs_static();
+        let ws_id = gyre_common::Id::new("ws-roll");
+        let mk_record = |id: &str, ts: u64, tokens: u64| gyre_domain::BudgetCallRecord {
+            id: gyre_common::Id::new(id),
+            tenant_id: gyre_common::Id::new("tenant-1"),
+            workspace_id: ws_id.clone(),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "agent_run".to_string(),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            model: "m".to_string(),
+            timestamp: ts,
+        };
+        // One record 25h old (expired), one 2h old (in window).
+        state
+            .budget_calls
+            .save(&mk_record("old", now - 25 * 3600, 700))
+            .await
+            .unwrap();
+        state
+            .budget_calls
+            .save(&mk_record("new", now - 2 * 3600, 300))
+            .await
+            .unwrap();
+
+        // Counters currently hold both (as if incremented when reported).
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-roll"),
+                "workspace",
+                "ws-roll",
+                now - 25 * 3600,
+                1000,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        super::apply_rolling_24h_window(state.as_ref()).await.unwrap();
+
+        let usage = state
+            .budget_usages
+            .get_usage(&super::workspace_key("ws-roll"))
+            .await
+            .unwrap()
+            .expect("usage entry must survive the roll");
+        assert_eq!(
+            usage.tokens_used_today, 300,
+            "only the in-window record may count after the rolling reset"
+        );
+        // The job computes its own `now` — allow a small skew across a
+        // second boundary, but it must be the rolling cutoff, not a
+        // calendar-day boundary.
+        let expected = now - 24 * 3600;
+        assert!(
+            (usage.period_start as i64 - expected as i64).abs() <= 2,
+            "period_start must be the rolling window cutoff (±2s), got {} vs {expected}",
+            usage.period_start
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_usage_rolls_up_from_agent_reports() {
+        let state = crate::mem::test_state();
+        let repo_id = gyre_common::Id::new("repo-rollup");
+        super::record_llm_call_usage(
+            &state,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: gyre_common::Id::new("ws-rollup"),
+                repo_id: Some(repo_id.clone()),
+                agent_id: None,
+                task_id: None,
+                usage_type: "agent_run".to_string(),
+                input_tokens: 600,
+                output_tokens: 400,
+                cost_usd: 0.10,
+                model: "m".to_string(),
+            },
+        )
+        .await;
+
+        let repo_usage = state
+            .budget_usages
+            .get_usage(&super::repo_key(repo_id.as_str()))
+            .await
+            .unwrap()
+            .expect("repo usage entry must exist after an agent report");
+        assert_eq!(repo_usage.entity_type, "repo");
+        assert_eq!(repo_usage.tokens_used_today, 1000);
+        assert!((repo_usage.cost_today - 0.10).abs() < 1e-9);
+
+        // Workspace total carries the same usage (roll-up).
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&super::workspace_key("ws-rollup"))
+            .await
+            .unwrap()
+            .expect("workspace usage must exist");
+        assert_eq!(ws_usage.tokens_used_today, 1000);
+    }
+
+    #[tokio::test]
+    async fn repo_budget_limit_blocks_spawns() {
+        let state = crate::mem::test_state();
+        let mut repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-budgeted"),
+            gyre_common::Id::new("ws-rb"),
+            "budgeted",
+            "/tmp/repo-budgeted",
+            0,
+        );
+        repo.budget = Some(gyre_domain::BudgetConfig {
+            max_tokens_per_day: Some(500),
+            ..Default::default()
+        });
+        state.repos.create(&repo).await.unwrap();
+
+        // Under the repo budget: allowed.
+        assert!(super::check_repo_spawn_budget(state.as_ref(), &repo).await.is_ok());
+
+        // At the limit: rejected (workspace check separately covers the
+        // inherited case; this is the repo override firing).
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::repo_key("repo-budgeted"),
+                "repo",
+                "repo-budgeted",
+                0,
+                500,
+                0.0,
+            )
+            .await
+            .unwrap();
+        let err = super::check_repo_spawn_budget(state.as_ref(), &repo)
+            .await
+            .expect_err("repo budget exhausted must block spawns");
+        assert!(err.contains("repo budget exceeded"), "got: {err}");
+
+        // No override → inherits the workspace limit (no repo-level error).
+        let mut unbounded = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-plain"),
+            gyre_common::Id::new("ws-rb"),
+            "plain",
+            "/tmp/repo-plain",
+            0,
+        );
+        unbounded.budget = None;
+        assert!(super::check_repo_spawn_budget(state.as_ref(), &unbounded).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn workspace_lifetime_cascade_rejects_exceeding_tenant() {
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                super::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_agent_lifetime_secs: Some(3600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-life/budget")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(json_body(r#"{"max_agent_lifetime_secs":7200}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

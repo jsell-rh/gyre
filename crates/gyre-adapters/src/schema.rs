@@ -19,6 +19,7 @@ diesel::table! {
         updated_at -> BigInt,
         max_agents -> Nullable<Integer>,
         max_agent_iterations -> Nullable<Integer>,
+        budget_json -> Nullable<Text>,
     }
 }
 
@@ -592,6 +593,7 @@ diesel::table! {
         active_agents -> Integer,
         period_start -> BigInt,
         updated_at -> BigInt,
+        compute_minutes -> BigInt,
     }
 }
 

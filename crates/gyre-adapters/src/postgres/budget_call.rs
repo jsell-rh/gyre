@@ -116,4 +116,21 @@ impl BudgetCallRepository for PgStorage {
         })
         .await?
     }
+
+    async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>> {
+        let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = budget_call_records::table
+                .filter(budget_call_records::tenant_id.eq(&tenant_id))
+                .filter(budget_call_records::timestamp.ge(since as i64))
+                .order(budget_call_records::timestamp.desc())
+                .limit(limit)
+                .load::<BudgetCallRow>(&mut *conn)
+                .context("list budget_call_records since cutoff")?;
+            Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
+        })
+        .await?
+    }
 }

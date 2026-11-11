@@ -53,6 +53,13 @@ pub struct UpdateRepoRequest {
     /// (agent-runtime.md §1 Phase 7). `None` clears the override (server
     /// default 10 applies).
     pub max_agent_iterations: Option<u32>,
+    /// Repo-level budget override (agent-runtime.md §4 Cascade,
+    /// repo-lifecycle.md §3). When present, REPLACES the whole override;
+    /// a field left `null` inside the object means no limit for that
+    /// dimension. `{}` (all null) clears the override — the repo then
+    /// inherits the workspace limit. Every set field is validated against
+    /// the workspace budget (400 on violation).
+    pub budget: Option<gyre_domain::BudgetConfig>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +96,9 @@ pub struct RepoResponse {
     /// Ralph-loop iteration ceiling (agent-runtime.md §1 Phase 7); None
     /// means the server default (10).
     pub max_agent_iterations: Option<u32>,
+    /// Repo-level budget override (agent-runtime.md §4 Cascade); None
+    /// inherits the workspace limit.
+    pub budget: Option<gyre_domain::BudgetConfig>,
     /// Git Smart HTTP clone URL: {base_url}/git/{workspace_slug}/{repo_name}
     pub clone_url: String,
 }
@@ -110,6 +120,7 @@ impl From<Repository> for RepoResponse {
             last_mirror_sync: r.last_mirror_sync,
             max_agents: r.max_agents,
             max_agent_iterations: r.max_agent_iterations,
+            budget: r.budget,
             clone_url: String::new(),
         }
     }
@@ -279,6 +290,57 @@ pub async fn update_repo(
             ));
         }
         repo.max_agent_iterations = Some(max_iter);
+    }
+    // agent-runtime.md §4 Cascade / repo-lifecycle.md §3: repo-level budget
+    // override. "Repo budget (cannot exceed workspace)" — every set field
+    // is validated against the workspace budget; a violation is a 400.
+    // A dimension the workspace leaves unlimited imposes no ceiling.
+    if let Some(budget) = req.budget {
+        let ws_budget = state
+            .budget_configs
+            .get_config(&crate::api::budget::workspace_key(
+                &repo.workspace_id.to_string(),
+            ))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_tokens_per_day, ws_budget.max_tokens_per_day)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_tokens_per_day ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) = (budget.max_cost_per_day, ws_budget.max_cost_per_day)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_cost_per_day ({repo_max:.4}) exceeds the workspace limit ({ws_max:.4})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_concurrent_agents, ws_budget.max_concurrent_agents)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_concurrent_agents ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_agent_lifetime_secs, ws_budget.max_agent_lifetime_secs)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_agent_lifetime_secs ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        repo.budget = Some(budget);
     }
     repo.updated_at = now_secs();
 
@@ -525,6 +587,7 @@ pub async fn create_mirror_repo(
         updated_at: now,
         max_agents: None,
         max_agent_iterations: None,
+        budget: None,
     };
     state.repos.create(&repo).await?;
 
@@ -1288,6 +1351,102 @@ mod tests {
         // A zero iteration ceiling would block every iteration: 400.
         let resp = put(serde_json::json!({"max_agent_iterations": 0})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_repo_budget_cascade_validated() {
+        // agent-runtime.md §4 Cascade: "Repo budget (cannot exceed
+        // workspace)". A repo budget above the workspace budget is a 400
+        // and is not persisted; a valid override is persisted, returned,
+        // and clearable.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bud"),
+            gyre_common::Id::new("t1"),
+            "Bud",
+            "bud",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // Workspace budget: 1000 tokens/day, $5.00/day.
+        state
+            .budget_configs
+            .set_config(
+                &crate::api::budget::workspace_key("ws-bud"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_cost_per_day: Some(5.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-bud"),
+            gyre_common::Id::new("ws-bud"),
+            "budgeted-repo",
+            "/tmp/gyre-test-r-bud",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-bud")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Token budget above the workspace limit: 400, not persisted.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 2000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.budget, None, "violating budget must not persist");
+
+        // Cost budget above the workspace limit: 400.
+        let resp = put(serde_json::json!({
+            "budget": {"max_cost_per_day": 9.0}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Within both limits: persisted and returned.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 800, "max_cost_per_day": 4.0}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["budget"]["max_tokens_per_day"], 800);
+        assert_eq!(updated["budget"]["max_cost_per_day"], 4.0);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        let budget = found.budget.expect("repo budget must persist");
+        assert_eq!(budget.max_tokens_per_day, Some(800));
+        assert_eq!(budget.max_cost_per_day, Some(4.0));
+
+        // {} clears the override — the repo inherits the workspace limit.
+        let resp = put(serde_json::json!({"budget": {}})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(
+            found.budget,
+            Some(gyre_domain::BudgetConfig::default()),
+            "an empty budget object clears every override dimension"
+        );
     }
 
     #[tokio::test]
