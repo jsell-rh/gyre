@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["583c4a07dde4629da277a1efdafaa5b077596b9d", "d715552208fab61ea2e1e241e36d0f86074ae2b0"]
 ---
 
 ## Spec Excerpt
@@ -102,113 +102,81 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 
 ## Shipped
 
-Both coverage sections are implemented with real production behavior
-(product commit `583c4a07d9c1d0f2789cf3748a02d25152d3435d`).
+Both coverage sections are implemented with real production behavior.
+Product commits: `583c4a07d` (implementation) and `d71555220`
+(review-repair round f0f41ed, findings F1-F5).
 
 ### Gate chains (§Gate Chains)
 
 - **Ordered chains**: `quality_gates.position` (migration
-  `2026-11-12-000061`, next free sequence after 000060); SQLite and
-  Postgres adapters `ORDER BY position, created_at` (creation order
-  tiebreaks pre-column rows), mem adapter sorts identically;
-  `create_gate` appends at the end of the chain; `GET /repos/:id/gates`
-  returns chain order; `GateResponse` exposes `position`.
+  `2026-11-12-000061`); SQLite/Postgres adapters `ORDER BY position,
+  created_at`, mem adapter sorts identically; `create_gate` appends;
+  `GET /repos/:id/gates` returns chain order.
 - **TOML chain configuration**: `PUT/GET /api/v1/repos/:id/gate-chain`
-  accepting/returning the spec's exact `[[gates]]` format (`name`,
-  `type` in PascalCase or snake_case, `command`, `persona`,
-  `min_approvals`, `validation_type`, `required`, `timeout_secs`).
-  PUT replaces the chain atomically: all validation happens before the
-  first mutation (duplicate names / missing per-type fields / unknown
-  types / malformed TOML → 400 with the current chain untouched; a JSON
-  body → 415); same-named gates keep their ids so existing GateResults
-  stay linked; gates absent from the chain are deleted; `position` =
-  array index. Route is ABAC-mapped as resource `gate`
-  (`check-abac-route-registry` passes).
-- **RequiredApprovals really counts now**: the previous code returned
-  `Passed` claiming "approval check delegated to merge processor" — no
-  delegate existed anywhere. Now `run_required_approvals_gate` counts
-  DISTINCT reviewers with Approved reviews; short of the minimum the
-  gate is `Running`, and `check_gates_for_mr` re-evaluates live every
-  merge-processor cycle, promoting the persisted result to `Passed` the
-  moment the Nth distinct approval lands (no re-enqueue). One reviewer
-  approving twice counts once.
-- **Parallel execution / wait / block / notify** (pre-existing, verified
-  intact): enqueue triggers `trigger_gates_for_mr` which spawns one
-  tokio task per gate; `check_gates_for_mr` returns not-ready (requeue)
-  while required gates are Pending/Running and fails the queue entry +
-  notifies the author when a required gate fails.
-- **Optional gates**: `required = false` failures don't block and now
-  attach an advisory comment on the MR attributed to
-  `gate-agent:{gate_id}` (results were already recorded in
-  `gate_results`).
+  accepting/returning the spec's `[[gates]]` format. PUT replaces the
+  chain atomically (validation-before-mutation; 400 leaves the chain
+  untouched; JSON body → 415); same-named gates keep ids; absent
+  pre-merge gates deleted; `position` = array index. ABAC-mapped as
+  resource `gate`.
+- **Post-merge gates preserved (review F4)**: the chain manages only
+  PreMerge gates — post-merge recovery gates (same table, configured via
+  `PUT /repos/:id/post-merge-gates`) are neither deleted nor re-phased
+  by a chain PUT; `GET /gate-chain` emits only the pre-merge chain; a
+  chain entry reusing a post-merge gate's name is a 400 (per-repo name
+  uniqueness, same rule `create_gate` enforces).
+- **RequiredApprovals really counts**: distinct reviewers with Approved
+  reviews; live re-evaluation each merge-processor cycle promotes a
+  waiting gate to Passed the moment the Nth distinct approval lands.
+- **Parallel execution / wait / block / notify**: enqueue triggers
+  `trigger_gates_for_mr` (one tokio task per gate);
+  `check_gates_for_mr` decides via a pure, order-independent pass
+  (`decide_gate_readiness`): required failures → Err (merge processor
+  fails the queue entry and notifies the author — failures take
+  precedence over waiting, review F2), required Pending/Running →
+  Ok(false) requeue, else Ok(true).
+- **Optional gates never block (review F1)**: `required = false` gates
+  are never waited on and their failures never block — including
+  RequiredApprovals gates short of their minimum (previously these
+  requeued the MR forever). Advisory failures attach an MR comment
+  attributed to `gate-agent:{gate_id}`.
 
 ### Gate agent lifecycle (§Gate Agent Lifecycle)
 
 - **Ephemeral, read-only, identity-scoped**: shipped with task-134
-  (scoped JWT `review:submit`/`validation:report`, exact-match scope
-  enforcement, push denied in git_http, token revoked on process exit
-  including crash/timeout) — unchanged, covered by task-134's tests.
-- **Attributed** (new): `Review.reviewer_persona` + `Review.gate_id`
-  (migration `2026-11-12-000061`; SQLite + Postgres + mem round-trips).
-  `submit_review` derives both server-side from the scoped reviewer
-  token's `task_id` claim (the gate that minted it) — request bodies
-  cannot forge or suppress attribution. `ReviewResponse` and
-  `GET /merge-requests/:id/reviews` surface both fields.
-- **Context windows captured for audit** (new): before the
-  review/validation subprocess runs, the exact bundle the agent will see
-  (persona system prompt, full MR diff, spec content at the pinned
-  `spec_ref` SHA, MR title, task description/acceptance criteria) is
-  zstd-compressed and stored through the conversation repository —
-  the same provenance store regular agents use — replayable at
-  `GET /api/v1/conversations/:sha`. A `gate_agent_context` audit event
-  records the conversation SHA, gate, persona, and MR. Capture happens
-  before the process runs, so timed-out or crashed reviewers still
-  leave an auditable context. When the workspace's tenant scope cannot
-  be resolved, capture is skipped and logged — never stored under a
-  fabricated tenant identity.
+  (scoped JWT `review:submit`/`validation:report`, push denied in
+  git_http, token revoked on process exit) — unchanged.
+- **Attributed**: `Review.reviewer_persona` + `Review.gate_id` derived
+  server-side from the scoped reviewer token's `task_id` claim; surfaced
+  in `ReviewResponse` and `GET /merge-requests/:id/reviews`.
+- **Context windows captured for audit**: the exact bundle the agent
+  sees (persona system prompt, MR diff, spec at pinned SHA, task
+  description) zstd-compressed into the conversation repository before
+  the subprocess runs, replayable at `GET /api/v1/conversations/:sha`,
+  referenced by a `gate_agent_context` audit event; capture skipped and
+  logged when the tenant scope is unresolvable — never fabricated.
 
 ### Test evidence
 
-Server test compilation is deferred to the independent verifier (the
-build wrapper blocks gyre-server test builds in this sandbox to fit the
-4 GiB budget; `cargo check -p gyre-server --tests` passes). The verifier
-should run:
+New regression tests for the repair round (mem-backed, plus a pure unit
+test): `decide_gate_readiness_failure_precedes_waiting_in_any_order`
+(pins failure-precedence for both orderings and advisory-never-blocks),
+`advisory_approvals_gate_must_not_block_merge`,
+`waiting_approvals_gate_must_not_mask_failed_required_gate`,
+`gate_chain_put_preserves_post_merge_gates`.
 
-- `cargo test -p gyre-adapters --lib -- sqlite::review sqlite::quality_gate`
-  (already executed here: 14/14 pass, including the new
-  `review_attribution_persists_and_roundtrips`,
-  `review_without_attribution_stays_null`,
-  `list_by_repo_orders_by_chain_position`,
-  `list_by_repo_position_tie_falls_back_to_created_at`, and the extended
-  `save_upsert_updates_all_config_columns`; the fresh-DB run also proves
-  migration 000061 applies cleanly).
-- `cargo test -p gyre-domain --lib review` (executed here: 8/8 pass).
-- `cargo test -p gyre-server --lib` — new tests:
-  `gate_chain_put_parses_spec_toml_and_orders_chain`,
-  `gate_chain_replace_reorders_keeps_ids_deletes_removed`,
-  `gate_chain_invalid_entries_rejected_and_chain_unchanged`,
-  `gate_chain_unknown_repo_is_404`,
-  `advisory_gate_failure_attaches_mr_comment`,
-  `required_gate_failure_attaches_no_advisory_comment`,
-  `required_approvals_gate_passes_when_count_met`,
-  `required_approvals_gate_waits_until_approvals_arrive`,
-  `required_approvals_counts_distinct_reviewers`,
-  `agent_review_captures_context_window_for_audit`,
-  `agent_review_context_capture_skips_without_workspace_tenant`,
-  `scoped_gate_review_records_persona_attribution`,
-  `unscoped_review_has_no_gate_attribution`; plus the full existing
-  gate_executor / merge_processor / api suites for regressions
-  (notably `check_gates_*`, `selection_skips_gates_pending_tries_next_candidate`,
-  `selection_fails_gates_failed_entry_tries_next`, and the task-134
-  e2e review tests, which exercise the code paths this task extends).
-- `cargo test --all` (acceptance criterion).
-- Mechanical guards executed here and passing: check-arch,
-  check-abac-route-registry, check-migration-versions,
-  check-migration-sql-portability, check-byte-slice-truncation,
-  check-fabricated-scope-defaults, check-inert-enforcement,
-  check-lossy-secret-conversion, check-mem-port-contracts,
-  check-relative-path-defaults, check-scope-literal-defaults,
-  check-forged-scope-fields, check-in-memory-state-stores,
-  check-dead-message-kinds, check-forwarded-header-trust,
-  check-no-em-dash, check-conditional-test-guards. All other check
-  scripts match baseline exit codes exactly (no new findings).
+`cargo check -p gyre-server --tests` passes in-sandbox (exit 0;
+gyre-server test *execution* is blocked by the build wrapper's 4 GiB
+budget and must run in the independent verifier):
+`cargo test -p gyre-server --lib gate_chain`, `--lib required_approvals`,
+`--lib check_gates`, and the four tests above; task acceptance
+criterion `cargo test --all` likewise belongs to the verifier.
+Mechanical checks pass: check-arch, check-abac-route-registry,
+check-inert-enforcement. Evidence: /tmp/stage/review-evidence/
+task135-repair-round2.md.
+
+### Docs (review F5)
+
+docs/api-reference.md gate rows no longer claim Admin-only
+authorization for gate-chain PUT / POST /gates; they now state the
+actual ABAC authorization (builtin developer-write-access /
+agent-scoped-access policies allow Developer/Agent write on `gate`).
