@@ -46,6 +46,13 @@ pub struct UpdateRepoRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub default_branch: Option<String>,
+    /// Max concurrent worker agents in this repo (repo-lifecycle.md §3).
+    /// Cannot exceed the workspace's `max_agents_per_repo` (400 on violation).
+    pub max_agents: Option<u32>,
+    /// Ralph-loop iteration ceiling for agents working this repo
+    /// (agent-runtime.md §1 Phase 7). `None` clears the override (server
+    /// default 10 applies).
+    pub max_agent_iterations: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +83,12 @@ pub struct RepoResponse {
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
     pub last_mirror_sync: Option<u64>,
+    /// Max concurrent worker agents (repo-lifecycle.md §3); None inherits
+    /// the workspace limit.
+    pub max_agents: Option<u32>,
+    /// Ralph-loop iteration ceiling (agent-runtime.md §1 Phase 7); None
+    /// means the server default (10).
+    pub max_agent_iterations: Option<u32>,
     /// Git Smart HTTP clone URL: {base_url}/git/{workspace_slug}/{repo_name}
     pub clone_url: String,
 }
@@ -95,6 +108,8 @@ impl From<Repository> for RepoResponse {
             mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
             last_mirror_sync: r.last_mirror_sync,
+            max_agents: r.max_agents,
+            max_agent_iterations: r.max_agent_iterations,
             clone_url: String::new(),
         }
     }
@@ -237,6 +252,33 @@ pub async fn update_repo(
     }
     if let Some(branch) = req.default_branch {
         repo.default_branch = branch;
+    }
+    // repo-lifecycle.md §3 "Max concurrent agents": repo-level override of
+    // the workspace limit. The server validates on PUT that a repo's
+    // max_agents can never exceed the workspace's max_agents_per_repo —
+    // a repo cannot grant itself more parallelism than its workspace
+    // allows (agent-runtime.md §4 Cascade).
+    if let Some(max_agents) = req.max_agents {
+        if let Ok(Some(ws)) = state.workspaces.find_by_id(&repo.workspace_id).await {
+            if let Some(ws_max) = ws.max_agents_per_repo {
+                if max_agents > ws_max {
+                    return Err(ApiError::InvalidInput(format!(
+                        "max_agents {max_agents} exceeds the workspace limit of {ws_max}"
+                    )));
+                }
+            }
+        }
+        repo.max_agents = Some(max_agents);
+    }
+    // agent-runtime.md §1 Phase 7: per-repo Ralph-loop iteration ceiling.
+    // A zero ceiling would block every iteration, so require >= 1.
+    if let Some(max_iter) = req.max_agent_iterations {
+        if max_iter == 0 {
+            return Err(ApiError::InvalidInput(
+                "max_agent_iterations must be at least 1".to_string(),
+            ));
+        }
+        repo.max_agent_iterations = Some(max_iter);
     }
     repo.updated_at = now_secs();
 
@@ -481,6 +523,8 @@ pub async fn create_mirror_repo(
         description: None,
         status: RepoStatus::Active,
         updated_at: now,
+        max_agents: None,
+        max_agent_iterations: None,
     };
     state.repos.create(&repo).await?;
 
@@ -1180,6 +1224,70 @@ mod tests {
         let updated = body_json(update_resp).await;
         assert_eq!(updated["description"], "updated description");
         assert_eq!(updated["default_branch"], "develop");
+    }
+
+    /// TASK-118 (repo-lifecycle §3 / agent-runtime §4 Cascade): a repo's
+    /// max_agents cannot exceed the workspace's max_agents_per_repo (400),
+    /// and max_agent_iterations must be >= 1. Valid settings persist.
+    #[tokio::test]
+    async fn update_repo_agent_limits_validated() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace with a per-repo agent limit of 2.
+        let mut ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-1"),
+            gyre_common::Id::new("t1"),
+            "Ws",
+            "ws",
+            0,
+        );
+        ws.max_agents_per_repo = Some(2);
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-max"),
+            gyre_common::Id::new("ws-1"),
+            "max-repo",
+            "/tmp/gyre-test-r-max",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-max")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Exceeding the workspace limit: 400, nothing persisted.
+        let resp = put(serde_json::json!({"max_agents": 5})).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.max_agents, None);
+
+        // Within the limit + iteration ceiling: persisted and returned.
+        let resp = put(serde_json::json!({"max_agents": 2, "max_agent_iterations": 3})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["max_agents"], 2);
+        assert_eq!(updated["max_agent_iterations"], 3);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.max_agents, Some(2));
+        assert_eq!(found.max_agent_iterations, Some(3));
+
+        // A zero iteration ceiling would block every iteration: 400.
+        let resp = put(serde_json::json!({"max_agent_iterations": 0})).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
