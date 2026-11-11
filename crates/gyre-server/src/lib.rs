@@ -38,6 +38,7 @@ pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod prompt_assembly;
+pub mod ralph_loop;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
