@@ -2,7 +2,7 @@
 title: "Enforce SignedInput context binding (replay prevention) at verification"
 spec_ref: "authorization-provenance.md §2.4"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
 commits: ["f293796daa7ba9edbb9875c56873ebb9ecc6df5a", "10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905"]
