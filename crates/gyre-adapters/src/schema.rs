@@ -17,6 +17,8 @@ diesel::table! {
         description -> Nullable<Text>,
         status -> Text,
         updated_at -> BigInt,
+        max_agents -> Nullable<Integer>,
+        max_agent_iterations -> Nullable<Integer>,
     }
 }
 
