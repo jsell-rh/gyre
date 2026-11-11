@@ -60,6 +60,29 @@
     spec_conflict: 'warning',
     mr_reverted: 'danger',
     merge_queue_escalation: 'danger',
+    // Unified server taxonomy (notification types are normalized to
+    // snake_case via typeNormMap below before this lookup)
+    agent_completed: 'success',
+    agent_failed: 'danger',
+    spec_approved: 'success',
+    spec_rejected: 'danger',
+    mr_merged: 'success',
+    mr_created: 'info',
+    gate_passed: 'success',
+    budget_exhausted: 'danger',
+    merge_queue_paused: 'warning',
+    breaking_change_detected: 'danger',
+    spec_drift_detected: 'warning',
+    dependency_stale: 'info',
+    security_finding: 'danger',
+    invitation_received: 'info',
+    membership_changed: 'info',
+    persona_approval_requested: 'warning',
+    persona_change_pending_approval: 'warning',
+    system_alert: 'warning',
+    impersonation_request: 'warning',
+    impersonation_alert: 'danger',
+    secret_expiring: 'warning',
   };
 
   // Human-readable type labels — derived from i18n
@@ -102,18 +125,41 @@
       const typeNormMap = {
         // HSI §8 priority table (10 item types) — canonical NotificationType values
         AgentNeedsClarification: 'agent_clarification',
-        SpecPendingApproval: 'spec_approval',
+        SpecApprovalRequested: 'spec_approval',
+        SpecPendingApproval: 'spec_approval', // legacy rows
         GateFailure: 'gate_failure',
         CrossWorkspaceSpecChange: 'cross_workspace_change',
         ConflictingInterpretations: 'conflicting_interpretations',
         MetaSpecDrift: 'meta_spec_drift',
-        BudgetWarning: 'budget_warning',
+        AgentBudgetWarning: 'budget_warning',
+        BudgetWarning: 'budget_warning', // legacy rows
         TrustSuggestion: 'trust_suggestion',
         SpecAssertionFailure: 'spec_assertion_failure',
         SuggestedSpecLink: 'suggested_link',
         // Other NotificationType variants with template branches
         AgentCompleted: 'agent_completed',
+        AgentFailed: 'agent_failed',
+        SpecApproved: 'spec_approved',
         SpecRejected: 'spec_rejected',
+        GatePassed: 'gate_passed',
+        MrMerged: 'mr_merged',
+        MrCreated: 'mr_created',
+        TaskCreated: 'task_created',
+        SpecChanged: 'spec_changed',
+        AgentBudgetExhausted: 'budget_exhausted',
+        MergeQueuePaused: 'merge_queue_paused',
+        BreakingChangeDetected: 'breaking_change_detected',
+        SpecDriftDetected: 'spec_drift_detected',
+        DependencyStale: 'dependency_stale',
+        SecurityFinding: 'security_finding',
+        InvitationReceived: 'invitation_received',
+        MembershipChanged: 'membership_changed',
+        PersonaApprovalRequested: 'persona_approval_requested',
+        PersonaChangePendingApproval: 'persona_change_pending_approval',
+        SystemAlert: 'system_alert',
+        ImpersonationRequest: 'impersonation_request',
+        ImpersonationAlert: 'impersonation_alert',
+        SecretExpiring: 'secret_expiring',
         // Extended NotificationType variants (gyre-common/src/notification.rs) —
         // each is emitted by a server path and previously rendered a card with
         // no action buttons when unmapped.
@@ -128,13 +174,7 @@
         MrReverted: 'mr_reverted',
         MergeQueueEscalation: 'merge_queue_escalation',
         // Legacy/defensive entries kept for older rows
-        AgentFailed: 'agent_failed',
-        SpecApproved: 'spec_approved',
-        MrMerged: 'mr_merged',
-        MrCreated: 'mr_created',
         MrNeedsReview: 'mr_needs_review',
-        TaskCreated: 'task_created',
-        SpecChanged: 'spec_changed',
       };
       data = data.map(n => ({
         ...n,

@@ -82,6 +82,19 @@ class FullsendContracts(FullsendFixture):
         self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
 
+    def test_assessment_is_registered_with_fullsend_and_has_a_read_only_guard(self):
+        self.store.finish(self.work,self.claim['token'],{})
+        work=self.store.enqueue('assess','task-9999','g',{'base':self.base,'candidate':self.base,'requirements':'fp'})
+        self.claim=self.store.claim('assess','assessor');self.execution=Execution(self.store,self.claim)
+        cfg,repo,_=self.prepare()
+        config=(cfg/'config.yaml').read_text()
+        self.assertIn('name: assess\n    source: harness/assess.yaml',config)
+        harness=json.loads((cfg/'harness/assess.yaml').read_text())
+        self.assertEqual(harness['role'],'review')
+        self.assertEqual(harness['agent'],'agents/assess.md')
+        self.assertTrue((cfg/'agents/assess.md').is_file())
+        self.assertTrue((self.execution.directory/'bundle/review-before.json').is_file())
+
     def interrupted_review(self, source_edit=False, wrong_candidate=False):
         import io
         self.store.finish(self.work,self.claim['token'],{})
@@ -281,10 +294,12 @@ else: print('fixture control operation')
         return subprocess.run([str(self.shim/'openshell'),*args],env={**self.env,**(extra or {})},capture_output=True,text=True,timeout=30)
 
     def test_creation_is_reserved_and_owned_before_real_cli_and_capacity_is_enforced(self):
-        result=self.invoke('sandbox','create','--name',self.name,'--keep','--','sleep','infinity')
+        self.store.set_setting('compute_memory:task-9999:implement',8)
+        result=self.invoke('sandbox','create','--name',self.name,'--memory','8Gi','--keep','--','sleep','infinity')
         self.assertEqual(result.returncode,0,result.stderr)
         state=json.loads((self.root/'backend.json').read_text())
         self.assertNotIn('--keep',state['calls'][0])
+        self.assertEqual(state['calls'][0][state['calls'][0].index('--memory')+1],'4Gi')
         self.assertIn('gyre.dev/work='+self.work,state['calls'][0])
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'present')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')

@@ -56,7 +56,7 @@ const gateFailureNotif = makeNotification({
 
 const dismissedNotif = makeNotification({
   id: 'notif-dismissed',
-  notification_type: 'trust_suggestion',
+  notification_type: 'TrustSuggestion',
   priority: 8,
   title: 'Consider increasing trust',
   body: JSON.stringify({ message: '0 failures in 30 days.' }),
@@ -290,7 +290,7 @@ describe('Inbox', () => {
     api.myNotifications.mockResolvedValue([
       makeNotification({
         id: 'notif-trust',
-        notification_type: 'trust_suggestion',
+        notification_type: 'TrustSuggestion',
         priority: 8,
         title: 'Consider increasing trust level',
         body: JSON.stringify({
@@ -1059,7 +1059,7 @@ describe('Inbox', () => {
       api.myNotifications.mockResolvedValue([
         makeNotification({ id: 'n-repo', repo_id: 'repo-1' }),
         makeNotification({ id: 'n-other', repo_id: 'repo-2' }),
-        makeNotification({ id: 'n-ws', repo_id: null, notification_type: 'trust_suggestion', title: 'Consider increasing trust' }),
+        makeNotification({ id: 'n-ws', repo_id: null, notification_type: 'TrustSuggestion', title: 'Consider increasing trust' }),
       ]);
       const { container } = render(Inbox, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
       // The repo-scoped card renders; the other-repo and workspace-only cards do not.

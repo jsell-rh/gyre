@@ -254,8 +254,9 @@ async fn spec_conflict_response(
             now as i64,
         );
         notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_path.to_string());
-        notif.repo_id = Some(repo.id.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = spec_path.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
         }
@@ -717,7 +718,7 @@ pub async fn save_spec(
             .notifications
             .update_body_by_entity_ref(
                 mr.id.as_str(),
-                NotificationType::SpecPendingApproval.as_str(),
+                NotificationType::SpecApprovalRequested.as_str(),
                 &refreshed_body,
             )
             .await
@@ -789,7 +790,8 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec pending approval" notification (HSI §2 + §8 P2).
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8 P2,
+    // user-management.md §Notification Entity).
     //
     // Fan out to every workspace Admin/Developer/Owner member — these are the
     // roles allowed to approve (reject_spec allows Admin/Developer). When the
@@ -802,6 +804,10 @@ pub async fn save_spec(
     //               (the version the human is approving; matches the ledger's
     //               current_sha semantics from sync_spec_ledger)
     //   mr_id / branch / repo_id — for the MR quick links
+    //
+    // The structured source (entity_type "mr", entity_id = MR id) carries the
+    // same source entity the legacy body fields describe, for the
+    // notification-entity deep-link surface.
     //
     // See spec_blob_sha for how the SHA is derived (git rev-parse with a
     // content-derived fallback — never "", which is a fail-open).
@@ -852,14 +858,15 @@ pub async fn save_spec(
             notif_id,
             repo.workspace_id.clone(),
             uid.clone(),
-            NotificationType::SpecPendingApproval,
+            NotificationType::SpecApprovalRequested,
             format!("Spec pending approval: {}", req.spec_path),
             &tenant_id,
             now as i64,
         );
         notif.body = Some(notif_body.clone());
-        notif.entity_ref = Some(mr_id.to_string());
-        notif.repo_id = Some(repo.id.to_string());
+        notif.source.entity_type = "mr".to_string();
+        notif.source.entity_id = mr_id.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
         // Non-fatal — MR is created even if notification fails.
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
@@ -1113,10 +1120,10 @@ mod tests {
         let notifs = state.notifications.list_recent(10).await.unwrap();
         let spec_notif = notifs
             .iter()
-            .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
-            .expect("SpecPendingApproval notification must be created");
-        assert_eq!(spec_notif.priority, 2);
-        assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
+            .find(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+            .expect("SpecApprovalRequested notification must be created");
+        assert_eq!(spec_notif.priority_rank, 2);
+        assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
         // HSI §8 P2: the body must carry the structured fields the Inbox
         // inline actions consume (approve SHA, MR diff fetch, quick links).
         let body: serde_json::Value =
@@ -1180,6 +1187,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -1210,12 +1218,12 @@ mod tests {
                 .unwrap();
             let approvals: Vec<_> = notifs
                 .iter()
-                .filter(|n| n.notification_type == NotificationType::SpecPendingApproval)
+                .filter(|n| n.notification_type == NotificationType::SpecApprovalRequested)
                 .collect();
             assert_eq!(
                 approvals.len(),
                 1,
-                "user {uid} must get exactly one SpecPendingApproval notification"
+                "user {uid} must get exactly one SpecApprovalRequested notification"
             );
             let body: serde_json::Value =
                 serde_json::from_str(approvals[0].body.as_deref().unwrap()).unwrap();
@@ -1388,10 +1396,10 @@ mod tests {
         let card = notifs
             .iter()
             .find(|n| {
-                n.notification_type == NotificationType::SpecPendingApproval
-                    && n.entity_ref.as_deref() == Some(mr_id.as_str())
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
             })
-            .expect("SpecPendingApproval card after first save");
+            .expect("SpecApprovalRequested card after first save");
         let body: serde_json::Value = serde_json::from_str(card.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["spec_sha"], "98537aa01f28c720793d8f199d221ebd97c3bff3");
 
@@ -1407,8 +1415,8 @@ mod tests {
         let cards: Vec<&gyre_common::Notification> = notifs
             .iter()
             .filter(|n| {
-                n.notification_type == NotificationType::SpecPendingApproval
-                    && n.entity_ref.as_deref() == Some(mr_id.as_str())
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
             })
             .collect();
         assert_eq!(
@@ -2052,6 +2060,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -2092,10 +2101,10 @@ mod tests {
                 1,
                 "user {uid} must get exactly one SpecConflict notification, got {notifs:?}"
             );
-            assert_eq!(conflict[0].priority, 2);
+            assert_eq!(conflict[0].priority_rank, 2);
             assert_eq!(
-                conflict[0].entity_ref.as_deref(),
-                Some("specs/system/conflict.md")
+                conflict[0].source.entity_id.as_str(),
+                "specs/system/conflict.md"
             );
             let body: serde_json::Value =
                 serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();
