@@ -21,7 +21,14 @@ def digest(path):
 
 
 def directory(execution):
-    path=execution.store.directory/'build-cache';path.mkdir(exist_ok=True);path.chmod(0o700);return path
+    path=execution.store.directory/'build-cache';path.mkdir(exist_ok=True);path.chmod(0o700)
+    # Downloads are bounded to five minutes; collect crash leftovers only
+    # after an hour, without touching a live transfer.
+    for partial in path.glob('*.part'):
+        try:
+            if partial.stat().st_mtime<time.time()-3600:partial.unlink()
+        except FileNotFoundError:pass
+    return path
 
 
 def select(execution,key,base):

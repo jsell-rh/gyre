@@ -122,7 +122,7 @@ def transient_setup_failure(run, repo, head, base, failed, logs):
     Product steps and changed workflow definitions always retain normal failure
     handling. A DNS-looking line elsewhere in a workflow is not evidence.
     """
-    evidence=[]
+    evidence=[];input_cache={}
     for check in failed:
         match=re.fullmatch(r'https://github.com/'+re.escape(repo)+r'/actions/runs/(\d+)/job/(\d+)',check.get('detailsUrl') or '')
         if not match:return None
@@ -156,12 +156,23 @@ def transient_setup_failure(run, repo, head, base, failed, logs):
                              r'EAI_AGAIN|Connection timed out|TLS handshake timeout|HTTP[^\n]*\b50[234]\b',lines,re.I):return None
         path=workflow.get('path','').split('@',1)[0]
         if not re.fullmatch(r'\.github/workflows/[\w.-]+\.ya?ml',path):return None
-        inputs=[]
-        for ref in (head,base):
-            value=json.loads(run('gh','api',f'repos/{repo}/contents/{path}?ref={ref}',timeout=30).stdout)
-            if value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):return None
-            inputs.append(value['sha'])
-        if inputs[0]!=inputs[1]:return None
+        paths=[path]
+        if 'Install mold linker' in steps:paths.append('scripts/ci-install-mold.sh')
+        if any(s in steps for s in ('Install dependencies','Install web dependencies','Install Playwright browsers')):
+            paths+=['web/package.json','web/package-lock.json','.npmrc','web/.npmrc']
+        for source_path in paths:
+            inputs=[]
+            for ref in (head,base):
+                key=(source_path,ref)
+                if key not in input_cache:
+                    response=run('gh','api',f'repos/{repo}/contents/{source_path}?ref={ref}',timeout=30,check=False)
+                    value=json.loads(response.stdout)
+                    if str(value.get('status'))=='404' and source_path!=path:input_cache[key]=None
+                    elif response.returncode or value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):
+                        raise RuntimeError('Cannot establish setup input identity')
+                    else:input_cache[key]=value['sha']
+                inputs.append(input_cache[key])
+            if inputs[0]!=inputs[1]:return None
         evidence.append({'run':ident,'attempt':job['run_attempt'],'job':job_id,'steps':steps})
     return {'status':'infrastructure','infrastructure_evidence':evidence,'detail':'Transient setup transport failure; retry the same head, without implementation.'}
 
