@@ -1517,6 +1517,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_tree_template_injects_view_spec_grammar_into_system_prompt() {
+        // ui-layout.md §2 Available Data / Output Format: "The server sends
+        // the LLM: the question, the list of available node types and counts
+        // in the workspace, and the view spec grammar schema." The git-tree
+        // template (specs/prompts/explorer-generate.md — the spec's primary
+        // prompt-storage path) must declare {{view_spec_grammar}} and the
+        // handler must substitute it. Grounded end-to-end: the committed
+        // template is committed into a real workspace repo's git tree, the
+        // real handler runs, and a mock LLM that records its system prompt
+        // proves what actually reached the model — no mirrored substitution
+        // list. (Review 9fc567ff: the placeholder was previously absent from
+        // the committed template, so the git-tree path never sent the
+        // grammar.)
+        //
+        // include_str! so the test always exercises the exact committed
+        // template bytes, never a copy.
+        const COMMITTED_TEMPLATE: &str =
+            include_str!("../../../../specs/prompts/explorer-generate.md");
+        // Guards the template side: the placeholder must be declared.
+        assert!(COMMITTED_TEMPLATE.contains("{{view_spec_grammar}}"));
+
+        use gyre_ports::GitOpsPort as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = dir.path().join("repo.git");
+        let git = gyre_adapters::Git2OpsAdapter::new();
+        git.init_bare(repo_path.to_str().unwrap()).await.unwrap();
+        git.create_initial_commit(repo_path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+        git.write_file(
+            repo_path.to_str().unwrap(),
+            "main",
+            "specs/prompts/explorer-generate.md",
+            COMMITTED_TEMPLATE.as_bytes(),
+            "add prompt template",
+        )
+        .await
+        .unwrap();
+
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-gen-grammar");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                gyre_common::Id::new("default"),
+                "grammar-ws",
+                "grammar-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-gen-grammar"),
+                ws_id.clone(),
+                "grammar-repo",
+                repo_path.to_str().unwrap().to_string(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        let mock = Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+            serde_json::json!({"nonsense": true}),
+        ));
+        let mut s = (*state).clone();
+        s.git_ops = Arc::new(git);
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: mock.clone(),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-gen-grammar/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"q?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the SSE body so the handler runs to completion.
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // The repo must stay on disk for the duration of the request; the
+        // state holds only the path string.
+        std::mem::forget(dir);
+
+        let captured = mock.captured_system_prompts.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one LLM call expected");
+        let system_prompt = &captured[0];
+        // Guards the handler side: the grammar schema actually reaches the
+        // LLM through the git-tree template path.
+        assert!(
+            system_prompt.contains(crate::llm_helpers::VIEW_SPEC_GRAMMAR),
+            "git-tree path must inject the view spec grammar schema into the \
+             system prompt"
+        );
+        // No literal placeholder text may leak into the prompt.
+        assert!(
+            !system_prompt.contains("{{"),
+            "unsubstituted template variables reached the LLM: {system_prompt}"
+        );
+    }
+
+    #[tokio::test]
     async fn generate_explorer_view_rejects_foreign_repo_id() {
         // A repo_id belonging to another workspace must not leak its graph
         // into this prompt — 403, not a grounded generation.

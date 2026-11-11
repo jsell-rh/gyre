@@ -41,6 +41,12 @@ pub struct MockLlmAdapter {
     /// self-check refinement flow) where consecutive calls must return
     /// different outputs.
     script: Option<std::sync::Mutex<VecDeque<String>>>,
+    /// Every system prompt received by `complete` / `predict_json` /
+    /// `stream_complete`, in call order. Lets tests assert on the prompt
+    /// the server actually built (e.g. that a `{{...}}` template variable
+    /// was substituted before reaching the LLM) without mirroring the
+    /// handler's substitution logic.
+    pub captured_system_prompts: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockLlmAdapter {
@@ -53,6 +59,7 @@ impl MockLlmAdapter {
             partial_chunks: vec![],
             stream_error_message: String::new(),
             script: None,
+            captured_system_prompts: Arc::new(std::sync::Mutex::new(vec![])),
         }
     }
     /// Create an adapter that echoes the user_prompt verbatim.
@@ -77,6 +84,7 @@ impl MockLlmAdapter {
             partial_chunks: vec![],
             stream_error_message: String::new(),
             script: None,
+            captured_system_prompts: Arc::new(std::sync::Mutex::new(vec![])),
         }
     }
 
@@ -91,6 +99,7 @@ impl MockLlmAdapter {
             partial_chunks: chunks,
             stream_error_message: message.into(),
             script: None,
+            captured_system_prompts: Arc::new(std::sync::Mutex::new(vec![])),
         }
     }
 
@@ -106,6 +115,7 @@ impl MockLlmAdapter {
             partial_chunks: vec![],
             stream_error_message: String::new(),
             script: Some(std::sync::Mutex::new(VecDeque::from(responses))),
+            captured_system_prompts: Arc::new(std::sync::Mutex::new(vec![])),
         }
     }
 
@@ -128,16 +138,24 @@ impl MockLlmAdapter {
             self.response.clone()
         }
     }
+
+    /// Record a received system prompt for test inspection.
+    fn capture_system_prompt(&self, system_prompt: &str) {
+        if let Ok(mut captured) = self.captured_system_prompts.lock() {
+            captured.push(system_prompt.to_string());
+        }
+    }
 }
 
 #[async_trait]
 impl LlmPort for MockLlmAdapter {
     async fn complete(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<String> {
+        self.capture_system_prompt(system_prompt);
         if let Some(msg) = &self.failure {
             return Err(anyhow::anyhow!("{msg}"));
         }
@@ -146,10 +164,11 @@ impl LlmPort for MockLlmAdapter {
 
     async fn predict_json(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<serde_json::Value> {
+        self.capture_system_prompt(system_prompt);
         if let Some(msg) = &self.failure {
             return Err(anyhow::anyhow!("{msg}"));
         }
@@ -168,10 +187,11 @@ impl LlmPort for MockLlmAdapter {
 
     async fn stream_complete(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        self.capture_system_prompt(system_prompt);
         if let Some(msg) = &self.failure {
             return Err(anyhow::anyhow!("{msg}"));
         }
