@@ -88,7 +88,7 @@ def eligible(store, work):
         if not verification_ready(store,task,inputs.get('base')) or not store.integration_available(work):
             return False
         verified = data.get('verified') or {}
-        return verified.get('candidate') != candidate or verified.get('base') != inputs['base']
+        return verified.get('candidate') != candidate or verified.get('passed') is not True
     if stage == 'publish':
-        return data.get('verified') == inputs['verified'] and store.integration_available(work)
+        return data.get('verified') == inputs['verified'] and verified.get('passed') is True and store.integration_available(work)
     return False
