@@ -27,7 +27,7 @@ def key(checkout, job, env):
     paths=['Cargo.lock','web/package-lock.json','.cargo/config.toml','rust-toolchain.toml']
     paths+=sorted(str(p.relative_to(checkout)) for p in checkout.glob('**/Cargo.toml') if '.git' not in p.parts and 'node_modules' not in p.parts and 'target' not in p.parts)
     inputs={p:digest(checkout/p) for p in paths if (checkout/p).is_file()}
-    versions=[subprocess.check_output(cmd,text=True,timeout=30).strip() for cmd in (['rustc','-vV'],['node','--version'],['mold','--version'])]
+    versions=[subprocess.check_output(cmd,text=True,timeout=30,env={**os.environ,**env}).strip() for cmd in (['rustc','-vV'],['node','--version'],['mold','--version'])]
     value={'schema':1,'image':job['image'],'versions':versions,'inputs':inputs,'environment':env}
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 

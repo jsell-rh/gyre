@@ -158,7 +158,8 @@ def main():
         cache=None
         if job.get('cache_enabled') and 'probe' not in job:
             cache_module=runpy.run_path(str(STAGE/'pipeline-cache.py'))
-            cache=cache_module['prepare'](CHECKOUT,job,build_env,STAGE)
+            try:cache=cache_module['prepare'](CHECKOUT,job,build_env,STAGE)
+            except Exception as exc:print('Optional build cache unavailable: '+type(exc).__name__,flush=True)
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())

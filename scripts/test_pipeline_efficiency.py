@@ -110,8 +110,9 @@ class EfficiencyTests(unittest.TestCase):
 
     def test_cache_key_changes_with_lockfiles_toolchain_and_build_settings(self):
         (self.repo/'Cargo.lock').write_text('dependencies A')
-        with patch.object(remote.subprocess,'check_output',return_value='version1'):
-            first=remote.key(self.repo,{'image':'immutable-image'}, {'RUSTFLAGS':'one'})
+        with patch.object(remote.subprocess,'check_output',return_value='version1') as versions:
+            first=remote.key(self.repo,{'image':'immutable-image'}, {'RUSTFLAGS':'one','RUSTUP_HOME':'/trusted/rustup'})
+            self.assertTrue(all(c.kwargs['env']['RUSTUP_HOME']=='/trusted/rustup' for c in versions.call_args_list))
             (self.repo/'Cargo.lock').write_text('dependencies B')
             self.assertNotEqual(first,remote.key(self.repo,{'image':'immutable-image'},{'RUSTFLAGS':'one'}))
             self.assertNotEqual(first,remote.key(self.repo,{'image':'immutable-image'},{'RUSTFLAGS':'two'}))
