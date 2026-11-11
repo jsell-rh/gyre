@@ -1642,11 +1642,6 @@ async fn run_post_merge_gate_commands(
     Ok(())
 }
 
-/// Returns whether all required gate results for the given MR have passed.
-/// Returns `Ok(true)` if no gates exist or all required gates passed.
-/// Returns `Ok(false)` if any required gates are still pending/running.
-/// Returns `Err(msg)` if any required gate has failed.
-/// Non-required (advisory) gates that fail are recorded but do not block merging.
 /// Count distinct reviewers who have submitted an `Approved` review on the
 /// MR. Re-submissions by the same reviewer count once — "N approvals" is N
 /// people approving, not one person approving N times.
@@ -1689,6 +1684,41 @@ async fn run_required_approvals_gate(
     }
 }
 
+/// Decide merge readiness from evaluated `(status, is_required, gate_id)`
+/// triples. Pure and order-independent by construction: required-gate
+/// failures are scanned across ALL results before any wait decision, so a
+/// Pending/Running required gate can never mask a Failed required gate —
+/// no matter where each sits in the chain or the result-iteration order.
+fn decide_gate_readiness(evaluated: &[(GateStatus, bool, Id)]) -> Result<bool, String> {
+    // Failures first: "if any required gate fails, MR is blocked and author
+    // agent is notified with failure details" — even while other required
+    // gates are still Pending/Running. Advisory gates never block.
+    for (status, is_required, gate_id) in evaluated {
+        if *is_required && matches!(status, GateStatus::Failed) {
+            return Err(format!("gate {} failed", gate_id));
+        }
+    }
+    // Then waiting: "the merge processor waits until all required gates
+    // pass". Advisory gates are never waited on — in any state.
+    for (status, is_required, _) in evaluated {
+        if *is_required && matches!(status, GateStatus::Pending | GateStatus::Running) {
+            return Ok(false); // not ready yet — requeue
+        }
+    }
+    Ok(true) // all required gates passed (or no gates)
+}
+
+/// Returns whether all required gate results for the given MR have passed.
+/// Returns `Ok(true)` if no gates exist or all required gates passed.
+/// Returns `Ok(false)` if any required gates are still pending/running.
+/// Returns `Err(msg)` if any required gate has failed.
+/// Non-required (advisory) gates never block merging — neither their
+/// failures nor their incomplete results (including RequiredApprovals
+/// gates still short of their minimum; agent-gates.md §Gate Chains:
+/// optional gates are "advisory-only" and "don't block merging").
+/// Required-gate failures take precedence over waiting: the merge
+/// processor must block and notify the author even while other required
+/// gates are still pending/running.
 pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, String> {
     let results = state
         .gate_results
@@ -1696,6 +1726,12 @@ pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, St
         .await
         .unwrap_or_default();
 
+    // Pass 1 — evaluate every result into (status, is_required). No
+    // decision is made mid-loop: deciding per-result would let a
+    // Pending/Running gate EARLIER in the chain mask a Failed required
+    // gate LATER in it (the merge processor would requeue forever instead
+    // of failing the MR and notifying the author).
+    let mut evaluated: Vec<(GateStatus, bool, Id)> = Vec::with_capacity(results.len());
     for r in &results {
         // Look up the gate definition (default: required for unknown gates).
         let gate_def = state
@@ -1705,6 +1741,7 @@ pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, St
             .ok()
             .flatten();
         let is_required = gate_def.as_ref().map(|g| g.required).unwrap_or(true);
+        let mut status = r.status.clone();
 
         // RequiredApprovals gates evaluate the review count LIVE while the
         // gate sits Pending/Running (§Gate Chains: "the merge processor
@@ -1714,7 +1751,7 @@ pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, St
         // proceed — no re-enqueue needed.
         if let Some(def) = gate_def.as_ref() {
             if def.gate_type == GateType::RequiredApprovals
-                && matches!(r.status, GateStatus::Pending | GateStatus::Running)
+                && matches!(status, GateStatus::Pending | GateStatus::Running)
             {
                 let min = def.required_approvals.unwrap_or(1) as u64;
                 let have = count_distinct_approvals(state, mr_id).await;
@@ -1732,33 +1769,25 @@ pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, St
                             )),
                         )
                         .await;
-                    continue; // this gate is now satisfied
+                    status = GateStatus::Passed;
                 }
-                // Still short on approvals: keep waiting (requeue). An
-                // approvals gate has no failure mode to record — only
-                // satisfaction — so advisory approval gates wait too.
-                return Ok(false);
+                // Still short: the recorded Pending/Running status stands.
+                // Whether that waits is decided by is_required below — an
+                // advisory approvals gate must NOT block the merge (§Gate
+                // Chains: optional gates "don't block merging"); a required
+                // one keeps the merge waiting, as the spec requires.
             }
         }
 
-        match r.status {
-            GateStatus::Failed => {
-                if is_required {
-                    return Err(format!("gate {} failed", r.gate_id));
-                }
-                // Advisory gate failure — log but don't block.
-            }
-            GateStatus::Pending | GateStatus::Running => {
-                if is_required {
-                    return Ok(false); // not ready yet
-                }
-                // Advisory gate still running — don't wait for it.
-            }
-            GateStatus::Passed => {}
-        }
+        evaluated.push((status, is_required, r.gate_id.clone()));
     }
 
-    Ok(true) // all required gates passed (or no gates)
+    // Pass 2 — decide (pure, order-independent: see
+    // decide_gate_readiness). No decision is made mid-loop: deciding
+    // per-result would let a Pending/Running gate EARLIER in the chain
+    // mask a Failed required gate LATER in it (the merge processor would
+    // requeue forever instead of failing the MR and notifying the author).
+    decide_gate_readiness(&evaluated)
 }
 
 fn now_secs() -> u64 {
@@ -2189,6 +2218,168 @@ mod tests {
         );
         let ready = check_gates_for_mr(&state, &mr_id).await.unwrap();
         assert!(!ready, "duplicate approvals must not unblock the merge");
+    }
+
+    #[tokio::test]
+    async fn advisory_approvals_gate_must_not_block_merge() {
+        // agent-gates.md §Gate Chains: optional gates are "advisory-only"
+        // and "don't block merging" — that must hold for RequiredApprovals
+        // gates too. An advisory approvals gate short of its minimum must
+        // NOT make check_gates_for_mr wait forever: the MR can merge while
+        // the approvals trickle in (they are recorded, never blocking).
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        // An advisory approvals gate demanding approvals nobody will give...
+        let mut advisory = approvals_gate(5);
+        advisory.required = false;
+        state.quality_gates.save(&advisory).await.unwrap();
+        // ...currently Running (0/5 approvals, never satisfied)...
+        state
+            .gate_results
+            .save(&GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: advisory.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Running,
+                output: Some("required_approvals gate: waiting for approvals (0/5)".to_string()),
+                started_at: Some(now_secs()),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        // ...plus a required gate that has passed.
+        let passed_gate = make_gate(GateType::TestCommand, Some("true".to_string()));
+        state.quality_gates.save(&passed_gate).await.unwrap();
+        state
+            .gate_results
+            .save(&GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: passed_gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Passed,
+                output: None,
+                started_at: Some(now_secs()),
+                finished_at: Some(now_secs()),
+            })
+            .await
+            .unwrap();
+
+        // No approvals exist, so the advisory gate stays short — the merge
+        // must proceed anyway (Ok(true)), not requeue forever (Ok(false)).
+        let result = check_gates_for_mr(&state, &mr_id).await;
+        assert_eq!(
+            result, Ok(true),
+            "advisory approvals gate short of its minimum must not block merging"
+        );
+    }
+
+    #[test]
+    fn decide_gate_readiness_failure_precedes_waiting_in_any_order() {
+        // Review F2 regression: when decisions were made mid-loop, a
+        // Pending/Running required gate evaluated BEFORE a Failed required
+        // gate masked the failure (Ok(false) requeue forever, author never
+        // notified). The decision is now a separate order-independent
+        // pass — both orderings must return Err.
+        let waiting = (GateStatus::Running, true, Id::new("gate-waiting"));
+        let failed = (GateStatus::Failed, true, Id::new("gate-failed"));
+        // Waiting gate BEFORE the failed one — the exact masking ordering.
+        let err = decide_gate_readiness(&[waiting.clone(), failed.clone()]);
+        assert!(err.is_err(), "waiting-then-failed must block (Err)");
+        assert!(err.unwrap_err().contains("gate-failed"));
+        // Reverse order must block identically.
+        assert!(decide_gate_readiness(&[failed, waiting]).is_err());
+
+        // Review F1 regression: an ADVISORY gate that is still Running —
+        // e.g. a required=false RequiredApprovals gate short of its
+        // minimum — must never block, in any state (§Gate Chains:
+        // optional gates "don't block merging").
+        assert_eq!(
+            decide_gate_readiness(&[
+                (GateStatus::Running, false, Id::new("gate-advisory")),
+                (GateStatus::Passed, true, Id::new("gate-required")),
+            ]),
+            Ok(true),
+            "advisory Running gate must not block a merge whose required gates passed"
+        );
+        // Advisory failure neither blocks nor masks: required Passed +
+        // advisory Failed still merges.
+        assert_eq!(
+            decide_gate_readiness(&[
+                (GateStatus::Failed, false, Id::new("gate-advisory")),
+                (GateStatus::Passed, true, Id::new("gate-required")),
+            ]),
+            Ok(true)
+        );
+        // Required waiting still waits (spec: "waits until all required
+        // gates pass"), and required failure still blocks.
+        assert_eq!(
+            decide_gate_readiness(&[(GateStatus::Running, true, Id::new("g"))]),
+            Ok(false)
+        );
+        assert!(decide_gate_readiness(&[(GateStatus::Failed, true, Id::new("g"))]).is_err());
+        assert_eq!(decide_gate_readiness(&[]), Ok(true));
+    }
+
+    #[tokio::test]
+    async fn waiting_approvals_gate_must_not_mask_failed_required_gate() {
+        // §Gate Chains: "if any required gate fails, MR is blocked and
+        // author agent is notified with failure details". A required
+        // approvals gate still waiting (Pending/Running) must not mask a
+        // required gate that FAILED — failures take precedence over
+        // waiting, or the merge processor requeues forever and the author
+        // is never notified. (The mem store's result iteration order is a
+        // HashMap artifact, so the exact ordering is pinned by the
+        // decide_gate_readiness unit test above; this end-to-end test
+        // proves the full path — live approvals count, persisted results,
+        // decision — returns Err regardless of order.)
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        // Required approvals gate, short of its minimum (1/2) → Running.
+        let waiting = approvals_gate(2);
+        state.quality_gates.save(&waiting).await.unwrap();
+        submit_approval(&state, &mr_id, "reviewer-a").await;
+        state
+            .gate_results
+            .save(&GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: waiting.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Running,
+                output: Some("required_approvals gate: waiting for approvals (1/2)".to_string()),
+                started_at: Some(now_secs()),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        // Required gate that already failed.
+        let failed_gate = make_gate(GateType::TestCommand, Some("cargo test".to_string()));
+        state.quality_gates.save(&failed_gate).await.unwrap();
+        state
+            .gate_results
+            .save(&GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: failed_gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Failed,
+                output: Some("test failure".to_string()),
+                started_at: Some(now_secs()),
+                finished_at: Some(now_secs()),
+            })
+            .await
+            .unwrap();
+
+        let result = check_gates_for_mr(&state, &mr_id).await;
+        assert!(
+            result.is_err(),
+            "a failed required gate must block (Err) even while a required \
+             approvals gate is still waiting; got Ok({:?})",
+            result.ok()
+        );
+        assert!(result.unwrap_err().contains(failed_gate.id.as_str()));
     }
 
     // ── Gate agent context window capture (§Gate Agent Lifecycle) ──────

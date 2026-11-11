@@ -448,12 +448,19 @@ fn validate_chain(chain: &GateChainToml) -> Result<Vec<GateType>, ApiError> {
 /// Body: the chain as TOML text (the spec's `[[gates]]` format),
 /// content-type `application/toml` or `text/plain`.
 ///
-/// Semantics: the chain REPLACES the repo's configured gates — entries are
-/// applied in order (position = array index), gates whose names disappear
-/// from the chain are deleted, and gates whose names persist keep their ids
-/// (so existing GateResults stay linked to their gate). Validation happens
-/// entirely before the first mutation: an invalid chain is a 400 and leaves
-/// the current chain untouched.
+/// Semantics: the chain REPLACES the repo's configured PRE-MERGE gates —
+/// entries are applied in order (position = array index), gates whose
+/// names disappear from the chain are deleted, and gates whose names
+/// persist keep their ids (so existing GateResults stay linked to their
+/// gate). Validation happens entirely before the first mutation: an
+/// invalid chain is a 400 and leaves the current chain untouched.
+///
+/// Post-merge gates (`gate_phase = post_merge`, configured via
+/// `PUT /repos/:id/post-merge-gates`) are NOT part of the chain — the
+/// chain TOML cannot express a gate phase — so they are neither deleted
+/// nor re-phased by this endpoint. A chain entry whose name collides with
+/// an existing post-merge gate is rejected (gate names are unique per
+/// repo, enforced by `create_gate` for POST /gates as well).
 pub async fn set_gate_chain(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -490,9 +497,32 @@ pub async fn set_gate_chain(
     // Full validation before any mutation (atomicity).
     let types = validate_chain(&chain)?;
 
-    let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
-    let mut by_name: std::collections::HashMap<String, QualityGate> = existing
+    // The chain manages only PRE-MERGE gates. Post-merge recovery gates
+    // (set_post_merge_gates) live in the same per-repo table but are
+    // configured through their own endpoint — the chain TOML cannot
+    // express a gate phase, so a chain PUT must neither delete them nor
+    // re-phase them. A name collision would violate per-repo name
+    // uniqueness (see create_gate), so it is rejected up front.
+    let all_gates = state.quality_gates.list_by_repo_id(&repo_id).await?;
+    let post_merge_names: std::collections::HashSet<&str> = all_gates
+        .iter()
+        .filter(|g| g.gate_phase == GatePhase::PostMerge)
+        .map(|g| g.name.as_str())
+        .collect();
+    if let Some(entry) = chain
+        .gates
+        .iter()
+        .find(|e| post_merge_names.contains(e.name.as_str()))
+    {
+        return Err(ApiError::InvalidInput(format!(
+            "gate '{}' is configured as a post-merge gate for repo {repo_id}; \
+             chain entries cannot reuse post-merge gate names",
+            entry.name
+        )));
+    }
+    let mut by_name: std::collections::HashMap<String, QualityGate> = all_gates
         .into_iter()
+        .filter(|g| g.gate_phase == GatePhase::PreMerge)
         .map(|g| (g.name.clone(), g))
         .collect();
 
@@ -530,7 +560,8 @@ pub async fn set_gate_chain(
         saved.push(gate);
     }
 
-    // Gates absent from the new chain are removed from it.
+    // Pre-merge gates absent from the new chain are removed from it.
+    // (Post-merge gates were never in by_name — they survive the PUT.)
     for (_, removed) in by_name {
         state.quality_gates.delete(removed.id.as_str()).await?;
     }
@@ -542,7 +573,11 @@ pub async fn set_gate_chain(
 }
 
 /// GET /api/v1/repos/:id/gate-chain — the repo's current gate chain as
-/// TOML (the same `[[gates]]` format `PUT` accepts, entries in chain order).
+/// TOML (the same `[[gates]]` format `PUT` accepts, entries in chain
+/// order). Only pre-merge gates are part of the chain; post-merge gates
+/// are listed by `GET /repos/:id/post-merge-gates` instead (the chain
+/// format cannot express a gate phase, so including them here would make
+/// a GET→PUT roundtrip silently re-phase or drop them).
 pub async fn get_gate_chain(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -554,7 +589,10 @@ pub async fn get_gate_chain(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
-    let gates = state.quality_gates.list_by_repo_id(&repo_id).await?;
+    let gates = state
+        .quality_gates
+        .list_by_repo_id_and_phase(&repo_id, GatePhase::PreMerge)
+        .await?;
     let chain = GateChainToml {
         gates: gates.iter().map(GateChainEntry::from).collect(),
     };
@@ -1161,6 +1199,106 @@ required = false
             .map(|g| g["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["security-review", "peer-approval", "advisory-lint"]);
+    }
+
+    #[tokio::test]
+    async fn gate_chain_put_preserves_post_merge_gates() {
+        // Post-merge recovery gates (PUT /repos/:id/post-merge-gates) share
+        // the per-repo quality_gates table but are NOT chain entries — the
+        // chain TOML cannot express a gate phase. A chain PUT must neither
+        // delete them (they're absent from the chain) nor re-phase them,
+        // and GET gate-chain must not emit them as chain entries (a
+        // GET→PUT roundtrip would otherwise silently drop or re-phase
+        // them).
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Seed a post-merge gate the way set_post_merge_gates stores them.
+        let post_merge = gyre_domain::QualityGate {
+            id: gyre_common::Id::new("pm-gate-1"),
+            repo_id: gyre_common::Id::new("repo-1"),
+            name: "post-merge-smoke".to_string(),
+            gate_type: gyre_domain::GateType::TestCommand,
+            command: Some("smoke.sh".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: gyre_domain::GatePhase::PostMerge,
+            timeout_secs: None,
+            position: 0,
+            created_at: 0,
+        };
+        state.quality_gates.save(&post_merge).await.unwrap();
+
+        // Replace the pre-merge chain — "post-merge-smoke" is absent from it.
+        let resp = put_chain(&app, SPEC_CHAIN_TOML, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The post-merge gate survived the replacement, still PostMerge.
+        let pm = state
+            .quality_gates
+            .find_by_id("pm-gate-1")
+            .await
+            .unwrap()
+            .expect("post-merge gate must survive a chain PUT");
+        assert_eq!(pm.gate_phase, gyre_domain::GatePhase::PostMerge);
+        assert_eq!(pm.name, "post-merge-smoke");
+        assert_eq!(pm.command.as_deref(), Some("smoke.sh"));
+
+        // GET gate-chain emits only the pre-merge chain.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gate-chain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !text.contains("post-merge-smoke"),
+            "post-merge gates are not chain entries; chain TOML: {text}"
+        );
+        assert!(text.contains("name = \"tests\""), "chain TOML: {text}");
+
+        // A chain entry reusing a post-merge gate's name is rejected: it
+        // would violate per-repo name uniqueness (create_gate enforces the
+        // same for POST /gates) or ambiguously rewire the recovery gate.
+        let colliding = r#"
+[[gates]]
+name = "post-merge-smoke"
+type = "TestCommand"
+command = "cargo test"
+"#;
+        let resp = put_chain(&app, colliding, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // The rejected PUT left everything untouched.
+        let pm2 = state
+            .quality_gates
+            .find_by_id("pm-gate-1")
+            .await
+            .unwrap()
+            .expect("post-merge gate intact after rejected PUT");
+        assert_eq!(pm2.gate_phase, gyre_domain::GatePhase::PostMerge);
+        let chain_len = state
+            .quality_gates
+            .list_by_repo_id_and_phase("repo-1", gyre_domain::GatePhase::PreMerge)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(
+            chain_len, 5,
+            "pre-merge chain unchanged by the rejected PUT"
+        );
     }
 
     #[tokio::test]
