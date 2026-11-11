@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["583c4a07dde4629da277a1efdafaa5b077596b9d", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "6ccbdff179e7e559c35c08e5072b53b4590dd29c"]
 ---
 
 ## Spec Excerpt
@@ -103,8 +103,9 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 ## Shipped
 
 Both coverage sections are implemented with real production behavior.
-Product commits: `583c4a07d` (implementation) and `d71555220`
-(review-repair round f0f41ed, findings F1-F5).
+Product commits: `583c4a07d` (implementation), `d71555220` (review-repair
+round f0f41ed, findings F1-F5), and `6ccbdff1` (merge reconciliation
+with the task-118 base, verification round d8d5debf).
 
 ### Gate chains (§Gate Chains)
 
@@ -155,24 +156,46 @@ Product commits: `583c4a07d` (implementation) and `d71555220`
   referenced by a `gate_agent_context` audit event; capture skipped and
   logged when the tenant scope is unresolvable — never fabricated.
 
+### Merge reconciliation (round d8d5debf, commit `6ccbdff1`)
+
+The task-118 base (`cba416b`) added ralph_loop integration tests that
+construct `QualityGate` without the `position` field this task added to
+the domain type, so the merged tree failed to compile (E0063 at
+`ralph_loop.rs:827`); three files had also drifted from rustfmt. The
+repair adds `position: 0` to that single-gate test fixture and
+reformats the drifted files (`sqlite/quality_gate.rs`, `api/gates.rs`,
+`gate_executor.rs`) — no behavior change. Verified that the merge kept
+every branch-side feature: merge_queue still triggers
+`trigger_gates_for_mr`, merge_processor still decides via
+`check_gates_for_mr`, and review attribution
+(`reviewer_persona`/`gate_id`) survived the two-sided merge of
+`merge_requests.rs`. Migration numbering audited: the base's
+`2026-10-08-000060_task_generation` and this branch's
+`2026-11-12-000060_repo_agent_limits` map to distinct Diesel versions
+(date-prefixed), confirmed by `check-migration-versions.sh`.
+
 ### Test evidence
 
-New regression tests for the repair round (mem-backed, plus a pure unit
-test): `decide_gate_readiness_failure_precedes_waiting_in_any_order`
+Regression tests from the repair rounds (mem-backed, plus pure unit
+tests): `decide_gate_readiness_failure_precedes_waiting_in_any_order`
 (pins failure-precedence for both orderings and advisory-never-blocks),
 `advisory_approvals_gate_must_not_block_merge`,
 `waiting_approvals_gate_must_not_mask_failed_required_gate`,
 `gate_chain_put_preserves_post_merge_gates`.
 
-`cargo check -p gyre-server --tests` passes in-sandbox (exit 0;
-gyre-server test *execution* is blocked by the build wrapper's 4 GiB
-budget and must run in the independent verifier):
-`cargo test -p gyre-server --lib gate_chain`, `--lib required_approvals`,
-`--lib check_gates`, and the four tests above; task acceptance
-criterion `cargo test --all` likewise belongs to the verifier.
-Mechanical checks pass: check-arch, check-abac-route-registry,
-check-inert-enforcement. Evidence: /tmp/stage/review-evidence/
-task135-repair-round2.md.
+This sandbox: `cargo check --workspace --all-targets` exit 0 (no
+warnings), `cargo fmt --check` clean, `cargo test -p gyre-domain` and
+`cargo test -p gyre-adapters quality_gate|review` all pass (evidence in
+`/tmp/stage/review-evidence/`). gyre-server test *execution* is blocked
+by the build wrapper's 4 GiB budget and must run in the independent
+verifier: `cargo test -p gyre-server --lib gate_chain`, `--lib
+required_approvals`, `--lib check_gates`, `--lib advisory`, `--lib
+agent_review`, and `ralph_loop::tests::gate_failure_respawns_agent_with_fresh_context`
+(the fixture repaired this round); task acceptance criterion
+`cargo test --all` likewise belongs to the verifier. Mechanical checks
+pass: check-arch, check-abac-route-registry, check-inert-enforcement,
+check-migration-versions, check-migration-sql-portability,
+check-mem-port-contracts, check-task-commit-attribution.
 
 ### Docs (review F5)
 
