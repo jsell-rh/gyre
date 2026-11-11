@@ -2,13 +2,13 @@
 title: "Implement search query language (quoted phrases, faceted filtering)"
 spec_ref: "search.md §Query Language"
 depends_on: [task-153]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "search.md §Query Language"
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["001df9412a9d85f2e51e7d6cdfd8f0da1d919916", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
 ---
 
 ## Spec Excerpt
@@ -162,20 +162,39 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
 - The three index-on-create sites (tasks/agents/MRs) pass the entity's
   real update time as `updated_at`.
 
-### Verification repair (this round)
+### CI repair (this round)
 
-Verification finding `1bcd3647914240fd8c081890366fec38` failed only
-`check-rustfmt-diff` — unformatted changed lines in the seven task-surface
-files. Fixed by a whitespace-only rustfmt pass (every reformat region falls
-inside lines this task changed vs base); all other gates in that run
-already passed (clippy changed-lines clean, arch, ABAC, migration
-portability, web build). Post-fix probes: `check-rustfmt-diff` exit 0,
-`cargo test -p gyre-domain search_query` 25 passed, `cargo test -p
-gyre-adapters --lib search` 30 passed, `cargo check -p gyre-server` clean.
-Evidence: `/tmp/stage/review-evidence/` (rustfmt-diff.txt,
-rustfmt-diff-after.txt, focused-tests.txt).
+Durable finding `a9d572fb2408486490b71d2ac8bf0bcd`: the e2e job at PR head
+f061d0e02 (run 43036531271) failed at "Install mold linker" — apt could
+not resolve `azure.archive.ubuntu.com`, a transient GitHub-runner DNS
+failure, not a code defect. Because `.cargo/config.toml` hard-wires
+`-fuse-ld=mold`, the failed install bricked every later build step.
+
+Fix: the four inline `sudo apt-get install -y mold` steps (e2e plus
+clippy/test/build-release in ci.yml) now use a composite action,
+`.github/actions/setup-linker`, which retries the install with growing
+backoff (20s/40s/60s) and, if apt remains unreachable, exports
+`RUSTFLAGS=-C link-arg=-fuse-ld=lld` so the job still builds with the
+runner image's preinstalled clang+lld (also a parallel low-memory
+linker, preserving the OOM rationale in `.cargo/config.toml`). The
+jobs' checks are unchanged — only the link step degrades, with a
+`::warning::`. Verified: the `RUSTFLAGS` env var replaces the config's
+target rustflags (only the env flags reach rustc — checked with
+`cargo build -v` on a scratch crate), clang+lld links working binaries,
+and stubbed-apt runs of the action cover persistent failure (4 attempts,
+fallback env written, exit 0), recovery on the 3rd attempt (mold used,
+no fallback), and immediate success. Evidence:
+`/tmp/stage/review-evidence/ci-mold-fallback/`.
+
+An earlier verification round's rustfmt repair (whitespace-only format
+of this task's changed lines) is preserved in commit fc0c24e8b.
 
 ### Test evidence
+
+- Re-run at this round's head: `cargo test -p gyre-domain search_query`
+  25 passed; `cargo test -p gyre-adapters search` 30 passed
+  (sqlite + mem + postgres SQL-shape). Server-side suites remain
+  deferred to the independent verifier per the 4 GiB budget.
 
 - `gyre-domain` `search_query` — 25 parser/time-bound tests.
 - `gyre-adapters` SQLite — `quoted_phrases_match_exactly_not_individual_terms`,
