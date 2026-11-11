@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "b3b97d79e47705e77bda31294fd7cbd4a4814440"]
 ---
 
 ## Spec Excerpt
@@ -71,7 +71,7 @@ From `platform-model.md` §4 — Agent Coordination Protocol (MCP-Based):
 
 ## Shipped
 
-### MCP prompts/list + prompts/get (mcp.rs, 30fba783f)
+### MCP prompts/list + prompts/get (mcp.rs, 30fba783)
 
 `prompts/list` returns the four §4.3 prompts (`system://persona`,
 `system://protocol`, `system://context`, `system://constraints`) with
@@ -97,7 +97,9 @@ text}}]}`; unknown or missing `name` → JSON-RPC `-32602`.
   12c5fe5e5): a task in another workspace (or, for a repo-scoped agent,
   another repo) is rejected instead of rendered.
 - `system://constraints` — workspace + tenant budget limits with remaining
-  budget, agent lifetime cap, and workspace/tenant scope boundaries.
+  budget, agent lifetime cap, and workspace/tenant scope boundaries, read
+  from the same `budget_configs`/`budget_usages` stores spawn-time
+  enforcement reads.
 
 ### Spawn injection (api/spawn.rs)
 
@@ -107,35 +109,54 @@ unapproved slugs, and persists the binding as the agent's `persona_id`.
 The four prompts are injected into the container env as `GYRE_PROMPT_PERSONA`
 (only when a persona is bound), `GYRE_PROMPT_PROTOCOL`,
 `GYRE_PROMPT_CONTEXT`, and `GYRE_PROMPT_CONSTRAINTS` — content identical
-to what `prompts/get` serves. `meta_spec_set_sha` follows task-116's
-approved semantics (reconciliation 727befd94): the spawn response carries
-the SHA-256 of the assembled meta-spec prompt set — exactly the set
-delivered as `GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — null when
-the assembled set is empty; no value is fabricated.
+to what `prompts/get` serves. Orchestrator launches
+(`launch_orchestrator_process`) inject the same set from the bound
+persona. `meta_spec_set_sha` on the spawn response is the SHA-256 of the
+assembled meta-spec prompt set — exactly the set delivered as
+`GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — null when the assembled
+set is empty; no value is fabricated.
 
-### Verification repair: bearer-token merge drift (894fe8b73)
+### Merge repair: launch-ctx refactor drift (b3b97d79e, this round)
 
-This round merged assignment base `cfeefbda` (task-091 HSI + task-107
-Fulcio signing boundary), which added a required `bearer_token:
-Option<String>` field to `auth::AuthenticatedAgent`. The three task-150
-MCP prompt test initializers (`agent_auth_with_task` and the two
-user-token auths in the prompts suites) still constructed the struct
-without the field, failing `cargo check -p gyre-server --tests` with
-E0063 at mcp.rs:5966/6476/6506. All three now set `bearer_token: None`
-(header-token auth is irrelevant to `handle_prompt_get` — those handlers
-never sign). No production behavior changed.
+Assignment base `cba416b46` (task-118) extracted
+`launch_agent_process(state, ctx)` behind an `AgentLaunchCtx` shared by
+first spawn and the Ralph-loop re-spawn. The merge kept task-150's
+prompt-building block inside the extracted function but left it
+referencing `spawn_agent_core` locals (`req`, `is_interrogation`,
+`persona`) — E0425 x4 — and `signal_chain`'s `try_spawn_worker`
+`SpawnAgentRequest` initializer lost `persona_slug` (E0063). Repaired
+within the base's shared-context design: `AgentLaunchCtx` now carries the
+resolved `persona` and `is_interrogation`; the prompt scope/builders read
+from `ctx` (task id, branch, worktree path); the Ralph-loop re-spawn
+resolves the persona bound to the agent row at first spawn (fail-closed
+when the binding no longer resolves to an Approved persona) and passes
+`is_interrogation: false` (workers only — the path requires a worktree,
+interrogation agents have none); `try_spawn_worker` sets
+`persona_slug: None` (scheduler spawns carry no persona request).
 
-### Test evidence (this round)
+### Test evidence
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — exit 0
-  (evidence `/tmp/stage/review-evidence/task-150-bearer-token-repair.md`).
-- `rustfmt --check crates/gyre-server/src/mcp.rs` — clean.
-- `scripts/check-arch.sh` — passes.
+`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+clean (the 5 merge-drift errors are gone); `cargo fmt --check` and
+`scripts/check-arch.sh` pass. gyre-server test compilation exceeds this
+sandbox's 4 GiB budget (build-wrapper blocked), so the verifier must run
+the focused suites (also recorded in /tmp/stage/review-evidence):
 
-gyre-server test compilation is blocked in the implement sandbox by the
-4 GiB build wrapper; the independent verifier must run
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_prompts` and
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spawn` (prior round:
-157 passed, 0 failed across `mcp::tests::`, `api::spawn::tests::`,
-`api::prompts::`; this round's change only adds a `None` field to three
-test auth initializers, so those suites' behavior is unchanged).
+- `cargo test -p gyre-server --lib mcp_prompts` — 11 tests: list
+  shape+order+args, initialize capability, unknown/missing-name errors,
+  persona scope-chain fallback + bound-persona + unapproved/unknown
+  rejection, context task+spec+worktree + cross-scope task rejection,
+  constraints budget+scope, protocol content, agent-identity requirement.
+- `cargo test -p gyre-server --lib
+  spawn_injects_all_four_system_prompts_with_persona` and
+  `spawn_without_persona_injects_prompts_but_no_persona` and
+  `spawn_persona_slug_fails_closed` — spawn env-dump through a real child
+  process.
+- `cargo test -p gyre-server --lib
+  gate_failure_respawns_agent_with_fresh_context` and
+  `max_iterations_blocks_task_and_fails_agent` — Ralph-loop re-spawn
+  path touched by the repair.
+- `cargo test -p gyre-server --lib
+  spawn_omits_meta_spec_set_sha_without_required_meta_specs` and
+  `spawn_delivers_meta_spec_prompt_to_agent_env` — meta-spec SHA
+  semantics.
