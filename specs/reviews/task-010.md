@@ -69,3 +69,82 @@ Sweep for new findings:
 - All 1,843 tests pass (0 failures, 14 ignored).
 
 No new findings. **TASK-010 verified complete.**
+
+## R5 — 2026-09-29
+
+Reviewer: Independent review (pi runtime)
+Candidate: `b8e47aba5125b7eb65de33975a725bbb227f7bcb` (base `75afe7fca`)
+
+Scope of this round: the candidate delta over base. The five TASK-010
+surfaces (`briefing://`, `notifications://`, `trace://`, `graph_concept`,
+`spec_assist`) shipped in the base and were verified through R1–R4; the
+delta closes the tool-naming deviation those rounds left open
+(snake_case vs the §11 table's dotted spellings).
+
+### Delta reviewed
+
+1. `tools/call` accepts `graph.concept`/`spec.assist` as dispatch aliases
+   (rewritten to canonical names in `mcp_handler`, mcp.rs:3349–3360).
+2. `tools/list` advertises both spellings — alias entries derived from the
+   canonical definitions (same inputSchema, prefixed description) so the
+   two cannot drift (mcp.rs:595–625).
+3. HSI §11 parity table amended to name the shipped snake_case tools, with
+   a tool-naming note — the resolution the base §11 coverage audit row 50
+   prescribed ("amend spec table naming via spec lifecycle rather than
+   renaming tools").
+4. Three new tests + docs/coverage/task-file updates.
+
+### Verification performed (evidence: /tmp/stage/review-evidence/)
+
+- **Gate ordering**: the alias rewrite executes BEFORE the `needs_write`
+  RBAC match, the TASK-216 repo-scope check, and the agent-identity
+  check — an alias call receives enforcement identical to the canonical
+  spelling; aliases cannot bypass any gate.
+- **Core surface reality spot-check** (not trusting labels):
+  `handle_graph_concept` delegates to `assemble_concept_projection` /
+  `assemble_workspace_concept_projection`; `handle_spec_assist` performs
+  real repo lookup, sliding-window rate limit, and the LLM pipeline;
+  `briefing://` implements the REST handler's three-step `since`
+  resolution and delegates to `assemble_briefing`. No stubs.
+- **Test strength**: `mcp_graph_concept_dotted_alias_dispatches_projection`
+  seeds a real manifest repo + graph nodes and asserts the dotted spelling
+  returns the real concept projection (matching node in, non-matching node
+  out) and byte-identical output to the canonical spelling — it fails if
+  the alias dispatch is removed (would yield "Unknown tool"). The
+  `spec.assist` dotted test is error-path only ("repo not found", not
+  "Unknown tool"), but the shared rewrite mechanism is data-path-proven by
+  the graph test.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — **OK** (7m09s
+  cold, exit 0): the new tests compile.
+- `scripts/check-mcp-write-tools.sh` — OK (8 write-capable tools, all
+  gated; aliases are not separate handlers so gate derivation is
+  unaffected).
+- `scripts/check-arch.sh`, `scripts/check-task-commit-attribution.sh` — OK.
+- `scripts/check-mcp-wrapper-parity.sh` — 35 violations, **byte-identical
+  set to base** (pre-existing, none added/removed by the candidate).
+- **rustfmt**: local rustfmt 1.10.0 flags 21 locations in mcp.rs, all
+  pre-existing at base (diff content identical modulo line offsets); the
+  candidate's added lines introduce zero new drift, and the changed-lines
+  failures the prior verification flagged (606, 6886–6888, 6967 at
+  `ce99ae317`) were repaired by `67985e8d9`. The durable exit-1 from that
+  verification run was this rustfmt failure — no other check failed.
+
+### Non-blocking observations
+
+- The spec amendment's claim that the dotted spellings were "editorial,
+  not an API contract" is interpretive, but non-load-bearing: the dotted
+  spellings remain callable and advertised, so clients written against
+  either table revision work. The amendment direction follows the base
+  coverage audit's recorded resolution.
+- `specs/tasks/task-002.md` still quotes the dotted spellings in its frozen
+  contract excerpt — historical assignment text for a different (complete)
+  task; not modifiable here.
+
+### Verifier commands (gyre-server test compilation deferred per runtime
+budget directive)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_tools_list_includes_dotted_parity_aliases mcp_graph_concept_dotted_alias_dispatches_projection mcp_spec_assist_dotted_alias_dispatches`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_` (full MCP
+  surface, including the TASK-010 resource/tool tests from R1–R4)
+
+No new findings. **R5 approved.**

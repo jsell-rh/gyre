@@ -2,10 +2,10 @@
 title: "MCP HSI Parity — Resources and Tools"
 spec_ref: "human-system-interface.md §11 (CLI/MCP Parity Constraint)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-010.md
 coverage_sections: []
-commits: ["67985e8d9d51b99cf89a0f41ab7707b84ec18bce", "275692a808a228d725ba27365a5461d778a26602"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -101,78 +101,3 @@ When working on this task:
 ## Git Commits
 
 - `feat(mcp): add HSI §11 parity resources and tools (TASK-010)`
-
-## Shipped
-
-All five HSI §11 parity surfaces are real production code, and the tools
-are now reachable under BOTH spellings the spec has carried.
-
-### Behavior
-
-- `briefing://{workspace_id}` resource: three-step `since` resolution
-  (explicit `?since=` → `user_workspace_state.get_last_seen` → 24h
-  fallback), delegates to the same `assemble_briefing` the REST handler
-  calls.
-- `notifications://{workspace_id}` resource: resolves the user from
-  agent JWT auth, honors `?min_priority=`/`?max_priority=`, serializes
-  through `NotificationResponse` with the REST envelope.
-- `trace://{mr_id}` resource: verifies the MR exists, delegates to
-  `assemble_gate_trace` (spans, root_spans, service_graph, commit_sha,
-  gate_run_id).
-- `graph_concept` tool: requires `concept` + a scope (`repo_id` or
-  `workspace_id`), delegates to the shared `assemble_concept_results`
-  used by both REST handlers.
-- `spec_assist` tool: requires `repo_id`/`spec_path`/`instruction`;
-  replicates the REST pipeline (rate limit → LLM config → spec content →
-  graph context → prompt → LLM call → diff validation).
-
-### Dotted-name parity repair (finding fd72a1bf)
-
-The assigned requirement inputs quote the §11 parity table with dotted
-tool names (`graph.concept`, `spec.assist`); the shipped surface only
-accepted snake_case, so `tools/call` with a dotted name returned
-"Unknown tool". Commit 275692a80 closes that contract contradiction in
-the server itself:
-
-- `tools/call` normalizes the dotted §11 spellings to the canonical
-  snake_case names before the `needs_write` RBAC gate and dispatch
-  (both tools are read-only; gate membership unchanged).
-- `tools/list` advertises the dotted spellings as alias entries DERIVED
-  from the canonical definitions (same inputSchema and description), so
-  the two spellings cannot drift.
-- `docs/api-reference.md` documents the alias surface; the §11 coverage
-  note records it.
-
-The branch also carries the prior-epoch spec amendment (5b06eded9)
-renaming the in-repo §11 table cells to the shipped snake_case surface;
-protected spec publication stays with the controller. With the aliases,
-the server satisfies either spec text.
-
-### Verification repair (finding b550b5ccf)
-
-Changed-line rustfmt failures at mcp.rs:606, 6886-6888, 6967
-(tuple-array literal wrapping, chained `create_node` call). Commit
-67985e8d9 applies `cargo fmt`; whitespace-only, no behavior change.
-`cargo fmt -p gyre-server -- --check` now passes clean.
-
-### Test evidence
-
-Focused run (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- dotted
-mcp_graph_concept mcp_spec_assist mcp_tools_list mcp_briefing
-mcp_notifications mcp_trace`): 23 passed, 0 failed — the 3 new alias
-tests plus all pre-existing TASK-010 resource/tool tests.
-
-- `mcp_tools_list_includes_dotted_parity_aliases` — both spellings
-  listed with identical inputSchemas.
-- `mcp_graph_concept_dotted_alias_dispatches_projection` — dotted name
-  returns the real manifest-based concept projection, byte-identical to
-  the canonical-name result.
-- `mcp_spec_assist_dotted_alias_dispatches` — dotted name reaches repo
-  resolution ("repo not found"), not "Unknown tool".
-
-Mutation probes (evidence: /tmp/stage/review-evidence/): removing the
-normalization fails both dispatch tests with "Unknown tool: …"; removing
-the advertising fails the tools/list test. Mechanical gates:
-check-mcp-write-tools OK (8 tools, all gated); check-mcp-wrapper-parity
-violation set identical to the assignment base (line-number shifts
-only).
