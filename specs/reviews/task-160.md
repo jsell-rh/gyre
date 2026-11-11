@@ -57,3 +57,30 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review of merged candidate `ea930c3c0` (verdict: approved)
+
+Assignment: base `cba416b46a73d3568f745d7b4eae49a0700a90a6` (task-118 ralph-loop merge) → candidate `ea930c3c0`. The prior rounds' SHAs (`06df8bf`, `f515799`) are NOT ancestors of this candidate — the review file content was checkpoint-recovered across attempt lineages, so every operative claim below was re-verified directly on this exact HEAD. Tree clean before and after; all mutation probes restored (verified via `git status`).
+
+### Verified on this candidate
+
+- **All three scripts pass**: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0 (116 read methods on tenant-column tables checked, 0 violations; pg-path fix live — both `src/sqlite` and `src/postgres` scanned); `check-api-auth.sh` exit 0 (4 non-ABAC mutating handlers checked; Check 3 delegates to the frozen-baseline `check-abac-route-registry.sh`, exit 0).
+- **Kill sensitivity re-proved independently** (each mutation restored afterward):
+  - `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`; deleting the field entirely → exit 1 (missing-field branch).
+  - Removing `workspaces::tenant_id.eq(&tenant)` from `sqlite/workspace.rs::find_by_id` → tenant-filter exit 1 with file:line; same probe on `postgres/workspace.rs` → exit 1 (postgres scan is live, not silently skipped).
+  - Deleting the `abac_middleware` layer line from `lib.rs` → api-auth Check 1 exit 1; deleting `auth: AuthenticatedAgent` from `git_http.rs::git_upload_pack` → Check 2 exit 1. (Note: a merely *commented-out* extractor still textually passes Check 2 — the compiler is the backstop there; grep-lint limitation, not a defect.)
+- **`tenant_isolation.rs` kills real bugs**: clean run 2 passed; removing the sqlite `find_by_id` tenant filter makes `tenant_reads_never_see_another_tenants_rows` FAIL — the test is not self-confirming.
+- **Merge repair compiles**: `cargo check -p gyre-server --tests` exit 0 (4m33s, `SKIP_WEB_BUILD=1`, wrapper-serialized) — the round-1 verification failure (three E0308s in `ralph_loop.rs` from `d162c56d0`'s target) is resolved; the three call sites now pass scoped `Id` matching the hardened `emit_event` signature.
+- **Adapter repairs are real enforcement**: sqlite+postgres workspace/repository/merge_request/notification/saved_view/compute_target reads gain `.filter(<table>::tenant_id.eq(&tenant))` from `self.tenant_id`; analytics/cost `record()` create-stamps use the storage's real tenant instead of `"default"`; the raw-SQL `aggregate_by_day` binds `tenant_id = ?` (covered by the lint's raw-SQL alternative pattern).
+- **Sibling invariants hold**: `check-arch.sh`, `check-scope-literal-defaults.sh`, `check-inert-enforcement.sh`, `check-fabricated-scope-defaults.sh`, `check-mem-port-contracts.sh`, `check-byte-slice-truncation.sh`, `check-abac-route-registry.sh`, `check-task-commit-attribution.sh` — all exit 0 on this HEAD.
+- **Focused tests**: `cargo test -p gyre-adapters --lib` 444 passed / 0 failed / 6 ignored; `--test tenant_isolation` 2 passed.
+- **Wiring**: all three scripts blocking in `.pre-commit-config.yaml` (:46/:62/:70) and `.github/workflows/ci.yml` (:72-76, no `|| true` on any of the three; hierarchy runs with `GYRE_CHECK_HIERARCHY=1`). All executable with usage comments.
+- **Coverage matrix honest**: rows 10/14/27 task-assigned → implemented with evidence; row 28 (integration tests) correctly left to task-161 rather than closed as a side effect.
+
+### Notes (non-material)
+
+- Coverage row 14 note says the SKIP_LIST has "five" adapters and double-lists `user_workspace_state`; the script actually carries six entries (adds `user.rs`, `kv_store.rs`). Cosmetic doc drift.
+- `check-tenant-filter.sh` registers a second `trap … EXIT` that replaces the first; the first pair of mktemp files is explicitly removed before that point. Harmless.
+- Verifier must run (deferred per review budget): `cargo test --all`, clippy, rustfmt, and the three scripts on this HEAD.
+
+Evidence: `/tmp/stage/review-evidence/` — clean-run outputs, all negative-probe outputs (`check-hierarchy-negative*.txt`, `check-tenant-filter-negative*.txt`, `check-api-auth-negative-*.txt`, `tenant-isolation-negative.txt`), `cargo-check-gyre-server.txt`, `adapters-lib-tests.txt`, sibling-lint outputs.
