@@ -44,7 +44,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/personas/{id}/approve` | Approve a persona version — transitions it to active; **Admin only**; records approver + timestamp (VISION-3) |
 | `GET` | `/api/v1/personas/resolve` | Resolve the effective persona for a scope: `?scope=tenant|workspace|repo&scope_id=<uuid>` — returns the most specific persona applicable (VISION-3) |
 | `POST/GET` | `/api/v1/repos` | Create / list repos (`?workspace_id=`); response includes mirror fields (`is_mirror`, `mirror_url`, `mirror_interval_secs`, `last_mirror_sync`), repo status (`status`: `active`, `archived`, `deleting`). `mirror_url` has credentials redacted (`https://***@host`) (M12.2, M35-lifecycle) |
-| `GET/PUT` | `/api/v1/repos/{id}` | Get / update repository; PUT accepts `{name?, description?, default_branch?, workspace_id?}`; response includes `status`, `archived_at`, `workspace_id` fields (M35-lifecycle) |
+| `GET/PUT` | `/api/v1/repos/{id}` | Get / update repository; PUT accepts `{name?, description?, default_branch?, workspace_id?, max_agents?, max_agent_iterations?, budget?}`; `budget` is the repo-level override (agent-runtime.md §4 Cascade): `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}` — replaces the whole override when present, `{}` clears it (inherit the workspace limit), and every set field is validated against the workspace budget (400 on violation); response includes `status`, `archived_at`, `workspace_id`, `budget` fields (M35-lifecycle, task-119) |
 | `DELETE` | `/api/v1/repos/{id}` | Delete repository (**Admin only**); soft-delete sets `status=deleting`; background job removes bare git directory (M35-lifecycle) |
 | `POST` | `/api/v1/repos/{id}/archive` | Archive a repo — sets `status=archived`, cancels open tasks, stops running agents, closes open MRs with `MRStatus::Reverted` (M35-lifecycle) |
 | `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
@@ -222,7 +222,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
-| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_daily_reset` (resets `tokens_used_today`/`cost_today` at midnight UTC), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
+| `GET` | `/api/v1/admin/jobs` | Admin: background job status — merge processor, stale agent detector, `spawn_budget_reset` (hourly: applies the rolling 24h budget window — re-syncs `tokens_used_today`/`cost_today` from the per-call records inside the last 24 hours, agent-runtime.md §4 Budget Reset), `stale_peer_detector` (marks WireGuard peers inactive after `GYRE_WG_PEER_TTL` s, runs every 60 s), `log-compression` (zstd-compresses audit-event details and agent log lines older than 7 days, daily by default via `GYRE_LOG_COMPRESSION_INTERVAL`) (Admin only) |
 | `GET` | `/api/v1/admin/audit` | Admin: searchable activity log (`?agent_id=&event_type=&since=`) (Admin only) |
 | `POST` | `/api/v1/admin/agents/{id}/kill` | Admin: force agent to Dead, terminate real OS process via process registry, clean worktrees, block assigned task, revoke agent token (Admin only) (M11.1, task-103) |
 | `POST` | `/api/v1/admin/agents/{id}/reassign` | Admin: reassign agent's current task to another agent (Admin only) |
@@ -258,8 +258,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/costs` | Record a cost entry (agent_id, task_id, cost_type, amount) |
 | `GET` | `/api/v1/costs` | Query cost entries (`?agent_id=&task_id=&since=`) |
 | `GET` | `/api/v1/costs/summary` | Aggregated cost totals by agent |
-| `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
-| `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
+| `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot, incl. `compute_minutes` — agent wall-clock time charged to the workspace) for a project-scoped workspace; `id` is the project UUID (M22.2, task-119) |
+| `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); enforcement runs after the save — a budget reduced below current usage hard-kills the workspace's active agents immediately, a reduction to exactly 100% starts the 60s graceful stop (agent-runtime.md §4); **Admin only** (M22.2, task-119) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
 | `POST` | `/api/v1/secrets` | Create a secret, or update the value of an existing secret with the same `(scope, scope_id, name)` in the tenant — body: `{name, scope: "tenant"\|"workspace"\|"repo"\|"task", scope_id?, secret_type: "static"\|"ephemeral"\|"rotated"\|"derived", value, expires_at?}`; **Admin only** (ABAC `secret` resource + in-handler role check); `scope_id` is validated against the caller's tenant (404 unknown, 403 cross-tenant); the plaintext `value` is accepted here and NEVER returned by any endpoint (values encrypted at rest, AES-256-GCM); returns metadata (platform-model.md §7, task-098) |
 | `GET` | `/api/v1/secrets` | List secret metadata by scope — `?scope=tenant\|workspace\|repo\|task&scope_id=<uuid>` (scope_id required for workspace/repo/task); **Admin only**; returns `[{id, name, scope, scope_id, secret_type, created_by, created_at, expires_at, last_rotated_at, tenant_id}]` — never values (platform-model.md §7, task-098) |
@@ -441,7 +441,7 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discover and call Gyre capabilities as MCP tools.
 
 **Endpoints:**
-- `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`. Requires authentication.
+- `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`. Requires authentication.
 - `GET /mcp/sse` — SSE stream of typed AG-UI activity events. Requires authentication.
 
 **Available tools** (from `tools/list`):
@@ -482,6 +482,15 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
 | `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
 | `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
+
+**Available prompts** (from `prompts/list`, agent-runtime.md §5 / platform-model.md §4):
+
+| Prompt | Name | Description |
+|---|---|---|
+| `system://persona` | `system://persona` | The assembled meta-spec prompt set the calling agent was spawned under (required tenant + workspace meta-specs and spec-level bindings at pinned versions), served verbatim from the spawn-time record. |
+| `system://protocol` | `system://protocol` | System-managed protocol section: Ralph loop rules, MCP tool usage, heartbeat requirement (60s), escalation rules, completion signaling (`agent.complete`). |
+| `system://context` | `system://context` | Task context for the calling agent: task details, pinned spec ref, branch/repo context, gate failure messages from previous iterations, unacknowledged inbox messages. |
+| `system://constraints` | `system://constraints` | Budget limits and operational parameters: workspace budget limits and live usage (tokens, cost, active agents, compute minutes), agent lifetime, Ralph-loop iteration ceiling, scope boundaries. |
 
 Example MCP `initialize` call:
 ```json
