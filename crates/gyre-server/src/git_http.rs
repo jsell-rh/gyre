@@ -137,18 +137,18 @@ async fn resolve_repo_by_slug(
 ///
 /// - The system principal (bootstrap token) is allowed.
 /// - Agent tokens and other principals without a user identity are allowed:
-/// agents are scoped to their repos at spawn time and their pushes run
-/// through the gate chain; membership is a human-authorization concept.
+///   agents are scoped to their repos at spawn time and their pushes run
+///   through the gate chain; membership is a human-authorization concept.
 /// - Global TenantAdmins are allowed (tenant-wide administration).
 /// - Every other user principal MUST hold a membership in the repo's
-/// workspace whose effective role (workspace role capped by any per-repo
-/// override) carries `perm`; otherwise 403 with an `RbacDenied` audit event.
+///   workspace whose effective role (workspace role capped by any per-repo
+///   override) carries `perm`; otherwise 403 with an `RbacDenied` audit event.
 async fn authorize_repo_access(
     state: &Arc<AppState>,
     auth: &AuthenticatedAgent,
     repo: &gyre_domain::Repository,
     perm: gyre_domain::RepoPermission,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     if auth.is_system_principal() || auth.user_id.is_none() {
         return Ok(());
     }
@@ -211,9 +211,12 @@ async fn authorize_repo_access(
     {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return Err(denial("no workspace membership".to_string(), None));
+            return Err(Box::new(denial(
+                "no workspace membership".to_string(),
+                None,
+            )));
         }
-        Err(e) => return Err(git_err(format!("db error: {e}"))),
+        Err(e) => return Err(Box::new(git_err(format!("db error: {e}")))),
     };
 
     // Per-repo override caps the workspace role (restrict-only).
@@ -223,19 +226,19 @@ async fn authorize_repo_access(
         .await
     {
         Ok(o) => o.map(|o| o.restricted_role),
-        Err(e) => return Err(git_err(format!("db error: {e}"))),
+        Err(e) => return Err(Box::new(git_err(format!("db error: {e}")))),
     };
     let effective = gyre_domain::effective_repo_role(membership.role, override_role);
 
     if !effective.has_repo_permission(perm) {
-        return Err(denial(
+        return Err(Box::new(denial(
             format!(
                 "effective role {} lacks the {} permission",
                 effective.as_str(),
                 perm.as_str()
             ),
             Some(effective),
-        ));
+        )));
     }
     Ok(())
 }
@@ -289,7 +292,7 @@ pub async fn git_info_refs(
         Err(r) => return r,
     };
     if let Err(resp) = authorize_repo_access(&state, &auth, &repo, needed_perm).await {
-        return resp;
+        return *resp;
     }
     let repo_path = repo.path.clone();
 
@@ -522,7 +525,7 @@ pub async fn git_upload_pack(
     if let Err(resp) =
         authorize_repo_access(&state, &auth, &repo, gyre_domain::RepoPermission::Read).await
     {
-        return resp;
+        return *resp;
     }
     let repo_path = repo.path.clone();
 
@@ -584,7 +587,7 @@ pub async fn git_receive_pack(
     if let Err(resp) =
         authorize_repo_access(&state, &auth, &resolved, gyre_domain::RepoPermission::Write).await
     {
-        return resp;
+        return *resp;
     }
 
     let repo_id = resolved.id.to_string();

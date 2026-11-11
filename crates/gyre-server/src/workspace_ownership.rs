@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use gyre_common::{Id, Notification, NotificationPriority, NotificationType};
+use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{Workspace, WorkspaceRole};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -410,6 +410,7 @@ pub async fn orphaned_workspaces(state: &Arc<AppState>) -> anyhow::Result<Vec<Or
 mod tests {
     use super::*;
     use crate::mem::test_state;
+    use gyre_common::NotificationPriority;
     use gyre_domain::{GlobalRole, User, Workspace, WorkspaceMembership, WorkspaceRole as Role};
 
     fn make_workspace(id: &str) -> Workspace {

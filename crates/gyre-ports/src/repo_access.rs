@@ -11,6 +11,7 @@ use gyre_domain::RepoAccessOverride;
 /// layer (`RepoAccessOverride::validate`); this repository persists whatever
 /// the service layer has already validated.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait RepoAccessOverrideRepository: Send + Sync {
     /// Persist a new override.
     ///
