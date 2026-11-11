@@ -123,7 +123,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/graph/diff` | Graph diff between commits — `{from, to, message, deltas}`; `?from=<ref>&to=<ref>` (defaults: `HEAD~1`/`HEAD`) (M30) |
 | `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (M30) |
-| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`); every agent response carries `orchestrator_type`: `worker` \| `workspace_orchestrator` \| `repo_orchestrator` (platform-model §3 — the role signal for the HSI §4 scoped-chat recipient lookup) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
 | `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{model, input_tokens, output_tokens, cost_usd?}`; accumulated in budget tracking; `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
