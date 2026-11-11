@@ -12,7 +12,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
+commits: ["a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7", "c8b4e5efc28c285c0a81f8f332e68439f72f58a0"]
 ---
 
 ## Spec Excerpt
@@ -96,7 +96,12 @@ Read `specs/system/agent-runtime.md` §1 Phases 4-8 in full. Agent spawn is in `
 
 Commit `26edb8fc3` implements agent-runtime.md §1 Phases 4–8;
 `6ae1e989c` repairs the first review round's findings; `a08ef0e79`
-repairs the second round's (worker-claim release + byte-slice).
+repairs the second round's (worker-claim release + byte-slice);
+`c8b4e5efc` repairs the verification round's lint failures (two
+clippy `needless_borrow`s on `&state` in spawn.rs, one identity
+`Ok(...?)` wrapper in ralph_loop.rs, one rustfmt drift in
+merge_queue.rs) — no behavior change; `cargo check -p gyre-server`
+and `cargo fmt --check` pass.
 
 ### Phase 4 — worker scheduler
 
