@@ -52,7 +52,9 @@ class EfficiencyTests(unittest.TestCase):
         stale={'file':'web/dist/','detail':'bundle belongs to main','category':'code'}
         defect={'file':'web/src/Inbox.svelte','detail':'missing real action','category':'code'}
         escape={'file':'web/dist/../../src/App.svelte','detail':'source defect'}
-        self.assertEqual(source_findings([stale,defect,escape]),([defect,escape],[stale]))
+        ambiguous={'file':'web/dist/, web/src/Inbox.svelte','detail':'source and output issue'}
+        malformed={'file':42,'detail':'invalid finding location'}
+        self.assertEqual(source_findings([stale,defect,escape,ambiguous,malformed]),([defect,escape,ambiguous,malformed],[stale]))
         self.assertEqual(source_findings(['build failure']),(['build failure'],[]))
 
     def test_identical_source_and_findings_stop_but_real_progress_resets(self):

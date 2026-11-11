@@ -1,6 +1,7 @@
 """Bound unchanged repair cycles across work identities and main advances."""
 import hashlib
 import json
+import re
 from pathlib import PurePosixPath
 
 from .execution import Attention
@@ -13,8 +14,9 @@ def source_findings(findings):
         name=finding.get('file','') if isinstance(finding,dict) else ''
         # Only explicit generated paths qualify. General frontend, build, test,
         # security or source findings are never suppressed by text matching.
+        name=name if isinstance(name,str) else ''
         path=PurePosixPath(name.split(':',1)[0])
-        target=generated if name.startswith('web/dist/') and '..' not in path.parts else source
+        target=generated if re.fullmatch(r'web/dist/[A-Za-z0-9_.@/-]*(?::[0-9]+(?::[0-9]+)?)?',name) and '..' not in path.parts else source
         target.append(finding)
     return source,generated
 
