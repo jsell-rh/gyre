@@ -237,7 +237,7 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
     }
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             Destination::Workspace(task.workspace_id.clone()),
             MessageKind::TaskTransitioned,
             Some(serde_json::json!({
@@ -303,7 +303,7 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
             .unwrap_or_else(|| r.gate_id.to_string());
         state
             .emit_event(
-                Some(agent.workspace_id.clone()),
+                agent.workspace_id.clone(),
                 Destination::Agent(agent.id.clone()),
                 MessageKind::GateFailure,
                 Some(serde_json::json!({
@@ -518,7 +518,7 @@ pub(crate) async fn notify_task_blocked(
 
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             destination,
             MessageKind::TaskBlocked,
             Some(payload),
