@@ -612,6 +612,8 @@ mod tests {
         // Mint and register a real agent JWT with DISTINCT attribution
         // values, so the assertions would catch the old placeholder-literal
         // bug (`task_id: "task-107"`, `spawned_by: "system"` — F2).
+        // §1 hierarchy claims mirror the fixture's real repo context
+        // (repo created in workspace "test-ws" by the system principal).
         let jwt = state
             .agent_signing_key
             .mint(
@@ -620,6 +622,10 @@ mod tests {
                 "user-fallback",
                 &state.base_url,
                 3600,
+                "default",
+                "test-ws",
+                &repo_id,
+                "test-repo",
             )
             .expect("mint JWT");
         state
