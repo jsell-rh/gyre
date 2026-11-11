@@ -956,9 +956,21 @@ mod tests {
             a
         };
         for agent in [
-            mk("ws-orch-1", "coord", gyre_domain::OrchestratorType::WorkspaceOrchestrator),
-            mk("repo-orch-1", "payments-orchestrator", gyre_domain::OrchestratorType::RepoOrchestrator),
-            mk("worker-1", "search-orchestrator-worker", gyre_domain::OrchestratorType::Worker),
+            mk(
+                "ws-orch-1",
+                "coord",
+                gyre_domain::OrchestratorType::WorkspaceOrchestrator,
+            ),
+            mk(
+                "repo-orch-1",
+                "payments-orchestrator",
+                gyre_domain::OrchestratorType::RepoOrchestrator,
+            ),
+            mk(
+                "worker-1",
+                "search-orchestrator-worker",
+                gyre_domain::OrchestratorType::Worker,
+            ),
         ] {
             state.agents.create(&agent).await.unwrap();
         }
@@ -984,8 +996,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("agent {id} missing from list: {v:?}"))
                 .clone()
         };
-        assert_eq!(by_id(&json, "ws-orch-1")["orchestrator_type"], "workspace_orchestrator");
-        assert_eq!(by_id(&json, "repo-orch-1")["orchestrator_type"], "repo_orchestrator");
+        assert_eq!(
+            by_id(&json, "ws-orch-1")["orchestrator_type"],
+            "workspace_orchestrator"
+        );
+        assert_eq!(
+            by_id(&json, "repo-orch-1")["orchestrator_type"],
+            "repo_orchestrator"
+        );
         assert_eq!(by_id(&json, "worker-1")["orchestrator_type"], "worker");
 
         // Single-agent GET carries the same field.
