@@ -121,85 +121,101 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 ## Shipped
 
-All three HSI §12 gaps are implemented in production code on this branch.
-This round repairs the three findings from review 0242394a on top of the
-earlier delivery rounds.
+All three HSI §12 gaps are implemented in production code on this branch
+(assignment base 42d894f8 merged in as 21d750531; all seven task commits
+verified ancestors of HEAD).
 
 ### Behavior shipped
 
-- **Spec amendment (Part 1)** — `specs/system/human-system-interface.md` §12
-  Judgment Ledger carries a concrete Sources table (category → table →
-  human-attribution key → workspace-attribution key), states when each event
-  is written, and pins `?type=` values to `approval|rejection|gate|trust|meta-spec`
-  (exactly the `JudgmentType` wire strings). Approvals attribute via
-  `spec_approvals.approver_id`; rejections/revocations via `rejected_by`/
-  `revoked_by`; `audit_events.user_id` is the human key for gate/trust/meta-spec
-  events.
+- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger carries a concrete
+  Sources table (category → table → human-attribution key →
+  workspace-attribution key), states when each event is written, and pins
+  `?type=` to `approval|rejection|gate|trust|meta-spec` (exactly the
+  `JudgmentType` wire strings). `audit_events.user_id`/`workspace_id`
+  (migration `2026-09-30-000054_audit_event_envelope`) are the human and
+  workspace keys for gate/trust/meta-spec events.
 - **Write paths (Part 3)** — `AuditEventType` has `TrustChange`/`GateOverride`/
-  `MetaSpecPublish` variants. Trust transition via `PUT /api/v1/workspaces/:id`
-  writes a `trust_change` audit event attributed to the acting user. A human
-  approval review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_type/from/to); agent-token approvals do
-  not qualify. Meta-spec registry create/update write `meta_spec_publish`
-  events with kind/name/version/content_hash and workspace attribution.
+  `MetaSpecPublish`. Trust transition via `PUT /api/v1/workspaces/:id` writes
+  a `trust_change` audit event attributed to the acting user. A human
+  approval review on an MR with failed gate results writes one
+  `gate_override` event per failed gate (mr_id/gate_type/from/to); agent-token
+  approvals do not qualify. Meta-spec registry create/update write
+  `meta_spec_publish` events with kind/name/version/content_hash and workspace
+  attribution.
 - **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user` in both
-  SQL adapters (and the mem adapter) unions spec approvals/rejections with
+  SQL adapters and the mem adapter unions spec approvals/rejections with
   audit-carried gate/trust/meta-spec judgments: `?workspace_id=` filters in
   SQL (not stamps), `?type=` selects the source, reverse-chronological sort
-  across the merged stream, limit/offset applied after union+sort. The
-  source-1 rows load through a named `SpecApprovalJudgmentRow` struct (see
-  repairs below), and the source-2 rows materialize through the shared
-  `AuditEventRow::into_event` read path so log-compressed `detail_zstd`
-  payloads decompress transparently.
+  across the merged stream, limit/offset applied after union+sort.
+  `JudgmentType::GateOverride` has `as_str() == "gate"` and
+  `from_db_str("gate")` parses.
 - **Auth provider info** — `GET /api/v1/users/me` returns read-only
-  `oidc_issuer` + `last_login_at` recorded by the JWT login path; PUT has no
-  field for either. The profile UI displays both (Auth Provider, Last Login).
+  `oidc_issuer` (migration `2026-10-07-000056_user_auth_provider_info`, no
+  client-writable field) + `last_login_at` recorded by the JWT login path;
+  the profile UI displays both.
 - **Notification filtering** — inbox list and badge count exclude types
   disabled in `user_notification_preferences` (canonical-name comparison,
   default all enabled); `PUT /users/me/notification-preferences` normalizes
-  legacy alias spellings to canonical names before storing.
+  legacy alias spellings to canonical names before storing and rejects
+  unknown names. The profile UI exposes a toggle for every canonical
+  `NotificationType` (39/39; Svelte ids, en.json labels, and Rust canonical
+  set cross-checked identical in this sandbox).
 
-### Review repairs in this round (0242394a)
+### Review repair fa094011b F1 (stale committed web/dist)
 
-- **F2 (unnamed tuple carriers)** — the 10-element positional tuple carrier
-  for the spec_approvals select in both SQL adapters'
-  `JudgmentLedgerRepository::list_for_user` is replaced by a named
-  `SpecApprovalJudgmentRow` (Queryable derive, same column order,
-  field-named destructuring). `scripts/check-unnamed-tuple-carriers.sh`
-  drops from 6 hits to the 4 pre-existing baseline ones (all in
-  gyre-server, untouched by this task).
-- **F3 (curated toggle subset)** — the profile UI's Notification Preferences
-  tab previously exposed 22 of the 39 canonical
-  `NotificationType::as_str()` names; HSI §12 requires a toggle for any
-  variant. `NOTIF_TYPE_IDS` now lists all 39 canonical names in enum
-  order, with the 17 missing en.json labels added; a cross-check confirms
-  the Svelte ids, en.json keys, and Rust canonical set are identical
-  (39/39). Tests assert toggle count 39 and spot-check previously-omitted
-  types (AgentFailed, SecurityFinding, MergeQueuePaused,
-  PersonaChangePendingApproval).
-- **F1 (stale web/dist)** — fixed in source only: the canonical-id,
-  full-toggle-list and last-login changes live in `web/src`. Per
-  implement-stage policy the executor restores `web/dist` from the
-  assignment base and final integration rebuilds/publishes it remotely
-  from final source; the committed bundle was NOT rebuilt in this
-  assignment. Publication must verify the regenerated bundle contains all
-  39 canonical preference ids (grep dist for 'AgentFailed',
-  'SecurityFinding', 'PersonaChangePendingApproval') and no legacy ids
-  ('SpecPendingApproval'/'BudgetWarning').
+The finding: the committed bundle (`web/dist/assets/index-jpFOlnlZ.js` at the
+reviewed candidate) contained the old 10-entry toggle list, so the profile
+surface was non-functional in the documented Rust-only build. Resolution in
+this round, per implement-stage policy (executor restores `web/dist` from the
+assignment base; final integration rebuilds and publishes it remotely from
+final source — a dist commit here is discarded by that restore):
 
-### Test evidence
+- **Sources are correct and verified to build.** `build.rs` regenerated
+  `web/dist` from merged HEAD during `cargo check`; the reviewer's reproduce
+  greps were re-run against that fresh bundle (evidence:
+  `/tmp/stage/review-evidence/web-dist-rebuild-greps.log`): the old
+  ` ["SpecApproval","GateOverride",...] ` list is absent, all 39 canonical
+  ids present (`AgentFailed`, `SecurityFinding`,
+  `PersonaChangePendingApproval`, `MergeQueuePaused`, …). Remaining
+  `SpecPendingApproval`/`BudgetWarning` strings in the bundle are
+  pre-existing Inbox/WorkspaceHome icon-map keys for legacy persisted rows,
+  not profile toggles. The local rebuild was then discarded (`git checkout
+  -- web/dist`); dist stays at the assignment-base state for the executor.
+- **Publication must verify** the remotely rebuilt bundle: no
+  `grep '\["SpecApproval","GateOverride"'` hit, and canonical ids
+  (`AgentFailed`, `SecurityFinding`, `PersonaChangePendingApproval`,
+  `MergeQueuePaused`) present. If those greps fail at the published head,
+  the dist regen step was skipped, not the source.
 
-- `cargo test -p gyre-adapters sqlite::user_profile` — 12 passed (judgment
-  ledger aggregation, compression round-trip, notification filtering, token
-  and login tests) through the new named-row read path. Run in this sandbox;
-  exit 0.
-- `cd web && npm ci && npm test` — 99 files / 2014 tests passed, including
-  the updated UserProfile cases (27 tests: toggle count 39, saved-wire
-  canonical names, alias-row handling). Exit 0.
-- `scripts/check-unnamed-tuple-carriers.sh` — the two candidate-introduced
-  violations are gone; only the 4 pre-existing baseline hits remain.
-- Deferred to the independent verifier (server test compile exceeds this
-  sandbox's budget): `cargo test -p gyre-server users::` — in particular
-  `preference_alias_normalizes_to_canonical_before_storing`,
-  `disabled_preference_excludes_type_from_inbox_and_count`, and the
-  judgments/get_me endpoint tests — plus the full workspace suite and CI.
+### Test evidence (this sandbox, merged HEAD 21d750531)
+
+- `cargo check -p gyre-server` — exit 0 (includes gyre-adapters sqlite +
+  postgres modules and the build.rs web rebuild).
+- `cargo test -p gyre-adapters sqlite::user_profile` — 12 passed, exit 0
+  (ledger aggregation/reverse-chron/pagination/type+workspace filters,
+  zstd detail decompression, notification filtering on list and count,
+  prefs upsert, login debounce, tokens).
+- `cargo test -p gyre-common notification` — 8 passed, exit 0.
+- `cd web && npm test` — 104 files, 2079 passed / 41 skipped, exit 0
+  (includes UserProfile's 27 tests: toggle count 39, canonical wire names,
+  alias-row handling).
+- Mechanical: `check-arch.sh`, `check-mem-port-contracts.sh`,
+  `check-abac-route-registry.sh`, `check-migration-sql-portability.sh`,
+  `check-unnamed-tuple-carriers.sh` (4 pre-existing baseline hits, none in
+  task files) — all clean.
+- Environment note: `check-tenant-filter.sh` exits 2 with an awk syntax
+  error on BOTH this branch and the pristine base 42d894f8 — the sandbox
+  awk is mawk 1.3.4, which lacks gawk's 3-arg `match()`. Environment
+  limitation, not a branch defect; the task's queries were reviewed
+  manually (user-scoped via `user_id`/`approver_id`, workspace-filtered in
+  SQL).
+
+### Server tests for the independent verifier
+
+- `cargo test -p gyre-server trust_transition_writes_trust_change_audit_event`
+- `cargo test -p gyre-server gate_override` (human approval review on
+  failed-gate MR writes the audit event)
+- `cargo test -p gyre-server meta_spec_publish` (publish attribution)
+- `cargo test -p gyre-server users::` (get_me oidc_issuer/last_login_at,
+  notification preferences endpoint, judgments endpoint shape)
+- Full `cargo test --all` and `cd web && npm test`
