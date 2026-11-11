@@ -12,7 +12,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
+commits: ["26edb8fc38732bcb23f8c96770ccdbe60d79e4e7", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53"]
 ---
 
 ## Spec Excerpt
@@ -94,18 +94,19 @@ Read `specs/system/agent-runtime.md` §1 Phases 4-8 in full. Agent spawn is in `
 
 ## Shipped
 
-Commit `26edb8fc3` implements agent-runtime.md §1 Phases 4–8; commit
-`6ae1e989c` repairs the independent-review findings on that
-implementation. Behavior as it stands on this branch:
+Commit `26edb8fc3` implements agent-runtime.md §1 Phases 4–8;
+`6ae1e989c` repairs the first review round's findings; `a08ef0e79`
+repairs the second round's (worker-claim release + byte-slice).
 
 ### Phase 4 — worker scheduler
 
 `spawn_implementation_workers` (signal_chain.rs) runs inside
 `scheduler_run_once` under the same cycle lock. It detects `Backlog`
-tasks with `task_type: Implementation` (Delegation/Coordination
-excluded), checks ordering (`depends_on` resolved; `order` is next in
-the repo+parent group), and preconditions: repo not `Archived` (defer,
-resume on unarchive); `effective_max_agents` = `repo.max_agents` →
+tasks with `task_type: Implementation` (Delegation/Coordination and
+untyped push-hook tasks excluded), checks ordering (`depends_on`
+resolved; `order` is next in the repo+parent group), and
+preconditions: repo not `Archived` (defer, resume on unarchive);
+`effective_max_agents` = `repo.max_agents` →
 `workspace.max_agents_per_repo` → unlimited, with
 queueing-not-rejection semantics; workspace budget exhaustion flags
 the `budget-exhausted` task label (cleared on the later successful
@@ -118,24 +119,39 @@ task `InProgress` and spawns attempt 0 synchronously through
 000060, SQLite + PG; `PUT /repos/:id` validates repo limit ≤
 workspace per-repo limit).
 
+**Mid-flight claim release (round-3 repair):** when the budget is
+exhausted AFTER the claim was taken (concurrent REST spawn or retry
+backoff racing the pre-check), `spawn_agent_core`'s own check returns
+429, `try_spawn_worker` maps it to `WorkerSpawnOutcome::Blocked`, and
+`release_claim` releases the task to Backlog via the new domain edge
+`Task::release_claim` — the ONLY InProgress→Backlog transition,
+reserved for this system-side release (the general transition table
+still has no edge into Backlog, so API transitions cannot requeue).
+The release persists the `budget-exhausted` label on budget blocks —
+the same Phase 4 step 3 marker as the pre-check path — so a later
+cycle's Backlog scan re-spawns the task once the budget clears.
+Regression test
+`budget_exhausted_mid_flight_releases_claim_and_respawns` drives the
+exact race (claim, exhaust budget, Blocked outcome, release, restore,
+re-spawn).
+
 ### Phase 6 — MR and gates on completion
 
 Both completion surfaces — REST `POST /agents/:id/complete` and MCP
-`gyre_agent_complete` (which previously created no MR) — share
-`create_mr_for_completion` and call `ralph_loop::on_agent_mr_created`,
-which enqueues via `merge_queue::enqueue_core`; enqueue triggers
-`trigger_gates_for_mr` so gates run automatically and results are
-recorded on the MR. `enqueue_core` is idempotent per open MR (review
-repair): a manual enqueue of an already-queued MR returns the
-existing non-terminal entry (200 OK) instead of a duplicate that
-could never be merged twice; a terminal entry still allows a fresh
-enqueue (retry path); gates are not re-triggered for an existing
-entry.
+`gyre_agent_complete` — share `create_mr_for_completion` and call
+`ralph_loop::on_agent_mr_created`, which enqueues via
+`merge_queue::enqueue_core`; enqueue triggers `trigger_gates_for_mr`
+so gates run automatically and results are recorded on the MR.
+`enqueue_core` is idempotent per open MR (review repair): a manual
+enqueue of an already-queued MR returns the existing non-terminal
+entry instead of a duplicate that could never be merged twice; a
+terminal entry still allows a fresh enqueue (retry path); gates are
+not re-triggered for an existing entry.
 
 ### Phase 7 — Ralph loop
 
-New `crates/gyre-server/src/ralph_loop.rs`. Pass path: a bounded
-watcher waits for the merge processor's merge, then task → Done +
+`crates/gyre-server/src/ralph_loop.rs`. Pass path: a bounded watcher
+waits for the merge processor's merge, then task → Done +
 TaskTransitioned, agent Idle, JWT revoked. Fail path: task back to
 `InProgress`, one `GateFailure` message per failed gate in the
 agent's inbox carrying the gate's real recorded output, failed MR
@@ -146,41 +162,38 @@ prompt set re-assembled at pinned versions). At
 `max_agent_iterations` (repo setting, default 10): task `Blocked`,
 agent `Failed`, token removed, `TaskBlocked` routed to the repo
 orchestrator (spawned on demand). Spawn failure: 3 retries at
-1s/5s/30s (`SPAWN_RETRY_BACKOFF_SECS`, claim kept fresh vs the 60s
-stale recovery; covered by `worker_spawn_failure_retries_then_blocks`
-under `#[tokio::test(start_paused = true)]` — tokio `test-util` is a
-gyre-server dev-dependency, not a production feature); exhausted →
-task `Blocked` + priority-1 `ComputeTargetUnavailable` notifications
-to workspace Owner/Admin members. Spec rejection mid-flight
-cancellation was already genuine (specs.rs, unchanged).
+1s/5s/30s backoff (`retry_worker_spawn`; claim kept fresh so the
+stale-claim recovery never double-claims mid-retry), then task
+`Blocked`, failed attempts' agent records torn down (`Failed`, token
+removed, budget counter released), `TaskBlocked` to the orchestrator
+and a priority-1 `ComputeTargetUnavailable` notification for
+workspace admins. Worker id prefixes are char-boundary truncated
+(`chars().take(8)`, round-3 repair).
 
 ### Phase 8 — system-initiated agents
 
-Gate reviewer (`run_agent_review_gate`, gate_executor.rs) is
-triggered mechanically now that the Ralph loop enqueues every agent
-MR; interrogation agents (spawn endpoint `agent_type:
-"interrogation"`, 30-min JWT, read-only ABAC policies) and
-reconciliation rollouts (`run_reconciliation` creating tasks that
-flow through the now-complete scheduler→worker chain) were
-pre-existing and verified.
+Gate reviewer (spec-review gate spawns a reviewer agent persona),
+interrogation (`POST /agents/:id/ask-why`, 30-min JWT TTL,
+restrict-Deny rollback), reconciliation (meta-spec change
+publication spawns the reconciliation agent).
 
 ### Test evidence
 
-Verified in-sandbox at `6ae1e989c`:
-`cargo check -p gyre-server --all-targets` clean (no warnings); the
-workspace feature change keeps every crate type-checking. The
-gyre-server lib/test binaries exceed the sandbox 4 GiB build budget,
-so the server probes must run in the independent verifier:
-
-- `cargo test -p gyre-server --lib ralph_loop`
-- `cargo test -p gyre-server --lib signal_chain`
-- `cargo test -p gyre-server --lib api::merge_queue` (new:
-  `enqueue_is_idempotent_per_open_mr`,
-  `enqueue_after_terminal_entry_creates_fresh_entry`)
-- `cargo test -p gyre-server --test e2e_ralph_loop` (step 10 now
-  proves the Phase 6 auto-enqueue with a no-duplicate assertion and
-  no manual enqueue of the already-queued MR)
-- `cargo test -p gyre-server --test git_integration` (its merge-queue
-  test completes an agent and then manually enqueues the same MR —
-  now exercises the idempotent path)
-- `cargo test --all` (task acceptance criterion)
+- `cargo test -p gyre-domain` — 466 lib tests pass in-sandbox,
+  including the new `release_claim` edge tests
+  (`test_release_claim_from_in_progress`,
+  `test_release_claim_rejects_other_statuses`,
+  `test_transition_table_has_no_edge_into_backlog`).
+- `cargo check -p gyre-server` and `cargo check -p gyre-server
+  --tests` pass in-sandbox (the build wrapper refuses gyre-server
+test codegen under the 4 GiB budget).
+- Verifier must run: `cargo test -p gyre-server --lib --
+  signal_chain::tests` (includes
+  `budget_exhausted_mid_flight_releases_claim_and_respawns`,
+  `scheduler_flags_budget_exhausted`,
+  `worker_spawn_failure_retries_then_blocks`,
+  `scheduler_failure_releases_claim_and_retries`),
+  `cargo test -p gyre-server --test e2e_ralph_loop`, and
+  `cargo test -p gyre-domain`.
+- `scripts/check-byte-slice-truncation.sh` and
+  `scripts/check-arch.sh` pass in-sandbox.
