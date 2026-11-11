@@ -29,6 +29,8 @@ struct RepositoryRow {
     description: Option<String>,
     status: String,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
 }
 
 impl From<RepositoryRow> for Repository {
@@ -50,6 +52,8 @@ impl From<RepositoryRow> for Repository {
                 RepoStatus::Active
             }),
             updated_at: r.updated_at as u64,
+            max_agents: r.max_agents.map(|v| v as u32),
+            max_agent_iterations: r.max_agent_iterations.map(|v| v as u32),
         }
     }
 }
@@ -71,6 +75,8 @@ struct NewRepositoryRow<'a> {
     description: Option<&'a str>,
     status: &'a str,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
 }
 
 #[async_trait]
@@ -97,6 +103,8 @@ impl RepoRepository for SqliteStorage {
                 description: r.description.as_deref(),
                 status: &status_str,
                 updated_at: r.updated_at as i64,
+                max_agents: r.max_agents.map(|v| v as i32),
+                max_agent_iterations: r.max_agent_iterations.map(|v| v as i32),
             };
             diesel::insert_into(repositories::table)
                 .values(&row)
@@ -114,6 +122,8 @@ impl RepoRepository for SqliteStorage {
                     repositories::description.eq(row.description),
                     repositories::status.eq(row.status),
                     repositories::updated_at.eq(row.updated_at),
+                    repositories::max_agents.eq(row.max_agents),
+                    repositories::max_agent_iterations.eq(row.max_agent_iterations),
                 ))
                 .execute(&mut *conn)
                 .context("insert repository")?;
@@ -173,6 +183,8 @@ impl RepoRepository for SqliteStorage {
                     repositories::description.eq(r.description.as_deref()),
                     repositories::status.eq(&status_str),
                     repositories::updated_at.eq(r.updated_at as i64),
+                    repositories::max_agents.eq(r.max_agents.map(|v| v as i32)),
+                    repositories::max_agent_iterations.eq(r.max_agent_iterations.map(|v| v as i32)),
                 ))
                 .execute(&mut *conn)
                 .context("update repository")?;
@@ -383,5 +395,46 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.description.as_deref(), Some("my description"));
+    }
+
+    /// TASK-118 (agent-runtime.md §1 Phase 4/Phase 7, repo-lifecycle §3):
+    /// the per-repo agent limits persist through create and update — NULL
+    /// inherits, values round-trip.
+    #[tokio::test]
+    async fn max_agent_limits_persist() {
+        let (_tmp, s) = setup();
+        let mut r = make_repo("r-limits", "ws1");
+        r.max_agents = Some(2);
+        r.max_agent_iterations = Some(4);
+        RepoRepository::create(&s, &r).await.unwrap();
+
+        let found = RepoRepository::find_by_id(&s, &r.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.max_agents, Some(2));
+        assert_eq!(found.max_agent_iterations, Some(4));
+
+        // NULL = inherit: a repo without overrides round-trips None.
+        let plain = make_repo("r-plain", "ws1");
+        RepoRepository::create(&s, &plain).await.unwrap();
+        let found = RepoRepository::find_by_id(&s, &plain.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.max_agents, None);
+        assert_eq!(found.max_agent_iterations, None);
+
+        // Update path persists changed values.
+        let mut updated = found;
+        updated.max_agents = Some(5);
+        updated.max_agent_iterations = Some(10);
+        RepoRepository::update(&s, &updated).await.unwrap();
+        let found = RepoRepository::find_by_id(&s, &updated.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.max_agents, Some(5));
+        assert_eq!(found.max_agent_iterations, Some(10));
     }
 }

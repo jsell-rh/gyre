@@ -197,6 +197,33 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let entity_ref = entity_ref.to_string();
+        let ntype = notification_type.to_string();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let updated = diesel::update(
+                notifications::table
+                    .filter(notifications::entity_ref.eq(entity_ref.as_str()))
+                    .filter(notifications::notification_type.eq(ntype.as_str()))
+                    .filter(notifications::resolved_at.is_null())
+                    .filter(notifications::dismissed_at.is_null()),
+            )
+            .set(notifications::body.eq(body))
+            .execute(&mut *conn)
+            .context("update notification body by entity_ref")?;
+            Ok(updated as u64)
+        })
+        .await?
+    }
+
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
@@ -496,6 +523,88 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"mid-unread"));
         assert!(ids.contains(&"new-read"));
+    }
+
+    #[tokio::test]
+    async fn update_body_by_entity_ref_updates_only_unresolved_matches() {
+        // task-175 review F1: save_spec's append path refreshes the
+        // SpecApprovalRequested card bodies in place. The update must touch
+        // every unresolved card referencing the entity (the fan-out creates
+        // one per recipient) and skip resolved/dismissed cards — their body
+        // is the audit record of what was actually acted on — and skip other
+        // entities/types entirely.
+        let (_tmp, s) = setup();
+        let mut base = make("card-1", 100, false);
+        base.notification_type = NotificationType::SpecApprovalRequested;
+        base.source.entity_type = "mr".to_string();
+        base.source.entity_id = "mr-1".to_string();
+        base.body = Some("{\"spec_sha\":\"old\"}".to_string());
+        let mut card2 = base.clone();
+        card2.id = Id::new("card-2"); // second recipient of the same MR
+        let mut resolved = base.clone();
+        resolved.id = Id::new("card-resolved");
+        resolved.resolved_at = Some(110);
+        let mut dismissed = base.clone();
+        dismissed.id = Id::new("card-dismissed");
+        dismissed.dismissed_at = Some(110);
+        let mut other_mr = base.clone();
+        other_mr.id = Id::new("card-other-mr");
+        other_mr.source.entity_id = "mr-2".to_string();
+        let mut other_type = base.clone();
+        other_type.id = Id::new("card-other-type");
+        other_type.notification_type = NotificationType::GateFailure;
+        for n in [&base, &card2, &resolved, &dismissed, &other_mr, &other_type] {
+            NotificationRepository::create(&s, n).await.unwrap();
+        }
+
+        let updated = NotificationRepository::update_body_by_entity_ref(
+            &s,
+            "mr-1",
+            "SpecApprovalRequested",
+            "{\"spec_sha\":\"new\"}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 2, "card-1 + card-2 only");
+
+        let all = NotificationRepository::list_recent(&s, 100).await.unwrap();
+        let by_id = |id: &str| all.iter().find(|n| n.id.as_str() == id).unwrap();
+        assert_eq!(
+            by_id("card-1").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
+        assert_eq!(
+            by_id("card-2").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
+        // Resolved/dismissed/other-entity/other-type bodies untouched.
+        assert_eq!(
+            by_id("card-resolved").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-dismissed").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-mr").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-type").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+
+        // Nonexistent entity updates nothing, succeeds.
+        let updated = NotificationRepository::update_body_by_entity_ref(
+            &s,
+            "mr-nope",
+            "SpecApprovalRequested",
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 0);
     }
 
     #[tokio::test]

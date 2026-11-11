@@ -29,6 +29,8 @@ struct RepositoryRow {
     description: Option<String>,
     status: String,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
 }
 
 impl From<RepositoryRow> for Repository {
@@ -50,6 +52,8 @@ impl From<RepositoryRow> for Repository {
                 RepoStatus::Active
             }),
             updated_at: r.updated_at as u64,
+            max_agents: r.max_agents.map(|v| v as u32),
+            max_agent_iterations: r.max_agent_iterations.map(|v| v as u32),
         }
     }
 }
@@ -71,6 +75,8 @@ struct NewRepositoryRow<'a> {
     description: Option<&'a str>,
     status: &'a str,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
 }
 
 #[async_trait]
@@ -97,6 +103,8 @@ impl RepoRepository for PgStorage {
                 description: r.description.as_deref(),
                 status: &status_str,
                 updated_at: r.updated_at as i64,
+                max_agents: r.max_agents.map(|v| v as i32),
+                max_agent_iterations: r.max_agent_iterations.map(|v| v as i32),
             };
             diesel::insert_into(repositories::table)
                 .values(&row)
@@ -114,6 +122,8 @@ impl RepoRepository for PgStorage {
                     repositories::description.eq(row.description),
                     repositories::status.eq(row.status),
                     repositories::updated_at.eq(row.updated_at),
+                    repositories::max_agents.eq(row.max_agents),
+                    repositories::max_agent_iterations.eq(row.max_agent_iterations),
                 ))
                 .execute(&mut *conn)
                 .context("insert repository")?;
@@ -173,6 +183,8 @@ impl RepoRepository for PgStorage {
                     repositories::description.eq(r.description.as_deref()),
                     repositories::status.eq(&status_str),
                     repositories::updated_at.eq(r.updated_at as i64),
+                    repositories::max_agents.eq(r.max_agents.map(|v| v as i32)),
+                    repositories::max_agent_iterations.eq(r.max_agent_iterations.map(|v| v as i32)),
                 ))
                 .execute(&mut *conn)
                 .context("update repository")?;
