@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "8791562452e3241d07b8944c029500d3744a676d"]
 ---
 
 ## Spec Excerpt
@@ -72,28 +72,27 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is access-scoped end to end (search.md §Access Scoping), on a history that carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the rebase repair onto base `4e895f7` (merge `08c1c757`, durable finding `25e35a17`), and the CI runner repair `df800fe2` (durable finding `4991c811`).
+Search is access-scoped end to end (search.md §Access Scoping), on a history that carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the earlier rebase repair onto base `4e895f76`, the CI runner repair `df800fe2`, and this attempt's rebase repair onto base `7cf2f81c` (merge `87915624`, durable finding `8e976725d`).
 
 ### Behavior
 
 - **Scope derivation (server-side, `crates/gyre-server/src/search_scope.rs`)**: `derive_search_scope` resolves the caller's `tenant_id` from auth, then — Admin (incl. global dev token) → unscoped within the tenant; agent JWTs with `orchestrator_type` claims → workspace orchestrator sees its whole workspace, repo orchestrator its single repo; worker agents → their agent record's workspace/repo; human users → accepted workspace memberships; unknown callers → fail closed (empty accessible set, zero results, never unscoped).
-- **Port (`gyre-ports/src/search.rs`)**: `SearchQuery` carries `tenant_id`, `accessible_workspace_ids: Option<Vec<String>>` (`None` = Admin/unscoped, empty = zero rows), `accessible_repo_ids: Option<Vec<String>>` (repo-less workspace docs stay visible). The user-supplied `workspace_id`/`entity_type` remain narrowing filters intersected with the accessible set — they can only narrow, never widen.
-- **Adapter enforcement, inside the index query**: SQLite FTS5 and Postgres tsvector adapters bind `tenant_id = ?`, `workspace_id IN (...)`, `(repo_id = '' OR repo_id IN (...))` as SQL WHERE clauses on the FTS/tsquery itself (empty accessible set → `AND 0`); the mem adapter applies the same constraints in its query filter before scoring. No post-filtering anywhere, so totals/facet counts cannot leak inaccessible documents.
-- **Handlers**: REST `search_handler` and MCP `gyre_search` take `AuthenticatedAgent` first and derive scope from the token context, never from client args.
+- **Port (`gyre-ports/src/search.rs`)**: `SearchQuery` carries `tenant_id`, `accessible_workspace_ids: Option<Vec<String>>` (`None` = Admin/unscoped, empty = zero rows), `accessible_repo_ids: Option<Vec<String>>` (repo-less workspace docs stay visible). The user-supplied `workspace_id`/`entity_type` remain narrowing filters intersected with the accessible set — they can only narrow, never widen. `suggest()` and `facet_counts()` take the same `SearchQuery` and enforce the same scope (this rebase closed the gap the merged task-153 surface opened: the base's suggest/facets were unscoped).
+- **Adapter enforcement, inside the index query**: SQLite FTS5 and Postgres tsvector adapters build the §Access Scoping WHERE clauses (`tenant_id = ?`, `workspace_id IN (...)`, `(repo_id = '' OR repo_id IN (...))`; empty accessible set → `AND 0`/`AND FALSE`) in one shared `scope_filter_sql` helper applied identically by `search()`, `suggest()`, and `facet_counts()` — never post-filtered, so totals, suggestion lists, and facet counts cannot leak inaccessible documents. Blank facet text aggregates the caller's whole accessible set (not the whole index). The mem adapter applies the same scope predicate in its query filter (port-contract parity).
+- **Handlers**: REST `search_handler`, `suggest_handler`, `facets_handler`, and MCP `gyre_search` all take `AuthenticatedAgent` and derive scope from the token context, never from client args; a client `workspace_id` only narrows.
 - **Indexing**: task/agent/MR creation routes documents through `search_scope::index_doc`, which stamps `workspace_id`/`repo_id` from the entity and resolves `tenant_id` from the workspace's scope row (unresolvable → doc visible to no tenant-scoped query, never mis-attributed).
-- **Docs**: `docs/api-reference.md` search rows now state the access scoping and that `workspace_id` only narrows.
+- **Docs**: `docs/api-reference.md` search/suggest/facets rows state the access scoping and that `workspace_id` only narrows.
 
 ### Test evidence
 
-Logs retained under `/tmp/stage/review-evidence/task-203-*`:
+Logs retained under `/tmp/stage/review-evidence/task-203-rebase-7cf2f81c/`:
 
-- `cargo test -p gyre-server --lib mcp_search` — 1 passed: `mcp_search_is_access_scoped_to_the_agent_token` (admin sees 3; repo orchestrator sees only its repo; client `workspace_id: ws-b` cannot widen; workspace orchestrator sees both ws-a repos, never ws-b).
-- `cargo test -p gyre-server --test search_wiring` — 2 passed: `search_is_access_scoped_to_the_authenticated_caller` (member of ws-a gets total 2 with ws-b's matching doc absent from results AND total; `workspace_id=ws-b` param → total 0; repo/workspace orchestrator and worker-agent paths; ghost agent fails closed) and `sqlite_url_wires_fts5_search_port` (FTS5 wiring, stemming, tenant boundary, facets).
-- `cargo test -p gyre-adapters search` — 16 passed, incl. `access_scoping_filters_inside_the_index_query` (asserts the SQL text carries the WHERE clauses), `access_scoping_filters_inside_the_query_filter` (mem), `repo_scope_restricts_repos_but_keeps_workspace_level_docs`.
-- `bash scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-abac-route-registry.sh` — all exit 0.
+- `cargo test -p gyre-adapters search` — 21 passed (mem + SQLite FTS5): port-level scoping (tenant boundary, accessible-workspace/repo sets, empty-set → zero rows, client `workspace_id` cannot widen), plus this attempt's new legs — scoped `facet_counts` excludes other workspaces from counts, blank-text facet aggregation stays within the accessible set, scoped `suggest` returns only accessible titles.
+- `cargo check -p gyre-ports -p gyre-adapters --tests`, `cargo check -p gyre-server --tests` (incl. `search_wiring`) — clean; `bash scripts/check-arch.sh` — passed.
+- `crates/gyre-server/tests/search_wiring.rs` `search_is_access_scoped_to_the_authenticated_caller` now also asserts alice's `facet_counts`, `/search/suggest`, and `/search/facets` exclude workspace B (type-checked here; execution deferred — see below).
 
-Full workspace suites, all-target Clippy, and GitHub CI are deferred to verification per assignment scope.
+### Verifier-required probes (server test binaries exceed this sandbox's build budget)
 
-### CI repair (`df800fe2`, durable finding `4991c811`)
-
-PR #741 run 42573267153 failed at the E2E job's `Install Playwright browsers` step: `ubuntu-latest` now resolves to ubuntu 26.04, for which the locked Playwright 1.58.2 has no chromium build ("Playwright does not support chromium on ubuntu26.04-x64"). Every earlier step of the same run (release build, `npm ci`, web build, vitest) passed — the failure is the runner image, not the code. Fix: pin the e2e job's `runs-on` to `ubuntu-24.04`, an image Playwright 1.58.2 officially supports; no locked dependency, test, or assertion changed (`ci(e2e): pin runner image to ubuntu-24.04 for locked Playwright`). Local probes with the locked toolchain (`/tmp/stage/review-evidence/task-203-ci-repair-*`): `npm ci` + `npx playwright install --dry-run chromium` confirms the locked 1.58.2 expects chromium v1208 (the exact installed build), and a browser-launch smoke test using the repo's `playwright.config.js` launch options (`--no-zygote`, `chromiumSandbox: false`) renders a page successfully — the e2e toolchain itself is healthy. Exact-head GitHub checks remain with verification.
+- `cargo test -p gyre-server --test search_wiring`
+- `cargo test -p gyre-server --lib mcp_search`
+- `cargo test --all` and `bash scripts/check-arch.sh` (repo-wide gates)
