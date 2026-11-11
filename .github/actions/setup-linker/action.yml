@@ -1,0 +1,41 @@
+name: 'Set up Rust linker'
+description: >-
+  Install the mold linker with retries and a documented fallback. If apt is
+  unreachable (transient runner DNS/network failure — e2e run 43036531271
+  died at "Install mold linker" with "Temporary failure resolving
+  'azure.archive.ubuntu.com'"), export RUSTFLAGS pointing the config's
+  clang linker at the runner image's preinstalled lld so the job still
+  builds and runs its real checks.
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        if command -v mold >/dev/null 2>&1; then
+          echo "mold already present"
+          exit 0
+        fi
+        # apt retries short fetch failures internally, but a DNS blip that
+        # outlasts that fails the job outright; add outer retries with
+        # growing backoff (20s/40s/60s) before falling back.
+        attempt=0
+        until sudo apt-get install -y mold; do
+          attempt=$((attempt + 1))
+          if [ "$attempt" -ge 4 ]; then
+            echo "::warning::mold is not installable (apt network failure after $attempt attempts); linking with preinstalled lld instead"
+            # .cargo/config.toml wires -fuse-ld=mold for linux-gnu targets.
+            # A RUSTFLAGS environment variable replaces those target
+            # rustflags (verified: only the env flags reach rustc), so point
+            # the same clang linker at the runner image's preinstalled lld —
+            # also a parallel low-memory linker, preserving the OOM
+            # rationale in .cargo/config.toml. The job's checks are
+            # unchanged; only the link step differs.
+            echo "RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          delay=$((attempt * 20))
+          echo "apt-get install mold failed (attempt $attempt); retrying in ${delay}s"
+          sleep "$delay"
+        done
+        echo "mold installed on attempt $((attempt + 1))"
