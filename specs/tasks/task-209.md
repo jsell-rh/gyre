@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "5acaf065f8d32e1ac3d6d5bd9397f7ce625ea6f2"]
 ---
 
 ## Spec Excerpt
@@ -121,9 +121,17 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 ## Shipped
 
-All three HSI §12 gaps are implemented in production code on this branch
-(assignment base 42d894f8 merged in as 21d750531; all seven task commits
-verified ancestors of HEAD).
+All three HSI §12 gaps are implemented in production code on this branch.
+This round rebased the completed task onto the new assignment base
+cfeefbda9 (task-091) as merge 5acaf065f — the only source conflicts were
+resolved by combining both sides (auth.rs keeps the HSI §12
+LOGIN_RECORD_DEBOUNCE_SECS alongside task-134's capability-scope constants;
+merge_requests.rs submit_review keeps task-134's reviewer identity binding
+while preserving the mr_id/decision clones task-209's gate-override audit
+write needs), and the merged tree was re-verified: `cargo check -p
+gyre-server` exit 0, `cargo test -p gyre-adapters sqlite::user_profile`
+12 passed / 0 failed. All seven prior task commits plus the merge are
+ancestors of HEAD.
 
 ### Behavior shipped
 
@@ -187,7 +195,7 @@ final source — a dist commit here is discarded by that restore):
   `MergeQueuePaused`) present. If those greps fail at the published head,
   the dist regen step was skipped, not the source.
 
-### Test evidence (this sandbox, merged HEAD 21d750531)
+### Test evidence (re-verified this round on merged HEAD 5acaf065f)
 
 - `cargo check -p gyre-server` — exit 0 (includes gyre-adapters sqlite +
   postgres modules and the build.rs web rebuild).
