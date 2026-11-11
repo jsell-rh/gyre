@@ -99,15 +99,18 @@ never diffs against a stale pre-publish prompt.
 ### This round (contract restoration)
 
 The executor restored the assigned task document to its contract form
-(repair `c0ed46af2e5d43e4898b1c165e5111de`); this round changes no
+(repair `58f1efcfece34880b5c8787dfac0e1a9`); this round changes no
 production code — it re-verifies and re-records the existing fix.
-`git diff 91fe1e86d HEAD -- web/src` is empty, confirming the Iterate
-results-visibility repair is intact at HEAD `8c9a00454`. Focused
-vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` (after `npm ci`
-from the lockfile): 2 files, **153/153 passed**. Evidence:
-`/tmp/stage/review-evidence/focused-tests.txt`. `web/dist` regeneration
-is executor-owned (restored from the assignment base; final integration
-rebuilds and publishes remotely), so no dist commit is made here.
+`git diff 91fe1e86d HEAD -- web/src` is empty (verified this round),
+confirming the Iterate results-visibility repair is intact at HEAD
+`671873eea` after the base merge; the only web/dist difference vs the
+assignment base is the executor's restoration of generated assets.
+Focused vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` (after
+`npm ci` from the lockfile): 2 files, **153/153 passed**, exit 0.
+Evidence: `/tmp/stage/review-evidence/task-176-focused-tests.log`.
+`web/dist` regeneration is executor-owned (restored from the assignment
+base; final integration rebuilds and publishes remotely), so no dist
+commit is made here.
 
 ### Known limitation
 
