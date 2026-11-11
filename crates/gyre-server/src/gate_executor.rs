@@ -615,6 +615,15 @@ async fn build_review_agent_context(
 
     // Scoped reviewer identity: `review:submit` only. `task_id` carries the
     // gate id so the token is traceable to the gate run that minted it.
+    // §1 Token Scoping: the token carries the tenant of the MR's workspace
+    // and the resolved persona slug, both fail-closed — an unresolvable
+    // workspace/tenant is a gate failure, never a fabricated literal.
+    let workspace = state
+        .workspaces
+        .find_by_id(&mr.workspace_id)
+        .await
+        .map_err(|e| format!("failed to load workspace {}: {e:#}", mr.workspace_id))?
+        .ok_or_else(|| format!("workspace {} not found", mr.workspace_id))?;
     let gate_agent_id = format!("gate-review-{}", Uuid::new_v4());
     let token = state
         .agent_signing_key
@@ -625,6 +634,8 @@ async fn build_review_agent_context(
             &state.base_url,
             gate_token_ttl_secs(gate),
             crate::auth::REVIEW_SUBMIT_SCOPE,
+            workspace.tenant_id.as_str(),
+            Some(slug),
         )
         .map_err(|e| format!("failed to mint scoped review token: {e}"))?;
     // Register in agent_tokens so the auth extractor resolves the JWT and
@@ -895,6 +906,47 @@ async fn run_validation_agent_process(
     // never validate, so the agent could not authenticate at all ("cannot
     // determine state" is not "state is fine"). Mirrors
     // build_review_agent_context's fail-closed mint path.
+    //
+    // §1 Token Scoping: the token carries the tenant of the MR's workspace
+    // and the gate persona's slug, both resolved fail-closed before the
+    // mint — an unresolvable MR/workspace/tenant fails the gate, never a
+    // fabricated literal.
+    let mr = match state.merge_requests.find_by_id(mr_id).await {
+        Ok(Some(mr)) => mr,
+        Ok(None) => {
+            return (
+                GateStatus::Failed,
+                format!("agent_validation gate failed: merge request {mr_id} not found"),
+            )
+        }
+        Err(e) => {
+            return (
+                GateStatus::Failed,
+                format!("agent_validation gate failed: cannot load MR {mr_id}: {e:#}"),
+            )
+        }
+    };
+    let workspace = match state.workspaces.find_by_id(&mr.workspace_id).await {
+        Ok(Some(ws)) => ws,
+        Ok(None) => {
+            return (
+                GateStatus::Failed,
+                format!(
+                    "agent_validation gate failed: workspace {} not found",
+                    mr.workspace_id
+                ),
+            )
+        }
+        Err(e) => {
+            return (
+                GateStatus::Failed,
+                format!(
+                    "agent_validation gate failed: cannot load workspace {}: {e:#}",
+                    mr.workspace_id
+                ),
+            )
+        }
+    };
     let gate_agent_id = format!("gate-validate-{}", Uuid::new_v4());
     let gate_token = match state.agent_signing_key.mint_scoped(
         &gate_agent_id,
@@ -903,6 +955,8 @@ async fn run_validation_agent_process(
         &state.base_url,
         gate_token_ttl_secs(gate),
         crate::auth::VALIDATION_REPORT_SCOPE,
+        workspace.tenant_id.as_str(),
+        Some(persona_slug(persona)),
     ) {
         Ok(token) => token,
         Err(e) => {
@@ -1496,6 +1550,23 @@ mod tests {
     /// Seed a repository row (no persona) with a real on-disk bare git
     /// repository (source branch diverged from main so the MR diff
     /// resolves). Returns (mr_id, repo_id).
+    /// Ensure a Workspace row exists for `ws_id` under the bootstrapped
+    /// single-tenant scope, so fixtures model the production chain the
+    /// §1 gate-agent mint resolves (MR → workspace → tenant). Idempotent.
+    async fn ensure_workspace_row(state: &Arc<AppState>, ws_id: &Id) {
+        if let Ok(Some(_)) = state.workspaces.find_by_id(ws_id).await {
+            return;
+        }
+        let ws = gyre_domain::Workspace::new(
+            ws_id.clone(),
+            Id::new("default"),
+            format!("Test workspace {}", ws_id.as_str()),
+            ws_id.as_str().to_string(),
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
     async fn seed_mr_with_repo(state: &Arc<AppState>) -> (Id, Id) {
         let dir = std::env::temp_dir().join(format!("gyre-gate-fixture-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1531,6 +1602,7 @@ mod tests {
             now_secs(),
         );
         state.repos.create(&repo).await.unwrap();
+        ensure_workspace_row(state, &Id::new("default")).await;
 
         let mr_id = make_mr_id();
         let mr = gyre_domain::MergeRequest::new(
@@ -1674,6 +1746,7 @@ mod tests {
         mr.spec_ref = Some(format!("specs/system/widget.md@{spec_sha}"));
         mr.author_agent_id = Some(agent_id);
         mr.workspace_id = Id::new("ws-test");
+        ensure_workspace_row(state, &Id::new("ws-test")).await;
         state.merge_requests.create(&mr).await.unwrap();
 
         (mr_id, repo_id, spec_sha)
@@ -1929,7 +2002,7 @@ mod tests {
     async fn agent_validation_exit_zero_passes() {
         let state = test_state();
         let gate = make_gate(GateType::AgentValidation, Some("true".to_string()));
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -1941,7 +2014,7 @@ mod tests {
     async fn agent_validation_exit_nonzero_fails() {
         let state = test_state();
         let gate = make_gate(GateType::AgentValidation, Some("false".to_string()));
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -1962,7 +2035,7 @@ mod tests {
             Some("printenv GYRE_VALIDATION_TYPE".to_string()),
         );
         gate.validation_type = Some("license-scan".to_string());
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -1988,7 +2061,7 @@ mod tests {
         let state = test_state();
         let gate = make_gate(GateType::AgentValidation, Some("true".to_string()));
         assert!(gate.validation_type.is_none());
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -2006,7 +2079,7 @@ mod tests {
             GateType::AgentValidation,
             Some("/nonexistent/validator".to_string()),
         );
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -2023,7 +2096,7 @@ mod tests {
     async fn gate_token_revoked_after_validation_completes() {
         let state = test_state();
         let gate = make_gate(GateType::AgentValidation, Some("true".to_string()));
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -2055,7 +2128,7 @@ mod tests {
             GateType::AgentValidation,
             Some("printenv GYRE_VALIDATION_TOKEN".to_string()),
         );
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 
@@ -2071,12 +2144,14 @@ mod tests {
             .expect("gate-agent JWT must validate against the server signing key");
         assert_eq!(
             claims.scope,
-            crate::auth::VALIDATION_REPORT_SCOPE,
+            vec![crate::auth::VALIDATION_REPORT_SCOPE.to_string()],
             "validator token must carry validation:report, not review:submit"
         );
-        assert_ne!(
-            claims.scope,
-            crate::auth::REVIEW_SUBMIT_SCOPE,
+        assert!(
+            !claims
+                .scope
+                .iter()
+                .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE),
             "validator must not hold review-submission capability"
         );
     }
@@ -2354,7 +2429,21 @@ mod tests {
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
         let app = crate::build_router(state.clone());
 
-        // Mint and register a reviewer token exactly as the gate does.
+        // Mint and register a reviewer token exactly as the gate does:
+        // tenant resolved from the MR's workspace (fail-closed), persona
+        // slug from the fixture persona.
+        let mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .expect("fixture MR");
+        let workspace = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .expect("fixture workspace");
         let gate_agent_id = format!("gate-review-{}", Uuid::new_v4());
         let token = state
             .agent_signing_key
@@ -2365,6 +2454,8 @@ mod tests {
                 &state.base_url,
                 60,
                 crate::auth::REVIEW_SUBMIT_SCOPE,
+                workspace.tenant_id.as_str(),
+                Some("test-reviewer"),
             )
             .unwrap();
         state

@@ -1030,17 +1030,16 @@ pub async fn submit_review(
     // reviewer id. Exact-match capability (review F3); `validation:report`
     // validators have no review-submission capability at all (F2) and are
     // additionally blocked from this route by the ABAC allow-list.
-    let reviewer_agent_id = if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open.
+    let reviewer_agent_id = if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
-            auth.agent_id.clone()
-        } else {
-            req.reviewer_agent_id
-        }
+        auth.agent_id.clone()
     } else {
         req.reviewer_agent_id
     };

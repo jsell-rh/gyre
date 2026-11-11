@@ -15,6 +15,30 @@ async fn test_state() -> std::sync::Arc<gyre_server::AppState> {
     gyre_server::build_state("gyre-test-token", "http://localhost:0", None)
 }
 
+/// Ensure a Workspace row backs the probe MR's default workspace scope and
+/// return its tenant id, so §1 mint_scoped callers resolve the tenant the
+/// way production does (MR → workspace → tenant), never a fabricated
+/// literal. Idempotent.
+async fn ensure_probe_workspace(
+    state: &std::sync::Arc<gyre_server::AppState>,
+    ws_id: &str,
+    tenant_id: &str,
+) -> String {
+    let ws_id = gyre_common::Id::new(ws_id);
+    if let Ok(Some(ws)) = state.workspaces.find_by_id(&ws_id).await {
+        return ws.tenant_id.to_string();
+    }
+    let ws = gyre_domain::Workspace::new(
+        ws_id.clone(),
+        gyre_common::Id::new(tenant_id),
+        "probe workspace",
+        ws_id.as_str().to_string(),
+        1,
+    );
+    state.workspaces.create(&ws).await.unwrap();
+    tenant_id.to_string()
+}
+
 /// Scoped `review:submit` JWT must be bound to its own subject when
 /// submitting a review (forged reviewer_agent_id ignored).
 #[tokio::test]
@@ -37,7 +61,10 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
-    // Mint a scoped token for a gate agent.
+    // Mint a scoped token for a gate agent. Tenant comes from the MR's
+    // workspace ("default", the documented single-tenant scope — a real
+    // Workspace row is seeded so the §1 mint resolves it like production).
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe".to_string();
     let token = state
         .agent_signing_key
@@ -48,6 +75,8 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -103,6 +132,7 @@ async fn scoped_review_token_denied_outside_allowlist() {
         .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe-2".to_string();
     let token = state
         .agent_signing_key
@@ -113,6 +143,8 @@ async fn scoped_review_token_denied_outside_allowlist() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -178,6 +210,8 @@ async fn scoped_review_token_cannot_push() {
             "http://localhost:0",
             60,
             "review:submit",
+            ws.tenant_id.as_str(),
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -222,6 +256,7 @@ async fn revoked_scoped_token_is_rejected() {
     let state = test_state().await;
     let app: Router = gyre_server::build_router(state.clone());
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe-4".to_string();
     let token = state
         .agent_signing_key
@@ -232,6 +267,8 @@ async fn revoked_scoped_token_is_rejected() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -292,6 +329,7 @@ async fn validation_scoped_token_cannot_submit_review() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-validate-probe".to_string();
     let token = state
         .agent_signing_key
@@ -302,6 +340,8 @@ async fn validation_scoped_token_cannot_submit_review() {
             "http://localhost:0",
             60,
             "validation:report",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -365,6 +405,7 @@ async fn validation_scoped_token_can_read_mr_context() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-validate-probe-read".to_string();
     let token = state
         .agent_signing_key
@@ -375,6 +416,8 @@ async fn validation_scoped_token_can_read_mr_context() {
             "http://localhost:0",
             60,
             "validation:report",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -432,6 +475,7 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         1,
     );
     state.merge_requests.create(&mr).await.unwrap();
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
 
     for lookalike in ["review:submit:admin", "xreview:submit"] {
         let agent_id = format!("gate-lookalike-{}", lookalike.replace(':', "-"));
@@ -444,6 +488,8 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
                 "http://localhost:0",
                 60,
                 lookalike,
+                &tenant_id,
+                None,
             )
             .unwrap();
         state

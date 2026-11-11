@@ -464,6 +464,12 @@ impl AgentSigningKey {
     /// middleware (route allow-list), and `submit_review` (reviewer identity
     /// binding). `task_id` carries the gate id so the token is traceable to
     /// the gate run that minted it.
+    ///
+    /// §1 Token Scoping: the capability string is stored as the token's
+    /// fine-grained scope list (`scope: Vec<String>`), so every downstream
+    /// scope check reads the array form. `tenant_id` is the tenant of the
+    /// gated MR's workspace, resolved fail-closed by the caller — never a
+    /// fabricated literal. `persona` is the gate persona's slug.
     pub fn mint_scoped(
         &self,
         agent_id: &str,
@@ -472,6 +478,8 @@ impl AgentSigningKey {
         issuer: &str,
         ttl_secs: u64,
         scope: &str,
+        tenant_id: &str,
+        persona: Option<&str>,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -482,13 +490,16 @@ impl AgentSigningKey {
             iss: issuer.to_string(),
             iat: now,
             exp: now + ttl_secs,
-            scope: scope.to_string(),
+            scope: vec![scope.to_string()],
             jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            tenant_id: tenant_id.to_string(),
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
