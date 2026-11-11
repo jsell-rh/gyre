@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,83 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-All three HSI §12 gaps are implemented in production code on this branch
-(the three surviving product commits from the earlier delivery rounds, plus
-the two review-repair commits from this round). This round repairs the three
-findings from review 02c5f5205c48496e867b222f628432c2.
-
-### Behavior shipped
-
-- **Spec amendment (Part 1)** — `specs/system/human-system-interface.md` §12
-  Judgment Ledger carries a concrete Sources table (category → table → human-
-  attribution key → workspace-attribution key), states when each event is
-  written, and pins `?type=` values to `approval|rejection|gate|trust|meta-spec`
-  (exactly the `JudgmentType` wire strings). Approvals attribute via
-  `spec_approvals.approver_id`; rejections/revocations via `rejected_by`/
-  `revoked_by`; `audit_events.user_id` is the human key for gate/trust/meta-spec
-  events.
-- **Write paths (Part 3)** — `AuditEventType` has `TrustChange`/`GateOverride`/
-  `MetaSpecPublish` variants. Trust transition via `PUT /api/v1/workspaces/:id`
-  writes a `trust_change` audit event attributed to the acting user. A human
-  approval review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_type/from/to); agent-token approvals do
-  not qualify. Meta-spec registry create/update write `meta_spec_publish`
-  events with kind/name/version/content_hash and workspace attribution.
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user` in both
-  SQL adapters (and the mem adapter) unions spec approvals/rejections with
-  audit-carried gate/trust/meta-spec judgments: `?workspace_id=` filters in
-  SQL (not stamps), `?type=` selects the source, reverse-chronological sort
-  across the merged stream, limit/offset applied after union+sort.
-- **Auth provider info** — `GET /api/v1/users/me` returns read-only
-  `oidc_issuer` + `last_login_at` recorded by the JWT login path; PUT has no
-  field for either.
-- **Notification filtering** — inbox list and badge count exclude types
-  disabled in `user_notification_preferences` (raw-string canonical-name
-  comparison, default all enabled).
-
-### Review repairs in this round
-
-- **F2 (inert alias toggles)** — `PUT /users/me/notification-preferences`
-  now normalizes every entry through `NotificationType::parse(...).as_str()`
-  before storing, so legacy alias spellings ('SpecPendingApproval',
-  'BudgetWarning') persist canonically ('SpecApprovalRequested',
-  'AgentBudgetWarning'). The profile UI's `NOTIF_TYPE_IDS` and the en.json
-  label keys now use canonical names only. New round-trip test proves an
-  alias-named disable excludes the canonical-typed notification from the
-  inbox and badge count.
-- **F3 (compressed audit details)** — the judgment-ledger source-2 query in
-  both SQL adapters materializes rows through the shared
-  `AuditEventRow::into_event` read path, so rows the log-compression job
-  moved to `detail_zstd` (detail blanked after 7 days) decompress
-  transparently, identical to `AuditRepository` query/since_timestamp.
-  New adapter test seeds judgments, runs the real
-  `compress_details_before` pass, and asserts entity refs/details survive
-  (the old code degrades to opaque resource-id fallbacks and fails it).
-- **F1 (stale web/dist)** — fixed in source only: the canonical-id and
-  wire-shape changes live in `web/src`. Per implement-stage policy the
-  executor restores `web/dist` from the assignment base and final
-  integration rebuilds/publishes it remotely from final source; the
-  committed bundle was NOT rebuilt in this assignment. Publication must
-  verify the regenerated bundle no longer PUTs legacy ids (grep dist for
-  'SpecPendingApproval'/'BudgetWarning' preference ids and the bare prefs
-  map wire shape).
-
-### Test evidence
-
-- `cargo test -p gyre-adapters sqlite::user_profile` — 12 passed (includes
-  the new compression round-trip and all judgment-ledger aggregation
-  tests). Run in this sandbox; exit 0.
-- `cd web && npm ci && npm test` — 99 files / 2014 tests passed, including
-  the new alias-handling UserProfile cases (27 tests in that file). Exit 0.
-- `cargo check -p gyre-adapters -p gyre-server` — clean.
-- `scripts/check-arch.sh`, `scripts/check-tenant-filter.sh` — clean (the
-  tenant-filter awk banner reproduces on the assignment base; pre-existing).
-- Deferred to the independent verifier (server test compile exceeds this
-  sandbox's budget): `cargo test -p gyre-server users::` — in particular
-  `preference_alias_normalizes_to_canonical_before_storing` (new),
-  `disabled_preference_excludes_type_from_inbox_and_count`, and the
-  judgments/get_me endpoint tests — plus the full workspace suite and CI
-  gates.
