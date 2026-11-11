@@ -412,6 +412,153 @@ pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
         usage.cost_usd,
     )
     .await;
+
+    maybe_notify_budget_threshold(state, usage).await;
+}
+
+/// user-management.md §Notification Entity: `AgentBudgetWarning` (≥ 80% of a
+/// daily limit, High — needs attention soon) and `AgentBudgetExhausted`
+/// (≥ 100%, Urgent — work is stopped until the period resets).
+///
+/// Recipients follow the spec's "Who Gets Notified" table: the agent's
+/// spawning user plus workspace Admins (warning) / the workspace Owner
+/// (exhausted). Emitted at most once per user per budget period via
+/// `has_active_notification` so repeated usage reports within the same
+/// period do not spam the inbox. Best-effort: failures are logged, never
+/// propagated (usage recording must not fail the caller's request).
+async fn maybe_notify_budget_threshold(state: &AppState, usage: &LlmCallUsage) {
+    let ws_key = workspace_key(&usage.workspace_id.to_string());
+
+    let Ok(Some(config)) = state.budget_configs.get_config(&ws_key).await else {
+        return; // no limits configured — nothing to warn about
+    };
+    let Ok(Some(ws_usage)) = state.budget_usages.get_usage(&ws_key).await else {
+        return;
+    };
+
+    // Highest utilization across the configured daily limits.
+    let token_pct = config
+        .max_tokens_per_day
+        .filter(|max| *max > 0)
+        .map(|max| ws_usage.tokens_used_today as f64 / max as f64);
+    let cost_pct = config
+        .max_cost_per_day
+        .filter(|max| *max > 0.0)
+        .map(|max| ws_usage.cost_today / max);
+    let pct = match (token_pct, cost_pct) {
+        (Some(t), Some(c)) => Some(t.max(c)),
+        (Some(t), None) => Some(t),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    };
+    let Some(pct) = pct else {
+        return;
+    };
+
+    let exhausted = pct >= 1.0;
+    let warning = !exhausted && pct >= 0.8;
+    if !exhausted && !warning {
+        return;
+    }
+
+    // The tenant scope comes from the workspace lookup — when it cannot be
+    // resolved there is no scoperable tenant, so skip rather than fabricate
+    // one (check-fabricated-scope-defaults.sh).
+    let Ok(Some(ws)) = state.workspaces.find_by_id(&usage.workspace_id).await else {
+        return;
+    };
+    let tenant_id = ws.tenant_id.to_string();
+
+    let (ntype, title) = if exhausted {
+        (
+            gyre_common::NotificationType::AgentBudgetExhausted,
+            format!(
+                "Workspace budget exhausted — {:.0}% of the daily limit used",
+                (pct * 100.0).min(999.0)
+            ),
+        )
+    } else {
+        (
+            gyre_common::NotificationType::AgentBudgetWarning,
+            format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0),
+        )
+    };
+
+    // Recipients: the agent's spawning user (when the usage is
+    // agent-attributed) plus workspace Admins (warning) / Owner (exhausted).
+    let mut recipients: Vec<gyre_common::Id> = Vec::new();
+    if let Some(agent_id) = usage.agent_id.as_ref() {
+        if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
+            if let Some(spawned_by) = agent.spawned_by {
+                recipients.push(gyre_common::Id::new(spawned_by));
+            }
+        }
+    }
+    if let Ok(members) = state
+        .workspace_memberships
+        .list_by_workspace(&usage.workspace_id)
+        .await
+    {
+        recipients.extend(
+            members
+                .into_iter()
+                .filter(|m| {
+                    if exhausted {
+                        matches!(m.role, gyre_domain::WorkspaceRole::Owner)
+                    } else {
+                        matches!(m.role, gyre_domain::WorkspaceRole::Admin)
+                    }
+                })
+                .map(|m| m.user_id),
+        );
+    }
+    recipients.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    recipients.dedup_by(|a, b| a.as_str() == b.as_str());
+
+    // De-duplicate per period: the budget counters increment on every call,
+    // so without this guard each call past the threshold would re-notify.
+    let entity_ref = usage.workspace_id.to_string();
+    let since = ws_usage.period_start as i64;
+    for user_id in recipients {
+        let already_notified = state
+            .notifications
+            .has_active_notification(
+                &usage.workspace_id,
+                &user_id,
+                ntype.as_str(),
+                &entity_ref,
+                since,
+            )
+            .await
+            .unwrap_or(false);
+        if already_notified {
+            continue;
+        }
+        let body = serde_json::json!({
+            "workspace_id": usage.workspace_id.as_str(),
+            "usage_pct": (pct * 100.0).round(),
+            "tokens_used_today": ws_usage.tokens_used_today,
+            "max_tokens_per_day": config.max_tokens_per_day,
+            "cost_today": ws_usage.cost_today,
+            "max_cost_per_day": config.max_cost_per_day,
+            "agent_id": usage.agent_id.as_ref().map(|a| a.as_str()),
+        })
+        .to_string();
+        crate::notifications::notify_rich(
+            state,
+            usage.workspace_id.clone(),
+            user_id,
+            ntype.clone(),
+            title.clone(),
+            &tenant_id,
+            Some(body),
+            Some(entity_ref.clone()),
+            usage.repo_id.as_ref().map(|r| r.to_string()),
+            "budget",
+            None,
+        )
+        .await;
+    }
 }
 
 /// Reset daily counters to zero. Called at midnight UTC by background job.
@@ -477,6 +624,7 @@ mod tests {
 
         let dev_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "developer-user",
                 "realm_access": { "roles": ["developer"] }
@@ -590,6 +738,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "rogue-agent",
                 "preferred_username": "rogue-agent",
                 "realm_access": { "roles": ["agent"] }
@@ -787,5 +936,143 @@ mod tests {
             err.contains("max_tokens_per_day"),
             "error must name the exceeded limit, got: {err}"
         );
+    }
+
+    /// user-management.md §Notification Entity: AgentBudgetWarning (≥ 80%,
+    /// High) and AgentBudgetExhausted (≥ 100%, Urgent) fire for the agent's
+    /// spawning user plus workspace Admins (warning) / the workspace Owner
+    /// (exhausted), at most once per budget period, and never below 80%.
+    #[tokio::test]
+    async fn budget_threshold_notifications_fire_once_per_period() {
+        use gyre_domain::{Agent, Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-bn");
+        let ws = Workspace::new(
+            ws_id.clone(),
+            gyre_common::Id::new("tenant-1"),
+            "budget-ws",
+            "budget-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-dev", WorkspaceRole::Developer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                crate::api::new_id(),
+                gyre_common::Id::new(uid),
+                ws_id.clone(),
+                role,
+                gyre_common::Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        let mut agent = Agent::new(gyre_common::Id::new("agent-bn"), "spender", 0);
+        agent.spawned_by = Some("user-spawner".to_string());
+        agent.workspace_id = ws_id.clone();
+        state.agents.create(&agent).await.unwrap();
+
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-bn"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let usage = |tokens: u64| super::LlmCallUsage {
+            tenant_id: gyre_common::Id::new("tenant-1"),
+            workspace_id: ws_id.clone(),
+            repo_id: None,
+            agent_id: Some(gyre_common::Id::new("agent-bn")),
+            task_id: None,
+            usage_type: "agent_run".to_string(),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            model: "test-model".to_string(),
+            prompt_template_sha: None,
+        };
+
+        async fn all(state: &crate::AppState) -> Vec<gyre_common::Notification> {
+            gyre_ports::NotificationRepository::list_recent(state.notifications.as_ref(), 100)
+                .await
+                .unwrap()
+        }
+
+        // 50%: below the warning threshold — no notification at all.
+        super::record_llm_call_usage(&state, &usage(500)).await;
+        assert!(
+            all(state.as_ref()).await.is_empty(),
+            "no budget notification below 80%"
+        );
+
+        // 85%: warning to the spawning user + workspace Admins only.
+        super::record_llm_call_usage(&state, &usage(350)).await;
+        let warnings: Vec<_> = all(&state)
+            .await
+            .into_iter()
+            .filter(|n| n.notification_type == gyre_common::NotificationType::AgentBudgetWarning)
+            .collect();
+        let mut warned: Vec<&str> = warnings.iter().map(|n| n.user_id.as_str()).collect();
+        warned.sort_unstable();
+        assert_eq!(
+            warned,
+            vec!["user-admin", "user-spawner"],
+            "warning routes to spawner + Admins, not Owner/Developer"
+        );
+        for n in &warnings {
+            assert_eq!(
+                n.priority,
+                gyre_common::NotificationPriority::High,
+                "budget warning is High per user-management.md"
+            );
+            assert_eq!(n.source.entity_type, "budget");
+        }
+
+        // Another call in the same period (now ≥ 90%): still no duplicate.
+        super::record_llm_call_usage(&state, &usage(100)).await;
+        let warning_count = all(&state)
+            .await
+            .iter()
+            .filter(|n| {
+                n.notification_type == gyre_common::NotificationType::AgentBudgetWarning
+                    && n.user_id.as_str() == "user-spawner"
+            })
+            .count();
+        assert_eq!(warning_count, 1, "warning must not re-fire within a period");
+
+        // Past 100%: exhausted (Urgent) to the spawning user + workspace Owner.
+        super::record_llm_call_usage(&state, &usage(200)).await;
+        let exhausted: Vec<_> = all(&state)
+            .await
+            .into_iter()
+            .filter(|n| n.notification_type == gyre_common::NotificationType::AgentBudgetExhausted)
+            .collect();
+        let mut exhausted_users: Vec<&str> = exhausted.iter().map(|n| n.user_id.as_str()).collect();
+        exhausted_users.sort_unstable();
+        assert_eq!(
+            exhausted_users,
+            vec!["user-owner", "user-spawner"],
+            "exhaustion routes to spawner + Owner"
+        );
+        for n in &exhausted {
+            assert_eq!(
+                n.priority,
+                gyre_common::NotificationPriority::Urgent,
+                "budget exhausted is Urgent per user-management.md"
+            );
+        }
     }
 }

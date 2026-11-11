@@ -88,6 +88,19 @@ pub struct RigVertexAiFactory {
     token_cache: Arc<RwLock<TokenCache>>,
 }
 
+/// Total-timeout bound for the Vertex AI completion/streaming client.
+/// reqwest has no default timeout, so without this a hung endpoint
+/// stalls the caller indefinitely — on the signal-chain path that would
+/// hold the task scheduler's cycle lock and the per-repo orchestrator
+/// mutex forever (the orchestrator LLM calls additionally carry their own
+/// `tokio::time::timeout` wrapper in signal_chain.rs).
+const HTTP_TIMEOUT_SECS: u64 = 180;
+
+/// Timeout for OAuth2 token-exchange requests (short: these are small,
+/// fast round-trips; a slow one should fail quickly, not eat into the
+/// completion budget).
+const TOKEN_HTTP_TIMEOUT_SECS: u64 = 15;
+
 impl RigVertexAiFactory {
     /// Construct from environment variables.
     ///
@@ -97,13 +110,14 @@ impl RigVertexAiFactory {
             .context("GYRE_VERTEX_PROJECT is not set — cannot initialise Vertex AI adapter")?;
         let location =
             std::env::var("GYRE_VERTEX_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .context("failed to build latency-bounded Vertex AI HTTP client")?;
         Ok(Self {
             project,
             location,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .context("failed to build Vertex AI HTTP client")?,
+            client,
             token_cache: Arc::new(RwLock::new(TokenCache::default())),
         })
     }
@@ -619,9 +633,9 @@ async fn fetch_adc_token() -> Result<(String, u64)> {
 /// Fetch a token from the GCE instance metadata server.
 async fn fetch_metadata_token() -> Result<(String, u64)> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(2))
         .build()
-        .context("failed to build metadata HTTP client")?;
+        .context("failed to build metadata-server HTTP client")?;
     let resp = client
         .get(
             "http://metadata.google.internal/computeMetadata/v1/instance/\
@@ -701,9 +715,9 @@ async fn fetch_service_account_token() -> Result<(String, u64)> {
 /// Exchange an OAuth2 refresh token for an access token.
 async fn exchange_refresh_token(creds: &UserCredentials) -> Result<(String, u64)> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(TOKEN_HTTP_TIMEOUT_SECS))
         .build()
-        .context("failed to build OAuth token client")?;
+        .context("failed to build token-endpoint HTTP client")?;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
@@ -773,9 +787,9 @@ async fn exchange_service_account_jwt(creds: &ServiceAccountKey) -> Result<(Stri
 
     // Exchange JWT for access token.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(TOKEN_HTTP_TIMEOUT_SECS))
         .build()
-        .context("failed to build OAuth token client")?;
+        .context("failed to build token-endpoint HTTP client")?;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
