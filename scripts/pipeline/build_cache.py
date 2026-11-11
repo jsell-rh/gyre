@@ -65,7 +65,7 @@ def save(execution,name,receipt):
     folder=directory(execution);temporary=folder/(uuid.uuid4().hex+'.part')
     if shutil.disk_usage(folder).free<value['bytes']+2*1024**3:return
     try:
-        execution.os('sandbox','download',name,'/tmp/stage/cache-output.tar.gz',str(temporary),timeout=300)
+        execution.os('sandbox','download',name,'/sandbox/workspace/.gyre-build-cache.tar.gz',str(temporary),timeout=300)
         if temporary.stat().st_size!=value['bytes'] or digest(temporary)!=value['sha256']:raise ValueError('downloaded build cache differs')
         value=value|{'source':receipt['head'],'key':key,'at':time.time()}
         with (folder/'cache.lock').open('a') as lock:

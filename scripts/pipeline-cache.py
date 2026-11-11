@@ -106,7 +106,7 @@ def prepare(checkout, job, env, stage):
 def export(checkout,env,stage,cache):
     try:
         subprocess.run(['python3',str(Path(stage)/'dev-cargo-clean.py')],cwd=checkout,env={**os.environ,**env},check=True,timeout=180)
-        result=pack(Path(stage)/'cache-output.tar.gz')
+        result=pack(Path(checkout).parent/'.gyre-build-cache.tar.gz')
         return cache|{'export':result} if result else cache
     except Exception as exc:
         print('Build cache export skipped: '+type(exc).__name__,flush=True)
