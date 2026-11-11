@@ -578,6 +578,7 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphConcepts: (repoId) => request(`/repos/${repoId}/graph/concepts`),
   repoGraphTimeline: (id, since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
@@ -749,6 +750,7 @@ export const api = {
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  workspaceGraphConcepts: (wsId) => request(`/workspaces/${wsId}/graph/concepts`),
   // API token management
   createApiToken: (data) =>
     request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),

@@ -30,3 +30,24 @@ visualize the question, explain why and set view_spec to null with a fallback.
 - For flow layout, trace_source is required in the data layer
 - filter.spec_path requires repo_id to be set
 - side-by-side sub-views cannot themselves contain side-by-side layouts
+
+## Concept Questions
+Questions like "show me everything related to authentication", "what is
+part of the retry concept", or "give me a concept view of billing" are
+concept questions: set `data.concept` to the concept term (e.g.
+"authentication") with a "graph" layout. `data.concept` is a
+case-insensitive substring match over node names and qualified names — the
+cross-cutting concept view (system-explorer.md §4). Example:
+
+```json
+{
+  "view_spec": {
+    "name": "Authentication concept",
+    "description": "Everything related to authentication",
+    "data": { "concept": "auth" },
+    "layout": "graph",
+    "explanation": "Nodes whose names mention auth, faded in as a concept view."
+  },
+  "explanation": "..."
+}
+```

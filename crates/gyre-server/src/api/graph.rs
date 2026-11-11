@@ -7,6 +7,7 @@
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
 //!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
+//!   GET  /api/v1/repos/{id}/graph/concepts     — concept browser listing (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -166,6 +167,30 @@ pub struct NodeWithEdgesResponse {
 pub struct RepoGraphQuery {
     /// Optional case-insensitive substring filter on node name / qualified_name.
     pub concept: Option<String>,
+}
+
+/// One predefined concept from a repo's spec manifest (realized-model.md §4)
+/// — the concept-browser listing entry (system-explorer.md §4).
+#[derive(Serialize)]
+pub struct ConceptSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts response.
+#[derive(Serialize)]
+pub struct RepoConceptListResponse {
+    pub repo_id: String,
+    pub concepts: Vec<ConceptSummary>,
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts response: manifest concepts
+/// unioned across the workspace's repos (case-insensitive name dedupe —
+/// the first repo defining a name supplies the description).
+#[derive(Serialize)]
+pub struct WorkspaceConceptListResponse {
+    pub workspace_id: String,
+    pub concepts: Vec<ConceptSummary>,
 }
 
 #[derive(Deserialize)]
@@ -699,6 +724,27 @@ pub async fn assemble_workspace_concept_projection(
     })
 }
 
+/// Read the `concepts:` block of the repo's `specs/manifest.yaml` at its
+/// default branch. Returns an empty vector when the repo has no manifest
+/// or the manifest is unparseable — a repo without a manifest simply
+/// defines no predefined concepts.
+async fn manifest_concepts(repo: &gyre_domain::Repository) -> Vec<crate::spec_registry::ConceptDef> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await;
+    let Some(yaml) = yaml else {
+        return Vec::new();
+    };
+    crate::spec_registry::parse_manifest(&yaml)
+        .map(|m| m.concepts)
+        .unwrap_or_default()
+}
+
 /// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
 /// match on the concept name) from the `concepts:` block of the repo's
 /// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
@@ -708,17 +754,8 @@ async fn resolve_concept_view(
     repo: &gyre_domain::Repository,
     concept_name: &str,
 ) -> Option<gyre_common::graph::ConceptView> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        &repo.default_branch,
-        "specs/manifest.yaml",
-    )
-    .await?;
-    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
-    manifest
-        .concepts
+    manifest_concepts(repo)
+        .await
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(concept_name))
         .map(gyre_common::graph::ConceptView::from)
@@ -746,6 +783,38 @@ pub async fn get_graph_concept(
     Ok(Json(
         assemble_concept_projection(&state, &repo, &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts
+/// Concept browser listing (system-explorer.md §4): the repo's predefined
+/// concepts from its spec manifest. A repo without a manifest (or with an
+/// unparseable one) defines no predefined concepts — an empty list is the
+/// valid answer, distinct from the single-concept projection endpoint's
+/// 404 on an undefined concept name.
+pub async fn list_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoConceptListResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let concepts = manifest_concepts(&repo)
+        .await
+        .into_iter()
+        .map(|c| ConceptSummary {
+            name: c.name,
+            description: c.description,
+        })
+        .collect();
+
+    Ok(Json(RepoConceptListResponse {
+        repo_id: id,
+        concepts,
+    }))
 }
 
 // ── Narrative generation (realized-model.md §6) ─────────────────────────────
@@ -1898,6 +1967,44 @@ pub async fn get_workspace_graph_concept(
     Ok(Json(
         assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts
+/// Workspace-scoped concept browser listing (system-explorer.md §4): the
+/// union of predefined concepts across the workspace's repos' spec
+/// manifests, deduped by case-insensitive name (the first repo defining a
+/// name supplies the description). Repos without manifests contribute
+/// nothing — an empty union is a valid workspace-wide answer.
+pub async fn list_workspace_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkspaceConceptListResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let mut concepts: Vec<ConceptSummary> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for repo in &repos {
+        for def in manifest_concepts(repo).await {
+            if !seen.insert(def.name.to_lowercase()) {
+                continue;
+            }
+            concepts.push(ConceptSummary {
+                name: def.name,
+                description: def.description,
+            });
+        }
+    }
+
+    Ok(Json(WorkspaceConceptListResponse {
+        workspace_id: id,
+        concepts,
+    }))
 }
 
 /// Request body for structural prediction.
@@ -3775,6 +3882,179 @@ specs:
             "repo without the concept must contribute nothing: {names:?} {repo_ids:?}"
         );
         assert_eq!(names.len(), 4, "only repo-1's projection: {names:?}");
+        drop(tmp);
+        drop(tmp2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_returns_manifest_concepts() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // The manifest defines exactly one concept — the browser listing
+        // must surface its name and description verbatim.
+        let concepts = json["concepts"].as_array().unwrap();
+        assert_eq!(concepts.len(), 1, "exactly the manifest concept: {concepts:?}");
+        assert_eq!(concepts[0]["name"].as_str().unwrap(), "Authentication");
+        assert_eq!(
+            concepts[0]["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_repo_without_manifest_returns_empty_list() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // A repo without a manifest defines no predefined concepts — an
+        // empty listing is the valid answer (contrast the single-concept
+        // projection endpoint, which 404s on the missing manifest).
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["concepts"].as_array().unwrap().len(),
+            0,
+            "no manifest → no predefined concepts"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_workspace_graph_concepts_unions_and_dedupes() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // repo-1 defines Authentication.
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        // repo-2 (same workspace) defines Authentication again (duplicate,
+        // case-different name — must dedupe to one entry) plus a distinct
+        // concept.
+        let two_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+concepts:
+  - name: authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+  - name: Billing
+    description: "Invoicing and payments"
+    include:
+      - types: ["*Invoice*"]
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(two_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+
+        // repo-3 has no manifest — contributes nothing.
+        let repo3 = gyre_domain::Repository::new(
+            Id::new("repo-3"),
+            Id::new("ws-briefing"),
+            "manifest-less",
+            "/repos/manifest-less",
+            1000,
+        );
+        state.repos.create(&repo3).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let mut names: Vec<&str> = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        // Case-insensitive dedupe: Authentication appears once (both
+        // repos define it with the same description — repo iteration order
+        // in the mem adapter is arbitrary, so the winner must not matter),
+        // Billing once, nothing from repo-3.
+        assert_eq!(
+            names,
+            vec!["Authentication", "Billing"],
+            "union with case-insensitive dedupe: {names:?}"
+        );
+        let auth = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"].as_str().unwrap() == "Authentication")
+            .unwrap();
+        assert_eq!(
+            auth["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
         drop(tmp);
         drop(tmp2);
     }
