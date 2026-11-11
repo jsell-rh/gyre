@@ -3,7 +3,7 @@ title: "Implement workspace membership model, ownership transfer, and repo acces
 spec_ref: "user-management.md §Workspace Membership"
 depends_on:
   - task-120
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
