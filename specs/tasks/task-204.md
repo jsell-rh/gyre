@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "1f4600643b2947bdd2014ded4a36bb46ff70f882"]
 ---
 
 ## Spec Excerpt
@@ -68,62 +68,59 @@ This is a distinct concern from the existing spec-links patrol at `POST /api/v1/
 The three `spec-lifecycle.md` §Accountability Integration checks are live in
 `crates/gyre-server/src/spec_lifecycle_patrol.rs` against real storage:
 
-- **Check 1** flags non-terminal `spec-drift-review` tasks older than
-  `drift_review_max_age_secs` (default 24 h ≈ one loop cycle).
+- **Check 1** flags non-terminal (`Done`/`Cancelled` excluded) `spec-drift-review`
+  tasks older than `drift_review_max_age_secs` (default 24 h, one loop-cycle
+  proxy).
 - **Check 2** flags `spec-implementation` tasks with `status == Backlog` older
   than `implementation_backlog_max_age_secs` (default 7 d).
-- **Check 3** (defense in depth) flags watched-path ledger entries
-  (`SPEC_WATCHED_PATHS`, shared with the post-receive hook) that have a
-  `current_sha`, are not `Deprecated`, are past the hook grace window, and have
-  no non-`Cancelled` task referencing the path (both `system/x.md` and
-  `specs/system/x.md` spellings normalized; repo-scoped when the ledger entry
-  carries a `repo_id`).
+- **Check 3** (defense in depth) flags watched ledger entries with a
+  `current_sha`, non-`Deprecated`, past the hook grace window, and no
+  non-`Cancelled` task referencing the path (both `system/x.md` and
+  `specs/system/x.md` spellings queried via `TaskRepository::list_by_spec_path`;
+  repo-scoped when both sides know it). Watched paths come from the repo's
+  `SpecLifecycleConfig` (`state.spec_lifecycle_configs.get_for_repo`, the same
+  config `git_http::process_spec_lifecycle` consults), so the patrol and the
+  hook can never disagree; repos with `enabled = false` are skipped, mirroring
+  the hook's early return.
 
-Every finding escalates to the workspace orchestrator as a REAL persisted
-`MessageKind::Escalation` message on the workspace event stream via
-`state.emit_event` (workspaceless findings broadcast — never a fabricated
-`"default"` scope). `POST /api/v1/patrol/spec-lifecycle` is registered in
-`api/mod.rs` beside spec-links patrol with an ABAC `RouteResourceMapping`
-(`spec` resource, write action) — real policy evaluation, no exemption file
-entry.
+Every finding escalates as a REAL persisted `MessageKind::Escalation` message
+on the workspace event stream (`Destination::Workspace(ws)`, `Broadcast` when
+no scope resolves — never a fabricated `"default"`), payload identifying
+`source`/`finding_type`/`severity`/`spec_path`/`task_id`/`message`/
+`suggested_action` and satisfying the message-bus escalation schema.
 
-This repair round removed a leftover kill-test mutant (`if true { return 0; }`
-stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
+`POST /api/v1/patrol/spec-lifecycle` is registered in `api/mod.rs` with an ABAC
+`RouteResourceMapping` (no exemption); request-body thresholds with documented
+defaults keep the check bodies free of hardcoded limits (task-109 config
+feed-ready). Storage failures return 500, not an empty finding list.
 
-### Contract repair round
+### Repair round (merge 1f460064)
 
-Accepted the executor's byte-exact restoration of the assigned task document
-(the only working-tree change; no source file was touched this round — the
-prior rounds' production fix is preserved in history, including the rustfmt
-repair of the repo-scope guard). Re-verified on the restored tree:
-`rustfmt --check` clean on every task-touched file; `cargo test -p gyre-server
---lib spec_lifecycle_patrol` — 11 passed; `... --lib api::specs::tests` — 53
-passed; `... --lib spec_patrol` — 19 passed; `check-arch.sh`,
-`check-abac-route-registry.sh`, `check-dead-message-kinds.sh`,
-`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh` all
-passed. Logs under `/tmp/stage/review-evidence/task204-*.log`.
+Resolved the rebase of base `cfeefbda` (task-091/task-109 lineage) into this
+branch: `git_http.rs` lost the hardcoded `SPEC_WATCHED_PATHS` constant to
+main's per-repo config work, so check 3's watched-path filter was ported to
+`SpecLifecycleConfig::is_watched`/`enabled` via `get_for_repo` (cached per
+patrol run, error-propagated on store failure). The e2e.yml conflict was
+comment-only (both sides pin ubuntu-24.04); main's text kept. New test
+`check3_watched_paths_follow_per_repo_config` proves the filter is
+config-driven: a repo watching only `specs/milestones/` has its orphaned
+milestone spec flagged while a default-watched `system/` orphan is not, and a
+disabled repo is skipped — this test fails if the filter reverts to a
+hardcoded list. Docs and the coverage row were updated to match.
 
-## Test evidence
+### Test evidence
 
-- Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail with
-  `every finding must be escalated, not merely logged` /
-  `one escalation per finding` / `escalation must be emitted, not skipped` —
-  `spec_lifecycle_patrol` + endpoint tests detect skipped escalation
-  (`/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101).
-- Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
-  passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
-  cancelled-task coverage, threshold-override, broadcast routing tests).
-- Endpoint tests: `cargo test -p gyre-server --lib api::specs::tests` — 53
-  passed (incl. `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
-  `..._honours_thresholds`, which assert persisted escalations via the real
-  router).
-- Spec-links patrol regression (shared `PatrolFinding` gained
-  `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
-  19 passed.
-- `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
-  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` all passed.
-- HTTP checks deferred to host verification: this sandbox's listener probe is
-  unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
-  the route was verified through the in-process router tests above; exact-head
-  GitHub CI checks remain mandatory for the deployed transport check.
+12 unit tests in `spec_lifecycle_patrol.rs` (incl. end-to-end
+`flags_and_escalates_only_the_accountability_gaps`: exactly the
+stale/orphaned set flagged AND one persisted escalation per finding with
+identifying payloads; fresh/covered/terminal items not flagged;
+threshold-tightening proves the checks are not no-ops or inverted) plus 2
+endpoint tests in `api/specs.rs` (flags + persisted escalation; thresholds
+honoured in both directions).
+
+This sandbox has no crates.io access (cargo registry cache empty, network
+blocked — recorded under `/tmp/stage/review-evidence`), so compilation and
+the test run are deferred to the independent verifier. Required probes:
+`cargo test -p gyre-server spec_lifecycle_patrol`, `cargo test -p gyre-server
+api::specs::tests::spec_lifecycle_patrol`, `cargo check -p gyre-server`,
+`bash scripts/check-arch.sh`, and `cargo test --all`.
