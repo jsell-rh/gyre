@@ -57,3 +57,48 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — review of candidate 6045ec957 (vs assigned base fbf1a63b)
+
+Verdict: **complete — approved** (no material findings).
+
+This round re-verified the full task contract at the exact assigned candidate after
+the subsequent upstream merges and the admin.rs repair commit `c7ea6ab05`.
+
+**Clean-HEAD runs (all exit 0):** `check-hierarchy.sh` pass; `check-tenant-filter.sh`
+pass — 116 read methods on tenant-column tables checked / 0 violations, 149 backlog
+reads on tenant-less tables reported visibly; `check-api-auth.sh` pass (middleware
+chain, 4 non-ABAC handlers with auth extractors, delegated route-registry OK);
+`check-abac-route-registry.sh` direct pass.
+
+**Mutation kills (edit → exit 1 with file:line → restore → re-pass):**
+`Task.workspace_id → Option<Id>` (exit 1, task.rs:60); `Task.workspace_id` deleted
+(exit 1, "missing from the struct"); tenant filter stripped from
+`sqlite/task.rs::list` (exit 1, 1/116) and from `postgres/task.rs::list` (exit 1 —
+Postgres dir genuinely scanned); `abac_middleware` layer removed from the api
+router (Check 1 exit 1); `AuthenticatedAgent` removed from `mcp_handler` (Check 2
+exit 1); unmapped `/api/v1/probe-unmapped` route added to api/mod.rs (Check 3 exit 1
+via the delegated frozen-baseline registry script). Working tree verified restored
+after every probe.
+
+**Wiring:** all three scripts executable, usage-commented, blocking in BOTH
+`.pre-commit-config.yaml` and `ci.yml` (no `|| true`; hierarchy run with
+`GYRE_CHECK_HIERARCHY=1`). SKIP_LIST holds 6 documented, spec-cited entries; the
+`user.rs` entry's rationale was verified against the migrations (`users.tenant_id`
+added nullable in 000058; 000056 documents the fail-closed auth extractor for
+unbound legacy rows).
+
+**Focused compile/test evidence (workspace suite is verifier-owned):**
+`cargo check -p gyre-adapters` exit 0; `SKIP_WEB_BUILD=1 cargo check -p gyre-server`
+exit 0; `cargo test -p gyre-adapters --test tenant_isolation` 2/2 pass;
+`cargo test -p gyre-adapters --lib` 442 passed / 0 failed / 6 ignored.
+
+**admin.rs merge-regression (prior finding 2d69e0d8 R1/R2): repaired.** Diff
+base→candidate on `crates/gyre-server/src/api/admin.rs` contains zero production
+changes — only test hardening (no hardcoded `"default"` tenant in test JWTs, a
+`test_workspace` helper so telemetry has a resolvable scope, and a new negative
+test asserting unresolvable-scope telemetry is dropped, not recorded).
+
+**Verifier must run:** `cargo test --all` (the remaining acceptance criterion).
+
+Evidence: `/tmp/stage/review-evidence/` (00-summary.md + numbered probe logs).

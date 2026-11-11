@@ -2,12 +2,12 @@
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -57,47 +57,3 @@ REQUIRED_FIELDS=(
 ## Agent Instructions
 
 Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (Enforcement), and §7 (Mechanical Enforcement) for the full script requirements. The scripts are purely static analysis (grep/regex) — no runtime execution. Check the existing `scripts/check-arch.sh` for style conventions used by other enforcement scripts in this codebase.
-
-## Shipped
-
-All three hierarchy-enforcement scripts exist, are executable, carry usage
-comments, and are wired into `.pre-commit-config.yaml` and
-`.github/workflows/ci.yml` (blocking).
-
-### Scripts
-
-- `scripts/check-hierarchy.sh` — awk state machine over every domain `.rs`
-  file; fails on `Option<...>` hierarchy fields and on deletion of a required
-  field (spec §2). Env-gated via `GYRE_CHECK_HIERARCHY` (enabled by default,
-  `=0` bypasses).
-- `scripts/check-tenant-filter.sh` — POSIX-awk scan of read query methods in
-  `src/sqlite` + `src/postgres`; the tenant-column table set is derived from
-  the migrations; documented `SKIP_LIST` for structurally-isolated adapters
-  (spec §3); tenant-less tables reported as non-failing backlog.
-- `scripts/check-api-auth.sh` — ABAC middleware chain on the api router,
-  per-handler auth extractors on non-ABAC routes, and the
-  route↔`RouteResourceMapping` cross-reference delegated to the frozen-baseline
-  `check-abac-route-registry.sh` (spec §7).
-
-### Enabling repairs
-
-Unfiltered tenant reads fixed in sqlite+postgres
-compute_target/merge_request/notification/repository/saved_view/workspace so
-the lint passes clean rather than by exemption; `tenant_isolation.rs`
-proves cross-tenant invisibility end-to-end. `b82af6b4b` binds both
-`evaluate_attestation_abac` results in `merge_processor.rs` and records them
-in the policy-decision audit trail. `c7ea6ab05` repaired the admin.rs
-merge-regression from review findings 2d69e0d8 R1/R2 (token/task-secret
-revocation, audit events, backend-aware kill, persona seeding, the three
-pinned tests) — HEAD admin.rs is assigned base + only the two legitimate
-test-helper additions, re-verified this round.
-
-### Verification evidence
-
-- All three scripts pass on current HEAD (output saved under
-  `/tmp/stage/review-evidence/`).
-- Negative test: injecting `workspace_id: Option<Id>` into `Task` makes
-  `check-hierarchy.sh` exit 1 with a precise violation report
-  (`check-hierarchy-negative.txt`); file restored afterward.
-- `cargo test --all` is verifier-owned; the source tree is byte-identical to
-  the checkpoint where `cargo check -p gyre-server --tests` was clean.
