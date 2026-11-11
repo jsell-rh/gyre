@@ -374,6 +374,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    repo_access_overrides (id) {
+        id -> Text,
+        repo_id -> Text,
+        user_id -> Text,
+        restricted_role -> Text,
+        created_by -> Text,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
     notifications (id) {
         id -> Text,
         workspace_id -> Text,
@@ -734,6 +745,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     personas,
     teams,
     workspace_memberships,
+    repo_access_overrides,
     notifications,
     policies,
     policy_decisions,
