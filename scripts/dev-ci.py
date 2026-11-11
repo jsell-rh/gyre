@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observe GitHub checks on an exact PR head; retain actionable failure evidence."""
 import hashlib
+from datetime import datetime
 import json
 import re
 import subprocess
@@ -115,6 +116,56 @@ def setup_failure(run, repo, head, base, failed, logs):
                 'platforms':sorted(platforms),'inputs':original},'target_base':main}
 
 
+def transient_setup_failure(run, repo, head, base, failed, logs):
+    """Only exact-head, terminal setup jobs with transport errors qualify.
+
+    Product steps and changed workflow definitions always retain normal failure
+    handling. A DNS-looking line elsewhere in a workflow is not evidence.
+    """
+    evidence=[]
+    for check in failed:
+        match=re.fullmatch(r'https://github.com/'+re.escape(repo)+r'/actions/runs/(\d+)/job/(\d+)',check.get('detailsUrl') or '')
+        if not match:return None
+        ident,job_id=map(int,match.groups())
+        workflow=json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+        job=json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_id}',timeout=30).stdout)
+        if (workflow.get('id')!=ident or workflow.get('head_sha')!=head or job.get('head_sha')!=head or job.get('id')!=job_id
+                or job.get('run_id')!=ident or job.get('name')!=check.get('name')
+                or workflow.get('status')!='completed' or job.get('status')!='completed'
+                or job.get('conclusion')!='failure' or workflow.get('conclusion')!='failure'
+                or not isinstance(job.get('run_attempt'),int) or job['run_attempt']!=workflow.get('run_attempt')):
+            raise RuntimeError('CI infrastructure evidence changed; observe the current attempt again')
+        steps=[x['name'] for x in job.get('steps',[]) if x.get('conclusion')=='failure']
+        if not steps or any(x not in {'Install mold linker','Install dependencies','Install web dependencies',
+                'Install Playwright browsers','Checkout','Set up job'} for x in steps):return None
+        for step in steps:
+            def belongs(line):
+                if line.startswith(job['name']+'\t'+step+'\t'):return True
+                # gh sometimes labels valid job logs UNKNOWN STEP. In that
+                # case require the timestamp to fall inside the exact failed
+                # setup step's authoritative API interval.
+                if not line.startswith(job['name']+'\tUNKNOWN STEP\t'):return False
+                stamp=re.search(r'\d{4}-\d\d-\d\dT[\d:.]+Z',line)
+                metadata=next(s for s in job['steps'] if s['name']==step)
+                try:
+                    return (datetime.fromisoformat(metadata['started_at'])<=datetime.fromisoformat(stamp[0])
+                            <=datetime.fromisoformat(metadata['completed_at']))
+                except (KeyError,ValueError,TypeError):return False
+            lines='\n'.join(line for line in logs.get(ident,'').splitlines() if belongs(line))
+            if not re.search(r'Temporary failure resolving|Could not resolve host|Could not resolve proxy|'
+                             r'EAI_AGAIN|Connection timed out|TLS handshake timeout|HTTP[^\n]*\b50[234]\b',lines,re.I):return None
+        path=workflow.get('path','').split('@',1)[0]
+        if not re.fullmatch(r'\.github/workflows/[\w.-]+\.ya?ml',path):return None
+        inputs=[]
+        for ref in (head,base):
+            value=json.loads(run('gh','api',f'repos/{repo}/contents/{path}?ref={ref}',timeout=30).stdout)
+            if value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):return None
+            inputs.append(value['sha'])
+        if inputs[0]!=inputs[1]:return None
+        evidence.append({'run':ident,'attempt':job['run_attempt'],'job':job_id,'steps':steps})
+    return {'status':'infrastructure','infrastructure_evidence':evidence,'detail':'Transient setup transport failure; retry the same head, without implementation.'}
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -212,6 +263,10 @@ def observe(run, url, head, base, directory):
             'artifact_directories': artifact_directories,
             'environment': 'github-' + hashlib.sha256(json.dumps(sorted((item.get('workflowName', ''), item.get('name', ''), item.get('context', '')) for item in failed)).encode()).hexdigest(),
             'log': str(log)}
+    transient=transient_setup_failure(run,repo,head,base,failed,logs) if any(re.search(r'Temporary failure resolving|Could not resolve|EAI_AGAIN|Connection timed out|TLS handshake timeout|HTTP[^\n]*\b50[234]\b',v,re.I) for v in logs.values()) else None
+    if transient:
+        result.update(transient)
+        return result
     setup=setup_failure(run,repo,head,base,failed,logs)
     if setup:
         result.update(setup,baseline_log=str(candidate_path))

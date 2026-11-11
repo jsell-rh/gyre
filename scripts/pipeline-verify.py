@@ -113,7 +113,7 @@ def main():
             value=json.loads(receipt.read_text())
         import runpy
         usage=runpy.run_path(str(STAGE/'pipeline-usage.py'))['usage']() if (STAGE/'pipeline-usage.py').exists() else {}
-        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
+        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive, 'cache_request':json.loads((STAGE/'cache-request.json').read_text()) if (STAGE/'cache-request.json').exists() else None}))
         return
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}
@@ -155,6 +155,10 @@ def main():
                     not isinstance(probe[1], str) or not re.fullmatch(r'scripts/check-[a-z0-9-]+\.sh', probe[1])):
                 raise ValueError('unsupported baseline probe')
             commands = [(probe, str(CHECKOUT), timeout)]
+        cache=None
+        if job.get('cache_enabled') and 'probe' not in job:
+            cache_module=runpy.run_path(str(STAGE/'pipeline-cache.py'))
+            cache=cache_module['prepare'](CHECKOUT,job,build_env,STAGE)
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())
@@ -166,6 +170,8 @@ def main():
             import importlib.util
             spec=importlib.util.spec_from_file_location('artifacts',STAGE/'pipeline-artifacts.py')
             artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
+            if cache is not None:
+                value['cache']=cache_module['export'](CHECKOUT,build_env,STAGE,cache)
             value['publication']=artifacts.publish(CHECKOUT,job['task'],job['publication_branch'])
         atomic(receipt, value)
     except Exception as exc:
