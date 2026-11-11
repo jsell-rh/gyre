@@ -56,6 +56,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
 | `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: `test_command`, `lint_command`, `required_approvals`, `agent_review`, `agent_validation` — serialized as snake_case; `agent_validation` accepts optional `validation_type` string identifying the domain-specific check, delivered to the agent as `GYRE_VALIDATION_TYPE`) (M12.1, M12.3). See [agent-protocol.md](agent-protocol.md) for `AgentReview`/`AgentValidation` env vars. |
 | `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
+| `GET/PUT` | `/api/v1/repos/{id}/gate-chain` | Get / replace the repo's ordered gate chain as TOML (`[[gates]]` entries: `name`, `type` (PascalCase per agent-gates.md or snake_case), `command`, `persona`, `min_approvals`, `validation_type`, `required`, `timeout_secs`). **PUT requires Admin role**; body content-type `application/toml` or `text/plain`. Replacement semantics: entries apply in array order (`position` = index), gates absent from the chain are deleted, same-named gates keep their ids; validation is all-or-nothing (invalid chain → 400, current chain untouched) (agent-gates.md §Gate Chains, task-135) |
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
 | `POST` | `/api/v1/specs/revoke` | Revoke a spec approval: `{approval_id, reason}` — caller must be original approver or Admin (returns 403 otherwise); revoker identity derived server-side (client must not supply `revoked_by`) (CISO M12.3-A, M12.3) |
@@ -145,7 +146,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
-| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
+| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes). Reviews submitted with a gate-agent scoped token (`review:submit`) carry server-derived attribution: `reviewer_persona` (the gate's configured persona) and `gate_id` — the review shows which gate persona produced it (agent-gates.md §Gate Agent Lifecycle, task-135) |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
 | `GET` | `/api/v1/merge-requests/{id}/attestation` | Get signed merge attestation bundle for a merged MR — fields: `attestation_version`, `mr_id`, `merge_commit_sha`, `merged_at`, `gate_results`, `spec_ref`, `spec_fully_approved`, `author_agent_id`; returns 404 if not yet merged or attestation pending (G5) |

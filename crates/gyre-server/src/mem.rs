@@ -2760,14 +2760,19 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self
+        let mut gates: Vec<gyre_domain::QualityGate> = self
             .gates
             .lock()
             .await
             .values()
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
-            .collect())
+            .collect();
+        // Chain order (agent-gates.md §Gate Chains): position first,
+        // creation order as the tiebreak — mirrors the SQL adapters'
+        // ORDER BY position, created_at.
+        gates.sort_by_key(|g| (g.position, g.created_at));
+        Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);

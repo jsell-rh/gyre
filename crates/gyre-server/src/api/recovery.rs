@@ -436,6 +436,7 @@ pub async fn set_post_merge_gates(
             required: dto.required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
+            position: 0,
             created_at: now,
         };
         state.quality_gates.save(&gate).await?;
@@ -746,6 +747,7 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
+                position: 0,
                 created_at: 1000,
             })
             .await
@@ -793,6 +795,7 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
+                position: 0,
                 created_at: 1000,
             })
             .await

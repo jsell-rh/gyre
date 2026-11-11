@@ -89,16 +89,23 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         GateType::TestCommand | GateType::LintCommand => {
             run_command(gate.command.as_deref().unwrap_or("true")).await
         }
-        GateType::RequiredApprovals => (
-            GateStatus::Passed,
-            "approval check delegated to merge processor".to_string(),
-        ),
+        GateType::RequiredApprovals => {
+            run_required_approvals_gate(&state, &gate, &mr_id).await
+        }
         GateType::AgentReview => run_agent_review_gate(&state, &gate, &mr_id).await,
         GateType::AgentValidation => run_agent_validation_gate(&state, &gate, &mr_id).await,
         GateType::TraceCapture => run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await,
     };
 
     let finished_at = now_secs();
+
+    // Optional gates (§Gate Chains: `required = false`): advisory failures
+    // don't block merging, but their results are recorded — surface the
+    // failure on the MR as a comment attributed to the gate so the author
+    // sees advisory findings without a merge block.
+    if status == GateStatus::Failed && !gate.required {
+        attach_advisory_comment(state.as_ref(), &gate, &mr_id, &output).await;
+    }
 
     info!(
         gate_id = %gate.id,
@@ -433,6 +440,10 @@ struct ReviewAgentContext {
     persona_prompt: String,
     /// Slug the persona was resolved from (for attribution in the verdict).
     persona_slug: String,
+    /// Scope the gate agent's captured context window is stored under
+    /// (§Gate Agent Lifecycle: context windows are captured for audit).
+    workspace_id: gyre_common::Id,
+    tenant_id: Option<gyre_common::Id>,
 }
 
 /// Derive the persona lookup slug from a configured persona reference.
@@ -645,6 +656,14 @@ async fn build_review_agent_context(
         task_description,
         persona_prompt: resolved.system_prompt,
         persona_slug: resolved.slug,
+        workspace_id: mr.workspace_id.clone(),
+        tenant_id: state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id),
     })
 }
 
@@ -669,6 +688,36 @@ async fn run_review_agent_process(
 
     let gate_agent_id = ctx.gate_agent_id.clone();
     let diff_url = format!("{}/api/v1/merge-requests/{}/diff", state.base_url, mr_id);
+
+    // Context window capture (§Gate Agent Lifecycle): store the exact
+    // bundle this agent will see before the process runs — even a timed-out
+    // or crashed reviewer leaves an auditable, replayable context.
+    capture_gate_agent_context(
+        state,
+        gate,
+        "AgentReview",
+        mr_id,
+        &gate_agent_id,
+        &ctx.workspace_id,
+        ctx.tenant_id.as_ref(),
+        serde_json::json!({
+            "kind": "gate_agent_context",
+            "gate_type": "AgentReview",
+            "gate_id": gate.id.to_string(),
+            "gate_name": gate.name,
+            "gate_agent_id": gate_agent_id,
+            "mr_id": mr_id.to_string(),
+            "mr_title": ctx.mr_title,
+            "persona": persona,
+            "persona_slug": ctx.persona_slug,
+            "system_prompt": ctx.persona_prompt,
+            "spec_ref": ctx.spec_ref,
+            "spec_content": ctx.spec_content,
+            "task_description": ctx.task_description,
+            "diff": ctx.diff,
+        }),
+    )
+    .await;
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -940,6 +989,41 @@ async fn run_validation_agent_process(
 
     let diff_url = format!("{}/api/v1/merge-requests/{}/diff", state.base_url, mr_id);
 
+    // Context window capture (§Gate Agent Lifecycle): validators are gate
+    // agents too — record what the validator was told to check and against
+    // which persona/spec, before the process runs.
+    if let Ok(Some(mr)) = state.merge_requests.find_by_id(mr_id).await {
+        let tenant_id = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id);
+        capture_gate_agent_context(
+            state,
+            gate,
+            "AgentValidation",
+            mr_id,
+            &gate_agent_id,
+            &mr.workspace_id,
+            tenant_id.as_ref(),
+            serde_json::json!({
+                "kind": "gate_agent_context",
+                "gate_type": "AgentValidation",
+                "gate_id": gate.id.to_string(),
+                "gate_name": gate.name,
+                "gate_agent_id": gate_agent_id,
+                "mr_id": mr_id.to_string(),
+                "persona": persona,
+                "validation_type": gate.validation_type,
+                "spec_ref": spec_ref,
+                "diff_url": diff_url,
+            }),
+        )
+        .await;
+    }
+
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         revoke_gate_token(state, &gate_agent_id).await;
@@ -1152,6 +1236,152 @@ async fn run_trace_capture_gate(
                 format!("trace_capture gate: capture failed (observational only): {e}"),
             )
         }
+    }
+}
+
+/// Capture a gate agent's context window for audit (§Gate Agent Lifecycle:
+/// "gate agent context windows are captured for audit, like any other
+/// agent").
+///
+/// The context window — everything the agent saw: persona system prompt,
+/// MR diff, spec content at the pinned SHA, MR title, task description — is
+/// serialized to JSON, zstd-compressed, and stored through the conversation
+/// repository (the same provenance store regular agents use; retrievable at
+/// `GET /api/v1/conversations/:sha` for full replay). An audit event records
+/// the conversation SHA together with the gate and persona so the run is
+/// attributable and the replay locatable.
+///
+/// Capture failure is logged, not fatal — the same contract as regular
+/// agents' conversation upload (HSI §5: "conversation upload failed —
+/// conversation marked unavailable"). A missing tenant scope also skips
+/// capture (logged): the scope cannot be determined, so the blob would be
+/// stored under a fabricated tenant identity
+/// (check-fabricated-scope-defaults.sh).
+#[allow(clippy::too_many_arguments)]
+async fn capture_gate_agent_context(
+    state: &Arc<AppState>,
+    gate: &gyre_domain::QualityGate,
+    gate_type_label: &str,
+    mr_id: &Id,
+    gate_agent_id: &str,
+    workspace_id: &gyre_common::Id,
+    tenant_id: Option<&gyre_common::Id>,
+    context_window: serde_json::Value,
+) {
+    let Some(tenant_id) = tenant_id else {
+        warn!(
+            gate_id = %gate.id,
+            mr_id = %mr_id,
+            gate_agent_id,
+            "gate agent context capture skipped: workspace tenant cannot be resolved"
+        );
+        return;
+    };
+
+    let payload = match serde_json::to_vec(&context_window) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(gate_id = %gate.id, mr_id = %mr_id, error = %e, "gate agent context capture: serialize failed");
+            return;
+        }
+    };
+    let compressed = match zstd::encode_all(payload.as_slice(), 3) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(gate_id = %gate.id, mr_id = %mr_id, error = %e, "gate agent context capture: compression failed");
+            return;
+        }
+    };
+
+    let sha = match state
+        .conversations
+        .store(&Id::new(gate_agent_id), workspace_id, tenant_id, &compressed)
+        .await
+    {
+        Ok(sha) => sha,
+        Err(e) => {
+            warn!(
+                gate_id = %gate.id,
+                mr_id = %mr_id,
+                gate_agent_id,
+                error = %e,
+                "gate agent context capture: conversation store failed — context window marked unavailable"
+            );
+            return;
+        }
+    };
+
+    info!(
+        gate_id = %gate.id,
+        mr_id = %mr_id,
+        gate_agent_id,
+        conversation_sha = %sha,
+        category = "Observability",
+        event = "gate_agent_context.captured",
+        "gate agent context window captured for audit"
+    );
+
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::Custom("gate_agent_context".to_string()),
+        Some(Id::new(gate_agent_id.to_string())),
+        None,
+        None,
+        Some(workspace_id.clone()),
+        Some(gate.repo_id.clone()),
+        "gate".to_string(),
+        Some(gate.id.to_string()),
+        gyre_domain::AuditOutcome::Success,
+        serde_json::json!({
+            "conversation_sha": sha,
+            "gate_id": gate.id.to_string(),
+            "gate_name": gate.name,
+            "gate_type": gate_type_label,
+            "mr_id": mr_id.to_string(),
+            "gate_agent_id": gate_agent_id,
+            "persona": gate.persona,
+            "ephemeral": true,
+        }),
+        None,
+        None,
+        now_secs(),
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        warn!(gate_id = %gate.id, mr_id = %mr_id, error = %e, "gate agent context audit event failed");
+    }
+}
+
+/// Attach an advisory (non-blocking) gate failure to the MR as a comment
+/// (§Gate Chains: optional gates' "results are recorded but don't block
+/// merging"). The comment is attributed to the gate agent identity so the
+/// author can see advisory findings next to the MR without a merge block.
+async fn attach_advisory_comment(
+    state: &AppState,
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+    output: &str,
+) {
+    let author = format!("gate-agent:{}", gate.id);
+    let body = format!(
+        "Advisory gate '{}' ({:?}) failed — non-blocking (required = false):\n{}",
+        gate.name,
+        gate.gate_type,
+        truncate_bytes(output, 2048)
+    );
+    let comment = gyre_domain::ReviewComment::new(
+        Id::new(Uuid::new_v4().to_string()),
+        mr_id.clone(),
+        author,
+        body,
+        now_secs(),
+    );
+    if let Err(e) = state.reviews.add_comment(&comment).await {
+        warn!(
+            gate_id = %gate.id,
+            mr_id = %mr_id,
+            error = %e,
+            "failed to attach advisory gate comment to MR"
+        );
     }
 }
 
@@ -1417,6 +1647,48 @@ async fn run_post_merge_gate_commands(
 /// Returns `Ok(false)` if any required gates are still pending/running.
 /// Returns `Err(msg)` if any required gate has failed.
 /// Non-required (advisory) gates that fail are recorded but do not block merging.
+/// Count distinct reviewers who have submitted an `Approved` review on the
+/// MR. Re-submissions by the same reviewer count once — "N approvals" is N
+/// people approving, not one person approving N times.
+async fn count_distinct_approvals(state: &AppState, mr_id: &Id) -> u64 {
+    let reviews = state.reviews.list_reviews(mr_id).await.unwrap_or_default();
+    reviews
+        .iter()
+        .filter(|r| r.decision == ReviewDecision::Approved)
+        .map(|r| r.reviewer_agent_id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64
+}
+
+/// Run a RequiredApprovals gate (§Gate Types: "count review approvals",
+/// blocks until "N approvals received").
+///
+/// Approvals are evaluated LIVE, not once: a gate whose count is not yet
+/// met stays `Running` — the merge processor re-checks every cycle via
+/// [`check_gates_for_mr`] and the gate passes the moment the Nth approval
+/// lands. That is the spec's waiting semantics ("the merge processor waits
+/// until all required gates pass"); a one-shot failure at enqueue time
+/// would block MRs whose approvals arrive moments later.
+async fn run_required_approvals_gate(
+    state: &Arc<AppState>,
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+) -> (GateStatus, String) {
+    let min = gate.required_approvals.unwrap_or(1) as u64;
+    let have = count_distinct_approvals(state, mr_id).await;
+    if have >= min {
+        (
+            GateStatus::Passed,
+            format!("required_approvals gate: {have} approval(s) received (min {min})"),
+        )
+    } else {
+        (
+            GateStatus::Running,
+            format!("required_approvals gate: waiting for approvals ({have}/{min})"),
+        )
+    }
+}
+
 pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, String> {
     let results = state
         .gate_results
@@ -1425,15 +1697,49 @@ pub async fn check_gates_for_mr(state: &AppState, mr_id: &Id) -> Result<bool, St
         .unwrap_or_default();
 
     for r in &results {
-        // Look up whether this gate is required (default: true for unknown gates).
-        let is_required = state
+        // Look up the gate definition (default: required for unknown gates).
+        let gate_def = state
             .quality_gates
             .find_by_id(r.gate_id.as_str())
             .await
             .ok()
-            .flatten()
-            .map(|g| g.required)
-            .unwrap_or(true);
+            .flatten();
+        let is_required = gate_def.as_ref().map(|g| g.required).unwrap_or(true);
+
+        // RequiredApprovals gates evaluate the review count LIVE while the
+        // gate sits Pending/Running (§Gate Chains: "the merge processor
+        // waits until all required gates pass"; §Gate Types: "blocks until
+        // N approvals received"). The moment the Nth distinct approval
+        // lands, the gate result is promoted to Passed and the merge may
+        // proceed — no re-enqueue needed.
+        if let Some(def) = gate_def.as_ref() {
+            if def.gate_type == GateType::RequiredApprovals
+                && matches!(r.status, GateStatus::Pending | GateStatus::Running)
+            {
+                let min = def.required_approvals.unwrap_or(1) as u64;
+                let have = count_distinct_approvals(state, mr_id).await;
+                if have >= min {
+                    let finished = now_secs();
+                    let _ = state
+                        .gate_results
+                        .update_status(
+                            r.id.as_str(),
+                            GateStatus::Passed,
+                            None,
+                            Some(finished),
+                            Some(format!(
+                                "required_approvals gate: {have} approval(s) received (min {min})"
+                            )),
+                        )
+                        .await;
+                    continue; // this gate is now satisfied
+                }
+                // Still short on approvals: keep waiting (requeue). An
+                // approvals gate has no failure mode to record — only
+                // satisfaction — so advisory approval gates wait too.
+                return Ok(false);
+            }
+        }
 
         match r.status {
             GateStatus::Failed => {
@@ -1485,6 +1791,7 @@ mod tests {
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
+            position: 0,
             created_at: now_secs(),
         }
     }
@@ -1709,6 +2016,310 @@ mod tests {
         let s = "\u{1F600}".repeat(3);
         let t = truncate_bytes(&s, 2);
         assert_eq!(t, "");
+    }
+
+    // ── Optional (advisory) gates: recorded, non-blocking (§Gate Chains) ──
+
+    /// Drive one gate through the full `run_gate` path and return its final
+    /// persisted status.
+    async fn run_one_gate(
+        state: &Arc<AppState>,
+        gate: QualityGate,
+        mr_id: &Id,
+    ) -> GateStatus {
+        let result_id = Id::new(Uuid::new_v4().to_string());
+        let result = GateResult {
+            id: result_id.clone(),
+            gate_id: gate.id.clone(),
+            mr_id: mr_id.clone(),
+            status: GateStatus::Pending,
+            output: None,
+            started_at: None,
+            finished_at: None,
+        };
+        state.gate_results.save(&result).await.unwrap();
+        run_gate(state.clone(), result_id.clone(), gate, mr_id.clone()).await;
+        state
+            .gate_results
+            .list_by_mr_id(mr_id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == result_id)
+            .map(|r| r.status)
+            .expect("gate result persisted")
+    }
+
+    #[tokio::test]
+    async fn advisory_gate_failure_attaches_mr_comment() {
+        // §Gate Chains: optional gates' "results are recorded but don't
+        // block merging" — the recorded result must be visible on the MR
+        // itself as an advisory comment attributed to the gate.
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        let mut gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        gate.required = false; // advisory
+
+        let status = run_one_gate(&state, gate.clone(), &mr_id).await;
+        assert_eq!(status, GateStatus::Failed, "the command really failed");
+
+        let comments = state.reviews.list_comments(&mr_id).await.unwrap();
+        assert_eq!(comments.len(), 1, "exactly one advisory comment");
+        let c = &comments[0];
+        assert_eq!(
+            c.author_agent_id,
+            format!("gate-agent:{}", gate.id),
+            "advisory comment is attributed to the gate"
+        );
+        assert!(c.body.contains("non-blocking"), "body: {}", c.body);
+        assert!(c.body.contains("test-gate"), "body names the gate: {}", c.body);
+    }
+
+    #[tokio::test]
+    async fn required_gate_failure_attaches_no_advisory_comment() {
+        // Required-gate failures follow the blocking path (MR failed,
+        // author notified) — they must not ALSO post advisory comments.
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        let gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        assert!(gate.required);
+
+        let status = run_one_gate(&state, gate, &mr_id).await;
+        assert_eq!(status, GateStatus::Failed);
+
+        let comments = state.reviews.list_comments(&mr_id).await.unwrap();
+        assert!(comments.is_empty(), "required failure is not an advisory comment");
+    }
+
+    // ── RequiredApprovals: live review-count evaluation (§Gate Types) ───
+
+    fn approvals_gate(min: u32) -> QualityGate {
+        let mut g = make_gate(GateType::RequiredApprovals, None);
+        g.required_approvals = Some(min);
+        g
+    }
+
+    async fn submit_approval(state: &Arc<AppState>, mr_id: &Id, reviewer: &str) {
+        let review = Review::new(
+            Id::new(Uuid::new_v4().to_string()),
+            mr_id.clone(),
+            reviewer,
+            gyre_domain::ReviewDecision::Approved,
+            now_secs(),
+        );
+        state.reviews.submit_review(&review).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn required_approvals_gate_passes_when_count_met() {
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+        submit_approval(&state, &mr_id, "reviewer-a").await;
+        submit_approval(&state, &mr_id, "reviewer-b").await;
+
+        let status = run_one_gate(&state, approvals_gate(2), &mr_id).await;
+        assert_eq!(status, GateStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn required_approvals_gate_waits_until_approvals_arrive() {
+        // §Gate Types: "blocks until N approvals received" + §Gate Chains:
+        // "the merge processor waits until all required gates pass". A
+        // gate short of approvals is RUNNING (waiting), not failed — and
+        // the merge processor's live re-check promotes it to Passed the
+        // moment the Nth approval lands, without a re-enqueue.
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        let gate = approvals_gate(2);
+        state.quality_gates.save(&gate).await.unwrap();
+        submit_approval(&state, &mr_id, "reviewer-a").await;
+
+        let status = run_one_gate(&state, gate.clone(), &mr_id).await;
+        assert_eq!(
+            status,
+            GateStatus::Running,
+            "short of approvals the gate waits (Running), it does not fail"
+        );
+
+        // Merge processor's view: not ready yet.
+        let ready = check_gates_for_mr(&state, &mr_id).await.unwrap();
+        assert!(!ready, "merge must wait while approvals are short");
+
+        // The second, distinct approval arrives.
+        submit_approval(&state, &mr_id, "reviewer-b").await;
+
+        // Next processor cycle: the live re-check promotes the gate.
+        let ready = check_gates_for_mr(&state, &mr_id).await.unwrap();
+        assert!(ready, "merge may proceed once the Nth approval lands");
+        let result = state
+            .gate_results
+            .list_by_mr_id(mr_id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.gate_id == gate.id)
+            .expect("gate result");
+        assert_eq!(
+            result.status,
+            GateStatus::Passed,
+            "the live re-check persists the promotion to Passed"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_approvals_counts_distinct_reviewers() {
+        // "N approvals" is N people, not one person approving N times: the
+        // same reviewer re-approving must not satisfy a min-2 gate.
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
+
+        let gate = approvals_gate(2);
+        state.quality_gates.save(&gate).await.unwrap();
+        submit_approval(&state, &mr_id, "reviewer-a").await;
+        submit_approval(&state, &mr_id, "reviewer-a").await; // re-approval
+
+        let status = run_one_gate(&state, gate.clone(), &mr_id).await;
+        assert_eq!(
+            status,
+            GateStatus::Running,
+            "one reviewer approving twice is still one approval"
+        );
+        let ready = check_gates_for_mr(&state, &mr_id).await.unwrap();
+        assert!(!ready, "duplicate approvals must not unblock the merge");
+    }
+
+    // ── Gate agent context window capture (§Gate Agent Lifecycle) ──────
+
+    #[tokio::test]
+    async fn agent_review_captures_context_window_for_audit() {
+        // §Gate Agent Lifecycle: "gate agent context windows are captured
+        // for audit, like any other agent" — the exact bundle the reviewer
+        // saw (persona prompt, diff, pinned spec, task description) must be
+        // stored in the conversation repository and referenced by an audit
+        // event, retrievable for replay.
+        let state = test_state();
+        // The capture is scope-resolved through the workspace's tenant —
+        // without a workspace row there is no scoperable tenant and capture
+        // is skipped (by design). Seed one.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-test"),
+            Id::new("tenant-test"),
+            "Test workspace",
+            "test-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
+
+        // A reviewer command that exits 0 without submitting a verdict: the
+        // gate fails (exit-0-no-review), but the context window was already
+        // captured BEFORE the process ran — that is the auditable guarantee.
+        let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
+        gate.persona = Some("personas/test-reviewer.md".to_string());
+
+        let (status, output) = run_agent_review_gate(&state, &gate, &mr_id).await;
+        assert_eq!(status, GateStatus::Failed, "output: {output}");
+        assert!(
+            output.contains("exited without submitting"),
+            "output: {output}"
+        );
+
+        // The audit event records the capture with its conversation SHA.
+        let events = state
+            .audit
+            .query(&gyre_ports::AuditQueryFilter {
+                event_type: Some("gate_agent_context".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "exactly one context-capture audit event");
+        let detail = &events[0].detail;
+        let sha = detail["conversation_sha"].as_str().unwrap().to_string();
+        assert_eq!(detail["gate_type"], "AgentReview");
+        assert_eq!(detail["persona"], "personas/test-reviewer.md");
+        assert_eq!(detail["mr_id"], mr_id.to_string());
+        let gate_agent_id = detail["gate_agent_id"].as_str().unwrap().to_string();
+        assert!(gate_agent_id.starts_with("gate-review-"));
+
+        // The conversation is retrievable (full replay of what the agent
+        // saw) and scoped to the workspace's tenant.
+        let tenant_id = Id::new("tenant-test");
+        let meta = state
+            .conversations
+            .get_metadata(&sha, &tenant_id)
+            .await
+            .unwrap()
+            .expect("captured context window metadata resolves");
+        assert_eq!(meta.1, Id::new("ws-test"));
+        let blob = state
+            .conversations
+            .get(&sha, &tenant_id)
+            .await
+            .unwrap()
+            .expect("captured context window blob resolves");
+        let ctx: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        assert_eq!(ctx["kind"], "gate_agent_context");
+        assert_eq!(ctx["gate_agent_id"], gate_agent_id.as_str());
+        // The reviewer's eyes: persona system prompt, the MR diff, the
+        // pinned spec content, and the task's acceptance criteria.
+        assert!(
+            ctx["system_prompt"].as_str().unwrap().contains("test-reviewer"),
+            "persona system prompt captured"
+        );
+        assert!(
+            ctx["diff"].as_str().unwrap().contains("widget"),
+            "MR diff captured"
+        );
+        assert_eq!(
+            ctx["spec_content"].as_str().unwrap(), "# Spec v1",
+            "spec at the PINNED sha captured (not the v2 tip)"
+        );
+        assert!(
+            ctx["task_description"]
+                .as_str()
+                .unwrap()
+                .contains("Implement the widget"),
+            "task description (acceptance criteria carrier) captured"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_review_context_capture_skips_without_workspace_tenant() {
+        // No workspace row → no scoperable tenant → capture is SKIPPED
+        // (logged), never stored under a fabricated tenant identity. The
+        // persona DOES resolve, so the gate reaches the capture point and
+        // runs — only the capture is skipped.
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo_and_persona(&state, "orphan-reviewer").await;
+
+        let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
+        gate.persona = Some("personas/orphan-reviewer.md".to_string());
+        let (status, output) = run_agent_review_gate(&state, &gate, &mr_id).await;
+        assert_eq!(status, GateStatus::Failed, "output: {output}");
+        assert!(
+            output.contains("exited without submitting"),
+            "the reviewer ran (persona resolved); it just submitted no verdict: {output}"
+        );
+
+        let events = state
+            .audit
+            .query(&gyre_ports::AuditQueryFilter {
+                event_type: Some("gate_agent_context".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "capture must be skipped, not stored under a fabricated tenant"
+        );
     }
 
     // ── AgentReview / AgentValidation no-command path (fail-closed) ────────
@@ -2491,6 +3102,7 @@ mod tests {
                 required: false,
                 gate_phase: Default::default(),
                 timeout_secs: None,
+                position: 0,
                 created_at: now_secs(),
             })
             .await

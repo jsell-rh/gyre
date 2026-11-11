@@ -61,6 +61,8 @@ pub struct GateResponse {
     pub gate_phase: String,
     /// Command timeout in seconds (None = system default).
     pub timeout_secs: Option<u64>,
+    /// Position of this gate in the repo's ordered gate chain (0-based).
+    pub position: u32,
     pub created_at: u64,
 }
 
@@ -78,6 +80,7 @@ impl From<QualityGate> for GateResponse {
             required: g.required,
             gate_phase: g.gate_phase.as_str().to_string(),
             timeout_secs: g.timeout_secs,
+            position: g.position,
             created_at: g.created_at,
         }
     }
@@ -216,14 +219,10 @@ pub async fn create_gate(
     // Duplicate guard: gate names are unique per repo. Without this, every
     // re-run of `gyre bootstrap` re-POSTs the same default gate set and
     // duplicates each row — every subsequent MR then runs each gate once
-    // per bootstrap run.
-    if state
-        .quality_gates
-        .list_by_repo_id(&repo_id)
-        .await?
-        .iter()
-        .any(|g| g.name == req.name)
-    {
+    // per bootstrap run. The listed chain also decides the new gate's
+    // position (append to the end of the ordered chain).
+    let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
+    if existing.iter().any(|g| g.name == req.name) {
         return Err(ApiError::Conflict(format!(
             "gate '{}' already exists for repo {repo_id}",
             req.name
@@ -254,6 +253,12 @@ pub async fn create_gate(
         }
     }
 
+    // Next free position in the repo's chain: gates appended via the
+    // single-gate API go to the end of the chain (agent-gates.md §Gate
+    // Chains — ordered policies). The chain-config endpoint is the
+    // authority for full reordering.
+    let next_position = existing.iter().map(|g| g.position).max().map_or(0, |m| m + 1);
+
     let gate = QualityGate {
         id: new_id(),
         repo_id: Id::new(repo_id),
@@ -266,6 +271,7 @@ pub async fn create_gate(
         required: req.required.unwrap_or(true),
         gate_phase: req.gate_phase.unwrap_or_default(),
         timeout_secs: req.timeout_secs,
+        position: next_position,
         created_at: now_secs(),
     };
 
@@ -286,7 +292,10 @@ pub async fn list_gates(
         .into_iter()
         .map(GateResponse::from)
         .collect();
-    result.sort_by_key(|g| g.created_at);
+    // Chain order: position first, creation order as tiebreak (rows written
+    // before the position column existed all sit at 0). Mirrors the
+    // adapters' ORDER BY so the API is ordered regardless of backend.
+    result.sort_by_key(|g| (g.position, g.created_at));
     Ok(Json(result))
 }
 
@@ -305,6 +314,257 @@ pub async fn delete_gate(
             Ok(StatusCode::NO_CONTENT)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate chain configuration (agent-gates.md §Gate Chains)
+// ---------------------------------------------------------------------------
+
+/// One `[[gates]]` entry of a repo's gate chain configuration.
+///
+/// Mirrors the spec's TOML surface exactly (`name`, `type`, `command`,
+/// `persona`, `min_approvals`, `required`) plus the optional
+/// `validation_type` / `timeout_secs` knobs the single-gate API supports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateChainEntry {
+    pub name: String,
+    /// Gate type. Accepts the spec's PascalCase names (`TestCommand`,
+    /// `AgentReview`, ...) and the internal snake_case wire forms
+    /// (`test_command`, `agent_review`, ...).
+    #[serde(rename = "type")]
+    pub gate_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Minimum approvals (RequiredApprovals gates). Named `min_approvals`
+    /// per the spec's TOML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_approvals: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// The full `[[gates]]` chain document (TOML).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateChainToml {
+    pub gates: Vec<GateChainEntry>,
+}
+
+/// Parse a gate type name from chain configuration. Accepts the spec's
+/// PascalCase names and the internal snake_case wire forms.
+fn parse_gate_type_name(s: &str) -> Option<GateType> {
+    match s {
+        "TestCommand" | "test_command" => Some(GateType::TestCommand),
+        "LintCommand" | "lint_command" => Some(GateType::LintCommand),
+        "RequiredApprovals" | "required_approvals" => Some(GateType::RequiredApprovals),
+        "AgentReview" | "agent_review" => Some(GateType::AgentReview),
+        "AgentValidation" | "agent_validation" => Some(GateType::AgentValidation),
+        "TraceCapture" | "trace_capture" => Some(GateType::TraceCapture),
+        _ => None,
+    }
+}
+
+/// Serialize a gate type back to the spec's PascalCase TOML form.
+fn gate_type_toml_name(t: &GateType) -> &'static str {
+    match t {
+        GateType::TestCommand => "TestCommand",
+        GateType::LintCommand => "LintCommand",
+        GateType::RequiredApprovals => "RequiredApprovals",
+        GateType::AgentReview => "AgentReview",
+        GateType::AgentValidation => "AgentValidation",
+        GateType::TraceCapture => "TraceCapture",
+    }
+}
+
+impl From<&QualityGate> for GateChainEntry {
+    fn from(g: &QualityGate) -> Self {
+        Self {
+            name: g.name.clone(),
+            gate_type: gate_type_toml_name(&g.gate_type).to_string(),
+            command: g.command.clone(),
+            persona: g.persona.clone(),
+            min_approvals: g.required_approvals,
+            validation_type: g.validation_type.clone(),
+            required: Some(g.required),
+            timeout_secs: g.timeout_secs,
+        }
+    }
+}
+
+/// Validate a parsed chain BEFORE any mutation so an invalid chain never
+/// partially applies. Returns per-entry parsed gate types.
+fn validate_chain(chain: &GateChainToml) -> Result<Vec<GateType>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut types = Vec::with_capacity(chain.gates.len());
+    for (i, entry) in chain.gates.iter().enumerate() {
+        if entry.name.trim().is_empty() {
+            return Err(ApiError::InvalidInput(format!(
+                "gate chain entry {i}: name must not be empty"
+            )));
+        }
+        if !seen.insert(entry.name.clone()) {
+            return Err(ApiError::InvalidInput(format!(
+                "gate chain entry {i}: duplicate gate name '{}'",
+                entry.name
+            )));
+        }
+        let gate_type = parse_gate_type_name(&entry.gate_type).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "gate chain entry {i} ('{}'): unknown gate type '{}'",
+                entry.name, entry.gate_type
+            ))
+        })?;
+        match gate_type {
+            GateType::TestCommand | GateType::LintCommand => {
+                if entry.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(ApiError::InvalidInput(format!(
+                        "gate chain entry {i} ('{}'): command is required for {} gates",
+                        entry.name, entry.gate_type
+                    )));
+                }
+            }
+            GateType::RequiredApprovals => {
+                if entry.min_approvals.is_none() {
+                    return Err(ApiError::InvalidInput(format!(
+                        "gate chain entry {i} ('{}'): min_approvals is required for RequiredApprovals gates",
+                        entry.name
+                    )));
+                }
+            }
+            GateType::AgentReview | GateType::AgentValidation | GateType::TraceCapture => {}
+        }
+        types.push(gate_type);
+    }
+    Ok(types)
+}
+
+/// PUT /api/v1/repos/:id/gate-chain — replace the repo's gate chain.
+///
+/// Body: the chain as TOML text (the spec's `[[gates]]` format),
+/// content-type `application/toml` or `text/plain`.
+///
+/// Semantics: the chain REPLACES the repo's configured gates — entries are
+/// applied in order (position = array index), gates whose names disappear
+/// from the chain are deleted, and gates whose names persist keep their ids
+/// (so existing GateResults stay linked to their gate). Validation happens
+/// entirely before the first mutation: an invalid chain is a 400 and leaves
+/// the current chain untouched.
+pub async fn set_gate_chain(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<Vec<GateResponse>>), ApiError> {
+    // Validate the repo exists.
+    state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Content-type gate: the chain is TOML. Accept the explicit type, plain
+    // text, or no header; anything else (notably JSON — a different format
+    // with different field semantics) is a 415, not a parse gamble.
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(content_type.as_str(), "application/toml" | "text/plain" | "") {
+        return Err(ApiError::UnsupportedMediaType(format!(
+            "gate chain configuration must be TOML (application/toml or text/plain), got '{content_type}'"
+        )));
+    }
+
+    let text = std::str::from_utf8(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("gate chain body is not valid UTF-8: {e}")))?;
+    let chain: GateChainToml = toml::from_str(text).map_err(|e| {
+        ApiError::InvalidInput(format!("gate chain is not valid TOML: {e}"))
+    })?;
+
+    // Full validation before any mutation (atomicity).
+    let types = validate_chain(&chain)?;
+
+    let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
+    let mut by_name: std::collections::HashMap<String, QualityGate> = existing
+        .into_iter()
+        .map(|g| (g.name.clone(), g))
+        .collect();
+
+    let mut saved = Vec::with_capacity(chain.gates.len());
+    for (i, entry) in chain.gates.iter().enumerate() {
+        let gate_type = types[i].clone();
+        let mut gate = by_name
+            .remove(&entry.name)
+            .unwrap_or_else(|| QualityGate {
+                id: new_id(),
+                repo_id: Id::new(repo_id.clone()),
+                name: entry.name.clone(),
+                gate_type: gate_type.clone(),
+                command: None,
+                required_approvals: None,
+                persona: None,
+                validation_type: None,
+                required: true,
+                gate_phase: Default::default(),
+                timeout_secs: None,
+                position: 0,
+                created_at: now_secs(),
+            });
+        // Update config in place (persisting gates keep their id and
+        // created_at; only the chain-controlled fields change).
+        gate.gate_type = gate_type;
+        gate.command = entry.command.clone();
+        gate.required_approvals = entry.min_approvals;
+        gate.persona = entry.persona.clone();
+        gate.validation_type = entry.validation_type.clone();
+        gate.required = entry.required.unwrap_or(true);
+        gate.timeout_secs = entry.timeout_secs;
+        gate.position = i as u32;
+        state.quality_gates.save(&gate).await?;
+        saved.push(gate);
+    }
+
+    // Gates absent from the new chain are removed from it.
+    for (_, removed) in by_name {
+        state.quality_gates.delete(removed.id.as_str()).await?;
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(saved.into_iter().map(GateResponse::from).collect()),
+    ))
+}
+
+/// GET /api/v1/repos/:id/gate-chain — the repo's current gate chain as
+/// TOML (the same `[[gates]]` format `PUT` accepts, entries in chain order).
+pub async fn get_gate_chain(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    // Validate the repo exists.
+    state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    let gates = state.quality_gates.list_by_repo_id(&repo_id).await?;
+    let chain = GateChainToml {
+        gates: gates.iter().map(GateChainEntry::from).collect(),
+    };
+    let text = toml::to_string_pretty(&chain)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize gate chain: {e}")))?;
+
+    Ok(axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/toml")
+        .body(axum::body::Body::from(text))
+        .unwrap())
 }
 
 /// GET /api/v1/merge-requests/:id/gates — list gate results for an MR.
@@ -420,6 +680,8 @@ mod tests {
     use gyre_domain::{Repository, SpecApproval};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    use super::GateChainToml;
 
     fn app() -> Router {
         crate::api::api_router().with_state(test_state())
@@ -652,6 +914,358 @@ mod tests {
             .expect("agent_validation gate in list");
         assert_eq!(stored["validation_type"], "license-scan");
         assert_eq!(stored["persona"], "personas/accountability.md");
+    }
+
+    // ── Gate chain configuration (agent-gates.md §Gate Chains) ──────────
+
+    /// The spec's exact §Gate Chains example: an ordered chain mixing all
+    /// gate types.
+    const SPEC_CHAIN_TOML: &str = r#"
+[[gates]]
+name = "tests"
+type = "TestCommand"
+command = "cargo test"
+required = true
+
+[[gates]]
+name = "architecture-lint"
+type = "LintCommand"
+command = "scripts/check-arch.sh"
+required = true
+
+[[gates]]
+name = "security-review"
+type = "AgentReview"
+persona = "personas/security.md"
+required = true
+
+[[gates]]
+name = "spec-alignment-review"
+type = "AgentReview"
+persona = "personas/accountability.md"
+required = true
+
+[[gates]]
+name = "peer-approval"
+type = "RequiredApprovals"
+min_approvals = 1
+required = true
+"#;
+
+    async fn put_chain(
+        app: &Router,
+        toml_text: &str,
+        content_type: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/gate-chain")
+                    .header("content-type", content_type)
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(toml_text.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gate_chain_put_parses_spec_toml_and_orders_chain() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = put_chain(&app, SPEC_CHAIN_TOML, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let gates = json.as_array().unwrap();
+        assert_eq!(gates.len(), 5, "all five chain entries applied");
+
+        // The chain is ordered: position = array index, mixed types kept.
+        let names: Vec<&str> = gates
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "tests",
+                "architecture-lint",
+                "security-review",
+                "spec-alignment-review",
+                "peer-approval"
+            ]
+        );
+        for (i, g) in gates.iter().enumerate() {
+            assert_eq!(g["position"], i as u64, "chain order = array index");
+        }
+        // Field mapping: spec TOML names → internal gate fields.
+        assert_eq!(gates[0]["gate_type"], "test_command");
+        assert_eq!(gates[0]["command"], "cargo test");
+        assert_eq!(gates[2]["gate_type"], "agent_review");
+        assert_eq!(gates[2]["persona"], "personas/security.md");
+        assert_eq!(gates[4]["gate_type"], "required_approvals");
+        assert_eq!(gates[4]["required_approvals"], 1);
+
+        // The plain gates listing is chain-ordered too.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let listed: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                "tests",
+                "architecture-lint",
+                "security-review",
+                "spec-alignment-review",
+                "peer-approval"
+            ]
+        );
+
+        // GET returns the chain as TOML in the same format PUT accepts.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gate-chain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+            "application/toml"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let toml_text = String::from_utf8(bytes.to_vec()).unwrap();
+        // Round-trip: the GET'd TOML parses back into the same chain, in order.
+        let round: GateChainToml = toml::from_str(&toml_text).unwrap();
+        let rt_names: Vec<&str> = round.gates.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            rt_names,
+            vec![
+                "tests",
+                "architecture-lint",
+                "security-review",
+                "spec-alignment-review",
+                "peer-approval"
+            ]
+        );
+        assert_eq!(round.gates[0].command.as_deref(), Some("cargo test"));
+        assert_eq!(round.gates[4].min_approvals, Some(1));
+        assert_eq!(round.gates[2].persona.as_deref(), Some("personas/security.md"));
+    }
+
+    #[tokio::test]
+    async fn gate_chain_replace_reorders_keeps_ids_deletes_removed() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = put_chain(&app, SPEC_CHAIN_TOML, "text/plain").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first = body_json(resp).await;
+        let id_of = |name: &str| {
+            first
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["name"] == name)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let security_id = id_of("security-review");
+        let tests_id = id_of("tests");
+
+        // Replacement chain: security-review moved to the front, tests gone,
+        // a brand-new advisory gate appended.
+        let replacement = r#"
+[[gates]]
+name = "security-review"
+type = "AgentReview"
+persona = "personas/security.md"
+required = true
+
+[[gates]]
+name = "peer-approval"
+type = "RequiredApprovals"
+min_approvals = 2
+required = true
+
+[[gates]]
+name = "advisory-lint"
+type = "LintCommand"
+command = "cargo clippy -- -D warnings"
+required = false
+"#;
+        let resp = put_chain(&app, replacement, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let second = body_json(resp).await;
+        let gates = second.as_array().unwrap();
+        assert_eq!(gates.len(), 3);
+
+        // Reordered: security-review now position 0.
+        assert_eq!(gates[0]["name"], "security-review");
+        assert_eq!(gates[0]["position"], 0);
+        // Persisting gates keep their ids — prior GateResults stay linked.
+        assert_eq!(gates[0]["id"].as_str().unwrap(), security_id);
+        assert_eq!(gates[1]["id"].as_str().unwrap(), id_of("peer-approval"));
+        // Updated config in place: min_approvals changed to 2.
+        assert_eq!(gates[1]["required_approvals"], 2);
+        // New gate gets a fresh id and the right position.
+        assert_eq!(gates[2]["name"], "advisory-lint");
+        assert_eq!(gates[2]["position"], 2);
+        assert_eq!(gates[2]["required"], false);
+        assert_ne!(gates[2]["id"].as_str().unwrap(), tests_id);
+
+        // The removed gate is really gone from the repo's chain.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["security-review", "peer-approval", "advisory-lint"]);
+    }
+
+    #[tokio::test]
+    async fn gate_chain_invalid_entries_rejected_and_chain_unchanged() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Start from a valid chain.
+        let resp = put_chain(&app, SPEC_CHAIN_TOML, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let before = {
+            let mut v: Vec<String> = state
+                .quality_gates
+                .list_by_repo_id("repo-1")
+                .await
+                .unwrap()
+                .iter()
+                .map(|g| g.id.to_string())
+                .collect();
+            v.sort();
+            v
+        };
+
+        // Duplicate names in one chain.
+        let dup = r#"
+[[gates]]
+name = "tests"
+type = "TestCommand"
+command = "cargo test"
+
+[[gates]]
+name = "tests"
+type = "LintCommand"
+command = "cargo clippy"
+"#;
+        let resp = put_chain(&app, dup, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing command for a TestCommand gate.
+        let no_cmd = r#"
+[[gates]]
+name = "tests"
+type = "TestCommand"
+"#;
+        let resp = put_chain(&app, no_cmd, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing min_approvals for a RequiredApprovals gate.
+        let no_min = r#"
+[[gates]]
+name = "peer-approval"
+type = "RequiredApprovals"
+"#;
+        let resp = put_chain(&app, no_min, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Unknown gate type.
+        let bad_type = r#"
+[[gates]]
+name = "mystery"
+type = "PsychicReview"
+"#;
+        let resp = put_chain(&app, bad_type, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Malformed TOML.
+        let resp = put_chain(&app, "[[gates\nname =", "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Wrong content type (JSON is a different format — 415, not a gamble).
+        let resp = put_chain(
+            &app,
+            serde_json::to_string(&serde_json::json!({"gates": []})).unwrap().as_str(),
+            "application/json",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // Atomicity: none of the rejected chains changed the stored gates.
+        let after = {
+            let mut v: Vec<String> = state
+                .quality_gates
+                .list_by_repo_id("repo-1")
+                .await
+                .unwrap()
+                .iter()
+                .map(|g| g.id.to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            after, before,
+            "invalid chain configurations must not partially apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_chain_unknown_repo_is_404() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+        let resp = put_chain(&app, SPEC_CHAIN_TOML, "application/toml").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
