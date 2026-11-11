@@ -14,6 +14,7 @@ pub mod budget_call;
 pub mod budget_usage;
 pub mod call_graph;
 pub mod chain_attestation;
+pub mod commit_signature_repo;
 pub mod compute;
 pub mod compute_target_repository;
 pub mod container_audit_repo;
@@ -75,6 +76,7 @@ pub use budget_call::BudgetCallRepository;
 pub use budget_usage::BudgetUsageRepository;
 pub use call_graph::CallGraphExtractor;
 pub use chain_attestation::ChainAttestationRepository;
+pub use commit_signature_repo::{CommitSignature, CommitSignatureRepository, SigstoreMode};
 pub use compute::{ComputeTarget, ProcessHandle, SpawnConfig};
 pub use compute_target_repository::ComputeTargetRepository;
 pub use container_audit_repo::ContainerAuditRepository;
@@ -107,7 +109,9 @@ pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
-pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
+pub use search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;

@@ -698,6 +698,7 @@ pub async fn resolve_impersonation_auth(
         repo_id: None,
         scope: Vec::new(),
         jwt_claims: None,
+        bearer_token: None,
         deprecated_token_auth: false,
         impersonation: Some(ImpersonationContext {
             impersonator_id: Id::new(session.impersonator_id.clone()),
@@ -802,7 +803,8 @@ async fn deliver_approval_code(
         })
         .to_string(),
     );
-    notif.entity_ref = Some(req.request_id.clone());
+    notif.source.entity_type = "impersonation".to_string();
+    notif.source.entity_id = req.request_id.clone();
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
@@ -850,7 +852,8 @@ async fn notify_impersonation_alert(
         })
         .to_string(),
     );
-    notif.entity_ref = Some(session.session_id.clone());
+    notif.source.entity_type = "impersonation".to_string();
+    notif.source.entity_id = session.session_id.clone();
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");

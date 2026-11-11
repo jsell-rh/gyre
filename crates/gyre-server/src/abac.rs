@@ -333,6 +333,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -369,6 +370,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -403,6 +405,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -438,6 +441,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -491,6 +495,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -524,6 +529,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };
@@ -544,6 +550,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };

@@ -713,6 +713,7 @@ mod tests {
             repo_id: None,
             scope: Vec::new(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
             impersonation: None,
         };

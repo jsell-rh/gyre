@@ -22,13 +22,7 @@ def eligible(store, work):
         return False
     if satisfied(data):
         return False
-    if stage == 'observe':
-        from .ci import publication
-        if inputs.get('priority_only'):
-            return data.get('pr') == inputs['url']
-        return (not data.get('repair') and data.get('candidate') == inputs['candidate']
-                and data.get('pr') == inputs['url'] and publication(store,task) == inputs['published'])
-    if stage in ('triage','implement','review','verify'):
+    if stage in ('triage','assess','implement','review','verify'):
         repair=data.get('repair') or {}
         if repair.get('shared_environment'):
             return False
@@ -37,6 +31,27 @@ def eligible(store, work):
             task_priority(store,task)
         except PriorityError:
             return False
+    requirements = data.get('requirements') or {}
+    if requirements.get('errors'):
+        return stage == 'triage' and inputs.get('binding_errors') == requirements['errors']
+    from .requirements import pending
+    assessment = pending(data)
+    if assessment:
+        # Format migration must let an already-running implementation retain
+        # its checkpoint. Discovery never offers another implementation claim.
+        if (stage == 'implement' and work.get('state') == 'claimed'
+                and not data.get('assessment_pending') and inputs.get('repair') == data.get('repair')):
+            return True
+        return (stage == 'assess' and inputs.get('requirements') == requirements.get('fingerprint')
+                and inputs.get('changes') == assessment.get('changes', {}))
+    if stage == 'assess':
+        return False
+    if stage == 'observe':
+        from .ci import publication
+        if inputs.get('priority_only'):
+            return data.get('pr') == inputs['url']
+        return (not data.get('repair') and data.get('candidate') == inputs['candidate']
+                and data.get('pr') == inputs['url'] and publication(store,task) == inputs['published'])
     if stage == 'triage':
         if inputs.get('baseline_probe'):
             if (probe(task) != inputs['baseline_probe'] or
