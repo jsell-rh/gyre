@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A document to be indexed for search.
@@ -62,7 +63,23 @@ pub struct SearchResult {
     pub facets: HashMap<String, String>,
 }
 
+/// A single autocomplete suggestion (spec §API: `GET /search/suggest`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSuggestion {
+    /// The matched title text to offer in the autocomplete dropdown.
+    pub text: String,
+    pub entity_type: String,
+    pub entity_id: String,
+}
+
+/// Aggregated facet counts, keyed `facet -> value -> count`. The built-in
+/// `type` facet counts `entity_type` values and `workspace` counts
+/// `workspace_id` values; every other key comes from the documents' facet
+/// maps (status, priority, ...).
+pub type FacetCounts = HashMap<String, HashMap<String, usize>>;
+
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SearchPort: Send + Sync {
     /// Index (or re-index) a document.
     async fn index(&self, doc: SearchDocument) -> Result<()>;
@@ -72,4 +89,19 @@ pub trait SearchPort: Send + Sync {
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()>;
     /// Rebuild the entire index from scratch. Returns number of documents indexed.
     async fn reindex_all(&self) -> Result<u64>;
+    /// Autocomplete: entity titles beginning with the `query.query` prefix,
+    /// case-insensitive, at most `query.limit` results (spec §API: `GET
+    /// /search/suggest`). The scope fields are enforced exactly like
+    /// `search()` — suggestions never include titles of entities the caller
+    /// cannot access. `entity_type`/`workspace_id` narrow within that scope.
+    async fn suggest(&self, query: SearchQuery) -> Result<Vec<SearchSuggestion>>;
+    /// Aggregate facet counts over the index (spec §API `GET /search/facets`
+    /// and §Response Format `facet_counts`). The scope fields are enforced
+    /// exactly like `search()` — counts never include documents the caller
+    /// cannot access. A blank `query.query` aggregates the caller's entire
+    /// accessible set; otherwise the aggregation is restricted to the same
+    /// filtered match set `search()` uses (text terms plus
+    /// `entity_type`/`workspace_id` filters, ignoring `limit`) — counts must
+    /// describe the full filtered set, not the truncated result page.
+    async fn facet_counts(&self, query: SearchQuery) -> Result<FacetCounts>;
 }

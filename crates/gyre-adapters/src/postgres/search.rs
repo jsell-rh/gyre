@@ -23,8 +23,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{Array, BigInt, Double, Text};
-use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::sync::Arc;
+use gyre_ports::search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
+use std::{collections::HashMap, sync::Arc};
 
 use super::PgStorage;
 
@@ -86,6 +88,140 @@ struct CountRow {
 struct TenantRow {
     #[diesel(sql_type = Text)]
     tenant_id: String,
+}
+
+/// Row carrier for prefix-suggestion queries on the title column.
+#[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
+struct SuggestRow {
+    #[diesel(sql_type = Text)]
+    entity_type: String,
+    #[diesel(sql_type = Text)]
+    entity_id: String,
+    #[diesel(sql_type = Text)]
+    title: String,
+}
+
+/// Row carrier for facet aggregation: scope columns + facets JSON.
+#[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
+struct FacetRow {
+    #[diesel(sql_type = Text)]
+    entity_type: String,
+    #[diesel(sql_type = Text)]
+    workspace_id: String,
+    #[diesel(sql_type = Text)]
+    metadata: String,
+}
+
+/// Escape SQL LIKE wildcards (`%`, `_`) and the escape character itself in a
+/// user-supplied prefix so it is matched literally under `ESCAPE '\\'`.
+fn escape_like(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len());
+    for c in prefix.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Fold one row into a `FacetCounts` aggregation: the built-in `type` facet
+/// from `entity_type`, `workspace` from a non-empty `workspace_id`, and every
+/// metadata facet key/value.
+fn count_facet_row(counts: &mut FacetCounts, row: FacetRow) {
+    counts
+        .entry("type".to_string())
+        .or_default()
+        .entry(row.entity_type)
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+    if !row.workspace_id.is_empty() {
+        counts
+            .entry("workspace".to_string())
+            .or_default()
+            .entry(row.workspace_id)
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+    }
+    if let Ok(facets) = serde_json::from_str::<HashMap<String, String>>(&row.metadata) {
+        for (key, value) in facets {
+            counts
+                .entry(key)
+                .or_default()
+                .entry(value)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        }
+    }
+}
+
+/// A typed bind emitted by [`scope_filter_sql`].
+enum ScopeBind {
+    Text(String),
+    TextArray(Vec<String>),
+}
+
+/// §Access Scoping WHERE fragments for a query over `search_index`: the
+/// user-supplied `entity_type`/`workspace_id` narrowing filters plus the
+/// caller's resolved scope (tenant boundary + accessible workspace/repo
+/// sets), as `$N` placeholders numbered from `*next` (advanced past every
+/// emitted bind on return).
+///
+/// Callers append this to their boxed raw query before the ORDER BY/LIMIT
+/// tail so every restriction is evaluated by the index query itself — never
+/// post-filtered — keeping result, suggestion, and facet counts from leaking
+/// inaccessible documents (search.md §Access Scoping). An empty accessible
+/// set compiles to `AND FALSE` (zero rows, by query).
+fn scope_filter_sql(query: &SearchQuery, next: &mut usize) -> (String, Vec<ScopeBind>) {
+    let mut sql = String::new();
+    let mut binds = Vec::new();
+    let mut n = *next;
+
+    if let Some(et) = &query.entity_type {
+        sql.push_str(&format!(" AND s.entity_type = ${n}"));
+        binds.push(ScopeBind::Text(et.clone()));
+        n += 1;
+    }
+    if let Some(ws) = &query.workspace_id {
+        // User-supplied narrowing filter — intersects with the accessible
+        // set below, so it can only narrow, never widen.
+        sql.push_str(&format!(" AND s.workspace_id = ${n}"));
+        binds.push(ScopeBind::Text(ws.clone()));
+        n += 1;
+    }
+    match &query.accessible_workspace_ids {
+        None => {}
+        Some(ids) if ids.is_empty() => {
+            // Caller has access to no workspace: no rows, by query.
+            sql.push_str(" AND FALSE");
+        }
+        Some(ids) => {
+            sql.push_str(&format!(" AND s.workspace_id = ANY(${n})"));
+            binds.push(ScopeBind::TextArray(ids.clone()));
+            n += 1;
+        }
+    }
+    match &query.accessible_repo_ids {
+        None => {}
+        Some(ids) if ids.is_empty() => {
+            sql.push_str(" AND FALSE");
+        }
+        Some(ids) => {
+            // Repo-less (workspace-level) documents stay visible: repo scope
+            // restricts repos, not the workspace itself.
+            sql.push_str(&format!(" AND (s.repo_id = '' OR s.repo_id = ANY(${n}))"));
+            binds.push(ScopeBind::TextArray(ids.clone()));
+            n += 1;
+        }
+    }
+    sql.push_str(&format!(" AND s.tenant_id = ${n}"));
+    binds.push(ScopeBind::Text(query.tenant_id.clone()));
+    n += 1;
+
+    *next = n;
+    (sql, binds)
 }
 
 const INSERT_SQL: &str = "
@@ -161,8 +297,7 @@ impl SearchPort for PgStorage {
             // sets) are WHERE clauses evaluated by the index query itself,
             // never post-filtered, so result counts cannot leak inaccessible
             // documents. ts_headline wraps matches in ** markers, mirroring
-            // the FTS5 adapter. Binds are appended in $N order via the boxed
-            // raw query.
+            // the FTS5 adapter.
             let mut q = diesel::sql_query(
                 "SELECT s.entity_type,
                         s.entity_id,
@@ -178,53 +313,14 @@ impl SearchPort for PgStorage {
             q = q.bind::<Text, _>(query.query.clone());
             let mut n = 2;
 
-            if let Some(et) = &query.entity_type {
-                q = q
-                    .sql(format!(" AND s.entity_type = ${n}"))
-                    .bind::<Text, _>(et.clone());
-                n += 1;
+            let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
+            q = q.sql(scope_sql);
+            for bind in scope_binds {
+                q = match bind {
+                    ScopeBind::Text(v) => q.bind::<Text, _>(v),
+                    ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+                };
             }
-            if let Some(ws) = &query.workspace_id {
-                // User-supplied narrowing filter — intersects with the
-                // accessible set below, so it can only narrow, never widen.
-                q = q
-                    .sql(format!(" AND s.workspace_id = ${n}"))
-                    .bind::<Text, _>(ws.clone());
-                n += 1;
-            }
-            match &query.accessible_workspace_ids {
-                None => {}
-                Some(ids) if ids.is_empty() => {
-                    // Caller has access to no workspace: no rows, by query.
-                    q = q.sql(" AND FALSE");
-                }
-                Some(ids) => {
-                    q = q
-                        .sql(format!(" AND s.workspace_id = ANY(${n})"))
-                        .bind::<Array<Text>, _>(ids.clone());
-                    n += 1;
-                }
-            }
-            match &query.accessible_repo_ids {
-                None => {}
-                Some(ids) if ids.is_empty() => {
-                    q = q.sql(" AND FALSE");
-                }
-                Some(ids) => {
-                    // Repo-less (workspace-level) documents stay visible:
-                    // repo scope restricts repos, not the workspace itself.
-                    q = q
-                        .sql(format!(
-                            " AND (s.repo_id = '' OR s.repo_id = ANY(${n}))"
-                        ))
-                        .bind::<Array<Text>, _>(ids.clone());
-                    n += 1;
-                }
-            }
-            q = q
-                .sql(format!(" AND s.tenant_id = ${n}"))
-                .bind::<Text, _>(query.tenant_id.clone());
-            n += 1;
             q = q
                 .sql(format!(" ORDER BY rank DESC LIMIT ${n}"))
                 .bind::<BigInt, _>(query.limit as i64);
@@ -264,6 +360,109 @@ impl SearchPort for PgStorage {
         })
         .await??;
         Ok(())
+    }
+
+    async fn suggest(&self, query: SearchQuery) -> Result<Vec<SearchSuggestion>> {
+        // Trimmed-empty prefixes match every title — treat them as "no
+        // suggestion" (the handler guards this too; the port is safe alone).
+        let prefix = query.query.trim().to_string();
+        if prefix.is_empty() {
+            return Ok(vec![]);
+        }
+        let pattern = format!("{}%", escape_like(&prefix));
+        let limit = query.limit;
+        let pool = Arc::clone(&self.pool);
+        Ok(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
+                let mut conn = pool.get().context("get db connection")?;
+                // ILIKE is case-insensitive prefix matching on the title column —
+                // what autocomplete needs (mid-word terms are unreachable from a
+                // prefix). §Access Scoping: the same WHERE fragments as
+                // `search()` are part of this index query — suggestions never
+                // include titles the caller cannot access.
+                let mut q = diesel::sql_query(
+                    "SELECT entity_type, entity_id, title
+                 FROM search_index
+                 WHERE title ILIKE $1 ESCAPE '\\'",
+                )
+                .into_boxed();
+                q = q.bind::<Text, _>(pattern);
+                let mut n = 2;
+
+                let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
+                q = q.sql(scope_sql);
+                for bind in scope_binds {
+                    q = match bind {
+                        ScopeBind::Text(v) => q.bind::<Text, _>(v),
+                        ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+                    };
+                }
+                q = q
+                    .sql(format!(" ORDER BY title LIMIT ${n}"))
+                    .bind::<BigInt, _>(limit as i64);
+                let rows = q.load::<SuggestRow>(&mut conn)?;
+
+                Ok(rows
+                    .into_iter()
+                    .map(|r| SearchSuggestion {
+                        text: r.title,
+                        entity_type: r.entity_type,
+                        entity_id: r.entity_id,
+                    })
+                    .collect())
+            })
+            .await??,
+        )
+    }
+
+    async fn facet_counts(&self, query: SearchQuery) -> Result<FacetCounts> {
+        let pool = Arc::clone(&self.pool);
+        Ok(tokio::task::spawn_blocking(move || -> Result<FacetCounts> {
+            let mut conn = pool.get().context("get db connection")?;
+
+            // Two shapes, both §Access-scoped: a blank text query aggregates
+            // the caller's whole accessible set (the /search/facets endpoint);
+            // a text query aggregates the same filtered match set `search()`
+            // uses, without the result limit — facet counts must describe the
+            // full filtered set, not the truncated page, and must never count
+            // documents the caller cannot access.
+            let has_text = !query.query.trim().is_empty();
+            let base_sql = if has_text {
+                "SELECT s.entity_type, s.workspace_id, s.metadata::text
+                 FROM search_index s, websearch_to_tsquery('english', $1) q
+                 WHERE s.tsv @@ q"
+            } else {
+                // Blank text: no tsquery — aggregate the caller's whole
+                // accessible set. `WHERE TRUE` anchors the scope fragments
+                // appended below.
+                "SELECT s.entity_type, s.workspace_id, s.metadata::text
+                 FROM search_index s
+                 WHERE TRUE"
+            };
+            let mut q = diesel::sql_query(base_sql).into_boxed();
+            let mut n = 1;
+            if has_text {
+                q = q.bind::<Text, _>(query.query.clone());
+                n = 2;
+            }
+
+            let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
+            q = q.sql(scope_sql);
+            for bind in scope_binds {
+                q = match bind {
+                    ScopeBind::Text(v) => q.bind::<Text, _>(v),
+                    ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+                };
+            }
+            let rows = q.load::<FacetRow>(&mut conn)?;
+
+            let mut counts = FacetCounts::new();
+            for row in rows {
+                count_facet_row(&mut counts, row);
+            }
+            Ok(counts)
+        })
+        .await??)
     }
 
     async fn reindex_all(&self) -> Result<u64> {

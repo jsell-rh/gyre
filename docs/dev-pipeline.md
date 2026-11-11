@@ -27,23 +27,27 @@ Infrastructure failures retry with backoff without changing the task contract.
 
 ## Thin workers and runtime recovery
 
-Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
-unit tests use one worker; the guarded frontend test command also serializes
-Vitest files. Thin-worker dev/test builds omit DWARF debug symbols (test
-behavior and debug assertions remain enabled) to reduce memory and workspace
-footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
-assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
-memory. Compute choices and the triggering evidence remain in the ledger.
-Build workspaces need 30 GiB persistent disk; this is separate from worker RAM.
-With the scoped Kubernetes runtime context configured, the harness verifies
-gateway ownership and PVC owner UID, expands only that sandbox's volume, and
-waits for the mounted filesystem before starting builds. Other backends must
-provision adequate workspace storage at the gateway. This does not alter
-gateway-wide defaults. Disk or inode exhaustion is reported as storage failure,
-never as transport loss or an OOM; identical attempts require an explicit retry.
-After stopping an implementation agent, its generated build cache can be
-reclaimed to leave room for saving source. Source and symlink targets are never
-deleted by this reclamation.
+Build-capable assignments always request one CPU and **4 GiB RAM**. Historical
+per-task 8 GiB settings are ignored. An OOM is retained as a resource failure
+requiring a lower-memory implementation or build strategy; it never authorizes
+larger allocations or cluster-policy changes. The harness does not read or
+change namespace admission policy to increase its budget.
+
+Build commands share one sandbox lock, with one Cargo job and one test thread.
+Agent and verifier environments use the same settings: no incremental Rust
+compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
+assertions, test selection, and required verification checks stay enabled.
+The coding agent's JavaScript heap is bounded separately from build tools.
+
+Source/checkpoints and the agent spool remain on the gateway-provided workspace.
+Rebuildable Cargo target/registry and npm caches use disk-backed
+`/tmp/gyre-build`, which survives transport reconnects but may require rebuilding
+after a sandbox restart. Before builds, the harness inspects filesystem space
+through OpenShell and rejects memory-backed or insufficient cache storage.
+It never patches PVCs or cluster limits. Storage exhaustion retains evidence
+and requires attention rather than silently changing platform configuration.
+Only generated build cache may be reclaimed; source and symlink targets are
+never deleted by reclamation.
 
 An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
 and `runtime_namespace` settings to capture workload termination reasons before
@@ -51,16 +55,17 @@ pods disappear. It only records pods matching existing owned resource records;
 cluster diagnostics are not a prerequisite for healthy gateway execution. Read-only
 cgroup counters also detect child-only OOM kills that leave the pod running;
 a compiler failure by itself never raises memory.
-Without an authoritative OOM and its killed allocation size, no memory escalation
-is inferred. The cockpit reports the actual runtime failure instead of calling
+An authoritative OOM and its allocation size are retained as diagnostics;
+no automatic memory escalation is permitted. The cockpit reports the actual runtime failure instead of calling
 an OOM a model or generic transport failure.
 
 Agent polling refreshes expired gateway authentication. Failed polls preserve
 process identity and output offsets while the sandbox remains Ready, bounded by
 the assignment deadline. A stopped owned sandbox may restart once per claim;
 trusted temporary inputs are restored and Pi resumes its persisted session.
-Agent spool and build cache live on the workspace volume. Another stop requires
-attention. OOM recovery can salvage source before retiring undersized compute;
+Agent spool lives on the workspace volume; disposable caches are rebuilt after
+a stop. Another stop requires
+attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
 Infrastructure backoff releases the integration lane so another reviewed
@@ -248,7 +253,7 @@ No GCP credential file is needed.
 A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
-unconfirmed deletion stays charged and is retried independently. A pending
+unconfirmed compute release stays charged and deletion is retried independently. A pending
 allocation is retained across fullsend's readiness retries; a repeated create
 adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
 allocations cannot be recreated within an attempt. A deleted sandbox
@@ -441,7 +446,16 @@ Infrastructure errors retain the same work identity and use exponential backoff
 from five seconds up to fifteen minutes. Pending autoscaler capacity waits within
 the existing sandbox. Failed input clones retry before sandbox allocation. No failure retains a sandbox
 for debugging: artifacts are captured locally, deletion is attempted immediately,
-and cleanup retries unresolved deletion while the reservation remains charged.
+and cleanup retries unresolved deletion. Cleanup debt and compute occupancy are
+tracked separately: a deleting allocation releases its compute slot only after
+scoped Kubernetes inventories establish that its sandbox is suspended, deleting,
+or absent and no matching pod remains. Sandbox state is read before pod state;
+even a terminating pod remains charged. Evidence is bound to the resource claim,
+cluster context, and namespace, and expires after three minutes. Unknown,
+incomplete, or stale evidence keeps the slot charged. Gateway sandbox/provider
+cleanup records and retries remain intact, and cleanup of the same task still
+precedes a replacement attempt. The cockpit reports occupied slots separately
+from pending deletions.
 
 Model admission also checks the pinned inference endpoint before reserving a
 sandbox. The shared probe uses `ENMAAS_API_KEY` or the local secret-store entry
@@ -469,6 +483,23 @@ logs are kept separate from baseline failures; bounded logs and screenshot
 artifacts are staged inside the repair sandbox. Pending checks and merge
 confirmation are expected observations, polled every 30 seconds without
 accumulating infrastructure failure backoff.
+
+Shared CI setup failures are coordinated separately from product defects.
+For Playwright's unsupported-runner failure, the observer verifies the terminal
+Actions job/attempt and failed installation step, then compares workflow and npm
+input blob identities against the exact upstream base. Product-test failures,
+mixed failures, and candidates that changed those inputs remain candidate repairs.
+An older green base run cannot establish the health of today's hosted runner.
+Matching setup failures share one SQLite-deduplicated repair task, even as main
+advances. Affected tasks retain their candidate, review, and product dependency
+contract; they do not start individual implementation workers for that failure.
+The shared repair receives automatic repair priority.
+
+Once the repair ships, retained candidates re-enter verification against a base
+containing the fix. If main already has different CI inputs when the failure is
+observed, the observer requests that integration refresh directly, without a
+repair model. This permits fresh verification only; it never marks CI green or
+merges an old failing head. New publication still requires all GitHub checks.
 
 Completing a repair clears its active finding but retains the original evidence
 as review context. The independent reviewer receives the failure source identity,
@@ -542,7 +573,7 @@ only those unchanged files, leaving candidate deletions intact; modified or
 pre-existing files are never blindly cleaned. This prevents the verifier itself
 from contaminating the exact checkout it later checks. Git retries reuse the
 allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
-unconfirmed deletion charged until authoritative absence. Slots zero drains
+unconfirmed compute release charged until scoped runtime evidence proves absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
 
@@ -567,3 +598,133 @@ python3 scripts/prove-remote-verification.py --candidate HEAD
 This creates isolated proof state, uses one gateway sandbox, runs real gates,
 and cleans its temporary verified branch. It does not mark a product task
 delivered, publish a PR, or alter production slots.
+
+## Requirement inputs, shipped history, and change assessment
+
+`specs/task-spec-inputs.json` binds each task's `spec_ref` to explicit stable
+section IDs. A definition selects an exact Markdown heading breadcrumb (ATX,
+ignoring fenced code), or declares `document: true` when the entire document is
+intentionally required. Section subtrees inherit their ancestor introductions,
+not sibling sections. `shared` lists additional global inputs; GOAL and the
+normative task text are always included. Scheduling dependencies remain claim
+preconditions rather than coding requirements. Maintain selectors in the same PR
+as a heading rename; never silently retarget an ID or broaden a missing binding.
+New task references need an explicit registry binding. Missing/ambiguous references
+appear as `needs-triage` and cannot dispatch implementation.
+
+A scoped contract change fences old claims and discovers `assess` work. This is
+an independent, read-only Fullsend assignment through OpenShell, sharing the
+normal claim/admission/cleanup budget. Its structured report names the exact
+source and requirement fingerprint. Concrete gaps become durable
+`requirements_gap` findings for implementation. A no-gap decision must also pass
+the normal full deterministic verification in a 4 GiB remote sandbox before
+currentness is restored. Ambiguous evidence or failed checks require attention;
+they never silently close a task or request a speculative code rewrite.
+
+`task_history` preserves append-only contract/delivery snapshots. The cockpit
+counts historically confirmed shipments separately from current requirement
+satisfaction and shows assessment/triage conditions. Reassessment never invents
+a new shipped merge. Imported completion retains its original evidence level.
+
+Installing the fingerprint format alone preserves existing execution epochs,
+claims, candidates and receipts. For old whole-document invalidations, preview
+and then apply the guarded recovery plan:
+
+```bash
+PYTHONPATH=scripts /usr/bin/python3 -m pipeline.requirement_migration \
+  --state .gyre-pipeline --checkout .gyre-pipeline/source
+# Repeat with --apply after inspecting the plan.
+```
+
+Recovery verifies a recorded succeeded merge against main ancestry and its exact
+historical contract generation, then compares old/current scoped inputs. Only
+proven equivalent inputs restore currentness mechanically. Unproven or changed
+inputs go to assessment. The migration skips active claims and unrelated repair
+findings, rechecks its entire planned state transactionally, and retains all
+candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
+select completed speculative repairs whose recorded catalog source was that
+specific invalidation; it does not select arbitrary historical changes.
+
+A no-gap assessment also inspects the retained candidate's actual merge
+contribution. Reviewed source changes proceed through normal verification and
+publication; they are not retired merely because main meets the product contract.
+Ancestor checkpoints and task/review-note-only differences do not manufacture
+new coding work. This preserves useful guard or quality fixes discovered during
+an earlier repair without paying for another implementation round.
+
+Assessment is source inspection only: its build wrapper rejects builds/tests.
+All model stages defer gyre-server code generation to the independent verifier;
+server `cargo check` and explicit smaller-package probes remain available to
+implementation/review. This prevents the large test compiler and model heap from
+competing for the same 4 GiB. The verifier still runs the full required suites.
+
+Semantic spec conflicts are `needs-triage`, distinct from implementation failures.
+Their stage/generation hold survives unrelated main advances; a requirement
+change or explicit operator retry releases it. Evidence and conflicting findings
+remain attached to the attempt instead of provoking speculative implementation.
+
+During recovery, `requirements_recovery_revision` can name the original catalog
+revision. Source refresh then retries the guarded migration for deferred tasks
+as their existing claims finish. It does not fence active work or supersede
+unrelated repair findings; once handled, each task's migration marker makes the
+operation a no-op.
+
+A completed, trusted full verification can also prove that a task was already
+implemented upstream. If its exact reviewed candidate changes only that task's
+operational record/review notes, its verified base is an ancestor of main, and
+the normative contract still matches, source reconciliation records
+`resolved: already_upstream`. This creates no fictitious shipped merge. Production
+assets count as real changes. Only redundant read-only verifiers may be retired;
+implementation/review, actual publication, source checkpoints and completed proof
+remain intact, with sandbox retirement handled by the normal cleanup reconciler.
+
+Recovery can explicitly `--reconsider TASK` after an input-binding correction;
+all original ancestry, historical-generation and exact scoped-equivalence checks
+still apply. This supports narrowing a legacy coverage-row reference without
+shipping a formatting-only checkpoint or inventing a new delivery.
+
+## Efficiency and bounded recovery
+
+CI observation examines exact-head terminal workflow jobs and the failed step.
+Transport failures in recognized setup steps, with an unchanged workflow, retry
+that same head with exponential backoff (60 seconds to 30 minutes). If main has
+updated the failing setup inputs, retain review and reverify against that base
+without another coding assignment. Each workflow
+attempt is rerun at most once; six rerun rounds require attention. Product-test
+failures and mixed failures still become implementation findings. Priority-only
+observation during repair polls every ten minutes, without allocating a sandbox.
+
+Generated `web/dist/` observations are deferred to the deterministic verifier.
+Independent review still blocks on source defects. The verifier merges source,
+resolves generated conflicts, rebuilds remotely, runs all required suites, and
+publishes assets bound to the exact verified tree. An already-upstream candidate
+is fetched by its upstream base and checked out at its exact head; no empty Git
+bundle is created.
+
+Three repair rounds with identical findings and unchanged production source
+require attention, retaining source and findings. Notes and generated output
+cannot reset this budget. Explicit retry resets the stage budget and hold, retaining its previous state
+in the audit log; real source
+progress or different findings starts a new budget. Main advancing does not
+clear a stage hold.
+
+Remote verifiers exchange disposable build caches through OpenShell. The host
+only relays archives on disk; compilation remains remote. Archives are bounded
+to 2 GiB compressed / 12 GiB expanded with an 8 GiB local retention budget. Keys
+include image, toolchain, dependency lockfiles/manifests and build settings.
+A cache is reusable only after its successful producer's source is included in
+upstream main. Integrity, ancestry, path, disk-space and size checks reject unsafe
+or stale archives. Credentials and verification decisions are never cached.
+Workspace Rust packages are invalidated before checks; dependency artifacts and
+content-addressed package downloads can be reused. Cache misses run normal full
+verification, with no reduced checks. Set `build_cache_enabled=false` in the
+local ledger to disable exchange.
+
+Read measured compute occupancy, merge throughput, observation wakeups and cache
+use with `python3 scripts/dev-efficiency.py --hours 24`. Worker minutes include
+provisioning/transport waits; they are not CPU utilization measurements.
+
+Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
+resolving distro packages for every job. Download retries remain bounded and a
+checksum mismatch fails setup; linker availability and all build/test gates are
+still required.

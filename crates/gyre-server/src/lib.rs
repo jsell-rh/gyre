@@ -18,8 +18,10 @@ pub(crate) mod git_http;
 pub mod git_refs;
 pub mod graph_extraction;
 pub mod procfs_monitor;
+pub mod sigstore;
 
 pub(crate) mod health;
+pub mod impersonation;
 pub mod jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
@@ -34,6 +36,8 @@ pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
+pub mod prompt_assembly;
+pub mod ralph_loop;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
@@ -53,6 +57,7 @@ pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
 pub mod policy_engine;
+pub mod signal_chain;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -79,9 +84,9 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -274,6 +279,17 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
+    /// Compute backend each running agent was spawned on: agent_id ->
+    /// backend owning its handle. Lets kill/is_alive reach the right
+    /// orchestrator (docker/podman, remote SSH docker, or kubectl)
+    /// instead of assuming a local pid (agent-runtime.md §3).
+    ///
+    /// Values are `Arc` so the exit monitor can clone the backend and drop
+    /// the lock BEFORE probing liveness — an SSH probe can block for the
+    /// TCP connect timeout, and holding this lock across it would stall
+    /// admin kills and every new spawn.
+    pub spawned_backends:
+        Arc<Mutex<HashMap<String, std::sync::Arc<crate::api::spawn::SpawnBackend>>>>,
     /// Per-agent log buffers ("[ts] message" lines) with a zstd-compressed
     /// cold segment for lines older than the compression age
     /// (observability.md §Log Retention & Compression).
@@ -303,6 +319,8 @@ pub struct AppState {
     pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
     /// Per-repo spec enforcement policies (persisted).
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
+    /// Per-repo spec lifecycle configuration (persisted).
+    pub spec_lifecycle_configs: Arc<dyn gyre_ports::SpecLifecycleRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
     /// Authorization provenance attestation chains (TASK-006).
@@ -316,16 +334,19 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
+    /// Commit signatures produced by jj squash (M13.8, task-107): persisted
+    /// via `CommitSignatureRepository`, keyed by `(repo_id, commit_sha)`.
+    pub commit_signatures: Arc<dyn gyre_ports::commit_signature_repo::CommitSignatureRepository>,
+    /// Signing configuration — mode plus the Fulcio/Rekor trust anchors
+    /// (task-107 F3: verification resolves trust from here, never from the
+    /// record being verified).
+    pub signing_config: commit_signatures::SigningConfig,
     /// Trusted reverse-proxy networks for forensic source-IP resolution
     /// (task-102 F3 / CWE-348). Populated from `GYRE_TRUSTED_PROXIES`
     /// (comma-separated CIDRs / bare IPs). Empty (the default) = every
     /// connection is direct: the socket peer is always the source and
     /// forwarded headers are ignored.
     pub trusted_proxies: trusted_proxy::TrustedProxies,
-    /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
-    pub commit_signatures: commit_signatures::CommitSignatureStore,
-    /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
-    pub sigstore_mode: commit_signatures::SigstoreMode,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
     /// Container audit records (persisted).
@@ -401,6 +422,12 @@ pub struct AppState {
     /// Workspace subscriptions per connection — used to scope UserPresence broadcasts.
     /// connection_id → list of subscribed workspace IDs.
     pub ws_connection_workspaces: Arc<RwLock<HashMap<u64, Vec<gyre_common::Id>>>>,
+    /// Verified user identity per connection — used for user-targeted
+    /// pushes (identity-security.md §Impersonation: notify the impersonated
+    /// user when online). connection_id → verified user_id. Connections
+    /// authenticated without a user identity (shared token, agent tokens)
+    /// are absent. Ephemeral connection state, not a durable store.
+    pub ws_connection_users: Arc<RwLock<HashMap<u64, String>>>,
     /// Gate-time OTel trace capture repository (HSI §3a).
     pub traces: Arc<dyn TraceRepository>,
     /// OTLP receiver server configuration (HSI §3a). From GYRE_OTLP_* env vars.
@@ -429,6 +456,12 @@ pub struct AppState {
     pub secrets: Arc<dyn gyre_ports::SecretRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// Orchestrator registry (agent-runtime.md §1 Phases 2–3): per-workspace
+    /// and per-repo processing locks implementing exactly-one-active
+    /// semantics for the spec-approval signal chain. Process-local
+    /// serialization only — agent liveness lives in the port-backed agents
+    /// store.
+    pub orchestrator_registry: signal_chain::OrchestratorRegistry,
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
@@ -500,6 +533,39 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Resolve the tenant scope for a server-originated message about a
+    /// workspace: the workspace record's tenant. Skips the emission and
+    /// logs when the workspace cannot be resolved (same contract as
+    /// `emit_reconciliation_completed`): a message carrying a fabricated
+    /// tenant re-targets delivery to whatever scope the id happens to
+    /// collide with.
+    async fn message_tenant_id(&self, workspace_id: Option<&Id>) -> Option<Id> {
+        match workspace_id {
+            Some(wid) => match self.workspaces.find_by_id(wid).await {
+                Ok(Some(ws)) => Some(ws.tenant_id),
+                Ok(None) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        "emit: workspace not found; skipping message (cannot resolve tenant scope)"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        error = %e,
+                        "emit: failed to resolve workspace tenant; skipping message"
+                    );
+                    None
+                }
+            },
+            // Broadcast messages have no workspace; server-originated
+            // broadcasts carry the documented default-tenant scope
+            // (message-bus.md auth-context table).
+            None => Some(Id::new(auth::system_principal_tenant())),
+        }
+    }
+
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
     pub async fn emit_event(
@@ -516,9 +582,15 @@ impl AppState {
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
+        // F1: tenant scope resolved from the workspace record, never a
+        // fabricated literal (skip-and-log on unresolvable).
+        let Some(tenant_id) = self.message_tenant_id(workspace_id.as_ref()).await else {
+            return;
+        };
+
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id,
             to,
@@ -548,7 +620,7 @@ impl AppState {
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
     /// Unsigned and not persisted.
-    pub fn emit_telemetry(
+    pub async fn emit_telemetry(
         &self,
         workspace_id: Id,
         kind: MessageKind,
@@ -560,9 +632,15 @@ impl AppState {
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
+
+        // F1: tenant scope resolved from the workspace record.
+        let Some(tenant_id) = self.message_tenant_id(Some(&workspace_id)).await else {
+            return;
+        };
+
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),
@@ -604,6 +682,30 @@ async fn require_auth_middleware(
     match token {
         Some(t) if auth::tokens_equal(t, &state.auth_token) => next.run(req).await,
         Some(t) => {
+            // 1.5. Impersonation JWT (identity-security.md §Impersonation) —
+            //     the same validation as the auth extractor
+            //     (`FromRequestParts` step 1.5): EdDSA signature + active
+            //     session. Without this branch the token is rejected here
+            //     and impersonated calls never reach the API at all.
+            //     Attribution happens downstream in `abac_middleware`.
+            if t.starts_with("ey") {
+                if let Some(claims) = state
+                    .agent_signing_key
+                    .validate_impersonation_opt(t, &state.base_url)
+                {
+                    return match crate::impersonation::resolve_impersonation_auth(&claims, &state)
+                        .await
+                    {
+                        Some(_) => next.run(req).await,
+                        None => (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Impersonation session is not active",
+                        )
+                            .into_response(),
+                    };
+                }
+            }
+
             // Check per-agent tokens using constant-time compare.
             let valid = if let Ok(pairs) = state.kv_store.kv_list("agent_tokens").await {
                 pairs.iter().any(|(_, v)| auth::tokens_equal(v.as_str(), t))
@@ -635,6 +737,32 @@ async fn require_auth_middleware(
             {
                 return next.run(req).await;
             }
+            // task-104: AuthFailure audit event (observability.md §Audit
+            // Event Types) — the global gate rejected the presented token;
+            // the extractors never run for this request. Best-effort token
+            // classification: "ey" prefix = JWT-shaped credential.
+            let token_kind = if t.starts_with("ey") {
+                "agent_jwt"
+            } else {
+                "unknown"
+            };
+            let source_ip = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip().to_string());
+            let user_agent = req
+                .headers()
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            auth::record_auth_failure_for_middleware(
+                &state,
+                token_kind,
+                "invalid token",
+                source_ip,
+                user_agent,
+            )
+            .await;
             (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
         }
         None => (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
@@ -799,6 +927,117 @@ pub fn configured_repos_path() -> std::path::PathBuf {
     }
 }
 
+/// KV namespace/key under which the forge Ed25519 signing key is persisted
+/// so that local-mode commit-signature records — which survive restarts in
+/// the `CommitSignatureRepository` — remain verifiable across boots
+/// (task-107 F12). A fresh key per boot would make every pre-restart
+/// local-mode record report `valid:false` after restart.
+pub const AGENT_SIGNING_KEY_KV_NAMESPACE: &str = "server_identity";
+pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
+
+/// Resolve the forge Ed25519 signing key for this boot:
+///
+/// 1. `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER, v1 or v2) — explicit
+///    operator provisioning; takes precedence and is never overwritten in the
+///    DB, so rotation is a deliberate operator act. Invalid material is a
+///    hard startup error: silently falling back to a different key would
+///    break every signature the operator expects to verify.
+/// 2. The key persisted in the durable KV store (PostgreSQL or SQLite,
+///    whichever backend `build_state` selected) — the default path.
+/// 3. A freshly generated key, persisted for the next boot. In pure
+///    in-memory mode (no DB) the key is fresh per boot, matching the
+///    process-lifetime scope of everything else in that mode.
+fn load_or_persist_agent_signing_key(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+) -> Arc<auth::AgentSigningKey> {
+    // 1. Operator-provisioned key.
+    if let Ok(encoded) = std::env::var("GYRE_AGENT_SIGNING_KEY") {
+        let der = B64
+            .decode(encoded.trim())
+            .unwrap_or_else(|e| panic!("GYRE_AGENT_SIGNING_KEY is not valid base64: {e}"));
+        let key = auth::AgentSigningKey::from_pkcs8(&der).unwrap_or_else(|e| {
+            panic!("GYRE_AGENT_SIGNING_KEY is not valid Ed25519 PKCS#8 material: {e}")
+        });
+        tracing::info!(
+            kid = %key.kid,
+            "using operator-provisioned agent signing key from GYRE_AGENT_SIGNING_KEY"
+        );
+        return Arc::new(key);
+    }
+
+    // 2. Key persisted in the durable KV store.
+    let persisted: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+        pg.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+    } else {
+        Ok(None)
+    };
+
+    match persisted {
+        Ok(Some(encoded)) => match B64
+            .decode(encoded.trim())
+            .map_err(|e| format!("base64: {e}"))
+            .and_then(|der| auth::AgentSigningKey::from_pkcs8(&der))
+        {
+            Ok(key) => {
+                tracing::info!(
+                    kid = %key.kid,
+                    "loaded persisted agent signing key (local-mode commit signatures remain verifiable across restarts)"
+                );
+                return Arc::new(key);
+            }
+            Err(e) => {
+                // Unreadable stored material: regenerate and overwrite below,
+                // loudly — local-mode records signed by the old key will no
+                // longer verify, which the operator must know about.
+                tracing::error!(
+                    error = %e,
+                    "persisted agent signing key is unreadable; generating a replacement"
+                );
+            }
+        },
+        Ok(None) => { /* first boot with this DB — generate below */ }
+        Err(e) => {
+            // Read failed (transient DB trouble): keep this boot's key
+            // process-local and do NOT overwrite storage, so a transient
+            // failure cannot destroy the existing key.
+            tracing::warn!(
+                error = %e,
+                "could not read persisted agent signing key; using a process-local key for this boot"
+            );
+            return Arc::new(auth::AgentSigningKey::generate());
+        }
+    }
+
+    // 3. Fresh key, persisted for subsequent boots.
+    let key = Arc::new(auth::AgentSigningKey::generate());
+    let encoded = B64.encode(key.pkcs8_der());
+    let store_result = if let Some(pg) = pg_db {
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_KV_KEY,
+            &encoded,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_KV_KEY,
+            &encoded,
+        )
+    } else {
+        Ok(())
+    };
+    if let Err(e) = store_result {
+        tracing::warn!(
+            error = %e,
+            "could not persist the agent signing key; local-mode commit signatures will not verify after a restart"
+        );
+    }
+    key
+}
+
 pub fn build_state(
     auth_token: &str,
     base_url: &str,
@@ -877,6 +1116,21 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+    // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
+    // pairs with `MemWorkspaceRepository` so `has_workspace_references`
+    // (agent-runtime.md §3 delete guard) sees real workspace assignments
+    // instead of a hardcoded empty set.
+    let mem_workspace_store =
+        Arc::new(Mutex::new(HashMap::<String, gyre_domain::Workspace>::new()));
+
+    // In pure in-memory mode, the meta-spec and meta-spec-binding repos must
+    // share a single binding store so the delete guard in
+    // `MemMetaSpecRepository` sees the bindings the binding repo writes
+    // (port contract: delete fails when bindings reference the meta-spec).
+    // In DB-backed mode both ports come from the same storage struct, so
+    // this store is unused.
+    let mem_meta_spec_binding_store =
+        Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
 
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
@@ -903,7 +1157,7 @@ pub fn build_state(
         telemetry_buffer,
         message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
-        agent_signing_key: Arc::new(auth::AgentSigningKey::generate()),
+        agent_signing_key: load_or_persist_agent_signing_key(&sqlite_db, &pg_db),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
@@ -942,6 +1196,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
+        spawned_backends: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(
@@ -972,6 +1227,10 @@ pub fn build_state(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
         ),
+        spec_lifecycle_configs: store!(
+            dyn SpecLifecycleRepository,
+            mem::MemSpecLifecycleRepository::default()
+        ),
         attestation_store: store!(
             dyn AttestationRepository,
             mem::MemAttestationRepository::default()
@@ -997,10 +1256,13 @@ pub fn build_state(
                     .collect()
             })
             .unwrap_or_default(),
+        commit_signatures: store!(
+            dyn gyre_ports::commit_signature_repo::CommitSignatureRepository,
+            mem::MemCommitSignatureRepository::default()
+        ),
+        signing_config: commit_signatures::SigningConfig::from_env(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: trusted_proxy::TrustedProxies::from_env(),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: store!(
             dyn ContainerAuditRepository,
@@ -1042,6 +1304,7 @@ pub fn build_state(
         workspaces: store!(
             dyn WorkspaceRepository,
             mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+                .with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
         policies: store!(
@@ -1068,11 +1331,13 @@ pub fn build_state(
         },
         meta_specs: store!(
             dyn MetaSpecRepository,
-            mem::MemMetaSpecRepository::default()
+            mem::MemMetaSpecRepository::with_binding_store(Arc::clone(
+                &mem_meta_spec_binding_store
+            ))
         ),
         meta_spec_bindings: store!(
             dyn MetaSpecBindingRepository,
-            mem::MemMetaSpecBindingRepository::default()
+            mem::MemMetaSpecBindingRepository::with_store(Arc::clone(&mem_meta_spec_binding_store))
         ),
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
@@ -1114,6 +1379,7 @@ pub fn build_state(
         ws_connections: Arc::new(RwLock::new(HashMap::new())),
         ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         ws_connection_workspaces: Arc::new(RwLock::new(HashMap::new())),
+        ws_connection_users: Arc::new(RwLock::new(HashMap::new())),
         traces: store!(dyn TraceRepository, mem::MemTraceRepository::default()),
         otlp_config: otlp_receiver::OtlpServerConfig::from_env(),
         conversations: store!(
@@ -1127,7 +1393,7 @@ pub fn build_state(
         ),
         compute_targets: store!(
             dyn ComputeTargetRepository,
-            mem::MemComputeTargetRepository::default()
+            mem::MemComputeTargetRepository::with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
@@ -1145,6 +1411,7 @@ pub fn build_state(
             dyn gyre_ports::JudgmentLedgerRepository,
             mem::MemJudgmentLedgerRepository
         ),
+        orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
@@ -1564,6 +1831,67 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
     tracing::info!("seeded {} built-in meta-specs", seeds.len());
 }
 
+/// Seed the four built-in personas (platform-model.md §2) into every
+/// existing tenant. Idempotent: an existing persona with the same slug at
+/// Tenant scope is never overwritten — the user may have customized it, and
+/// the spec allows workspace/repo-scope overrides to shadow it.
+///
+/// Called at server startup, after migrations and tenant bootstrap.
+pub async fn seed_builtin_personas(state: &Arc<AppState>) {
+    let tenants = match state.tenants.list().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("seed_builtin_personas: failed to list tenants: {e}");
+            return;
+        }
+    };
+    for tenant in &tenants {
+        seed_builtin_personas_for_tenant(state, &tenant.id).await;
+    }
+}
+
+/// Seed the built-in personas for one tenant — the shared tail of startup
+/// seeding and tenant creation (`POST /api/v1/tenants`), so every tenant
+/// gets the spec §2 table the moment it exists. Idempotent per slug+scope.
+pub async fn seed_builtin_personas_for_tenant(state: &Arc<AppState>, tenant_id: &Id) {
+    use gyre_domain::{builtin_personas, PersonaScope};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for persona in builtin_personas(tenant_id, now) {
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        match state
+            .personas
+            .find_by_slug_and_scope(&persona.slug, &scope)
+            .await
+        {
+            Ok(Some(_)) => {} // already exists → idempotent
+            Ok(None) => match state.personas.create(&persona).await {
+                Ok(()) => tracing::debug!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    "Seeded built-in persona"
+                ),
+                Err(e) => tracing::warn!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    err = %e,
+                    "Failed to seed built-in persona"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                slug = %persona.slug,
+                tenant_id = %tenant_id,
+                err = %e,
+                "Error checking built-in persona existence"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1678,6 +2006,173 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// Serialize env-mutating tests: GYRE_REPOS_PATH is process-global and
+    /// parallel test threads race on it.
+    static REPOS_PATH_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// F6 pin: a relative GYRE_REPOS_PATH (e.g. "repos" or "./repos") must
+    /// resolve to an ABSOLUTE path anchored at the process cwd —
+    /// `repos_root` is persisted into `repo.path` rows and handed to jj/git
+    /// child processes, which resolve paths against the COMMAND's cwd, not
+    /// the server's. A relative root silently breaks every child-process
+    /// operation in default deployments.
+    #[test]
+    fn configured_repos_path_makes_relative_config_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        let cwd = std::env::current_dir().unwrap();
+
+        std::env::set_var("GYRE_REPOS_PATH", "repos");
+        let p = configured_repos_path();
+        assert!(
+            p.is_absolute(),
+            "relative GYRE_REPOS_PATH must resolve absolute, got {p:?}"
+        );
+        assert_eq!(p, cwd.join("repos"));
+
+        std::env::set_var("GYRE_REPOS_PATH", "./repos");
+        let p = configured_repos_path();
+        assert_eq!(
+            p,
+            cwd.join("repos"),
+            "'./repos' must normalize to <cwd>/repos"
+        );
+
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// F6 pin (default): with no GYRE_REPOS_PATH configured, the root
+    /// defaults to an absolute <cwd>/repos — never the bare relative
+    /// "./repos" the default deployment used before the fix.
+    #[test]
+    fn configured_repos_path_default_is_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::remove_var("GYRE_REPOS_PATH");
+
+        let p = configured_repos_path();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(p, cwd.join("repos"));
+        assert!(p.is_absolute());
+    }
+
+    /// F6 pin (absolute passthrough): an absolute GYRE_REPOS_PATH must be
+    /// used verbatim.
+    #[test]
+    fn configured_repos_path_absolute_passthrough() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::set_var("GYRE_REPOS_PATH", "/srv/gyre/repos");
+        assert_eq!(
+            configured_repos_path(),
+            std::path::PathBuf::from("/srv/gyre/repos")
+        );
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// platform-model.md §2: startup seeding creates the four built-in
+    /// personas at tenant level, pre-approved, and is idempotent.
+    #[tokio::test]
+    async fn seed_builtin_personas_creates_four_and_is_idempotent() {
+        use gyre_domain::{PersonaApprovalStatus, PersonaScope, Tenant};
+
+        let state = mem::test_state();
+        // Startup seeding enumerates tenants — create one first (the way
+        // migrations/bootstrap would have).
+        let tenant = Tenant::new(Id::new("t-seed"), "Seed Tenant", "seed-tenant", 1);
+        state.tenants.create(&tenant).await.unwrap();
+
+        seed_builtin_personas(&state).await;
+
+        let scope = PersonaScope::Tenant(Id::new("t-seed"));
+        let seeded = state.personas.list_by_scope(&scope).await.unwrap();
+        let mut slugs: Vec<String> = seeded.iter().map(|p| p.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec![
+                "accountability",
+                "repo-orchestrator",
+                "security",
+                "workspace-orchestrator"
+            ],
+            "all four built-in personas must be seeded at tenant scope"
+        );
+        for p in &seeded {
+            assert_eq!(
+                p.approval_status,
+                PersonaApprovalStatus::Approved,
+                "built-in {} must be pre-approved",
+                p.slug
+            );
+            assert_eq!(p.approved_by.as_deref(), Some("system"));
+            assert_eq!(p.version, 1);
+        }
+
+        // Second run (server restart): no duplicates.
+        seed_builtin_personas(&state).await;
+        let after = state.personas.list_by_scope(&scope).await.unwrap();
+        assert_eq!(after.len(), 4, "re-seeding must not duplicate personas");
+    }
+
+    /// Task plan: "If the persona already exists, do not overwrite" — a
+    /// customized persona survives re-seeding untouched.
+    #[tokio::test]
+    async fn seed_builtin_personas_preserves_existing() {
+        use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
+
+        let state = mem::test_state();
+        let tenant_id = Id::new("t-custom");
+        // A user-customized security persona already exists at tenant scope.
+        let mut custom = Persona::new(
+            Id::new("custom-sec"),
+            "Custom Security",
+            "security",
+            PersonaScope::Tenant(tenant_id.clone()),
+            "hand-edited prompt",
+            42,
+        );
+        custom.system_prompt = "hand-edited prompt".to_string();
+        state.personas.create(&custom).await.unwrap();
+
+        seed_builtin_personas_for_tenant(&state, &tenant_id).await;
+
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        let personas = state.personas.list_by_scope(&scope).await.unwrap();
+        let sec: Vec<_> = personas.iter().filter(|p| p.slug == "security").collect();
+        assert_eq!(sec.len(), 1, "no duplicate security persona");
+        assert_eq!(sec[0].id, Id::new("custom-sec"));
+        assert_eq!(sec[0].system_prompt, "hand-edited prompt");
+        assert_eq!(sec[0].approval_status, PersonaApprovalStatus::Pending);
+        // The other three were seeded around it.
+        assert_eq!(personas.len(), 4);
+    }
+
+    /// Seeding for one tenant never leaks personas into another tenant.
+    #[tokio::test]
+    async fn seed_builtin_personas_scoped_to_own_tenant() {
+        use gyre_domain::PersonaScope;
+
+        let state = mem::test_state();
+        let a = Id::new("t-a");
+        let b = Id::new("t-b");
+        seed_builtin_personas_for_tenant(&state, &a).await;
+        seed_builtin_personas_for_tenant(&state, &b).await;
+
+        let in_a = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(a.clone()))
+            .await
+            .unwrap();
+        let in_b = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(b.clone()))
+            .await
+            .unwrap();
+        assert_eq!(in_a.len(), 4);
+        assert_eq!(in_b.len(), 4);
+        for p in &in_a {
+            assert_eq!(p.scope, PersonaScope::Tenant(a.clone()));
+        }
     }
 
     /// task-197 / hierarchy-enforcement §1 Bootstrap Behavior: startup must

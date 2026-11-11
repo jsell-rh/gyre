@@ -16,12 +16,32 @@ vi.mock('../lib/api.js', () => ({
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsApprovals: vi.fn().mockResolvedValue([]),
     mergeRequests: vi.fn().mockResolvedValue([]),
     mrGates: vi.fn().mockResolvedValue([]),
     mrTrace: vi.fn().mockResolvedValue({ spans: [] }),
+    repoGraphRisks: vi.fn().mockResolvedValue([]),
   },
 }));
+
+// The workspace scope renders the realized-architecture graph
+// (ui-layout.md §5) via DependencyGraph — its ELK layout (WASM, unavailable
+// in jsdom) is mocked with deterministic positions so repo nodes render.
+vi.mock('../lib/layout-engines.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    elkLayout: vi.fn().mockImplementation(async (nodes) => {
+      const positions = {};
+      nodes.forEach((n, i) => {
+        positions[n.id] = { x: 100 + i * 200, y: 80 };
+      });
+      return positions;
+    }),
+  };
+});
 
 vi.mock('../lib/toast.svelte.js', () => ({ toast: vi.fn() }));
 
@@ -86,12 +106,15 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
   }
 
   async function drillIntoRepo(container) {
-    const repoCard = await waitFor(() => {
-      const btn = container.querySelector('.ws-repo-card');
-      expect(btn).toBeTruthy();
-      return btn;
+    // Since task-174 the workspace scope renders the realized-architecture
+    // graph (repos as nodes, ui-layout.md §5) — drill by double-clicking the
+    // rendered repo node (double-click = scope change to repo).
+    const repoNode = await waitFor(() => {
+      const el = container.querySelector('[data-testid="dep-node-repo-1"]');
+      expect(el).toBeTruthy();
+      return el;
     }, { timeout: 5000 });
-    await fireEvent.click(repoCard);
+    await fireEvent.dblClick(repoNode);
     await waitFor(() => {
       expect(container.querySelector('.lens-group')).toBeTruthy();
     }, { timeout: 5000 });
@@ -105,9 +128,11 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const structural = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true); // always-on base layer
+    expect(structural?.disabled).toBe(true); // Structural cannot be toggled off
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluative?.checked).toBe(false);
     expect(new URL(window.location.href).searchParams.get('lens')).toBeNull();
   });
 
@@ -120,13 +145,12 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     await drillIntoRepo(container);
 
     replaceStateSpy.mockClear();
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
     expect(evaluative).toBeTruthy();
     await fireEvent.click(evaluative);
 
     // Evaluative is now active and the URL carries the param
-    expect(evaluative.classList.contains('active')).toBe(true);
+    expect(evaluative.checked).toBe(true);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
   });
 
@@ -138,14 +162,14 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
     await fireEvent.click(evaluative);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
 
-    const structural = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Structural');
-    await fireEvent.click(structural);
+    // Unchecking the Evaluative overlay returns to structural (the base
+    // layer's own checkbox is locked on — there is nothing to click back to).
+    await fireEvent.click(evaluative);
+    expect(evaluative.checked).toBe(false);
     expect(new URL(window.location.href).searchParams.get('lens')).toBeNull();
   });
 
@@ -157,9 +181,8 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const evaluative = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
-    expect(evaluative?.classList.contains('active')).toBe(true);
+    const evaluative = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluative?.checked).toBe(true);
     expect(new URL(window.location.href).searchParams.get('lens')).toBe('evaluative');
   });
 
@@ -198,10 +221,11 @@ describe('ExplorerView — lens URL persistence (HSI §3 Three Lenses)', () => {
     });
     await drillIntoRepo(container);
 
-    const observable = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim().startsWith('Observable'));
+    const observable = container.querySelector('[data-testid="lens-checkbox-observable"]');
     expect(observable).toBeTruthy();
-    expect(observable.getAttribute('aria-disabled')).toBe('true');
+    const observableInput = observable.querySelector('input');
+    expect(observableInput?.checked).toBe(false);
+    expect(observableInput?.disabled).toBe(true);
     expect(observable.getAttribute('title')).toContain('requires production telemetry integration');
     expect(observable.textContent).toContain('requires production telemetry integration');
   });

@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::sync::Mutex;
+use gyre_ports::search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
+use std::{collections::HashMap, sync::Mutex};
 
 /// Extract a short snippet containing a match of `query` within `text`.
 fn make_snippet(text: &str, query: &str, max_len: usize) -> String {
@@ -46,6 +48,53 @@ fn score_doc(doc: &SearchDocument, terms: &[&str]) -> Option<f64> {
     Some(score)
 }
 
+/// §Access Scoping constraints plus the user-supplied narrowing filters, as
+/// a predicate over one document — the mem adapter's equivalent of the SQL
+/// adapters' WHERE clauses. Applied inside the query filter, before
+/// scoring/counting, so result and facet counts can never include documents
+/// the caller cannot access (search.md §Access Scoping: never a post-filter).
+fn scope_visible(query: &SearchQuery, doc: &SearchDocument) -> bool {
+    // Tenant boundary.
+    if doc.tenant_id.as_deref() != Some(query.tenant_id.as_str()) {
+        return false;
+    }
+    // Entity type filter.
+    if let Some(ref et) = query.entity_type {
+        if doc.entity_type != *et {
+            return false;
+        }
+    }
+    // Workspace filter (user-supplied narrowing — intersects with the
+    // accessible set, so it can only narrow, never widen).
+    if let Some(ref ws) = query.workspace_id {
+        if doc.workspace_id.as_deref() != Some(ws.as_str()) {
+            return false;
+        }
+    }
+    // Accessible-workspace set: None = unscoped (Admin), an empty
+    // set excludes everything.
+    if let Some(ref ids) = query.accessible_workspace_ids {
+        if !ids
+            .iter()
+            .any(|w| doc.workspace_id.as_deref() == Some(w.as_str()))
+        {
+            return false;
+        }
+    }
+    // Accessible-repo set: repo-less (workspace-level) documents stay
+    // visible — repo scope restricts repos, not the workspace itself.
+    if let Some(ref ids) = query.accessible_repo_ids {
+        let repo_ok = match doc.repo_id.as_deref() {
+            None | Some("") => true,
+            Some(r) => ids.iter().any(|i| i == r),
+        };
+        if !repo_ok {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Default)]
 pub struct MemSearchAdapter {
     docs: Mutex<Vec<SearchDocument>>,
@@ -84,50 +133,7 @@ impl SearchPort for MemSearchAdapter {
 
         let mut results: Vec<(f64, SearchResult)> = docs
             .iter()
-            .filter(|doc| {
-                // §Access Scoping: tenant + accessible workspace/repo sets are
-                // enforced inside the query filter, before scoring — the
-                // result set (and any count derived from it) can never
-                // include documents the caller cannot access.
-                if doc.tenant_id.as_deref() != Some(query.tenant_id.as_str()) {
-                    return false;
-                }
-                // Entity type filter.
-                if let Some(ref et) = query.entity_type {
-                    if doc.entity_type != *et {
-                        return false;
-                    }
-                }
-                // Workspace filter (user-supplied narrowing — intersects with
-                // the accessible set, so it can only narrow, never widen).
-                if let Some(ref ws) = query.workspace_id {
-                    if doc.workspace_id.as_deref() != Some(ws.as_str()) {
-                        return false;
-                    }
-                }
-                // Accessible-workspace set: None = unscoped (Admin), an empty
-                // set excludes everything.
-                if let Some(ref ids) = query.accessible_workspace_ids {
-                    if !ids
-                        .iter()
-                        .any(|w| doc.workspace_id.as_deref() == Some(w.as_str()))
-                    {
-                        return false;
-                    }
-                }
-                // Accessible-repo set: repo-less (workspace-level) documents
-                // stay visible — repo scope restricts repos, not the workspace.
-                if let Some(ref ids) = query.accessible_repo_ids {
-                    let repo_ok = match doc.repo_id.as_deref() {
-                        None | Some("") => true,
-                        Some(r) => ids.iter().any(|i| i == r),
-                    };
-                    if !repo_ok {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|doc| scope_visible(&query, doc))
             .filter_map(|doc| {
                 score_doc(doc, &terms).map(|score| {
                     let snippet = make_snippet(&doc.body, &raw_query, 120);
@@ -162,6 +168,70 @@ impl SearchPort for MemSearchAdapter {
         // In-memory adapter has nothing to rebuild — index is always current.
         let count = self.docs.lock().unwrap().len() as u64;
         Ok(count)
+    }
+
+    async fn suggest(&self, query: SearchQuery) -> Result<Vec<SearchSuggestion>> {
+        let prefix = query.query.trim().to_lowercase();
+        if prefix.is_empty() {
+            return Ok(vec![]);
+        }
+        let docs = self.docs.lock().unwrap();
+        // §Access Scoping: the same scope predicate as `search()`, applied
+        // inside the query filter — suggestions never include titles the
+        // caller cannot access.
+        let mut suggestions: Vec<SearchSuggestion> = docs
+            .iter()
+            .filter(|d| scope_visible(&query, d))
+            // Case-insensitive prefix match on the title — same contract as the
+            // SQL adapters' `title LIKE 'prefix%'`.
+            .filter(|d| d.title.to_lowercase().starts_with(&prefix))
+            .map(|d| SearchSuggestion {
+                text: d.title.clone(),
+                entity_type: d.entity_type.clone(),
+                entity_id: d.entity_id.clone(),
+            })
+            .collect();
+        suggestions.sort_by(|a, b| a.text.cmp(&b.text));
+        suggestions.truncate(query.limit);
+        Ok(suggestions)
+    }
+
+    async fn facet_counts(&self, query: SearchQuery) -> Result<FacetCounts> {
+        let docs = self.docs.lock().unwrap();
+        // §Access Scoping: the same scope predicate as `search()`, applied
+        // before counting — facet counts never include documents the caller
+        // cannot access. Blank text: no term filter, the caller's whole
+        // accessible set (the /search/facets endpoint shape). Non-blank:
+        // the same filtered match set `search()` uses, ignoring `limit`.
+        let query_lower = query.query.to_lowercase();
+        let terms: Vec<&str> = query_lower.split_whitespace().collect();
+        let selected: Vec<&SearchDocument> = docs
+            .iter()
+            .filter(|doc| scope_visible(&query, doc))
+            .filter(|doc| terms.is_empty() || score_doc(doc, &terms).is_some())
+            .collect();
+
+        let mut counts: FacetCounts = HashMap::new();
+        let mut bump = |facet: &str, value: String| {
+            counts
+                .entry(facet.to_string())
+                .or_default()
+                .entry(value)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        };
+        for doc in selected {
+            bump("type", doc.entity_type.clone());
+            if let Some(ws) = doc.workspace_id.as_deref() {
+                if !ws.is_empty() {
+                    bump("workspace", ws.to_string());
+                }
+            }
+            for (key, value) in &doc.facets {
+                bump(key, value.clone());
+            }
+        }
+        Ok(counts)
     }
 }
 
@@ -354,7 +424,8 @@ mod tests {
         // accessible-workspace and accessible-repo sets restrict the result
         // set before counts are derived; a user-supplied workspace_id cannot
         // widen access; a document with no resolvable tenant is visible to no
-        // tenant-scoped query.
+        // tenant-scoped query. Suggest and facet_counts enforce the same
+        // scope — titles and counts never leak inaccessible documents.
         let adapter = MemSearchAdapter::new();
 
         let mut in_a = make_doc("task", "in-a", "needle", "needle in workspace a");
@@ -437,5 +508,206 @@ mod tests {
             .unwrap();
         assert_eq!(repo_scoped.len(), 1);
         assert_eq!(repo_scoped[0].entity_id, "r1-doc");
+
+        // Facet counts over the same scoped match set: workspace-b's matching
+        // doc must be absent from the counts — a post-filter that still
+        // leaked counts would include ws-b here.
+        let facets = adapter
+            .facet_counts(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..tenant_query("needle")
+            })
+            .await
+            .unwrap();
+        assert_eq!(facets["workspace"]["ws-a"], 1);
+        assert!(
+            !facets["workspace"].contains_key("ws-b"),
+            "facet counts leaked workspace b: {facets:?}"
+        );
+
+        // Blank text + scope: the caller's whole accessible set — every ws-a
+        // doc (needle + both widget docs), ws-b's doc stays out of the counts.
+        let whole = adapter
+            .facet_counts(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..tenant_query("")
+            })
+            .await
+            .unwrap();
+        assert_eq!(whole["workspace"]["ws-a"], 3);
+        assert!(!whole["workspace"].contains_key("ws-b"));
+
+        // Suggest carries the same scope: only ws-a's titles.
+        let sugg = adapter
+            .suggest(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..tenant_query("need")
+            })
+            .await
+            .unwrap();
+        assert_eq!(sugg.len(), 1, "suggest leaked titles: {sugg:?}");
+        assert_eq!(sugg[0].entity_id, "in-a");
+    }
+
+    #[tokio::test]
+    async fn test_suggest_prefix_contract() {
+        // Same port contract as the SQL adapters: case-insensitive prefix on
+        // the title, mid-title terms excluded, limit truncates, empty prefix
+        // yields nothing (mem adapter guards in code — it has no schema).
+        let adapter = MemSearchAdapter::new();
+        adapter
+            .index(make_doc(
+                "spec",
+                "s1",
+                "Identity security",
+                "spiffe identity",
+            ))
+            .await
+            .unwrap();
+        adapter
+            .index(make_doc(
+                "task",
+                "t1",
+                "identity provider audit",
+                "oidc audit",
+            ))
+            .await
+            .unwrap();
+        adapter
+            .index(make_doc("task", "t2", "Rotate keys", "jwt rotation"))
+            .await
+            .unwrap();
+
+        let sugg = adapter
+            .suggest(SearchQuery {
+                query: "IDEN".to_string(),
+                ..tenant_query("")
+            })
+            .await
+            .unwrap();
+        assert_eq!(sugg.len(), 2, "case-insensitive prefix: {sugg:?}");
+        assert_eq!(sugg[0].text, "Identity security");
+        assert_eq!(sugg[0].entity_type, "spec");
+        assert_eq!(sugg[0].entity_id, "s1");
+        assert_eq!(sugg[1].text, "identity provider audit");
+
+        // Mid-title term: not a prefix.
+        let mid = adapter
+            .suggest(SearchQuery {
+                query: "security".to_string(),
+                ..tenant_query("")
+            })
+            .await
+            .unwrap();
+        assert!(mid.is_empty(), "mid-title term must not match: {mid:?}");
+
+        // Limit truncates.
+        assert_eq!(
+            adapter
+                .suggest(SearchQuery {
+                    query: "iden".to_string(),
+                    limit: 1,
+                    ..tenant_query("")
+                })
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Empty / whitespace-only prefix: no suggestions.
+        for blank in ["", "   "] {
+            assert!(
+                adapter
+                    .suggest(SearchQuery {
+                        query: blank.to_string(),
+                        ..tenant_query("")
+                    })
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_facet_counts_contract() {
+        // Same port contract as the SQL adapters: a blank query aggregates
+        // the caller's whole accessible set, a text query aggregates its
+        // filtered match set (terms + filters, limit ignored).
+        let adapter = MemSearchAdapter::new();
+
+        let mut t1 = make_doc("task", "t1", "jwt one", "jwt jwt jwt rotation");
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
+        adapter.index(t1).await.unwrap();
+
+        let mut t2 = make_doc("task", "t2", "jwt two", "jwt rotation");
+        t2.facets.insert("status".to_string(), "done".to_string());
+        t2.workspace_id = Some("ws-a".to_string());
+        adapter.index(t2).await.unwrap();
+
+        let mut m1 = make_doc("mr", "m1", "jwt merge", "jwt handling");
+        m1.facets
+            .insert("status".to_string(), "in_progress".to_string());
+        adapter.index(m1).await.unwrap();
+
+        adapter
+            .index(make_doc("task", "t3", "dns fix", "dns resolver"))
+            .await
+            .unwrap();
+
+        // Blank query: whole-accessible-set aggregation (admin shape here —
+        // unscoped within the test tenant).
+        let all = adapter
+            .facet_counts(tenant_query(""))
+            .await
+            .unwrap();
+        assert_eq!(all["type"]["task"], 3);
+        assert_eq!(all["type"]["mr"], 1);
+        assert_eq!(all["workspace"]["ws-a"], 1);
+        assert_eq!(all["status"]["in_progress"], 2);
+        assert_eq!(all["status"]["done"], 1);
+
+        // limit=1 must be ignored — counts describe the full filtered set.
+        let filtered = adapter
+            .facet_counts(SearchQuery {
+                limit: 1,
+                ..tenant_query("jwt")
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered["type"]["task"], 2);
+        assert_eq!(filtered["type"]["mr"], 1);
+        assert_eq!(filtered["status"]["in_progress"], 2);
+
+        // entity_type filter restricts the aggregation.
+        let mr_only = adapter
+            .facet_counts(SearchQuery {
+                entity_type: Some("mr".to_string()),
+                ..tenant_query("jwt")
+            })
+            .await
+            .unwrap();
+        assert_eq!(mr_only["type"]["mr"], 1);
+        assert!(!mr_only["type"].contains_key("task"));
+
+        // workspace filter restricts the aggregation.
+        let ws_only = adapter
+            .facet_counts(SearchQuery {
+                workspace_id: Some("ws-a".to_string()),
+                ..tenant_query("jwt")
+            })
+            .await
+            .unwrap();
+        assert_eq!(ws_only["type"]["task"], 1);
+        assert_eq!(ws_only["status"]["done"], 1);
+
+        // Non-matching query aggregates nothing.
+        let none = adapter
+            .facet_counts(tenant_query("zzz-nonexistent"))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 }

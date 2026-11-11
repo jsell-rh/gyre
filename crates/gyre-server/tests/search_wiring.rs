@@ -35,7 +35,14 @@
 //!   zero results (the param narrows, it can never widen);
 //! - a repo-scoped agent receives only its repo's documents; a
 //!   workspace-orchestrator agent receives all repos in its workspace;
-//! - admin callers are unscoped within the tenant.
+//! - admin callers are unscoped within the tenant;
+//! - suggest and facet counts enforce the same scope — a scoped caller's
+//!   autocomplete titles and facet counts never include workspace B.
+//!
+//! task-153 endpoint legs ride the same middleware stack: GET
+//! /search/suggest (prefix autocomplete, empty-prefix and auth rejection),
+//! GET /search/facets (whole-index aggregation), and facet_counts on the
+//! /search response (filtered-set aggregation).
 
 use axum::body::Body;
 use gyre_common::Id;
@@ -251,6 +258,112 @@ async fn sqlite_url_wires_fts5_search_port() {
     // Facet round-trip through the API surface.
     assert_eq!(hit["facets"]["status"], "backlog");
 
+    // ── §API/§Response Format: facet_counts on the search response ───────
+    // Aggregated over the filtered match set (the quokka task), not the
+    // whole index and not a truncated page.
+    let fc = &body["facet_counts"];
+    assert_eq!(
+        fc["type"]["task"].as_u64(),
+        Some(1),
+        "facet_counts.type must count the matching task: {fc}"
+    );
+    assert_eq!(
+        fc["status"]["backlog"].as_u64(),
+        Some(1),
+        "facet_counts.status must aggregate the match set's facets: {fc}"
+    );
+
+    // ── §API: GET /search/suggest — prefix autocomplete ──────────────────
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=quok", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let suggestions = body["suggestions"].as_array().unwrap();
+    assert_eq!(
+        suggestions.len(),
+        1,
+        "suggest must prefix-match 'quok' against 'Quokka census': {body}"
+    );
+    assert_eq!(suggestions[0]["text"], "Quokka census");
+    assert_eq!(suggestions[0]["entity_type"], "task");
+    assert!(!suggestions[0]["entity_id"].as_str().unwrap().is_empty());
+
+    // Empty prefix: empty list — never "every title in the index".
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["suggestions"].as_array().map(Vec::len),
+        Some(0),
+        "empty prefix must yield no suggestions: {body}"
+    );
+
+    // Non-matching prefix: empty list.
+    let resp = call(&app, "GET", "/api/v1/search/suggest?q=zzz", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["suggestions"].as_array().map(Vec::len), Some(0));
+
+    // Suggest is authenticated like /search itself: no token → 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/search/suggest?q=quok")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "suggest must sit behind require_auth"
+    );
+    // Facets endpoint likewise.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/search/facets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "facets must sit behind require_auth"
+    );
+
+    // ── §API: GET /search/facets — whole-index aggregation ───────────────
+    let resp = call(&app, "GET", "/api/v1/search/facets", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let facets = &body["facets"];
+    // wiring-1 (indexed directly) + the API-created quokka task.
+    assert_eq!(
+        facets["type"]["task"].as_u64(),
+        Some(2),
+        "facets must aggregate the whole index: {facets}"
+    );
+    // Only the API-created task carries a status facet (backlog).
+    assert_eq!(facets["status"]["backlog"].as_u64(), Some(1));
+
     // ── Durability: fresh state on the same file still finds the doc ───────
     let state2 = build_state(TOKEN, "http://localhost:3000", None);
     let persisted = state2
@@ -340,6 +453,59 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     assert!(
         results.iter().all(|r| r["entity_id"] != "b-doc"),
         "workspace-b document leaked to a workspace-a member: {body}"
+    );
+    // Facet counts ride the same scope: ws-b is absent from the workspace
+    // facet — a count leak here is exactly what §Access Scoping forbids.
+    let fc = &body["facet_counts"];
+    assert_eq!(
+        fc["workspace"]["ws-a"].as_u64(),
+        Some(2),
+        "scoped facet_counts must count only ws-a docs: {fc}"
+    );
+    assert!(
+        fc["workspace"].get("ws-b").is_none(),
+        "facet_counts leaked workspace b to a workspace-a member: {fc}"
+    );
+
+    // Suggest is scoped the same way: alice's autocomplete sees only ws-a
+    // titles, never ws-b's.
+    let resp = call_with_token(
+        &app,
+        "GET",
+        "/api/v1/search/suggest?q=need",
+        None,
+        alice_key,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let suggestions = body["suggestions"].as_array().unwrap();
+    assert_eq!(
+        suggestions.len(),
+        2,
+        "scoped suggest must return only ws-a titles: {body}"
+    );
+    assert!(
+        suggestions
+            .iter()
+            .all(|s| s["entity_id"] != "b-doc"),
+        "suggest leaked a workspace-b title: {body}"
+    );
+
+    // The whole-accessible-set facets endpoint is scoped too: ws-b never
+    // appears in alice's workspace facet counts.
+    let resp = call_with_token(&app, "GET", "/api/v1/search/facets", None, alice_key).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let facets = &body["facets"];
+    assert_eq!(
+        facets["workspace"]["ws-a"].as_u64(),
+        Some(2),
+        "facets endpoint must count only accessible docs: {facets}"
+    );
+    assert!(
+        facets["workspace"].get("ws-b").is_none(),
+        "facets endpoint leaked workspace b counts: {facets}"
     );
 
     // Alice requesting ws-b via the query param: zero results, not an error —

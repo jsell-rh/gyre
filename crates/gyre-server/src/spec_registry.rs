@@ -27,6 +27,8 @@ pub struct SpecManifest {
     #[serde(default)]
     pub defaults: ManifestDefaults,
     pub specs: Vec<SpecEntry>,
+    #[serde(default)]
+    pub concepts: Vec<ConceptDef>,
 }
 
 /// Default policies applied to all specs unless overridden per-entry.
@@ -49,11 +51,9 @@ impl Default for ManifestDefaults {
         }
     }
 }
-
 fn default_true() -> bool {
     true
 }
-
 /// Link type between specs — drives mechanical enforcement.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -824,6 +824,60 @@ pub async fn sync_spec_ledger(
 }
 
 // ---------------------------------------------------------------------------
+// Concept views (realized-model.md §4)
+// ---------------------------------------------------------------------------
+
+/// A concept view declared in the manifest's `concepts:` block
+/// (realized-model.md §4). Converts to the domain `ConceptView` type.
+/// A manifest without a `concepts:` key parses with an empty vec.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConceptDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub include: Vec<ConceptInclude>,
+}
+
+/// One `- types: [...]` / `- traits: [...]` / ... entry in a concept's
+/// `include:` sequence of single-key maps.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConceptInclude {
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub traits: Vec<String>,
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub specs: Vec<String>,
+}
+
+impl From<&ConceptDef> for gyre_common::graph::ConceptView {
+    fn from(def: &ConceptDef) -> Self {
+        let mut view = gyre_common::graph::ConceptView {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            include_types: vec![],
+            include_traits: vec![],
+            include_modules: vec![],
+            include_endpoints: vec![],
+            include_specs: vec![],
+        };
+        for inc in &def.include {
+            view.include_types.extend(inc.types.iter().cloned());
+            view.include_traits.extend(inc.traits.iter().cloned());
+            view.include_modules.extend(inc.modules.iter().cloned());
+            view.include_endpoints.extend(inc.endpoints.iter().cloned());
+            view.include_specs.extend(inc.specs.iter().cloned());
+        }
+        view
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Drift-review task creation helper (TASK-016 F2)
 // ---------------------------------------------------------------------------
 
@@ -965,7 +1019,7 @@ pub(crate) async fn read_git_file(
 }
 
 /// Get the blob SHA for a file at a given commit using `git rev-parse <sha>:<path>`.
-async fn get_blob_sha(
+pub(crate) async fn get_blob_sha(
     git_bin: &str,
     repo_path: &str,
     sha: &str,
@@ -1236,6 +1290,116 @@ specs:
 "#;
 
     #[test]
+    fn test_manifest_without_concepts_parses_empty() {
+        let m = parse_manifest(SAMPLE_MANIFEST).expect("parse failed");
+        assert!(
+            m.concepts.is_empty(),
+            "manifest without concepts: key must parse to empty vec"
+        );
+    }
+
+    #[test]
+    fn test_parse_concepts_spec_examples() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/source-control.md
+    title: Source Control
+    owner: user:jsell
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*", "*Token*", "*Rbac*", "*Abac*", "*Jwt*"]
+      - traits: ["*Auth*"]
+      - modules: ["*::auth*", "*::identity*"]
+      - endpoints: ["/api/v1/auth/*", "/.well-known/*"]
+      - specs: ["identity-security.md", "abac-policy-engine.md"]
+
+  - name: Merge Pipeline
+    description: "Merge queue, gates, MR lifecycle"
+    include:
+      - types: ["MergeRequest", "MergeQueueEntry", "Gate*", "QueueProcessor"]
+      - modules: ["*::merge*", "*::gates*"]
+      - specs: ["source-control.md", "agent-gates.md", "merge-dependencies.md"]
+"#;
+        let m = parse_manifest(yaml).expect("parse failed");
+        assert_eq!(m.concepts.len(), 2);
+
+        let auth = &m.concepts[0];
+        assert_eq!(auth.name, "Authentication");
+        assert_eq!(
+            auth.description,
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+        let view = gyre_common::graph::ConceptView::from(auth);
+        assert_eq!(
+            view.include_types,
+            vec!["*Auth*", "*Token*", "*Rbac*", "*Abac*", "*Jwt*"]
+        );
+        assert_eq!(view.include_traits, vec!["*Auth*"]);
+        assert_eq!(view.include_modules, vec!["*::auth*", "*::identity*"]);
+        assert_eq!(
+            view.include_endpoints,
+            vec!["/api/v1/auth/*", "/.well-known/*"]
+        );
+        assert_eq!(
+            view.include_specs,
+            vec!["identity-security.md", "abac-policy-engine.md"]
+        );
+
+        let merge = &m.concepts[1];
+        assert_eq!(merge.name, "Merge Pipeline");
+        let view = gyre_common::graph::ConceptView::from(merge);
+        assert_eq!(
+            view.include_types,
+            vec!["MergeRequest", "MergeQueueEntry", "Gate*", "QueueProcessor"]
+        );
+        assert!(view.include_traits.is_empty());
+        assert_eq!(view.include_modules, vec!["*::merge*", "*::gates*"]);
+        assert!(view.include_endpoints.is_empty());
+        assert_eq!(
+            view.include_specs,
+            vec![
+                "source-control.md",
+                "agent-gates.md",
+                "merge-dependencies.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_concept_without_include_and_split_keys() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/x.md
+    title: X
+    owner: user:jsell
+concepts:
+  - name: Bare
+  - name: Split
+    description: "same key across two include entries"
+    include:
+      - types: ["A*"]
+      - modules: ["m"]
+      - types: ["B*"]
+"#;
+        let m = parse_manifest(yaml).expect("parse failed");
+        assert_eq!(m.concepts.len(), 2);
+        let bare = &m.concepts[0];
+        assert_eq!(bare.name, "Bare");
+        let bare_view = gyre_common::graph::ConceptView::from(bare);
+        assert!(bare_view.include_types.is_empty());
+        assert!(bare_view.include_specs.is_empty());
+
+        // Same key appearing in multiple include entries aggregates.
+        let split_view = gyre_common::graph::ConceptView::from(&m.concepts[1]);
+        assert_eq!(split_view.include_types, vec!["A*", "B*"]);
+        assert_eq!(split_view.include_modules, vec!["m"]);
+    }
+
+    #[test]
     fn test_parse_manifest_ok() {
         let m = parse_manifest(SAMPLE_MANIFEST).expect("parse failed");
         assert_eq!(m.version, 1);
@@ -1243,6 +1407,90 @@ specs:
         assert_eq!(m.specs[0].path, "system/design-principles.md");
         assert_eq!(m.specs[0].title, "Design Principles");
         assert!(m.defaults.requires_approval);
+    }
+
+    /// The exact starter-kit manifest `gyre bootstrap --starter-kit` writes
+    /// (crates/gyre-cli/src/bootstrap/starter-manifest.yaml). Consumed via
+    /// include_str! so the test always sees the shipped bytes, never a copy
+    /// that could drift (task-099 F5 process fix #176: embedded templates
+    /// must round-trip through the consumer's real parser in a test). The
+    /// original F5 defect — `approval: human` instead of
+    /// `approval: {mode: human_only}` — parsed nowhere but the CLI's
+    /// structural check and silently emptied the spec ledger on push.
+    const CLI_STARTER_MANIFEST: &str =
+        include_str!("../../gyre-cli/src/bootstrap/starter-manifest.yaml");
+
+    #[test]
+    fn cli_starter_manifest_parses_with_real_parser() {
+        // Round-trip 1: the raw template must parse as SpecManifest.
+        let m = parse_manifest(CLI_STARTER_MANIFEST)
+            .expect("gyre bootstrap starter manifest must parse as SpecManifest");
+        assert_eq!(m.version, 1);
+        assert_eq!(m.specs.len(), 1, "starter kit registers one spec");
+        let entry = &m.specs[0];
+        assert_eq!(entry.path, "system/design-principles.md");
+        assert_eq!(entry.title, "Design Principles");
+        assert_eq!(entry.owner, "admin");
+        assert_eq!(entry.kind.as_deref(), Some("system"));
+        // The F5 defect shape: approval must be ApprovalConfig, and its
+        // effective mode must be a real ApprovalMode.
+        assert_eq!(entry.effective_approval_mode(), ApprovalMode::HumanOnly);
+        assert!(entry.effective_requires_approval(&m.defaults));
+    }
+
+    #[tokio::test]
+    async fn cli_starter_manifest_round_trips_through_ledger_sync() {
+        // Round-trip 2: the full consumer path. Build a real git repo with
+        // the starter kit's manifest + spec file, run the real
+        // sync_spec_ledger against it, and assert the ledger is populated —
+        // the exact path a pushed starter kit takes. If the template
+        // regresses to anything parse_manifest rejects, sync warn-returns
+        // and the ledger stays empty, failing this test.
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", CLI_STARTER_MANIFEST),
+            ("specs/index.md", "# Spec Index\n"),
+            (
+                "specs/system/design-principles.md",
+                "# Design Principles\n\nStarter kit template.\n",
+            ),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(crate::mem::MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let entries = ledger.list_all().await.unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "starter-kit manifest must register its spec in the ledger"
+        );
+        let e = entries
+            .iter()
+            .find(|e| e.path == "system/design-principles.md")
+            .expect("starter spec must be in the ledger");
+        assert_eq!(e.title, "Design Principles");
+        assert_eq!(e.approval_mode, "human_only");
+        assert_eq!(e.approval_status, ApprovalStatus::Pending);
+        assert!(!e.current_sha.is_empty(), "blob SHA must resolve at HEAD");
+        assert_eq!(e.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(e.workspace_id.as_deref(), Some("ws-1"));
     }
 
     #[test]
