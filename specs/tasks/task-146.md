@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "02b8c9073a9fa0c153c17abadb23933bd492ea86"]
 ---
 
 ## Spec Excerpt
@@ -77,11 +77,11 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [ ] AnalyticsEvent struct matches spec schema (all fields present)
-- [ ] All 12 auto-emitted events are recorded at their trigger points
-- [ ] Each event includes all spec-required properties
-- [ ] Query API supports all spec-required filter parameters
-- [ ] Tests pass for each auto-emitted event
+- [x] AnalyticsEvent struct matches spec schema (all fields present)
+- [x] All 12 auto-emitted events are recorded at their trigger points
+- [x] Each event includes all spec-required properties
+- [x] Query API supports all spec-required filter parameters
+- [x] Tests pass for each auto-emitted event
 
 ## Agent Instructions
 
@@ -101,143 +101,87 @@ pub struct AnalyticsEvent {
 - `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec fields
   (`id`, `event_name`, `agent_id`, `user_id`, `session_id`, `workspace_id`,
   `repo_id`, `properties`, `timestamp`); `with_scope` populates the
-  user/session/workspace/repo scope fields. A serde round-trip test pins
-  the shape against the spec schema.
+  user/session/workspace/repo scope fields. A serde round-trip test
+  (`analytics_event_matches_spec_schema`) pins the shape against the spec
+  schema.
 - All 12 spec-required auto-emitted events record at their real trigger
-  points with all spec-required properties, each proven by a passing
-  per-event test: `task.status_changed`, `mr.merged`, `mr.closed`,
-  `agent.spawned`, `agent.completed`, `agent.failed`,
-  `merge_queue.processed`, `gate.failed`, `gate.passed`, `spec.approved`,
-  `budget.warning`, `search.query`.
-- Query API: `POST/GET /api/v1/analytics/events`, `GET /count`, `GET /daily`
-  with the full spec filter set — `event_name` (exact or trailing-`*`
-  prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`,
-  `until`, `limit` (default 100, cap 10_000), `group_by` — implemented on
-  SQLite, Postgres, and mem adapters (adapter test
-  `analytics_query_filtered_all_params`).
+  points with all spec-required properties, each proven by a per-event
+  test: `task.status_changed`, `mr.merged`, `mr.closed`, `agent.spawned`,
+  `agent.completed`, `agent.failed`, `merge_queue.processed`,
+  `gate.failed`, `gate.passed`, `spec.approved`, `budget.warning`,
+  `search.query`.
+- Query API: `POST/GET /api/v1/analytics/events`, `GET /count`,
+  `GET /daily` with the full spec filter set — `event_name` (exact or
+  trailing-`*` prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`,
+  `since`, `until`, `limit` (default 100, cap 10_000), `group_by` —
+  implemented on SQLite, Postgres, and mem adapters. The sqlite adapter
+  test `analytics_query_filtered_all_params` seeds cross-cutting data
+  (agents span workspaces, workspaces span repos, users span workspaces)
+  and asserts each scope filter individually, so dropping any single
+  predicate fails the test.
+- Terminal-path completeness: a terminal queue-entry transition and its
+  `merge_queue.processed` event cannot diverge (`fail_queue_entry`), and
+  every task-status persistence records `task.status_changed`
+  (`record_task_status_changed`) — covering terminal queue outcomes
+  (quality-gate failure, MR/repo not found, non-mergeable MR during
+  candidate selection and atomic-group checks, dep-health,
+  spec/breaking-change/spec-link/constraint/attestation-ABAC blocks, git
+  errors, circuit-breaker and operator-cancel `skipped`), internal task
+  transitions (MCP `update_task`, spawn/completion auto-advance, admin
+  force-kill, stale-abort, spec-rejection and repo-archive
+  cancellation), and agent kill paths (fail, admin kill, stale abort,
+  spec-rejection stop, repo-archive stop, compose teardown). The
+  stale-agent Pause stop stays unemitted by design: pause is a
+  configured graceful stop, not a failure or kill.
+- The analytics scope-columns migration is renumbered past the base's
+  colliding sequence — `2026-10-08-000060_analytics_scope_columns`;
+  `check-migration-versions.sh` and the
+  `no_duplicate_migration_version_prefixes` guard test both pass on the
+  merged tree.
 
-### Terminal-path completeness
+### Rebase onto task-091 base (merge 3c3086aef, fix 02b8c9073)
 
-Trigger coverage extends to every production path, keeping the invariant
-that a terminal queue-entry transition and its `merge_queue.processed`
-event cannot diverge (`fail_queue_entry`) and that every task-status
-persistence records `task.status_changed` (`record_task_status_changed`):
-terminal queue outcomes (quality-gate failure, MR/repo not found,
-non-mergeable MR during candidate selection and atomic-group member
-checks, dep-health, spec/breaking-change/spec-link/constraint/
-attestation-ABAC blocks, git errors, circuit-breaker and operator-cancel
-`skipped`), internal task transitions (MCP `update_task`, spawn/completion
-auto-advance, admin force-kill, stale-abort, spec-rejection and
-repo-archive cancellation), and agent kill paths (fail, admin kill, stale
-abort, spec-rejection stop, repo-archive stop, compose teardown). Each
-extension has a regression test that fails on the pre-fix code. (The
-stale-agent Pause stop stays unemitted by design: pause is a configured
-graceful stop, not a failure or kill.)
+Resolved rebase repair 1887db69797b4108ad77fe90a1525d47 (base
+cfeefbda). Both sides had independently fixed the GateFailure
+"default" workspace fabrication in gate_executor.rs; kept the base's
+task-134 rewrite shape and kept this branch's
+`gate.passed`/`gate.failed` analytics emission, which auto-merged
+cleanly above it. The two fabricated-scope script conflicts were
+comment-only (same 5→1 lowering); narratives merged,
+`FROZEN_EXEMPTION_COUNT` stays 1, and
+`check-fabricated-scope-defaults.sh` passes on the merged tree. The
+base's new `QualityGate.validation_type` field (migration
+`2026-10-09-000059_gate_validation_type`) broke the branch-only test
+`gate_failure_during_selection_records_queue_processed_failed`
+(E0063, caught by `cargo check -p gyre-server --tests`); fixed by
+setting `validation_type: None` like every other test literal
+(02b8c9073).
 
-### Merge and gate hygiene
+### Test evidence
 
-Reconciled with the evolving base five times (4e895f766/bf39f38a2,
-fefde2946, b5a872087) — conflicts resolved as unions, never dropping a
-fix or re-adding an exemption. Base's fail-closed
-`resolve_orchestrator_persona` and launch-outcome reporting adopted over
-this branch's advisory persona warning (the stronger fix of the same
-inert-enforcement finding); this branch's `agent.spawned` emission and
-regression tests kept alongside base's truthful-launch-outcome test.
-Fixed for real, never via exemptions: orchestrator spawn tenant
-containment, attestation-ABAC merge enforcement, char-boundary-safe SHA
-truncation, spec tenant fanout resolution, GateFailure scope resolution,
-fail-closed `resolve_ref` sites, the relative-path literal in spawn.rs,
-and the dead traces.rs exemption entry. The fabricated-scope exemption
-list intersected across lineages down to one entry
-(speculative_merge.rs). The analytics migration is renumbered to the
-next unused sequence — now `2026-10-08-000060_analytics_scope_columns`
-(renumbered again past base's colliding
-`2026-10-08-000059_spec_lifecycle_configs`; see below).
-A wall-clock race in `rate_limit_exhaustion_returns_429` (predates this
-branch) was fixed deterministically by injecting the clock into
-`RateLimiter`. web/dist is byte-identical to base (this branch never
-modified it).
-
-### Review-repair round: workspace-orchestrator spawn containment (commit 3bcd6f525)
-
-Review finding on merge 72da380b3: adopting base's
-`is_system_principal()` tenant bypass in `spawn_workspace_orchestrator`
-broke this branch's regression test — the global token's cross-tenant
-spawn skipped containment, reached the (fail-closed, base-adopted)
-persona resolver, and returned 404 instead of the asserted 403, so the
-registry-exempt route's only authorization surface no longer held for
-every caller.
-
-Fix: the workspace-tier route enforces tenant containment for EVERY
-caller, no system-principal bypass — no bootstrap flow spawns a
-workspace orchestrator (platform-model.md §8 step 8 spawns the repo
-orchestrator only), so no operational path needs the global token to
-cross tenants there. The repo-tier route KEEPS its bypass: the
-documented dev-mode bootstrap (`gyre bootstrap --dev`, docs/cli.md)
-authenticates the step-8 repo-orchestrator spawn with the static global
-token against the freshly created "dev" tenant. Both routes' doc
-comments record the asymmetry and its reason so a future merge does not
-silently re-unify it.
-
-### Review-repair round: adapter test strength + migration renumber (17face906, 897b5565, 6f469a6b)
-
-Two repairs on top of the merged base 18adceb68 (merge conflicts
-resolved as unions — base's facet_counts search aggregation kept
-alongside this branch's `search.query` analytics emission):
-
-1. **Duplicate migration version (17face906 + 6f469a6b, real defect caught by the
-   strengthened test):** base added
-   `2026-10-08-000059_spec_lifecycle_configs`, colliding with this
-   branch's `2026-10-08-000059_analytics_scope_columns`. Diesel runs
-   only one migration per version, so the analytics scope columns
-   (`user_id`/`session_id`/`workspace_id`/`repo_id`) were silently
-   missing on fresh databases — the adapter test failed at insert time
-   with "table analytics_events has no column named user_id".
-   Renumbered the analytics migration to the next unused sequence,
-   `2026-10-08-000060_analytics_scope_columns`;
-   `check-migration-versions.sh` and the
-   `no_duplicate_migration_version_prefixes` guard test both pass.
-
-2. **Weak sqlite adapter test (897b5565, the assigned review
-   finding):** `analytics_query_filtered_all_params` seeded data in
-   which every scope predicate alone isolated the expected row, so
-   dropping any single predicate from
-   `SqliteAnalyticsRepository::query_filtered` shipped green, and the
-   `user_id` predicate was never exercised on the default production
-   backend. Reseeded with cross-cutting data — agents span workspaces,
-   workspaces span repos, users span workspaces — and now assert each
-   scope filter (`agent_id`, `user_id`, `workspace_id`, `repo_id`)
-   individually against strict expected id sets, plus exact/prefix
-   `event_name`, the conjunctive case, inclusive `since`/`until`, and
-   newest-first `limit`.
-
-### Test evidence (this round: 17face906, 897b5565, 6f469a6b on merge 03a01d59a)
-
-- Mutation-verified the strengthened test: deleting the `workspace_id`,
-  `user_id`, `agent_id`, or `repo_id` predicate from the sqlite
-  `query_filtered` each fails `cargo test -p gyre-adapters --lib
-  analytics_query_filtered_all_params` (evidence:
-  /tmp/stage/review-evidence/mutation-adapter-{workspace,user,agent,repo}-filter-postfix.log).
-- `cargo test -p gyre-adapters --lib` 431 passed / 0 failed / 6
-  ignored; `cargo test -p gyre-server --lib analytics` 42 passed;
-  `--lib search` 3 passed; `--test api_integration` 67 passed / 0
-  failed; `--test search_wiring` 1 passed (exercises base's
-  facet_counts alongside the search.query emission).
-- `cargo fmt --check` clean; clippy clean on the changed files
-  (pre-existing warnings elsewhere only).
-- Offline gates exit 0: arch, migration versions, ABAC registry +
-  exempt handlers, forged-scope, fabricated-scope, scope-literal,
-  inert-enforcement, mem-port-contracts, dead-message-kinds,
-  byte-slice, relative-path, fail-open-ref, lossy-secret,
-  mcp-write-tools, forwarded-header, in-memory-state,
-  unbounded-external-http, task-commit attribution (with both new
-  commits listed in the frontmatter).
-- Full workspace suite, all-target clippy, and GitHub CI remain owned by
-  the deterministic verification stage.
-
-### Prior-round history
-
-Workspace-orchestrator spawn containment (3bcd6f525): the regression
-seed now plants approved personas in both the foreign and the caller's
-tenant so the 403 provably comes from containment (assertion strength
-unchanged: 403 + no agent row foreign, 201 + agent row own-tenant).
+- In-sandbox (this round, merged tree): `cargo check -p gyre-server` and
+  `cargo check -p gyre-server --tests` clean; `cargo test -p
+  gyre-domain --lib analytics` 3 passed; `cargo test -p gyre-adapters
+  --lib sqlite::analytics` 13 passed (incl.
+  `analytics_query_filtered_all_params`); `cargo test -p gyre-adapters
+  --lib migration` 7 passed (incl.
+  `no_duplicate_migration_version_prefixes`); arch, migration-versions,
+  migration-portability, ABAC registry + exempt handlers,
+  mcp-write-tools, dead-message-kinds, byte-slice, mem-port-contracts,
+  inert-enforcement, scope-literal, fail-open-ref, lossy-secret,
+  forwarded-header, in-memory-state, unbounded-external-http,
+  forged-scope, fabricated-scope, event-payload, relative-path,
+  cli-parity, abac-context-parity, api-auth, tenant-filter* checks exit
+  0. (*`check-event-emission-coverage.sh` and
+  `check-tenant-filter.sh` need gawk's three-arg `match()`; this sandbox
+  has mawk only — both scripts are byte-identical to the base, so run
+  them in CI/gawk environments.)
+- Verifier-owned (4 GiB budget — recorded in
+  /tmp/stage/review-evidence/rebase-1887db69-verification.md): `cargo
+  test -p gyre-server --lib analytics`, `--lib search`, `--test
+  api_integration`, `--test search_wiring`; full workspace suite,
+  all-target clippy, fmt, and GitHub CI.
+- Prior rounds' full local evidence (mutation-verified adapter filters,
+  431 adapter lib tests, 42 server analytics lib tests, 67
+  api_integration tests, search_wiring) is in the commit history of the
+  listed commits.
