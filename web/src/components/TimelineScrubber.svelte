@@ -15,6 +15,35 @@
     deltaStats = null,        // { added: N, removed: N, modified: N, byType: {} }
   } = $props();
 
+  // ── d3-scale time axis (ui-layout.md §10: timeline → d3-scale + Svelte) ────
+  // Marker positions and axis ticks map delta *timestamps* (not array
+  // indexes) onto the track, so spacing reflects real time: a month-long
+  // gap renders ten times wider than a three-day gap.
+  import { scaleTime } from 'd3-scale';
+
+  function tsMs(ts) {
+    const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  let timeScale = $derived.by(() => {
+    const times = (timeline ?? []).map((d) => tsMs(d?.timestamp)).filter((ms) => ms !== null);
+    if (times.length < 2) return null;
+    const min = Math.min(...times);
+    const max = Math.max(...times);
+    if (max === min) return null;
+    return scaleTime().domain([new Date(min), new Date(max)]).range([0, 100]);
+  });
+
+  let timeTicks = $derived.by(() => {
+    if (!timeScale) return [];
+    try {
+      return timeScale.ticks(4).map((date) => ({ date, left: timeScale(date) }));
+    } catch {
+      return [];
+    }
+  });
+
   // Extract key moments from timeline deltas and node metadata
   let keyMoments = $derived.by(() => {
     if (!timeline?.length) return [];
@@ -106,10 +135,17 @@
     return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
-  // Marker position as percentage
-  function markerPosition(idx) {
-    if (!timeline?.length || timeline.length <= 1) return 0;
-    return (idx / (timeline.length - 1)) * 100;
+  // Marker position as percentage — by timestamp through the d3-scale time
+  // axis, falling back to index spacing when the time domain is degenerate
+  // (single delta, or all deltas share one timestamp).
+  function markerPosition(moment) {
+    if (!timeScale) {
+      if (!timeline?.length || timeline.length <= 1) return 0;
+      return (moment.index / (timeline.length - 1)) * 100;
+    }
+    const ms = tsMs(moment.delta?.timestamp);
+    if (ms === null) return 0;
+    return timeScale(new Date(ms));
   }
 
   // Event type display properties
@@ -194,13 +230,24 @@
           {#each keyMoments as moment}
             <button
               class="tl-marker"
-              style="left: {markerPosition(moment.index)}%; background: {eventTypeColor(moment.eventType)}"
+              style="left: {markerPosition(moment)}%; background: {eventTypeColor(moment.eventType)}"
               onclick={(e) => handleMarkerClick(moment, e)}
               type="button"
               title="{eventTypeLabel(moment.eventType)} — {formatDate(moment.delta?.timestamp)}"
             ></button>
           {/each}
         </div>
+        <!-- Time axis ticks (d3-scale, ui-layout.md §10 timeline layout) -->
+        {#if timeTicks.length > 1}
+          <div class="tl-time-axis" aria-hidden="true">
+            {#each timeTicks as tick (tick.left)}
+              <span class="tl-time-axis-tick" style="left: {tick.left}%">
+                <span class="tl-time-axis-pip"></span>
+                <span class="tl-time-axis-label">{tick.date.toLocaleDateString()}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <!-- Delta stats summary — per-type breakdown (spec §6: "+12 types, -3 types, +2 traits") -->
@@ -330,7 +377,7 @@
   }
 
   .tl-slider-container {
-    position: relative; flex: 1; min-width: 200px; height: 20px;
+    position: relative; flex: 1; min-width: 200px; height: 34px;
     display: flex; align-items: center;
   }
   .tl-slider {
@@ -349,6 +396,24 @@
     padding: 0;
   }
   .tl-marker:hover { transform: translate(-50%, -50%) scale(1.5); }
+
+  /* Time axis ticks (d3-scale, ui-layout.md §10 timeline layout) */
+  .tl-time-axis {
+    position: absolute; top: 22px; left: 0; right: 0; height: 12px;
+    pointer-events: none;
+  }
+  .tl-time-axis-tick {
+    position: absolute; top: 0;
+    transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+  }
+  .tl-time-axis-pip {
+    width: 1px; height: 5px; background: #475569;
+  }
+  .tl-time-axis-label {
+    font-size: 9px; color: #64748b; white-space: nowrap;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
 
   .tl-delta-stats {
     display: flex; gap: 6px; font-size: 11px;

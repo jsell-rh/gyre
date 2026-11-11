@@ -2,10 +2,11 @@
 title: "Manifest-driven Concept Views for the knowledge graph"
 spec_ref: "realized-model.md §4 Concept Views"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: []
+commits: ["5d2c217b691ca6a6f3aea11205bad0fc8396a7f9", "a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "e475fd802eb7eb68441b09eb5e630ad35aaa65a8", "8597bbec8fd1e7d2120736cb6e798373b2d32084", "0779ae15d6dcb17307d52e9cf694b38f75106c67", "e8b09b48e0ce4660918e22e0fdf392f993fae888", "3501ed421966653f03a3323d49967afcbbcd0a52", "d38ed2f9641ea29abda0ed80a1c157b70cd14722", "e4b55cdab1db1460297a327fac313e18efe0a712", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "2076ba76e29b8474c009daaa4147451ba49aa31f", "4052081908cf27a9d7abec9923fe24ee850f1a88", "860d06502d94bea226facb13620055e8f30b433a", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+review: specs/reviews/task-205.md
 ---
 
 ## Spec Excerpt
@@ -169,3 +170,91 @@ Real work only — no substring stand-in for the manifest projection.
   and the tests you add/touch. Conventional commits; author unchanged.
 - When done, set this task's `progress: complete`, record commit SHAs, and the
   reviewer will re-audit the coverage row.
+
+## Shipped
+
+- `specs/manifest.yaml` `concepts:` blocks parse into domain `ConceptView`s
+  (five include-rule vectors, repeated-key aggregation) via
+  `SpecManifest.concepts` + `From<&ConceptDef>`; repos without a concepts
+  block parse cleanly.
+- `GET /api/v1/repos/:id/graph/concept/:name` and
+  `GET /api/v1/workspaces/:id/graph/concept/:name` return the
+  manifest-driven union projection (types/traits/modules/endpoints/specs,
+  anchored case-sensitive `*`-globs, edge-metadata route paths, GovernedBy
+  spec linkage) with 404/no-contribution for undefined concept names —
+  substring fallback removed; the `?concept=` substring query param on
+  `/graph` is preserved as a distinct surface per spec §7.
+- MCP `graph_concept` tool shares the same projection assembly (HSI §11
+  parity) for repo and workspace scopes, with explicit errors for undefined
+  concepts and unknown repos.
+- Glob matcher + projection live in `gyre-common` (`glob_match`,
+  `ConceptView::project`); no new crate dependencies; 16 new tests including
+  integration tests a mutation probe confirms fail under substring revert.
+
+### Rebase repair (assignment 5bdf4967)
+
+- Resolved the rebase of this branch onto base fefde2946 (landed task-089
+  HSI Explorer Generated Views and task-083 briefing repo-filter work). The
+  single content conflict — `crates/gyre-server/src/api/graph.rs`, both sides
+  appending distinct test sections at the end of the tests module — was
+  resolved as a union: task-205's concept-view tests and the base's briefing
+  repo-filter tests both kept; no code from either side dropped. All task-205
+  production code (ConceptDef parsing, `glob_match`, `ConceptView::project`,
+  `get_graph_concept`/`get_workspace_graph_concept`, MCP `graph_concept`)
+  auto-merged intact; verified present and green at the resolved tree.
+- Re-verification at the resolved HEAD (d099607f6):
+  - `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) → OK.
+  - `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+    spec_registry::tests` → 176 passed, 0 failed (all 12 concept tests
+    included).
+  - `cargo test -p gyre-common --lib` → 120 passed, 0 failed.
+  - `cargo test -p gyre-server --test graph_integration` → 38 passed, 0
+    failed on a real TCP listener (base added one test).
+  - Evidence: /tmp/stage/review-evidence/task205-rebase-resolution.md.
+- Historical attribution for the earlier contract/scope repairs (re-owned
+  realized-model §4 coverage flip commits da4ad02a5/c88fc0962, exemption-anchor
+  fix 5d2c217b6) remains recorded in `commits:` above.
+- No production behavior changed this round; `web/dist` untouched by this
+  commit (staged dist changes come from the merge of the base and are restored
+  by the executor from the assignment base).
+
+## Repair round (checkpoint d415416e, exit 130)
+
+The interrupted assignment left the implementation complete and an R1 review
+on record (`specs/reviews/task-205.md`, verdict `complete`); what died mid-run
+was investigation of a 35/35 `graph_integration` failure. Root-caused this
+round as sandbox infrastructure, not code: `accept(2)` returns `EOPNOTSUPP`
+(errno 95) in this runtime for every stack (Python `socket.accept` and a
+minimal Rust/tokio `TcpListener::accept` probe both fail identically; `bind`
+and `connect` succeed). Every test in that binary serves HTTP over a real
+listener, so all 35 fail uniformly — including pre-existing tests untouched
+by this task. Evidence: `/tmp/stage/review-evidence/task205-sandbox-tcp-accept-restriction.txt`
+(probe source, outputs, and the exact host/CI commands required).
+
+Repairs shipped in `2076ba76`:
+
+- `scripts/check-task-commit-attribution.sh` failed at the merged HEAD
+  because the merge base itself (`f4acb4eb`, landed task-189) is a
+  task-labeled product-surface commit absent from task-189's frontmatter
+  (which listed only the pre-squash pipeline SHAs). Recorded `f4acb4eb` in
+  `specs/tasks/task-189.md` `commits:` — the check's documented remedy; no
+  exemptions added, exemption file untouched. Gate now passes.
+- `web/dist` churn reverted to the merge-base state: the hashed-file swap
+  came from the embedded `npm run build` during checkpoint compiles, not
+  from any web change (branch has zero `web/src`/`web/tests`/`package.json`
+  delta; bundle string-literals are identical — only minifier-renamed
+  identifiers differ). Task branches do not ship dist rebuilds.
+
+Re-verification at repaired HEAD (`2076ba76`):
+
+- `cargo build --all` OK.
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 142 passed (all 12 concept tests included).
+- `cargo test -p gyre-common --lib` → 98 passed (4 concept_tests included).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` — all pass.
+- TCP-listener integration tests (`cargo test -p gyre-server --test
+  graph_integration`) cannot run in this sandbox (accept(2) restriction
+  above); the exact commands are recorded in the evidence file for host
+  verification and GitHub CI.

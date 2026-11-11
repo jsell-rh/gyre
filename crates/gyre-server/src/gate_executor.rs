@@ -806,6 +806,33 @@ async fn run_gate(
         );
     }
 
+    // Notify the MR author when this pass makes ALL gates green
+    // (user-management.md §Notification Entity: GatePassed — Low,
+    // informational). De-duplicated per (user, MR) inside the helper so the
+    // last-finishing gates do not repeat the announcement.
+    if status == GateStatus::Passed {
+        if let Ok(true) = check_gates_for_mr(state.as_ref(), &mr_id).await {
+            if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
+                if let Some(ref author_id) = mr.author_agent_id {
+                    // The tenant scope comes from the workspace lookup — when
+                    // it cannot be resolved there is no scoperable tenant, so
+                    // skip rather than fabricate one
+                    // (check-fabricated-scope-defaults.sh).
+                    if let Ok(Some(ws)) = state.workspaces.find_by_id(&mr.workspace_id).await {
+                        crate::notifications::notify_gate_passed(
+                            state.as_ref(),
+                            author_id,
+                            &mr.workspace_id,
+                            &mr_id.to_string(),
+                            &ws.tenant_id.to_string(),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
     // Produce a GateAttestation record (§3.2, §5.1) and store it
     // alongside the chain attestation for the MR's task.
     produce_gate_attestation(&state, &gate, &mr_id, &status, &output).await;

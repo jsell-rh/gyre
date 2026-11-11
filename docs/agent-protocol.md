@@ -29,7 +29,7 @@ This document covers the full agent lifecycle: spawn, operation, and completion.
     ...
   },
   "token": "<signed-EdDSA-JWT>",   // M18: starts with "ey", 3 dot-separated parts; claims: sub=agent_id, task_id, spawned_by, exp. G10: when spawned on a real process, also embeds wl_pid, wl_hostname, wl_compute_target, wl_stack_hash. M19.4: container-spawned agents additionally embed wl_container_id, wl_image_hash. Verify via /.well-known/jwks.json. Legacy UUID tokens still accepted from POST /api/v1/agents.
-  "worktree_path": "/path/to/worktree",
+  "worktree_path": "/path/to/worktree",   // the agent's actual working directory — the jj workspace ({repo}/workspaces/{agent_id}) when jj provisioning succeeded, else the plain-git worktree ({repo}/worktrees/{branch}); equals the path listed by GET /repos/:id/worktrees
   "clone_url": "http://localhost:3000/git/project/repo.git",
   "branch": "feat/my-feature",
   "jj_change_id": "<jj-change-id-or-null>",   // present when jj is initialized in worktree (best-effort)
