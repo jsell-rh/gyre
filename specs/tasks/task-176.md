@@ -67,45 +67,40 @@ Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read 
 
 The §9 preview loop runs through the shared EditorSplit (task-172) in
 `context="meta-spec"`, mounted by the MetaSpecs workspace view: State 1
-target-spec checkbox selector + Preview/Publish, State 2 locked editor
-showing the pending-changes diff vs the published registry prompt
-(LCS line diff, `+`/`-` markers, add/remove summary) + per-spec ◐/✓
-progress + Cancel Preview, State 3 Architecture/Code Diff tabs rendering
-the real PreviewResponse fields, Iterate returning to editing with
-results retained, and Publish → registry PUT resetting approval to
-Pending.
+target-spec checkbox selector + Preview/Publish; State 2 locked editor
+showing the pending-changes diff vs the published registry prompt (LCS
+line diff, `+`/`-` markers, add/remove summary) + per-spec ◐/✓ progress
++ Cancel Preview (button and Esc); State 3 Architecture (default)/Code
+Diff tabs rendering the real PreviewResponse fields; Iterate returns to
+editing with results retained; Publish → registry PUT resets approval
+to Pending and refreshes the diff baseline so a post-publish preview
+never diffs against a stale pre-publish prompt.
 
-### What shipped
+### This round (rebase repair)
 
-- **eee86b3e** — `web/src/lib/lineDiff.js` (LCS line diff +
-  `diffSummary`), `EditorSplit.svelte`'s `baselineContent` prop (locked
-  left pane renders the draft-vs-published-baseline diff during a
-  preview, falling back to the verbatim draft when there is no baseline
-  or no change), and `MetaSpecs.svelte`'s `selectedMsBaseline` tracking
-  (set on load and on persona switch).
-- **6e3bb1a7 (review repair 8f06c912)** — `publish()` in
-  `MetaSpecs.svelte` now refreshes `selectedMsBaseline` (and the cached
-  `wsMetaSpecs` entry's prompt) after a successful publish, so the §9
-  publish → iterate → preview loop's locked pane never diffs against a
-  stale pre-publish baseline: a preview with no post-publish edits
-  shows the verbatim draft (no pending markers), and post-publish edits
-  mark only the newly added lines as pending. Also restored
-  `specs/coverage/system/ui-layout.md` row 37's Depth to 2 (H2 heading,
-  matching bootstrap-coverage.sh derivation) and the file header to
-  **Coverage: 2/38**.
+- Resolved the in-progress merge of base `cfeefbda` (merge commit
+  `5b0e5b491`): the only conflict, `specs/coverage/SUMMARY.md`, was
+  resolved by mechanical regeneration via
+  `scripts/update-coverage-summary.sh` from the already-merged coverage
+  files — no hand-edited rows. The task-176 `ui-layout.md` row 37
+  (implemented) and the base's newer coverage rows are both preserved.
+- Verified the implementation survived the merge intact: the merged
+  tree equals the candidate for every task-176 file
+  (`EditorSplit.svelte`, `MetaSpecs.svelte`, `lineDiff.js`, tests); the
+  base's `api.js`/`meta_specs.rs` additions (spec-lifecycle settings,
+  spec bindings) combined cleanly and the preview endpoints
+  (`POST/GET /workspaces/:id/meta-specs/preview`) are present in the
+  merged server source.
 
 ### Test evidence
 
 `npm ci`, then `./node_modules/.bin/vitest run src/__tests__/MetaSpecs.test.js
 src/__tests__/EditorSplit.test.js src/__tests__/lineDiff.test.js` →
-**165/165 passed** (163 prior + 2 new regression tests). Both new
-tests were verified to fail on the unfixed tree — reproducing the
-review's probe exactly: a publish-then-preview with no edits showed a
-phantom `'+1 -0'` pending line, and a single post-publish edit line
-showed `'+2 -0'` — and pass with the fix. `web/dist` rebuilt from this
-source. Evidence retained at
-`/tmp/stage/review-evidence/task-176-test-evidence.md` (repair-round
-evidence appended).
+**165/165 passed** on the merged tree; full web suite
+`./node_modules/.bin/vitest run` → **105 files, 2098 passed | 41
+skipped**. `cargo check -p gyre-server` → clean (7m40s). Locale keys
+used by the §9 components verified present in the auto-merged
+`en.json`.
 
 ### Scope boundary
 
