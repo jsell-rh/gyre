@@ -130,10 +130,7 @@ impl WhereBuilder {
     /// `column IN (?, …)` for one facet's values — the OR-within-facet
     /// composition (§Faceted Filtering).
     fn push_in_clause(&mut self, column: &str, values: &[String]) {
-        let placeholders: Vec<String> = values
-            .iter()
-            .map(|v| self.push_text(v.clone()))
-            .collect();
+        let placeholders: Vec<String> = values.iter().map(|v| self.push_text(v.clone())).collect();
         self.push_clause(format!("{column} IN ({})", placeholders.join(", ")));
     }
 
@@ -180,10 +177,8 @@ fn build_filters(query: &SearchQuery, w: &mut WhereBuilder) -> bool {
             // whitelisted by the parser, so no user text is interpolated.
             FacetFilter::Metadata { key, values } => {
                 let path = w.push_text(format!("$.{key}"));
-                let placeholders: Vec<String> = values
-                    .iter()
-                    .map(|v| w.push_text(v.clone()))
-                    .collect();
+                let placeholders: Vec<String> =
+                    values.iter().map(|v| w.push_text(v.clone())).collect();
                 w.push_clause(format!(
                     "json_extract(metadata, {path}) IN ({})",
                     placeholders.join(", ")
@@ -681,7 +676,12 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(SearchQuery::parse("jwt".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
 
@@ -730,7 +730,12 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(SearchQuery::parse("alpha beta".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("alpha beta".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         // Default AND-of-terms: both terms must appear.
@@ -739,14 +744,24 @@ mod tests {
 
         // Empty query matches nothing (parity with prior adapter behavior).
         let empty = storage
-            .search(SearchQuery::parse("".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(empty.is_empty());
 
         // Syntax-hostile query must return cleanly, not a MATCH parse error.
         let hostile = storage
-            .search(SearchQuery::parse("\"unterminated ( AND -^:*".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("\"unterminated ( AND -^:*".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         // Every token is quoted into a literal phrase — bare AND/OR/NEAR can
@@ -764,7 +779,12 @@ mod tests {
             .await
             .unwrap();
         let results = storage
-            .search(SearchQuery::parse("running".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("running".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "porter stemmer must match runs~running");
@@ -781,14 +801,24 @@ mod tests {
         storage.index(d2).await.unwrap();
 
         let by_type = storage
-            .search(SearchQuery::parse("widget".to_string()).with_entity_type(Some("mr".to_string())).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("widget".to_string())
+                    .with_entity_type(Some("mr".to_string()))
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(by_type.len(), 1);
         assert_eq!(by_type[0].entity_id, "m1");
 
         let by_ws = storage
-            .search(SearchQuery::parse("widget".to_string()).with_entity_type(None).with_workspace_id(Some("ws-a".to_string())).with_limit(10))
+            .search(
+                SearchQuery::parse("widget".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(Some("ws-a".to_string()))
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(by_ws.len(), 1);
@@ -796,7 +826,12 @@ mod tests {
 
         // Combined filter excluding everything.
         let none = storage
-            .search(SearchQuery::parse("widget".to_string()).with_entity_type(Some("task".to_string())).with_workspace_id(Some("ws-b".to_string())).with_limit(10))
+            .search(
+                SearchQuery::parse("widget".to_string())
+                    .with_entity_type(Some("task".to_string()))
+                    .with_workspace_id(Some("ws-b".to_string()))
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(none.is_empty());
@@ -929,7 +964,12 @@ mod tests {
         // Some(query): the query's filtered match set. limit=1 must be IGNORED
         // — facet counts describe the full filtered set, not the result page.
         let filtered = storage
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(1)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(1),
+            ))
             .await
             .unwrap();
         assert_eq!(filtered["type"]["task"], 2);
@@ -939,7 +979,12 @@ mod tests {
 
         // entity_type filter restricts the aggregation set.
         let mr_only = storage
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(Some("mr".to_string())).with_workspace_id(None).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(Some("mr".to_string()))
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(mr_only["type"]["mr"], 1);
@@ -950,7 +995,12 @@ mod tests {
 
         // workspace_id filter restricts the aggregation set.
         let ws_only = storage
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(None).with_workspace_id(Some("ws-a".to_string())).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(Some("ws-a".to_string()))
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(ws_only["type"]["task"], 1);
@@ -958,7 +1008,12 @@ mod tests {
 
         // No matching term at all: empty aggregation, not whole-index.
         let none = storage
-            .facet_counts(Some(SearchQuery::parse("zzz-nonexistent".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("zzz-nonexistent".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert!(
@@ -981,13 +1036,23 @@ mod tests {
             .unwrap();
 
         let stale = storage
-            .search(SearchQuery::parse("obsolete".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("obsolete".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(stale.is_empty(), "upsert left a stale row");
 
         let fresh = storage
-            .search(SearchQuery::parse("fresh".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("fresh".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(fresh.len(), 1);
@@ -995,7 +1060,12 @@ mod tests {
 
         storage.delete("task", "t1").await.unwrap();
         let gone = storage
-            .search(SearchQuery::parse("fresh".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("fresh".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(gone.is_empty());
@@ -1014,7 +1084,12 @@ mod tests {
             .unwrap();
         assert_eq!(storage.reindex_all().await.unwrap(), 2);
         let after = storage
-            .search(SearchQuery::parse("termone".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("termone".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(after.is_empty(), "index must be cleared");
@@ -1034,7 +1109,12 @@ mod tests {
         }
         let storage = SqliteStorage::new(file.path().to_str().unwrap()).unwrap();
         let results = storage
-            .search(SearchQuery::parse("orchestrator".to_string()).with_entity_type(Some("agent".to_string())).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("orchestrator".to_string())
+                    .with_entity_type(Some("agent".to_string()))
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -1059,12 +1139,22 @@ mod tests {
         let (_f, storage) = tmp_storage();
         // "merge queue" adjacent.
         storage
-            .index(doc("task", "adjacent", "Queue rules", "the merge queue ordering rules"))
+            .index(doc(
+                "task",
+                "adjacent",
+                "Queue rules",
+                "the merge queue ordering rules",
+            ))
             .await
             .unwrap();
         // Both words present, never adjacent — a phrase query must not match.
         storage
-            .index(doc("task", "scattered", "Merge separately", "merge the queue then ordering"))
+            .index(doc(
+                "task",
+                "scattered",
+                "Merge separately",
+                "merge the queue then ordering",
+            ))
             .await
             .unwrap();
 
@@ -1074,14 +1164,19 @@ mod tests {
 
         // Unquoted, the same words are independent AND terms — both match.
         let ids = q(&storage, "merge queue").await;
-        assert_eq!(ids.len(), 2, "unquoted terms must match independently: {ids:?}");
+        assert_eq!(
+            ids.len(),
+            2,
+            "unquoted terms must match independently: {ids:?}"
+        );
     }
 
     #[tokio::test]
     async fn facet_filters_and_or_within_compose() {
         let (_f, storage) = tmp_storage();
         let mut t1 = doc("task", "t1", "jwt one", "jwt rotation one");
-        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         t1.facets.insert("priority".to_string(), "high".to_string());
         let mut t2 = doc("task", "t2", "jwt two", "jwt rotation two");
         t2.facets.insert("status".to_string(), "done".to_string());
@@ -1104,7 +1199,10 @@ mod tests {
         ids.sort();
         assert_eq!(ids, ["m1", "t1", "t2", "t3"]);
         // AND across facets: type + metadata-facet (status) filter.
-        assert_eq!(q(&storage, "jwt type:task status:in_progress").await, ["t1"]);
+        assert_eq!(
+            q(&storage, "jwt type:task status:in_progress").await,
+            ["t1"]
+        );
         // Metadata facet alone.
         let mut ids = q(&storage, "jwt priority:high").await;
         ids.sort();
@@ -1152,7 +1250,8 @@ mod tests {
     async fn facet_only_query_browses_without_text() {
         let (_f, storage) = tmp_storage();
         let mut t1 = doc("task", "t1", "Widget plan", "widget roadmap");
-        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         let mut m1 = doc("mr", "m1", "Widget merge", "widget refactor");
         m1.facets.insert("status".to_string(), "open".to_string());
         storage.index(t1).await.unwrap();
@@ -1172,7 +1271,8 @@ mod tests {
     async fn facet_counts_honor_query_language_filters() {
         let (_f, storage) = tmp_storage();
         let mut t1 = doc("task", "t1", "jwt one", "jwt rotation one");
-        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         let mut t2 = doc("task", "t2", "jwt two", "jwt rotation two");
         t2.facets.insert("status".to_string(), "done".to_string());
         storage.index(t1).await.unwrap();
@@ -1180,16 +1280,23 @@ mod tests {
 
         // Text + facet filter: aggregation over the filtered match set only.
         let counts = storage
-            .facet_counts(Some(SearchQuery::parse("jwt status:in_progress".to_string()).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt status:in_progress".to_string()).with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(counts["type"]["task"], 1);
         assert_eq!(counts["status"]["in_progress"], 1);
-        assert!(!counts["status"].contains_key("done"), "filtered-out doc counted: {counts:?}");
+        assert!(
+            !counts["status"].contains_key("done"),
+            "filtered-out doc counted: {counts:?}"
+        );
 
         // Facet-only query: aggregation set is the facet's browse set.
         let counts = storage
-            .facet_counts(Some(SearchQuery::parse("status:done".to_string()).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("status:done".to_string()).with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(counts["status"]["done"], 1);
@@ -1197,6 +1304,9 @@ mod tests {
 
         // The reserved timestamp key is storage, never an aggregated facet.
         let all = storage.facet_counts(None).await.unwrap();
-        assert!(!all.contains_key("updated_at"), "timestamp key leaked into facets: {all:?}");
+        assert!(
+            !all.contains_key("updated_at"),
+            "timestamp key leaked into facets: {all:?}"
+        );
     }
 }

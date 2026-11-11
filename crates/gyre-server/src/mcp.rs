@@ -3689,8 +3689,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Merge queue rules"), "phrase match missing: {text}");
-        assert!(!text.contains("Merge separately"), "non-phrase match leaked: {text}");
+        assert!(
+            text.contains("Merge queue rules"),
+            "phrase match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge separately"),
+            "non-phrase match leaked: {text}"
+        );
 
         // Facet filter narrows; a type: facet overrides the entity_type arg.
         let (status, json) = mcp_post(
@@ -3711,8 +3717,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Merge separately"), "facet-filtered match missing: {text}");
-        assert!(!text.contains("Merge queue rules"), "facet excluded doc leaked: {text}");
+        assert!(
+            text.contains("Merge separately"),
+            "facet-filtered match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge queue rules"),
+            "facet excluded doc leaked: {text}"
+        );
     }
 
     #[tokio::test]

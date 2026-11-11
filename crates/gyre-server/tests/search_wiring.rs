@@ -104,7 +104,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     // is false — this query returns empty under a mem regression.
     let stemmed = state
         .search
-        .search(SearchQuery::parse("running".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+        .search(
+            SearchQuery::parse("running".to_string())
+                .with_entity_type(None)
+                .with_workspace_id(None)
+                .with_limit(10),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -287,7 +292,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     let state2 = build_state(TOKEN, "http://localhost:3000", None);
     let persisted = state2
         .search
-        .search(SearchQuery::parse("quokka".to_string()).with_entity_type(Some("task".to_string())).with_workspace_id(None).with_limit(10))
+        .search(
+            SearchQuery::parse("quokka".to_string())
+                .with_entity_type(Some("task".to_string()))
+                .with_workspace_id(None)
+                .with_limit(10),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -310,7 +320,12 @@ async fn sqlite_url_wires_fts5_search_port() {
         .await
         .unwrap();
     // A 40-day-old doc: since: must exclude it, absolute bounds must not.
-    let mut ancient = doc("task", "ancient", "Ancient survey", "ancient relic keyword census");
+    let mut ancient = doc(
+        "task",
+        "ancient",
+        "Ancient survey",
+        "ancient relic keyword census",
+    );
     ancient.updated_at = Some(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -324,9 +339,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     // adjacent token pair count~quokka in the census task's body only).
     let resp = call(&app, "GET", "/api/v1/search?q=%22count%20quokkas%22", None).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let titles: Vec<&str> = body["results"]
         .as_array()
         .unwrap()
@@ -341,16 +359,28 @@ async fn sqlite_url_wires_fts5_search_port() {
 
     // Unquoted, the same words are independent terms — both quokka docs match.
     let resp = call(&app, "GET", "/api/v1/search?q=count%20quokkas", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
 
     // Facet filter narrows: the API-created task carries status=backlog.
-    let resp = call(&app, "GET", "/api/v1/search?q=quokkas%20status:backlog", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=quokkas%20status:backlog",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
     assert_eq!(body["results"][0]["title"], "Quokka census");
     // facet_counts aggregates the facet-filtered match set.
@@ -358,16 +388,22 @@ async fn sqlite_url_wires_fts5_search_port() {
 
     // Non-matching facet value: nothing, not everything.
     let resp = call(&app, "GET", "/api/v1/search?q=quokkas%20status:open", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["total"].as_u64(), Some(0), "{body}");
 
     // Facet-only query (no text) browses the filtered set.
     let resp = call(&app, "GET", "/api/v1/search?q=status:backlog", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
     assert_eq!(body["results"][0]["title"], "Quokka census");
 
@@ -380,9 +416,12 @@ async fn sqlite_url_wires_fts5_search_port() {
         None,
     )
     .await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         body["results"].as_array().map(Vec::len),
         Some(2),
@@ -391,26 +430,51 @@ async fn sqlite_url_wires_fts5_search_port() {
 
     // since: excludes the 40-day-old doc; absolute bounds do not.
     let resp = call(&app, "GET", "/api/v1/search?q=census%20since:7d", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let titles: Vec<&str> = body["results"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| r["title"].as_str().unwrap())
         .collect();
-    assert_eq!(titles, ["Quokka census"], "since:7d must exclude the old doc: {body}");
+    assert_eq!(
+        titles,
+        ["Quokka census"],
+        "since:7d must exclude the old doc: {body}"
+    );
 
-    let resp = call(&app, "GET", "/api/v1/search?q=census%20since:2000-01-01", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20since:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
 
-    let resp = call(&app, "GET", "/api/v1/search?q=census%20until:2000-01-01", None).await;
-    let body: serde_json::Value =
-        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20until:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(body["total"].as_u64(), Some(0), "{body}");
 }

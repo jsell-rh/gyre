@@ -166,8 +166,11 @@ impl SearchPort for MemSearchAdapter {
         let time = parsed.time_bounds(now_secs());
         let filters = parsed.facet_filters();
         let has_text = parsed.has_text();
-        let has_filter =
-            query.entity_type.is_some() || query.workspace_id.is_some() || !filters.is_empty() || time.since.is_some() || time.until.is_some();
+        let has_filter = query.entity_type.is_some()
+            || query.workspace_id.is_some()
+            || !filters.is_empty()
+            || time.since.is_some()
+            || time.until.is_some();
         // Nothing to match and nothing to filter on: no results (parity with
         // the SQL adapters — an empty query never means "everything").
         if !has_text && !has_filter {
@@ -184,7 +187,13 @@ impl SearchPort for MemSearchAdapter {
         let mut results: Vec<(f64, SearchResult)> = docs
             .iter()
             .filter(|doc| {
-                doc_matches_filters(doc, &query.entity_type, &query.workspace_id, &filters, &time)
+                doc_matches_filters(
+                    doc,
+                    &query.entity_type,
+                    &query.workspace_id,
+                    &filters,
+                    &time,
+                )
             })
             .filter_map(|doc| {
                 let score = if has_text {
@@ -343,7 +352,12 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery::parse("ABAC".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("ABAC".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
 
@@ -374,7 +388,12 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery::parse("authentication".to_string()).with_entity_type(Some("task".to_string())).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("authentication".to_string())
+                    .with_entity_type(Some("task".to_string()))
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
 
@@ -391,7 +410,12 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery::parse("JWT".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("JWT".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
 
@@ -412,7 +436,12 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery::parse("QUEUE".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("QUEUE".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
 
@@ -437,7 +466,12 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery::parse("new".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("new".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -445,7 +479,12 @@ mod tests {
 
         // Old body should be gone.
         let old_results = adapter
-            .search(SearchQuery::parse("old".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10))
+            .search(
+                SearchQuery::parse("old".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            )
             .await
             .unwrap();
         assert!(old_results.is_empty());
@@ -535,7 +574,12 @@ mod tests {
 
         // limit=1 must be ignored — counts describe the full filtered set.
         let filtered = adapter
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(1)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(1),
+            ))
             .await
             .unwrap();
         assert_eq!(filtered["type"]["task"], 2);
@@ -544,7 +588,12 @@ mod tests {
 
         // entity_type filter restricts the aggregation.
         let mr_only = adapter
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(Some("mr".to_string())).with_workspace_id(None).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(Some("mr".to_string()))
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(mr_only["type"]["mr"], 1);
@@ -552,7 +601,12 @@ mod tests {
 
         // workspace filter restricts the aggregation.
         let ws_only = adapter
-            .facet_counts(Some(SearchQuery::parse("jwt".to_string()).with_entity_type(None).with_workspace_id(Some("ws-a".to_string())).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(Some("ws-a".to_string()))
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(ws_only["type"]["task"], 1);
@@ -560,7 +614,12 @@ mod tests {
 
         // Non-matching query aggregates nothing.
         let none = adapter
-            .facet_counts(Some(SearchQuery::parse("zzz-nonexistent".to_string()).with_entity_type(None).with_workspace_id(None).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("zzz-nonexistent".to_string())
+                    .with_entity_type(None)
+                    .with_workspace_id(None)
+                    .with_limit(10),
+            ))
             .await
             .unwrap();
         assert!(none.is_empty());
@@ -585,11 +644,27 @@ mod tests {
     async fn query_language_phrases_and_facets() {
         let adapter = MemSearchAdapter::new();
 
-        let mut adjacent = make_doc("task", "adjacent", "Queue rules", "the merge queue ordering rules");
-        adjacent.facets.insert("status".to_string(), "in_progress".to_string());
-        adjacent.facets.insert("priority".to_string(), "high".to_string());
-        let mut scattered = make_doc("task", "scattered", "Merge separately", "merge the queue then ordering");
-        scattered.facets.insert("status".to_string(), "done".to_string());
+        let mut adjacent = make_doc(
+            "task",
+            "adjacent",
+            "Queue rules",
+            "the merge queue ordering rules",
+        );
+        adjacent
+            .facets
+            .insert("status".to_string(), "in_progress".to_string());
+        adjacent
+            .facets
+            .insert("priority".to_string(), "high".to_string());
+        let mut scattered = make_doc(
+            "task",
+            "scattered",
+            "Merge separately",
+            "merge the queue then ordering",
+        );
+        scattered
+            .facets
+            .insert("status".to_string(), "done".to_string());
         let mut mr = make_doc("mr", "mr1", "Widget merge", "widget merge queue backport");
         mr.facets.insert("status".to_string(), "open".to_string());
         mr.repo_id = Some("gyre-server".to_string());
@@ -602,10 +677,19 @@ mod tests {
         // Quoted phrase: exact substring, not individual terms.
         assert_eq!(q(&adapter, "\"merge queue\" ordering").await, ["adjacent"]);
         // Unquoted: AND of independent terms — every doc with both words.
-        assert_eq!(q(&adapter, "merge queue").await, ["adjacent", "mr1", "scattered"]);
+        assert_eq!(
+            q(&adapter, "merge queue").await,
+            ["adjacent", "mr1", "scattered"]
+        );
         // Facet filters narrow; AND across facets, OR within a facet.
-        assert_eq!(q(&adapter, "merge queue type:task").await, ["adjacent", "scattered"]);
-        assert_eq!(q(&adapter, "merge queue status:in_progress").await, ["adjacent"]);
+        assert_eq!(
+            q(&adapter, "merge queue type:task").await,
+            ["adjacent", "scattered"]
+        );
+        assert_eq!(
+            q(&adapter, "merge queue status:in_progress").await,
+            ["adjacent"]
+        );
         assert_eq!(q(&adapter, "type:task type:mr status:open").await, ["mr1"]);
         assert_eq!(q(&adapter, "widget workspace:ws-a").await, ["wsdoc"]);
         assert_eq!(q(&adapter, "widget repo:gyre-server").await, ["mr1"]);
@@ -630,10 +714,16 @@ mod tests {
         adapter.index(recent).await.unwrap();
 
         assert_eq!(q(&adapter, "keyword since:7d").await, ["fresh"]);
-        assert_eq!(q(&adapter, "keyword since:2000-01-01").await, ["ancient", "fresh"]);
+        assert_eq!(
+            q(&adapter, "keyword since:2000-01-01").await,
+            ["ancient", "fresh"]
+        );
         assert!(q(&adapter, "keyword since:2999-01-01").await.is_empty());
         assert_eq!(q(&adapter, "keyword until:7d").await, ["ancient"]);
-        assert_eq!(q(&adapter, "keyword until:2999-01-01").await, ["ancient", "fresh"]);
+        assert_eq!(
+            q(&adapter, "keyword until:2999-01-01").await,
+            ["ancient", "fresh"]
+        );
         assert!(q(&adapter, "keyword until:2000-01-01").await.is_empty());
     }
 
@@ -641,7 +731,8 @@ mod tests {
     async fn query_language_facet_counts_and_malformed_queries() {
         let adapter = MemSearchAdapter::new();
         let mut t1 = make_doc("task", "t1", "jwt one", "jwt rotation one");
-        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         let mut t2 = make_doc("task", "t2", "jwt two", "jwt rotation two");
         t2.facets.insert("status".to_string(), "done".to_string());
         adapter.index(t1).await.unwrap();
@@ -649,7 +740,9 @@ mod tests {
 
         // Aggregation honors facet filters in the query.
         let counts = adapter
-            .facet_counts(Some(SearchQuery::parse("jwt status:in_progress".to_string()).with_limit(10)))
+            .facet_counts(Some(
+                SearchQuery::parse("jwt status:in_progress".to_string()).with_limit(10),
+            ))
             .await
             .unwrap();
         assert_eq!(counts["type"]["task"], 1);

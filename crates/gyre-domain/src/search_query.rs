@@ -30,8 +30,18 @@ use std::collections::HashMap;
 /// plain search terms, so no unvetted key ever reaches a storage backend's
 /// facet-filter path.
 pub const FACET_KEYS: [&str; 12] = [
-    "type", "workspace", "repo", "status", "priority", "assigned", "author", "label", "approval",
-    "scope", "since", "until",
+    "type",
+    "workspace",
+    "repo",
+    "status",
+    "priority",
+    "assigned",
+    "author",
+    "label",
+    "approval",
+    "scope",
+    "since",
+    "until",
 ];
 
 /// Facet keys that filter the document timestamp rather than the metadata
@@ -512,7 +522,10 @@ mod tests {
     #[test]
     fn time_bounds_first_value_wins() {
         let pq = parse_query("since:7d since:30d");
-        assert_eq!(pq.time_bounds(1_800_000_000).since, Some(1_800_000_000 - 7 * 86_400));
+        assert_eq!(
+            pq.time_bounds(1_800_000_000).since,
+            Some(1_800_000_000 - 7 * 86_400)
+        );
     }
 
     #[test]

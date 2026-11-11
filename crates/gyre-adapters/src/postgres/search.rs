@@ -284,18 +284,15 @@ fn build_filters(query: &SearchQuery, w: &mut PgWhereBuilder) -> (bool, String) 
     for filter in parsed.facet_filters() {
         match filter {
             FacetFilter::EntityType(values) => {
-                let placeholders: Vec<String> =
-                    values.iter().map(|v| w.text(v.clone())).collect();
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
                 w.push(format!("s.entity_type IN ({})", placeholders.join(", ")));
             }
             FacetFilter::Workspace(values) => {
-                let placeholders: Vec<String> =
-                    values.iter().map(|v| w.text(v.clone())).collect();
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
                 w.push(format!("s.workspace_id IN ({})", placeholders.join(", ")));
             }
             FacetFilter::Repo(values) => {
-                let placeholders: Vec<String> =
-                    values.iter().map(|v| w.text(v.clone())).collect();
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
                 w.push(format!("s.repo_id IN ({})", placeholders.join(", ")));
             }
             // Metadata facets (status/priority/label/…) live in the JSONB
@@ -303,8 +300,7 @@ fn build_filters(query: &SearchQuery, w: &mut PgWhereBuilder) -> (bool, String) 
             // whitelisted by the parser, so no user text is interpolated.
             FacetFilter::Metadata { key, values } => {
                 let key_p = w.text(key);
-                let placeholders: Vec<String> =
-                    values.iter().map(|v| w.text(v.clone())).collect();
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
                 w.push(format!(
                     "s.metadata->>{key_p} IN ({})",
                     placeholders.join(", ")
@@ -625,7 +621,10 @@ mod tests {
         // FROM references $1; every WHERE placeholder must number after it.
         assert!(from_tsq.contains("$1::text"), "from: {from_tsq}");
         let sql = w.sql();
-        assert!(!sql.contains("$1::"), "WHERE reuses the FROM parameter: {sql}");
+        assert!(
+            !sql.contains("$1::"),
+            "WHERE reuses the FROM parameter: {sql}"
+        );
         assert!(sql.contains("$2::text"));
     }
 }
