@@ -240,6 +240,17 @@
   });
 
   /**
+   * Whether the right pane renders the Architecture/Code Diff tabs.
+   * Always true in the spec context and in §9 State 3; in the meta-spec
+   * editing state only when §9 Iterate retained the last preview result —
+   * "Iterate: returns to State 1 with the preview results still visible"
+   * (ui-layout.md §9) — so the tabs stack below the target-spec selector.
+   */
+  const showResultTabs = $derived(
+    context !== 'meta-spec' || previewState !== 'editing' || Boolean(metaPreviewResult),
+  );
+
+  /**
    * Start the thorough preview: the server commits the draft to a throwaway
    * branch, agents implement, and the resulting graph delta + code diff are
    * reported (ui-layout.md §2 Editor Split right panel).
@@ -936,11 +947,30 @@
           <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
         </div>
       {/if}
-      {#if context === 'meta-spec' && previewState === 'editing'}
+      {#if previewState === 'preview_running'}
+        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
+        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
+          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
+          <div class="progress-list">
+            {#each previewProgress as item (item.path)}
+              <div class="progress-item">
+                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
+                <span class="progress-path">{item.path}</span>
+                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
+              </div>
+            {/each}
+          </div>
+          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
+          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
+        </div>
+      {:else}
+        {#if context === 'meta-spec' && previewState === 'editing'}
         <!-- Target spec selector (§9 State 1) — always shown in the meta-spec
              editing state, with an empty-state message when the workspace
-             has no non-meta specs. -->
-        <div class="spec-selector" data-testid="spec-selector">
+             has no non-meta specs. After §9 Iterate the last preview result
+             is retained, so the selector stacks above the Architecture /
+             Code Diff tabs (showResultTabs) instead of replacing them. -->
+        <div class="spec-selector" class:stacked={Boolean(metaPreviewResult)} data-testid="spec-selector">
           <div class="spec-selector-header">
             <span class="pane-title">{$t('editor_split.preview_against')}</span>
             <div class="spec-selector-shortcuts">
@@ -963,24 +993,10 @@
             {/each}
           </div>
         </div>
-      {:else if previewState === 'preview_running'}
-        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
-        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
-          <div class="progress-list">
-            {#each previewProgress as item (item.path)}
-              <div class="progress-item">
-                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
-                <span class="progress-path">{item.path}</span>
-                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
-              </div>
-            {/each}
-          </div>
-          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
-          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
-        </div>
-      {:else}
-        <!-- Preview Complete / spec context: Architecture (default) + Code Diff tabs -->
+        {/if}
+        {#if showResultTabs}
+        <!-- Preview Complete / spec context, or the retained results after
+             §9 Iterate: Architecture (default) + Code Diff tabs -->
         <div class="pane-header">
           <div class="impact-tabs" role="tablist" aria-label={$t('editor_split.impact_view_aria')}>
             <button
@@ -1072,9 +1088,11 @@
                   <SpecDiffView diff={file.diff} />
                 </div>
               {/each}
-            {:else if context === 'meta-spec' && previewState === 'preview_complete'}
+            {:else if context === 'meta-spec' && metaPreviewResult}
               <!-- Meta-spec previews report per-spec completion; the endpoint
-                   produces no line-level diff, so list the spec statuses. -->
+                   produces no line-level diff, so list the spec statuses.
+                   Bound to metaPreviewResult (not previewState) so the list
+                   survives §9 Iterate back into the editing state. -->
               {#if metaPreviewResult?.specs?.length}
                 <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
                   {#each metaPreviewResult.specs as s (s.path)}
@@ -1094,6 +1112,7 @@
               <p class="code-diff-empty">{$t('editor_split.run_preview_for_diff')}</p>
             {/if}
           </div>
+        {/if}
         {/if}
       {/if}
     </div>
@@ -1729,6 +1748,14 @@
   }
 
   .spec-check-item:hover { background: var(--color-surface-elevated); }
+
+  /* §9 Iterate: with a retained preview result the selector stacks above
+     the Architecture/Code Diff tabs instead of taking the whole pane. */
+  .spec-selector.stacked {
+    flex: 0 1 auto;
+    max-height: 40%;
+    border-bottom: 1px solid var(--color-border);
+  }
 
   .empty-specs {
     margin: 0;

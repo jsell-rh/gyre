@@ -579,6 +579,72 @@ describe('EditorSplit', () => {
     }
   }, 20000);
 
+  it('meta-spec Iterate returns to editing with the selector AND the last preview results still visible (§9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      // Real PreviewResponse / PreviewStatusResponse shapes (meta_specs.rs).
+      const blast = {
+        affected_workspaces: [{ id: 'ws-1' }],
+        affected_repos: [
+          { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
+        ],
+        affected_workspace_count: 1,
+      };
+      const structural = { scope: 'workspace', affected_spec_count: 1 };
+      api.previewPersona.mockResolvedValueOnce({
+        preview_id: 'pv-iter-1',
+        state: 'running',
+        specs: [{ path: 'specs/payment/retry.md', status: 'running' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      api.previewPersonaStatus.mockResolvedValue({
+        preview_id: 'pv-iter-1',
+        state: 'complete',
+        specs: [{ path: 'specs/payment/retry.md', status: 'complete' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          specPath: 'persona/backend-dev',
+          targetSpecs: [{ path: 'specs/payment/retry.md' }],
+        },
+      });
+      await fireEvent.click(await screen.findByText('Select All'));
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // State 3: tabs render the server-computed impact; no selector yet.
+      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
+      expect(screen.queryByTestId('spec-selector')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('iterate-btn'));
+
+      // Back to State 1: editor editable, Preview button back, selector
+      // visible again for the next iteration...
+      await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+      expect(screen.getByTestId('preview-btn')).toBeTruthy();
+      const selector = screen.getByTestId('spec-selector');
+      expect(selector.textContent).toContain('specs/payment/retry.md');
+      // ...AND the last preview results remain visible (§9 Iterate):
+      // Architecture impact + Code Diff tab with the per-spec statuses.
+      expect(screen.getByTestId('tab-architecture')).toBeTruthy();
+      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
+      expect(screen.getByTestId('meta-impact').textContent).toContain('repo-9');
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const statuses = await screen.findByTestId('meta-spec-statuses');
+      expect(statuses.textContent).toContain('specs/payment/retry.md');
+      expect(statuses.textContent).toContain('complete');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
   it('a thoroughPreview rejection (real deployments: 404 — no server route) returns to editing with an error banner, never a fabricated complete state', async () => {
     const { api } = await import('../lib/api.js');
     // POST /repos/:id/graph/thorough-preview has no server route, so every
