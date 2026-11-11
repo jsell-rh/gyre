@@ -72,6 +72,53 @@ pub enum ConditionValue {
 
 Conditions support dynamic references (e.g., `"$resource.repo_id"`) for comparing subject attributes against resource attributes at evaluation time.
 
+## Implementation Plan
+
+1. **Audit existing ABAC implementation:**
+   - `gyre-server/src/abac.rs` and `abac_middleware.rs` — check current approach
+   - `gyre-domain/src/policy.rs` — existing Policy entity
+   - `gyre-server/src/policy_engine.rs` — existing evaluation
+   - Determine gap between current implementation and spec
+
+2. **Domain types in `gyre-domain`:**
+   - Update/create `Policy` struct to match spec exactly
+   - Add `PolicyScope` enum (Tenant, Workspace, Repo)
+   - Add `PolicyEffect` enum (Allow, Deny)
+   - Add `Condition` struct with `ConditionOp` and `ConditionValue`
+   - Add `immutable` field for non-overridable deny policies
+
+3. **Attribute model:**
+   - Define `SubjectAttributes` struct collecting all subject attributes
+   - Define `ResourceAttributes` struct
+   - Define `EnvironmentAttributes` struct
+   - Attribute extraction from auth context (JWT claims, memberships)
+
+4. **Port trait in `gyre-ports`:**
+   - `PolicyRepository` — CRUD + list by scope + find applicable policies for a scope chain
+
+5. **SQLite adapter:**
+   - Migration for `policies` table matching spec schema
+   - Conditions stored as JSON array
+   - Actions and resource_types stored as JSON arrays
+   - Implement PolicyRepository
+
+6. **Dynamic references in conditions:**
+   - Support `$resource.repo_id` syntax in condition values
+   - Resolve at evaluation time by substituting from resource attributes
+
+## Acceptance Criteria
+
+- [ ] Policy entity matches spec (all fields including immutable, scope, conditions)
+- [ ] PolicyScope: Tenant, Workspace, Repo
+- [ ] PolicyEffect: Allow, Deny
+- [ ] Condition with all 8 ConditionOp variants
+- [ ] ConditionValue: String, StringList, Number, Bool
+- [ ] Dynamic references (`$resource.*`, `$subject.*`) resolve at evaluation time
+- [ ] PolicyRepository port trait with CRUD + scope-based listing
+- [ ] SQLite adapter with migration
+- [ ] Subject/Resource/Environment attribute extraction from auth context
+- [ ] `cargo test --all` passes
+
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Core Concepts through §Policy Examples. Existing ABAC: `gyre-server/src/abac.rs`, `abac_middleware.rs`, `policy_engine.rs`. Existing Policy domain: `gyre-domain/src/policy.rs`. Existing Policy port: `gyre-ports/src/policy.rs`. Existing Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Auth context: `gyre-server/src/auth.rs` for how subject attributes are extracted from JWTs. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
@@ -137,7 +184,7 @@ routes, formatting/lint findings, and parent MR/agent id leakage on
 merge-requests/agents child routes — each with killing tests named in the
 commit messages and per-row evidence in the coverage file.
 
-### Rebase repair (this round, merge c8d076fe7)
+### Rebase repair (merge c8d076fe7)
 
 Merged new base cfeefbd (task-091 HSI, incl. the task-134 gate-agent
 route allow-list) into the branch; no behavior change to either side:
@@ -154,12 +201,20 @@ route allow-list) into the branch; no behavior change to either side:
   the `persona`/`attestation_level` claim fields task-128 added to
   `AgentJwtClaims`.
 
-Probes at this head: `cargo check --workspace` clean; `cargo check -p
-gyre-server --all-targets` clean; `scripts/check-arch.sh` and
-`scripts/check-abac-route-registry.sh` pass. Per the build-budget rule the
-server test binaries run in the independent verifier — the relevant suites
-are the `abac_middleware` tests (worker repo-scope claims:
-`agent_jwt_claims_reach_live_evaluation`, persona/attestation:
-`persona_attestation_*`, gate-agent allow-list:
-`review_scoped_token_*`/`validation_scoped_token_*`) and
-`tests/task134_review_probe.rs`.
+### Contract repair (this round)
+
+The executor restored the assigned (protected) task document into the
+checkout — the previous round had dropped the `Implementation Plan` and
+`Acceptance Criteria` sections from it. No production code changed this
+round; the assigned task text is preserved verbatim and only the
+frontmatter (`progress`, `commits`) and this `## Shipped` section are
+(re-)applied on top. Probes at this head: `cargo check -p gyre-domain -p
+gyre-ports -p gyre-adapters` and `cargo check -p gyre-server` clean;
+`cargo test -p gyre-domain policy` 6/6 passed;
+`scripts/check-task-commit-attribution.sh` passes with the restored
+commits list. Per the build-budget rule the server test binaries run in
+the independent verifier — the relevant suites are the `abac_middleware`
+tests (worker repo-scope claims: `agent_jwt_claims_reach_live_evaluation`,
+persona/attestation: `persona_attestation_*`, gate-agent allow-list:
+`review_scoped_token_*`/`validation_scoped_token_*`), the
+`policy_engine` spec-example tests, and `tests/task134_review_probe.rs`.
