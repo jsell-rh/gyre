@@ -111,29 +111,24 @@ meta-specs, no repo context) rendered the State 1 chat permanently disabled:
   meta_spec_id})`. The dead `specsAssistGlobal` 404 stand-in was removed
   from `api.js`.
 
-### This round: merge integration with base cba416b46 (task-118)
+### This round: round-6 re-verification on the merged tree
 
-- Resolved the in-progress merge of assignment base
-  cba416b46a73d3568f745d7b4eae49a0700a90a6 (task-118 Ralph loop /
-  agent-runtime backend) as commit 61d5c50fb. The only content conflict
-  was `specs/coverage/SUMMARY.md`: resolved by keeping the base side's
-  newer agent-runtime.md row (16/16, from task-118's merged coverage
-  file) and this task's ui-layout.md row (36 assigned / 2 implemented,
-  §9 implemented), with the TOTAL recomputed mechanically — resolution
-  verified byte-identical to `scripts/update-coverage-summary.sh`
-  output. `specs/coverage/system/ui-layout.md` merged keeping this
-  task's implemented §9 row.
-- §9 source integrity on the merged tree confirmed: `locked-diff` ×18 in
+The source at HEAD (c41e24a76) is byte-identical to the previously vetted
+round-4 candidate (5b1d85405) for web/src and unchanged for the server; this
+round re-verified it in full rather than changing it:
+
+- §9 source markers confirmed at HEAD: `locked-diff` x19 in
   `web/src/lib/EditorSplit.svelte`, `metaSpecsAssist` in
-  `web/src/lib/api.js`, `lineDiff.js`/`lineDiff.test.js` present,
+  `web/src/lib/api.js` (line 677), `pending_changes` in
+  `web/src/locales/en.json`, `lineDiff.js`/`lineDiff.test.js` present,
   `showResultTabs` Iterate retention in place; server route
-  `POST /workspaces/:id/meta-specs/assist` → `assist_meta_spec`
-  registered in `api/mod.rs` with its ABAC resolver entry.
-- Focused frontend tests on the merged tree: EditorSplit + MetaSpecs +
-  lineDiff — 169 passed. `SKIP_WEB_BUILD=1 cargo check -p gyre-server` —
-  clean (7m12s). Evidence:
-  `/tmp/stage/review-evidence/task-176-round5-frontend.log`,
-  `task-176-round5-cargo-check.log`.
+  `POST /workspaces/:id/meta-specs/assist` -> `assist_meta_spec`
+  registered in `api/mod.rs` with its ABAC resolver entry
+  (`abac_middleware.rs`).
+- Focused frontend tests (locked deps, `npm ci`): EditorSplit + MetaSpecs +
+  lineDiff — 169 passed / 169, exit 0.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean (7m07s).
+- Evidence: `/tmp/stage/review-evidence/task176-r6-verification.log`.
 - Server tests for the verifier: `cargo test -p gyre-server specs_assist`
   (covers `assist_meta_spec_*`); `cargo test -p gyre-server ralph_loop
   signal_chain e2e_ralph_loop` (merged task-118 surfaces sharing
