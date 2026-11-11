@@ -318,7 +318,9 @@ pub fn render_protocol_prompt() -> String {
     out.push_str("- Read your task via the MCP tools, implement the change, run focused tests.\n");
     out.push_str("- Commit with conventional commit messages; push your branch.\n");
     out.push_str("- Signal completion with `agent.complete` — never leave work uncommitted.\n");
-    out.push_str("- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n");
+    out.push_str(
+        "- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n",
+    );
     out.push_str("## MCP tools\n");
     out.push_str("- `gyre_task_read` / task context: your task, spec ref, acceptance criteria.\n");
     out.push_str("- `gyre_agent_complete`: create the completion MR and start review.\n");
@@ -327,10 +329,14 @@ pub fn render_protocol_prompt() -> String {
     out.push_str("## Heartbeat\n");
     out.push_str("- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead.\n\n");
     out.push_str("## Escalation\n");
-    out.push_str("- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n");
+    out.push_str(
+        "- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n",
+    );
     out.push_str("  a decision requires human judgment, or infrastructure blocks progress.\n\n");
     out.push_str("## Completion\n");
-    out.push_str("- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n");
+    out.push_str(
+        "- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n",
+    );
     out
 }
 

@@ -3128,10 +3128,9 @@ fn prompt_result(description: &str, text: String) -> Value {
 async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
     match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
         Some(record) => match record.rendered_prompt {
-            Some(rendered) => prompt_result(
-                "Assembled meta-spec prompt set (pinned at spawn)",
-                rendered,
-            ),
+            Some(rendered) => {
+                prompt_result("Assembled meta-spec prompt set (pinned at spawn)", rendered)
+            }
             None => prompt_result(
                 "Assembled meta-spec prompt set (pinned at spawn)",
                 format!(
@@ -3155,12 +3154,16 @@ async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
 /// failure messages from previous iterations, and inbox messages.
 async fn prompt_context(state: &AppState, auth: &AuthenticatedAgent) -> Value {
     let mut text = String::from("# Task Context\n\n");
-    let agent = state.agents.find_by_id(&Id::new(auth.agent_id.clone())).await.ok().flatten();
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten();
     let Some(agent) = agent else {
         return prompt_result(
             "Task context",
-            "No agent record found for this identity — task context is agent-scoped."
-                .to_string(),
+            "No agent record found for this identity — task context is agent-scoped.".to_string(),
         );
     };
 
@@ -3227,12 +3230,16 @@ async fn prompt_context(state: &AppState, auth: &AuthenticatedAgent) -> Value {
 /// `system://constraints` — budget limits and operational parameters.
 async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Value {
     let mut text = String::from("# Constraints\n\n");
-    let agent = state.agents.find_by_id(&Id::new(auth.agent_id.clone())).await.ok().flatten();
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten();
     let Some(agent) = agent else {
         return prompt_result(
             "Budget limits and operational parameters",
-            "No agent record found for this identity — constraints are agent-scoped."
-                .to_string(),
+            "No agent record found for this identity — constraints are agent-scoped.".to_string(),
         );
     };
 
@@ -3258,15 +3265,24 @@ async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Valu
         (Some(config), usage) => {
             text.push_str(&format!(
                 "- max_tokens_per_day: {}\n",
-                config.max_tokens_per_day.map(|v| v.to_string()).unwrap_or_else(|| "unlimited".into())
+                config
+                    .max_tokens_per_day
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unlimited".into())
             ));
             text.push_str(&format!(
                 "- max_cost_per_day: {}\n",
-                config.max_cost_per_day.map(|v| format!("${v:.4}")).unwrap_or_else(|| "unlimited".into())
+                config
+                    .max_cost_per_day
+                    .map(|v| format!("${v:.4}"))
+                    .unwrap_or_else(|| "unlimited".into())
             ));
             text.push_str(&format!(
                 "- max_concurrent_agents: {}\n",
-                config.max_concurrent_agents.map(|v| v.to_string()).unwrap_or_else(|| "unlimited".into())
+                config
+                    .max_concurrent_agents
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unlimited".into())
             ));
             if let Some(u) = usage {
                 text.push_str(&format!(
@@ -3294,7 +3310,9 @@ async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Valu
             }
         }
     }
-    text.push_str(&format!("- Max iterations (Ralph loop): {max_iterations}\n"));
+    text.push_str(&format!(
+        "- Max iterations (Ralph loop): {max_iterations}\n"
+    ));
 
     prompt_result("Budget limits and operational parameters", text)
 }
@@ -4011,7 +4029,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let prompts = json["result"]["prompts"].as_array().unwrap();
-        let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
         for expected in [
             "system://persona",
             "system://protocol",
@@ -4057,11 +4078,22 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let text = json["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
         assert!(text.contains("Ralph loop rules"), "protocol prompt: {text}");
-        assert!(text.contains("heartbeat"), "protocol must cover heartbeat: {text}");
-        assert!(text.contains("agent.complete"), "protocol must cover completion: {text}");
-        assert!(text.contains("escalate"), "protocol must cover escalation: {text}");
+        assert!(
+            text.contains("heartbeat"),
+            "protocol must cover heartbeat: {text}"
+        );
+        assert!(
+            text.contains("agent.complete"),
+            "protocol must cover completion: {text}"
+        );
+        assert!(
+            text.contains("escalate"),
+            "protocol must cover escalation: {text}"
+        );
     }
 
     #[tokio::test]
@@ -4077,7 +4109,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let text = json["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
         assert!(
             text.contains("No meta-spec prompt set"),
             "an agent with no assembled set must get a truthful answer, got: {text}"

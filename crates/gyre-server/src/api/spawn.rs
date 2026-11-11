@@ -411,10 +411,10 @@ pub(crate) async fn spawn_agent_core(
     // M22.2 / agent-runtime.md §4: Budget enforcement — check workspace
     // concurrent-agent and daily limits, then the repo-level budget
     // override (inherits the workspace limit when unset).
-    super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
+    super::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
         .await
         .map_err(ApiError::TooManyRequests)?;
-    super::budget::check_repo_spawn_budget(&state, &repo)
+    super::budget::check_repo_spawn_budget(state, &repo)
         .await
         .map_err(ApiError::TooManyRequests)?;
 

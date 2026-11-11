@@ -393,8 +393,7 @@ pub async fn admin_kill_agent(
     // agent-runtime.md §4 What's Tracked). `agent.status` still holds the
     // pre-transition status: only an Active agent held a slot.
     if agent.status == AgentStatus::Active {
-        crate::api::budget::decrement_active_agents(&state, &agent.workspace_id.to_string())
-            .await;
+        crate::api::budget::decrement_active_agents(&state, &agent.workspace_id.to_string()).await;
     }
     crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 

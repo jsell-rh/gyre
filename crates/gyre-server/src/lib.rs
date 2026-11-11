@@ -261,8 +261,7 @@ pub struct AppState {
     /// process-local synchronization — a restart drops the timer, and the
     /// next usage report re-enters enforcement because usage is still at
     /// or above the limit. Not durable state; deliberately not port-backed.
-    pub budget_grace_in_progress:
-        Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    pub budget_grace_in_progress: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Product analytics event store.
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.

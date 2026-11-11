@@ -14,12 +14,9 @@ use crate::schema::repositories;
 /// A corrupt budget document must not take the repo read path down: the
 /// repo then inherits the workspace limit — the coarser ceiling still
 /// bounds spending, and the warn names the row for repair.
-fn parse_budget_json(
-    json: &Option<String>,
-    repo_id: &str,
-) -> Option<gyre_domain::BudgetConfig> {
-    json.as_deref().and_then(|json| {
-        match serde_json::from_str::<gyre_domain::BudgetConfig>(json) {
+fn parse_budget_json(json: &Option<String>, repo_id: &str) -> Option<gyre_domain::BudgetConfig> {
+    json.as_deref().and_then(
+        |json| match serde_json::from_str::<gyre_domain::BudgetConfig>(json) {
             Ok(b) => Some(b),
             Err(e) => {
                 tracing::warn!(
@@ -29,8 +26,8 @@ fn parse_budget_json(
                 );
                 None
             }
-        }
-    })
+        },
+    )
 }
 
 /// Serialize a repo budget override for the `budget_json` column.

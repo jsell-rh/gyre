@@ -316,7 +316,8 @@ pub async fn update_repo(
                 )));
             }
         }
-        if let (Some(repo_max), Some(ws_max)) = (budget.max_cost_per_day, ws_budget.max_cost_per_day)
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_cost_per_day, ws_budget.max_cost_per_day)
         {
             if repo_max > ws_max {
                 return Err(ApiError::InvalidInput(format!(
@@ -324,18 +325,20 @@ pub async fn update_repo(
                 )));
             }
         }
-        if let (Some(repo_max), Some(ws_max)) =
-            (budget.max_concurrent_agents, ws_budget.max_concurrent_agents)
-        {
+        if let (Some(repo_max), Some(ws_max)) = (
+            budget.max_concurrent_agents,
+            ws_budget.max_concurrent_agents,
+        ) {
             if repo_max > ws_max {
                 return Err(ApiError::InvalidInput(format!(
                     "repo max_concurrent_agents ({repo_max}) exceeds the workspace limit ({ws_max})"
                 )));
             }
         }
-        if let (Some(repo_max), Some(ws_max)) =
-            (budget.max_agent_lifetime_secs, ws_budget.max_agent_lifetime_secs)
-        {
+        if let (Some(repo_max), Some(ws_max)) = (
+            budget.max_agent_lifetime_secs,
+            ws_budget.max_agent_lifetime_secs,
+        ) {
             if repo_max > ws_max {
                 return Err(ApiError::InvalidInput(format!(
                     "repo max_agent_lifetime_secs ({repo_max}) exceeds the workspace limit ({ws_max})"
