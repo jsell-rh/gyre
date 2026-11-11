@@ -1012,6 +1012,8 @@ pub(crate) async fn spawn_agent_core(
             resolved_ct_entity: resolved_ct_entity.clone(),
             jj_workspace_path: jj_workspace_path.clone(),
             plain_worktree_path: worktree_path.clone(),
+            persona: persona.clone(),
+            is_interrogation,
         },
     )
     .await;
@@ -1152,6 +1154,16 @@ pub(crate) struct AgentLaunchCtx {
     pub jj_workspace_path: String,
     /// Plain-git worktree path (fallback working dir).
     pub plain_worktree_path: String,
+    /// The persona bound to the agent row at spawn time
+    /// (platform-model.md §4.3): its `system_prompt` is injected as
+    /// GYRE_PROMPT_PERSONA. `None` when the agent has no bound persona —
+    /// an unbound worker has no persona prompt, which is honest, not a
+    /// gap. The re-spawn path resolves the same binding so first spawn
+    /// and re-spawn never drift.
+    pub persona: Option<gyre_domain::Persona>,
+    /// Interrogation agents have no worktree; their context prompt
+    /// records that honestly instead of citing one.
+    pub is_interrogation: bool,
 }
 
 /// Outcome of one compute-target launch attempt.
@@ -1224,21 +1236,21 @@ pub(crate) async fn launch_agent_process(
         tenant_id: workspace.as_ref().map(|ws| ws.tenant_id.clone()),
         workspace_id: repo.workspace_id.clone(),
         repo_id: Some(repo.id.clone()),
-        task_id: Some(Id::new(&req.task_id)),
+        task_id: Some(task.id.clone()),
         agent_id: Some(agent.id.clone()),
     };
     let prompt_protocol = crate::api::prompts::protocol_prompt().to_string();
     let prompt_context = crate::api::prompts::context_prompt_for_spawn(
-        &task,
-        &repo,
-        if is_interrogation {
+        task,
+        repo,
+        if ctx.is_interrogation {
             None
         } else {
-            Some((&req.branch, &worktree_path))
+            Some((req_branch.as_str(), worktree_path.as_str()))
         },
     );
     let prompt_constraints = crate::api::prompts::constraints_prompt(state, &prompt_scope).await;
-    let prompt_persona = persona.as_ref().map(|p| p.system_prompt.clone());
+    let prompt_persona = ctx.persona.as_ref().map(|p| p.system_prompt.clone());
 
     {
         // Docker requires an absolute working directory path. Canonicalize
