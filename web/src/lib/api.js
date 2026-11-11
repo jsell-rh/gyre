@@ -107,6 +107,7 @@ export const api = {
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
   mergeRequest: (id) => request(`/merge-requests/${id}`),
+  mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
   submitComment: (mrId, data) =>
@@ -139,6 +140,15 @@ export const api = {
     }),
   cancelQueueEntry: (id) =>
     request(`/merge-queue/${id}`, { method: 'DELETE' }),
+  pauseMergeQueue: (repoId, reason) =>
+    request(`/repos/${repoId}/queue/pause`, {
+      method: 'PUT',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+  resumeMergeQueue: (repoId) =>
+    request(`/repos/${repoId}/queue/resume`, {
+      method: 'PUT',
+    }),
   // jj VCS operations
   jjInit: (repoId) =>
     request(`/repos/${repoId}/jj/init`, { method: 'POST' }),
