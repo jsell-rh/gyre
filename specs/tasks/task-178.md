@@ -2,11 +2,11 @@
 title: "Navigable Architecture — canvas layout, interaction model, lens selector"
 spec_ref: "system-explorer.md §1"
 depends_on: [task-170, task-177]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §1. The Navigable Architecture"
   - "ui-navigation.md §Tab: Architecture (Moldable Development Surface)"
-commits: ["618f415278d033b796295fc49ad55947513c81bd", "197222ba96f83d640031cd04880e3f157deb3323"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -87,58 +87,3 @@ From ui-navigation.md §3 Architecture tab:
 ## Agent Instructions
 
 Read `system-explorer.md` §1 "The Navigable Architecture" and `ui-navigation.md` §3 "Tab: Architecture" for the full feature set. The existing `ExplorerView.svelte`, `ExplorerFilterPanel.svelte`, and `EvaluativeOverlay.svelte` components are starting points. Check what's already built in these components before adding features. The saved views CRUD endpoints may already be registered — check `mod.rs` for `/explorer-views`. The lens selector should use checkboxes (not a dropdown) per the spec. The Evaluative lens requires data from `GET /repos/:id/graph/risks` — verify this endpoint exists.
-
-## Shipped
-
-The Navigable Architecture surface (system-explorer.md §1 + ui-navigation.md
-§3 "Tab: Architecture") on the task-065/170/177 canvas substrate: zoomable/
-pannable canvas with semantic zoom (boundaries at default zoom, interfaces on
-drill-in), spec-coverage green/amber/red coloring, complexity/churn node
-sizing, click → detail panel, double-click → C4 drill-down, `/` search,
-timeline scrubber, right-click context menu (View spec / provenance /
-history / code), lens checkbox group (Structural locked on, Evaluative
-additive overlay fetching `GET /repos/:id/graph/risks`, Observable future),
-view-selector dropdown (built-in → saved → Generate view…), 200px collapsible
-in-view filter panel, Ask input (GeneratedViewChat → POST
-/workspaces/:id/explorer-views/generate), and the View Spec Editor. The
-review-repair round (filter reaches tree-group containers, mutation-proof
-draw tests, REST saved views, Observable a11y) is commit 618f415.
-
-### This round: rebase onto base cfeefbda (repair 71d93b0c)
-
-Rebased the task branch onto the updated base (task-091 head), which
-introduced the flow-view / workspace-graph line of work in
-ExplorerCanvas.svelte and ExplorerView.svelte. Resolved both conflicts:
-
-- `web/src/lib/ExplorerCanvas.svelte` — both sides added import blocks at
-  the same site; kept both (flow-particles/particle-layer from the base,
-  filter-categories from task-178). Verified every symbol from both blocks
-  is used in the merged draw loop: the particle overlay (ParticleLayer,
-  particlesAtTime, trailSegments, …) and the tree-group filter
-  classification (nodeCategory, nodeMatchesConcept) coexist on the same
-  canvas.
-- `docs/ui.md` — merged the task-178 dropdown view-selector description
-  with the base's richer ui-layout.md §5 Level-1 (workspace-scope graph)
-  wording; the "view-selector tabs" phrasing from the old base was dropped
-  because it contradicts the dropdown the code ships.
-
-Merge commit: 177990c31.
-
-### Test evidence
-
-Focused web probes only (npm ci with locked versions; full suites, server
-builds, and web/dist rebuilds are owned by independent verification):
-
-- Batch 1 — 12 files, 274 tests passed: ExplorerCanvas, ExplorerCanvas.flow,
-  ExplorerCanvas.evaluative-lens, filter-categories, ExplorerDefaultViews,
-  ExplorerViewLensUrl, ExplorerViewNavigableArchitecture, ExplorerViewScope,
-  ExplorerViewWorkspaceGraph, FlowCanvas, flow-particles, particle-layer.
-- Batch 2 — 12 files, 119 tests passed: canvas-filters, ExplorerViewDrillUrl,
-  ExplorerCanvasDrillDown, ExplorerCanvasTrace, ExplorerCanvasLiveness,
-  ExplorerViewLivenessWiring, ExplorerGeneratedViews, ExplorerViewViewEvents,
-  ExplorerViewShortcuts, ExplorerViewLayoutRenderers, flow-layout,
-  ExplorerCanvas-performance.
-
-Total 393/393 passing, covering both sides of the merge. Evidence and
-command output retained in /tmp/stage/review-evidence (controller artifact
-path, not a repo path).

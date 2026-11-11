@@ -1,0 +1,36 @@
+# Review — task-178 (Navigable Architecture — canvas layout, interaction model, lens selector)
+
+Spec: `specs/system/system-explorer.md` §1 "The Navigable Architecture" + `specs/system/ui-navigation.md` §3 "Tab: Architecture (Moldable Development Surface)".
+Assignment: base `cfeefbda975211a6ac24a17e5920be6f8b23008b`, candidate `98011eb52b69871c53cd55120c40556d9b1c0653` (branch `pipeline/task-178/4141bc4d00e640a18c089af4daea2f4c-2`, rebase-repair lineage over the prior verified attempt `b0675bad`).
+Commits under review (frontmatter): `197222ba` (feat), `618f415` (review repair: tree-group filter reach, mutation-proof draw tests, REST saved views, Observable a11y); plus docs/process commits.
+Verdict: **approved** — the source implementation satisfies every acceptance criterion with real behavior and non-self-confirming tests; no findings.
+
+## Probes (evidence: /tmp/stage/review-evidence/, summary in probe-summary.md)
+
+- `cd web && npm ci` → exit 0.
+- Focused: `npx vitest run ExplorerViewNavigableArchitecture.test.js filter-categories.test.js ExplorerCanvas.test.js` → exit 0, 184/184.
+- Full web suite `npm test` → exit 0, 106 files, 2103 passed | 41 skipped.
+- **Mutation probe** (temporary, restored; `git diff` empty afterwards): removed the draw-loop in-view-filter skip block from `ExplorerCanvas.svelte` → the navigable-architecture suite fails 2 tests (boundary-filter and concept-focus draw assertions). The filter feature is load-bearing in the tests, not mirrored logic.
+- `scripts/check-task-commit-attribution.sh` in a temp worktree **at the candidate commit** → OK (both product commits recorded; the main-checkout FAIL is the executor's unstaged reset of `specs/tasks/task-178.md` to assignment state, not candidate content).
+- `check-arch.sh`, `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh` → OK (candidate is frontend-only: `web/src`, `web/tests`, `docs/ui.md`, task file).
+- `npm run build` → exit 0; the freshly built bundle contains `lens-checkbox-structural` and `explorer-filter-panel` (dist then restored to committed state).
+
+## Acceptance criteria — verified
+
+- **Canvas boundaries/interfaces at default zoom; spec-coverage coloring; complexity/churn sizing; timeline; `/` search; double-click C4 drill; right-click context menu** — pre-existing substrate from tasks 065/170/177, confirmed present at base and untouched negatively by the diff (semantic-zoom block, `spec_confidence` color paths, complexity sizing, `contextMenu` with View spec / View provenance / View history / Open in code all in `ExplorerCanvas.svelte`).
+- **Lens selector as checkbox group** — `ExplorerCanvas.svelte` toolbar: Structural `checked disabled` (always-on base layer), Evaluative toggle checkbox driving `lens`/`onLensChange`, Observable locked-off `role=checkbox` wrapper that is keyboard-operable and surfaces the telemetry notice banner. Exactly the ui-navigation.md §3 shape (checkboxes, not a dropdown). Tested (including Enter-key on Observable).
+- **Evaluative lens fetches and overlays risk data** — `ExplorerView.svelte` `$effect` fetches `api.repoGraphRisks(repoId)` (`GET /repos/:id/graph/risks`, route registered at base) when the Evaluative lens is active in boundary view; results land in `riskByNode`, `EvaluativeOverlay` gains the Risk metric button when data exists, and `getNodeMetricValue('risk')` feeds the generic heat path. Auto-metric reset respects `userExplicitlySelectedMetric`, so an explicit Risk selection is not clobbered by trace data. Test asserts both the fetch call and the rendered metric.
+- **View selector (built-in → saved → Generate view…)** — dropdown replacing the old tab strip; saved views are loaded via REST on open (`api.explorerViews` + `api.savedViews`, merged by id, workspace ViewSpecs translated via `viewSpecToViewQuery`) *and* via the chat socket's `views` message — the socket is not the only delivery path. Selecting a saved view applies its query to the canvas (annotation title asserted). "Generate view…" focuses the GeneratedViewChat/Ask input (pre-existing `POST /workspaces/:id/explorer-views/generate` surface from task-089).
+- **In-view filter panel (200px, collapsible)** — `ExplorerFilterPanel.svelte`: `width: 200px` left panel inside the Architecture content area (not the app sidebar), toggled by the filter icon in the control bar; category checkboxes (Boundaries/Interfaces/Data/Specs with live counts) + Concepts section (discovered via `filter-categories.js`). Enforcement reaches the draw loop: leaf nodes via `hiddenNodeIds`, synthetic tree-group containers via their own node classification (the task-178 repair — without it the Boundaries checkbox was a no-op at default zoom), edges touching hidden nodes, and the minimap. Mutation-verified.
+- **View spec editor** — "Edit view spec" code-icon button opens a collapsible JSON editor prefilled with the active/synthesized spec; Apply validates JSON, translates via `viewSpecToViewQuery`, and re-renders (annotation title asserted); invalid JSON shows an inline `role=alert` error and applies nothing (asserted).
+- **Tests pass** — full suite green (above).
+
+## Test-inflation check
+
+None found. The navigable-architecture suite drives the real component tree (mocked transport only) and asserts against **actual canvas draw output** — per-frame `fillText` capture bucketed by `setTransform`, with round-trip (re-check restores the nodes) assertions so absence claims can't pass on a stalled canvas. The unit suite for `filter-categories.js` covers classification, stopword/single-occurrence exclusion, cap/sort, and hidden-set semantics. The mutation probe confirms the tests kill a disabled filter.
+
+## Observations (non-blocking, recorded for the verifier/publication stage)
+
+- **Committed `web/dist/` does not contain the task-178 surface** (no `lens-checkbox-*`, `explorer-filter-panel`, `view-select-btn`, `view-spec-editor` in `web/dist/assets/*.js`; committed dist is byte-identical to `origin/main`'s). This is the established pipeline state at review time, not a candidate defect: dist regeneration is a controller-stage artifact — every task's `build(web): regenerate verified assets (task-NNN)` commit (135 on main) lands on the `pipeline/verified/...` branch after the attempt tip, including this task's own prior round (`06d94c7af` on `origin/pipeline/verified/9f363615...-1`, added on top of `b0675bad`, not part of any candidate). The review-stage instructions likewise treat the committed bundle as older by construction. **Verifier must:** rebuild web (`npm run build` — verified exit 0 here) and regenerate/attribute the verified-assets commit as it did for the prior round, so the `SKIP_WEB_BUILD=1` Rust-only deployment path ships the checkbox lens group, filter panel, view-selector dropdown, and view spec editor.
+- **Playwright e2e visual spec not run here** (needs a `gyre-server` build; cold server builds belong to the verifier). The candidate updated `web/tests/e2e/explorer-visual.spec.js` (lens button → checkbox selector) and regenerated the three toolbar snapshots. **Verifier must run:** `cd web && npx playwright test tests/e2e/explorer-visual.spec.js` (webServer: `cargo run -p gyre-server`, `GYRE_PORT=2222`, `GYRE_AUTH_TOKEN=e2e-test-token`).
+- No Rust/server tests are in scope: the candidate diff touches no `crates/` files.
