@@ -822,20 +822,69 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         if let Err(reason) =
             crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string()).await
         {
-            if !task.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL) {
-                let mut flagged = task.clone();
-                flagged.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
-                flagged.updated_at = now;
-                let _ = state.tasks.update(&flagged).await;
-                tracing::info!(
-                    task_id = %task.id,
-                    workspace_id = %repo.workspace_id,
-                    reason = %reason,
-                    "signal-chain: budget exhausted; task flagged and left Backlog"
-                );
+            // Flag the FRESHEST row (same stale-snapshot defense as the
+            // claim below): persisting the snapshot taken at
+            // list_by_status could revert a concurrent status change
+            // (e.g. a cancellation) while merely adding the label.
+            match state.tasks.find_by_id(&task.id).await {
+                Ok(Some(current))
+                    if current.status == TaskStatus::Backlog
+                        && !current.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL) =>
+                {
+                    let mut flagged = current;
+                    flagged.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
+                    flagged.updated_at = now;
+                    let _ = state.tasks.update(&flagged).await;
+                    tracing::info!(
+                        task_id = %task.id,
+                        workspace_id = %repo.workspace_id,
+                        reason = %reason,
+                        "signal-chain: budget exhausted; task flagged and left Backlog"
+                    );
+                }
+                _ => {}
             }
             continue;
         }
+
+        // Defense in depth against a concurrent API mutation inside this
+        // cycle's await window: the `task` snapshot predates the repo /
+        // ordering / budget awaits above, and claiming by whole-row
+        // persisting that snapshot would silently overwrite a task that
+        // was cancelled, completed, or edited in the meantime (the same
+        // re-read-after-lock defense the orchestrator loop applies before
+        // decomposition). Only a still-Backlog Implementation task may be
+        // claimed from the freshest row.
+        let task = match state.tasks.find_by_id(&task.id).await {
+            Ok(Some(current))
+                if current.status == TaskStatus::Backlog
+                    && current.task_type == Some(TaskType::Implementation) =>
+            {
+                current
+            }
+            Ok(Some(current)) => {
+                tracing::debug!(
+                    task_id = %task.id,
+                    task_status = ?current.status,
+                    "signal-chain: task changed during the spawn cycle; skipping"
+                );
+                continue;
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "signal-chain: task disappeared during the spawn cycle; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "signal-chain: task re-read before claim failed: {e}"
+                );
+                continue;
+            }
+        };
 
         // Claim: Backlog → InProgress so no concurrent cycle (or the 30 s
         // loop re-entering) can double-spawn this task. The background

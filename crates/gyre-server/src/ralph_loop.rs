@@ -79,7 +79,7 @@ pub async fn on_agent_mr_created(state: &Arc<AppState>, agent: &Agent, mr: &Merg
     }
     let mr_id = mr.id.clone();
     match crate::api::merge_queue::enqueue_core(state, &mr.id, 50).await {
-        Ok(_entry) => {
+        Ok((_entry, _created)) => {
             tracing::info!(
                 mr_id = %mr.id,
                 agent_id = %agent.id,
