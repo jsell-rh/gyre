@@ -83,25 +83,41 @@ in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
   blast radius with affected repos and pin reasons) and per-spec statuses
   from the throwaway-branch agent runs.
 - **Iterate** returns to State 1 with the selector restored AND the last
-  preview results still visible (Architecture/Code Diff tabs retained
-  below the height-capped selector).
+  preview results still visible (`showResultTabs`, fix 91fe1e86): the
+  Architecture/Code Diff tabs are retained below the height-capped selector.
 - **Publish** PUTs the edited prompt to the meta-spec registry, resets the
   spec's approval state to Pending, and refreshes the in-session diff
-  baseline so the next preview diffs against the newly published prompt.
+  baseline (fix 6e3bb1a) so the next preview diffs against the newly
+  published prompt.
 
 ### Test evidence
 
 - `npx vitest run src/__tests__/EditorSplit.test.js
-  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
-  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
+  src/__tests__/MetaSpecs.test.js` — 153 passed at HEAD e8782818 (log:
+  /tmp/stage/review-evidence/task-176-focused-tests.log).
 - The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
   shapes, runs the poll to completion, clicks Iterate, and asserts the
   selector AND the retained Architecture/Code Diff results stay visible.
-  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
-  that test, confirming it kills the prior round's real defect (Iterate
-  dropping results from the DOM).
+  Mutation probe re-run this round: reverting `showResultTabs` to the
+  pre-fix logic fails that test, restoring the fix passes it (log:
+  /tmp/stage/review-evidence/task-176-mutation-probe.log) — the test kills
+  the prior round's real defect (Iterate dropping results from the DOM).
 - Preview cancellation, state transitions, architecture delta display,
   and 404-rejection handling are covered in the same suites.
+
+### web/dist note (round-2 repair finding)
+
+The round-1/round-2 review flagged the committed web/dist as byte-identical
+to the assignment base. Under the current controller contract for this
+assignment, web/dist is a generated canonical asset: the executor restores
+it from the assignment base at checkpoint, and the pipeline publication
+stage (`pipeline-artifacts.py publish()`) rebuilds it remotely, creates the
+`build(web): regenerate verified assets (task-176)` commit itself, and
+appends that SHA to this file's `commits:` frontmatter automatically. No
+build(web) commit belongs on this branch; the full §9 UI (locked-diff,
+Iterate retention, publish-baseline refresh) is carried in web/src and is
+verified there (source-verification log:
+/tmp/stage/review-evidence/task-176-source-verification.log).
 
 ### Known limitation
 
@@ -111,13 +127,3 @@ API layer has no workspace-scoped assist endpoint (the repo-scoped
 `specs/assist` is what produces inline suggestion blocks). This is outside
 this task's acceptance criteria and blocked by the existing repo-scoped
 API surface; wiring a workspace-level assist is follow-up work.
-
-### Round note
-
-Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
-executor restored the assigned task document, so this round changes no
-production code — it re-verifies the existing fix (focused suites above,
-mutation probe) and re-records these notes. The acceptance criteria above
-are left in their assigned contract form; satisfaction is judged by the
-independent reviewer and deterministic gates, not by editing the protected
-text.
