@@ -2,7 +2,7 @@
 title: "Implement search query language (quoted phrases, faceted filtering)"
 spec_ref: "search.md §Query Language"
 depends_on: [task-153]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "search.md §Query Language"
   - "search.md §Simple Search"
@@ -162,18 +162,25 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
 - The three index-on-create sites (tasks/agents/MRs) pass the entity's
   real update time as `updated_at`.
 
-### Verification repair (this round)
+### CI repair (this round)
 
-Verification finding `1bcd3647914240fd8c081890366fec38` failed only
-`check-rustfmt-diff` — unformatted changed lines in the seven task-surface
-files. Fixed by a whitespace-only rustfmt pass (every reformat region falls
-inside lines this task changed vs base); all other gates in that run
-already passed (clippy changed-lines clean, arch, ABAC, migration
-portability, web build). Post-fix probes: `check-rustfmt-diff` exit 0,
+Durable finding `a9d572fb2408486490b71d2ac8bf0bcd` (candidate head
+`f061d0e02124a38ce8e4b02d05c9c76f93ada625`, PR #783, e2e run
+43036531271) failed only the e2e job's `Install mold linker` step:
+`apt-get install -y mold` exited 100 with `Temporary failure resolving
+'azure.archive.ubuntu.com'` — a GitHub-runner network/DNS failure, not a
+code defect (the same job's earlier steps and all other checks in the run
+reached the toolchain stage). No source change is warranted or made this
+round. Local probes at the identical head re-verified the behavior:
 `cargo test -p gyre-domain search_query` 25 passed, `cargo test -p
-gyre-adapters --lib search` 30 passed, `cargo check -p gyre-server` clean.
-Evidence: `/tmp/stage/review-evidence/` (rustfmt-diff.txt,
-rustfmt-diff-after.txt, focused-tests.txt).
+gyre-adapters search` 30 passed, `cargo check -p gyre-server` clean,
+`scripts/check-arch.sh` exit 0. Evidence: `/tmp/stage/review-evidence/`
+(probes.txt, domain-search-query.txt, adapters-search.txt,
+server-check.txt, arch-check.txt). The earlier rustfmt verification
+repair (finding `1bcd3647914240fd8c081890366fec38`) is already folded
+into the shipped commits above. The e2e job must be re-run by remote
+verification; the runner's apt mirror failure is infrastructure
+transient, not reproducible or fixable from the source tree.
 
 ### Test evidence
 
