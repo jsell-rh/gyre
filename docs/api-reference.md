@@ -159,7 +159,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
 | `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
 | `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
-| `GET` | `/api/v1/merge-queue/graph` | Return full merge queue DAG: `{nodes: [{mr_id, title, status, priority},...], edges: [{from, to},...]}` (TASK-100) |
+| `GET` | `/api/v1/merge-queue/graph` | Return full merge queue DAG: `{nodes: [{mr_id, title, status, priority, meta_spec_drift?: {produced_set_sha, current_set_sha}},...], edges: [{from, to},...]}`; `meta_spec_drift` surfaces a recorded §9 drift warning gate result per node, if any (TASK-100, task-159) |
 | `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees; POST: JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
@@ -202,6 +202,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/explorer-views/{view_id}` | Read / update / delete a named explorer view (S3.1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
+| `GET` | `/api/v1/workspaces/{id}/merge-policy` | Get workspace merge policy — `{require_current_meta_spec_set: bool}`; default false (warn only); 404 if workspace not found or not owned by caller's tenant (task-159, meta-spec-reconciliation §9) |
+| `PUT` | `/api/v1/workspaces/{id}/merge-policy` | Update workspace merge policy (partial): `{require_current_meta_spec_set?: bool}` — when true, meta-spec drift on an MR's provenance converts the merge-queue drift warning into a hard block; **Admin only** (task-159, meta-spec-reconciliation §9) |
 | `GET` | `/api/v1/workspaces/{id}/meta-specs/rollout-policy` | Get the workspace's reconciliation rollout policy — `{strategy: immediate\|rolling\|background, max_concurrent_agents, priority: high\|normal\|low, auto_merge}`; returns the spec default (rolling/normal/5/false) if unset (meta-spec-reconciliation §7) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-specs/rollout-policy` | Update the rollout policy; body: `{strategy, max_concurrent_agents?, priority?, auto_merge?}` (omitted fields keep current values); **Admin only**; 400 on unknown strategy/priority or `max_concurrent_agents < 1` (meta-spec-reconciliation §7) |
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
