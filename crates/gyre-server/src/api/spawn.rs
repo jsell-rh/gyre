@@ -2888,6 +2888,7 @@ mod tests {
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let _resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
@@ -2982,6 +2983,7 @@ mod tests {
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
@@ -3103,6 +3105,7 @@ mod tests {
                 loop_config: None,
                 agent_type: None,
                 conversation_sha: None,
+                persona: None,
             };
             let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
@@ -3170,6 +3173,7 @@ mod tests {
                 loop_config: None,
                 agent_type: None,
                 conversation_sha: None,
+                persona: None,
             };
             let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
@@ -3262,6 +3266,7 @@ mod tests {
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
