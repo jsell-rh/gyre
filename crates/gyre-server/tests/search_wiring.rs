@@ -57,6 +57,7 @@ fn doc(entity_type: &str, entity_id: &str, title: &str, body: &str) -> SearchDoc
         workspace_id: None,
         repo_id: None,
         facets: HashMap::new(),
+        updated_at: None,
     }
 }
 
@@ -103,12 +104,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     // is false — this query returns empty under a mem regression.
     let stemmed = state
         .search
-        .search(SearchQuery {
-            query: "running".to_string(),
-            entity_type: None,
-            workspace_id: None,
-            limit: 10,
-        })
+        .search(
+            SearchQuery::parse("running".to_string())
+                .with_entity_type(None)
+                .with_workspace_id(None)
+                .with_limit(10),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -291,12 +292,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     let state2 = build_state(TOKEN, "http://localhost:3000", None);
     let persisted = state2
         .search
-        .search(SearchQuery {
-            query: "quokka".to_string(),
-            entity_type: Some("task".to_string()),
-            workspace_id: None,
-            limit: 10,
-        })
+        .search(
+            SearchQuery::parse("quokka".to_string())
+                .with_entity_type(Some("task".to_string()))
+                .with_workspace_id(None)
+                .with_limit(10),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -305,4 +306,175 @@ async fn sqlite_url_wires_fts5_search_port() {
         "search index is not durable across build_state — mem-backed regression"
     );
     assert_eq!(persisted[0].title, "Quokka census");
+
+    // ── §Query Language (task-154): quoted phrases, facets, time bounds ────
+    // A doc with both words but never adjacent: a phrase query must not match.
+    state
+        .search
+        .index(doc(
+            "task",
+            "scattered",
+            "Quokka elsewhere",
+            "Count only the island quokkas every quarter.",
+        ))
+        .await
+        .unwrap();
+    // A 40-day-old doc: since: must exclude it, absolute bounds must not.
+    let mut ancient = doc(
+        "task",
+        "ancient",
+        "Ancient survey",
+        "ancient relic keyword census",
+    );
+    ancient.updated_at = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 40 * 86_400,
+    );
+    state.search.index(ancient).await.unwrap();
+
+    // Quoted phrase: exact adjacency ("count quokkas" porter-stems to the
+    // adjacent token pair count~quokka in the census task's body only).
+    let resp = call(&app, "GET", "/api/v1/search?q=%22count%20quokkas%22", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let titles: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Quokka census"],
+        "phrase query must require adjacency, not both words: {body}"
+    );
+
+    // Unquoted, the same words are independent terms — both quokka docs match.
+    let resp = call(&app, "GET", "/api/v1/search?q=count%20quokkas", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
+
+    // Facet filter narrows: the API-created task carries status=backlog.
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=quokkas%20status:backlog",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["results"][0]["title"], "Quokka census");
+    // facet_counts aggregates the facet-filtered match set.
+    assert_eq!(body["facet_counts"]["status"]["backlog"].as_u64(), Some(1));
+
+    // Non-matching facet value: nothing, not everything.
+    let resp = call(&app, "GET", "/api/v1/search?q=quokkas%20status:open", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["total"].as_u64(), Some(0), "{body}");
+
+    // Facet-only query (no text) browses the filtered set.
+    let resp = call(&app, "GET", "/api/v1/search?q=status:backlog", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["results"][0]["title"], "Quokka census");
+
+    // Query-string facet takes precedence over the entity_type param
+    // (the param is a fallback shortcut, §Query Language).
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=quokkas%20type:task&entity_type=mr",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body["results"].as_array().map(Vec::len),
+        Some(2),
+        "type: facet must override the entity_type param: {body}"
+    );
+
+    // since: excludes the 40-day-old doc; absolute bounds do not.
+    let resp = call(&app, "GET", "/api/v1/search?q=census%20since:7d", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let titles: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Quokka census"],
+        "since:7d must exclude the old doc: {body}"
+    );
+
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20since:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
+
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20until:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["total"].as_u64(), Some(0), "{body}");
 }
