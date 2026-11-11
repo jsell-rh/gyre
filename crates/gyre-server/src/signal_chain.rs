@@ -1075,6 +1075,7 @@ fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
 }
 
 /// Outcome of one worker spawn attempt.
+#[derive(Debug)]
 enum WorkerSpawnOutcome {
     /// The agent process launched on the compute target.
     Launched,
@@ -1134,7 +1135,9 @@ async fn try_spawn_worker(
     attempt: usize,
 ) -> WorkerSpawnOutcome {
     // Unique per attempt: a failed attempt's agent record keeps its name.
-    let id_prefix = &task.id.as_str()[..8.min(task.id.as_str().len())];
+    // Char-boundary-safe prefix (task ids are server-generated UUIDs, but
+    // the repo invariant forbids fixed byte-index slicing on principle).
+    let id_prefix: String = task.id.as_str().chars().take(8).collect();
     let name = format!("worker-{id_prefix}-a{attempt}");
     let branch = task
         .branch
@@ -1190,40 +1193,62 @@ async fn teardown_failed_spawn(state: &Arc<AppState>, agent_id: &Id, repo: &Repo
     crate::api::budget::decrement_active_agents(state, &repo.workspace_id.to_string()).await;
 }
 
-/// Release a worker claim (precondition blocked mid-flight). The domain
-/// has no InProgress→Backlog edge, so the claim routes through the
-/// Review→InProgress→Backlog path where possible; otherwise it stays for
-/// the 60 s stale re-claim (logged).
+/// Release a worker claim (precondition blocked mid-flight, after the
+/// claim was taken — e.g. workspace budget exhausted between the
+/// scheduler's pre-check and the spawn core's own check). The task
+/// returns to Backlog via `Task::release_claim` — the domain's ONLY
+/// InProgress→Backlog edge, reserved for this system-side release — so
+/// agent-runtime.md §1 Phase 4 step 3 ("task stays Backlog with a
+/// BudgetExhausted flag") holds on this path exactly as on the
+/// pre-check path, and the next cycle's Backlog scan re-spawns the
+/// task once the precondition clears.
 async fn release_claim(state: &Arc<AppState>, task: &Task, reason: &str) {
+    // Re-read the freshest row: the claim snapshot predates the spawn
+    // attempt's awaits, and releasing a task that was cancelled,
+    // completed, or otherwise mutated in the meantime must not
+    // overwrite that change.
     let Ok(Some(mut t)) = state.tasks.find_by_id(&task.id).await else {
         return;
     };
     if t.status != TaskStatus::InProgress {
+        tracing::debug!(
+            task_id = %task.id,
+            task_status = ?t.status,
+            reason,
+            "signal-chain: worker claim already changed; not releasing"
+        );
         return;
     }
-    let _ = t.transition_status(TaskStatus::Review);
-    let _ = t.transition_status(TaskStatus::InProgress);
-    if t.status == TaskStatus::InProgress {
-        let _ = t.transition_status(TaskStatus::Backlog);
-    }
-    if t.status != TaskStatus::Backlog {
-        tracing::warn!(
+    let now = crate::api::now_secs();
+    if let Err(e) = t.release_claim(now) {
+        tracing::error!(
             task_id = %task.id,
             reason,
-            "signal-chain: could not release worker claim to Backlog; stale re-claim will retry"
+            "signal-chain: could not release worker claim to Backlog: {e}"
         );
         return;
     }
     // Budget-blocked releases carry the flag so the observable marker
-    // matches the pre-check path.
-    if reason.starts_with("workspace budget") || reason.starts_with("tenant budget") {
-        if !t.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL) {
-            t.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
-        }
+    // matches the pre-check path (spawn core reasons: "workspace budget
+    // exceeded: ..." / "tenant budget exceeded: ...").
+    if (reason.starts_with("workspace budget") || reason.starts_with("tenant budget"))
+        && !t.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL)
+    {
+        t.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
     }
-    t.updated_at = crate::api::now_secs();
-    let _ = state.tasks.update(&t).await;
-    tracing::info!(task_id = %task.id, reason, "signal-chain: worker claim released");
+    if let Err(e) = state.tasks.update(&t).await {
+        tracing::error!(
+            task_id = %task.id,
+            reason,
+            "signal-chain: persisting released worker claim failed: {e}"
+        );
+        return;
+    }
+    tracing::info!(
+        task_id = %task.id,
+        reason,
+        "signal-chain: worker claim released to Backlog; a later cycle re-spawns"
+    );
 }
 
 /// Bump a task's updated_at so the stale-claim recovery window restarts.
@@ -2666,6 +2691,104 @@ mod tests {
         assert!(
             !after.labels.iter().any(|l| l == "budget-exhausted"),
             "budget flag cleared on spawn"
+        );
+    }
+
+    /// Review finding (task-118 repair round): the worker-claim RELEASE
+    /// path — budget exhausted AFTER the claim was taken, the race
+    /// between the scheduler's pre-check and the spawn core's own check
+    /// (a concurrent REST spawn consuming the last slot inside the
+    /// cycle's await window, or budget exhaustion during the 1s/5s/30s
+    /// retry backoff) — must actually release the claim. The pre-fix
+    /// code routed InProgress→Review→InProgress→Backlog, but the domain
+    /// transition table has no edge into Backlog, so the final
+    /// transition was always rejected and nothing was persisted: the
+    /// task was stranded InProgress forever (the worker scan selects
+    /// only Backlog; the stale-claim recovery skips Implementation
+    /// tasks; no API transition can requeue). The fix releases via the
+    /// domain's dedicated `Task::release_claim` edge — the only
+    /// InProgress→Backlog route — so Phase 4 step 3 ("task stays Backlog
+    /// with a BudgetExhausted flag") holds on this path exactly as on
+    /// the pre-check path, and a later cycle re-spawns the task.
+    #[tokio::test]
+    async fn budget_exhausted_mid_flight_releases_claim_and_respawns() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-midflight").await;
+
+        // Claim as the scheduler does — the race this test pins is
+        // everything that happens AFTER this point.
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        state.tasks.update(&claimed).await.unwrap();
+
+        // Exhaust the workspace budget inside the claim's window: the
+        // spawn core's own check now fails where the pre-check passed.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: Some(0),
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        match try_spawn_worker(&state, &repo, &claimed, 0).await {
+            WorkerSpawnOutcome::Blocked(reason) => {
+                release_claim(&state, &claimed, &reason).await;
+            }
+            other => panic!("expected the mid-flight budget block, got {other:?}"),
+        }
+
+        // The claim is actually released: Backlog (not stranded
+        // InProgress) with the BudgetExhausted flag.
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "mid-flight budget block releases the claim to Backlog"
+        );
+        assert!(
+            after.labels.iter().any(|l| l == "budget-exhausted"),
+            "released claim carries the BudgetExhausted flag: {:?}",
+            after.labels
+        );
+
+        // Budget restored: a later cycle re-spawns the task — the
+        // pre-fix bug was that it never could.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: None,
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let respawned = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            respawned.status,
+            TaskStatus::InProgress,
+            "a later cycle re-spawns the released task"
+        );
+        assert!(
+            !respawned.labels.iter().any(|l| l == "budget-exhausted"),
+            "budget flag cleared on the re-spawn"
         );
     }
 
