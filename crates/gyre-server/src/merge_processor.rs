@@ -37,6 +37,569 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
     process_next(state).await
 }
 
+// ── Automatic jj rebase on target branch movement (source-control.md §4) ──
+
+use gyre_domain::{AgentStatus, AuditEventType, AuditOutcome};
+use gyre_ports::JjRebaseOutcome;
+
+/// KV namespace for the per-agent rebase backoff window. Key = agent id,
+/// value = epoch seconds of the last *completed* rebase (Success or
+/// Conflict). A failure must NOT consume the window (R2 F4): a broken
+/// workspace would otherwise suppress every retry for 60s.
+const JJ_REBASE_BACKOFF_NS: &str = "jj_rebase_backoff";
+/// KV namespace for the per-agent pending-rebase marker. Key = agent id,
+/// value = JSON `{repo_id, target_branch, new_base_sha}` of the movement
+/// that was deferred by the backoff window and must be replayed once it
+/// expires (batch semantics: one deferred movement per agent — a later
+/// movement overwrites an earlier pending one, which is exactly the
+/// "batch into one rebase" behavior the plan requires).
+const JJ_REBASE_PENDING_NS: &str = "jj_rebase_pending";
+/// Rebase rate-limit window (plan item 5). Multiple baseline movements
+/// inside the window collapse into the pending marker above; the replay
+/// runs once the window expires.
+const JJ_REBASE_WINDOW_SECS: u64 = 60;
+
+/// An in-flight agent identified for rebasing after a merge landed.
+struct RebaseTarget {
+    agent_id: Id,
+    worktree_path: String,
+    branch: String,
+}
+
+/// One pending (deferred) rebase recorded in KV.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingRebase {
+    repo_id: String,
+    target_branch: String,
+    new_base_sha: String,
+}
+
+/// Identify the in-flight agents that must be rebased after a merge landed
+/// on `target_branch`: authors of other Open/Approved MRs targeting the
+/// same branch in the same repo, whose agent is still Active, and whose
+/// worktree directory exists on disk.
+///
+/// The merged MR's own author is excluded — their work just landed.
+async fn find_rebase_targets(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    target_branch: &str,
+    merged_author_agent_ids: &[Id],
+) -> Vec<RebaseTarget> {
+    let mut targets = Vec::new();
+    let mrs = match state.merge_requests.list_by_repo(&repo.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(repo_id = %repo.id, error = %e, "cannot list MRs for rebase targets");
+            return targets;
+        }
+    };
+    for mr in mrs {
+        if mr.target_branch != target_branch {
+            continue;
+        }
+        if !matches!(mr.status, MrStatus::Open | MrStatus::Approved) {
+            continue;
+        }
+        let Some(author_id) = &mr.author_agent_id else {
+            continue;
+        };
+        if merged_author_agent_ids.contains(author_id) {
+            continue;
+        }
+        // Safeguard (plan item 5): only Active agents — Dead/Completed/Idle
+        // agents have no in-progress work to rebase.
+        let Ok(Some(agent)) = state.agents.find_by_id(author_id).await else {
+            continue;
+        };
+        if agent.status != AgentStatus::Active {
+            continue;
+        }
+        // Safeguard (plan item 5): skip agents whose worktree is gone
+        // (already cleaned up, or never provisioned). The fallback for a
+        // missing (repo, source_branch) record stays INSIDE the moved repo
+        // (R12 F1): the worktree branch record can drift from the MR's
+        // source branch, but a worktree in a DIFFERENT repo must never be
+        // rebased for this repo's movement — the agent's other-repo
+        // in-flight work would be spliced onto this repo's baseline.
+        let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await else {
+            continue;
+        };
+        let Some(wt) = worktrees
+            .iter()
+            .find(|wt| wt.repository_id == repo.id && wt.branch == mr.source_branch)
+            .or_else(|| worktrees.iter().find(|wt| wt.repository_id == repo.id))
+        else {
+            continue;
+        };
+        if !std::path::Path::new(&wt.path).exists() {
+            continue;
+        }
+        targets.push(RebaseTarget {
+            agent_id: agent.id.clone(),
+            worktree_path: wt.path.clone(),
+            branch: mr.source_branch.clone(),
+        });
+    }
+    targets
+}
+
+/// Record a rebase audit event (plan item 5: log all rebase operations).
+/// The audit trail is the system of record for which agent was rebased
+/// onto which base, when, and with what outcome.
+#[allow(clippy::too_many_arguments)]
+async fn record_rebase_audit(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    outcome: &str,
+    rebased_count: usize,
+    files: &[String],
+    new_base_sha: &str,
+) {
+    let now = crate::jobs::now_secs();
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        AuditEventType::Custom("jj_rebase".to_string()),
+        Some(agent.agent_id.clone()),
+        None,
+        None,
+        Some(repo.workspace_id.clone()),
+        Some(repo.id.clone()),
+        "merge_queue".to_string(),
+        Some(agent.branch.clone()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "outcome": outcome,
+            "rebased_count": rebased_count,
+            "conflicted_files": files,
+            "new_base_sha": new_base_sha,
+            "target_branch": target_branch,
+            "worktree": agent.worktree_path,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        warn!(agent_id = %agent.agent_id, error = %e, "failed to record jj rebase audit event");
+    }
+}
+
+/// Attempt the rebase of one agent's in-flight work onto the new base.
+///
+/// Returns `true` when the deferral (pending marker) may be consumed —
+/// i.e. the rebase actually ran and reached a terminal outcome (Success or
+/// Conflict) — and `false` when it must stay deferred: backoff window hit,
+/// or infrastructure failure (an Err must not consume the deferral; the
+/// F4 guarantee holds on BOTH the trigger and replay paths, R2 F8).
+async fn rebase_one_agent(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    new_base_sha: &str,
+) -> bool {
+    // Rate limit (plan item 5): inside the window, defer instead of skip.
+    // The pending marker records the newest movement; the replay once the
+    // window expires batches every intermediate movement into one rebase.
+    let in_window = match state
+        .kv_store
+        .kv_get(JJ_REBASE_BACKOFF_NS, agent.agent_id.as_str())
+        .await
+    {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(last) => {
+                let now = crate::jobs::now_secs();
+                now.saturating_sub(last) < JJ_REBASE_WINDOW_SECS
+            }
+            Err(_) => false,
+        },
+        Ok(None) => false,
+        Err(e) => {
+            warn!(agent_id = %agent.agent_id, error = %e, "cannot read rebase backoff, proceeding");
+            false
+        }
+    };
+    if in_window {
+        let pending = PendingRebase {
+            repo_id: repo.id.to_string(),
+            target_branch: target_branch.to_string(),
+            new_base_sha: new_base_sha.to_string(),
+        };
+        match serde_json::to_string(&pending) {
+            Ok(v) => {
+                if let Err(e) = state
+                    .kv_store
+                    .kv_set(JJ_REBASE_PENDING_NS, agent.agent_id.as_str(), v)
+                    .await
+                {
+                    warn!(agent_id = %agent.agent_id, error = %e, "failed to record pending rebase");
+                }
+            }
+            Err(e) => {
+                warn!(agent_id = %agent.agent_id, error = %e, "cannot serialize pending rebase")
+            }
+        }
+        info!(agent_id = %agent.agent_id, branch = %agent.branch, "rebase deferred: inside backoff window, pending marker set");
+        return false;
+    }
+
+    run_rebase(state, repo, agent, target_branch, new_base_sha).await
+}
+
+/// Execute the jj rebase and apply all side effects (audit, notifications,
+/// conflict state). Returns `true` on a terminal outcome (Success or
+/// Conflict — including no-op success), `false` on infrastructure error
+/// (caller keeps the deferral alive).
+async fn run_rebase(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    new_base_sha: &str,
+) -> bool {
+    // -b @ rebases the branch containing the working copy — the whole
+    // in-flight stack ("the agent's in-progress work", source-control.md
+    // §4). Destination is the branch that just MOVED (`target_branch`),
+    // not the repo's default branch: MRs can target non-default branches
+    // (create_mr performs no default-branch validation), and rebasing an
+    // agent onto a branch their MR does not target splices their work
+    // into an unrelated line of history. Conflicts are state, not errors
+    // (jj's conflict-as-state model).
+    let outcome = state
+        .jj_ops
+        .jj_rebase(&agent.worktree_path, "@", target_branch)
+        .await;
+
+    match outcome {
+        Ok(JjRebaseOutcome::Success { rebased_count }) => {
+            // Persist the backoff only AFTER a completed rebase (R2 F4:
+            // guard state after the guarded action).
+            let now = crate::jobs::now_secs();
+            if let Err(e) = state
+                .kv_store
+                .kv_set(
+                    JJ_REBASE_BACKOFF_NS,
+                    agent.agent_id.as_str(),
+                    now.to_string(),
+                )
+                .await
+            {
+                warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
+            }
+
+            record_rebase_audit(
+                state,
+                repo,
+                agent,
+                target_branch,
+                "success",
+                rebased_count,
+                &[],
+                new_base_sha,
+            )
+            .await;
+
+            // A clean rebase clears the conflict state an earlier
+            // conflicted rebase surfaced on the author's MR (R19 F3):
+            // the flag must not outlive the conflict itself — the agent
+            // resolved it in their workspace and the stack now sits
+            // cleanly on the moved target. Only a flagged MR is touched
+            // (no write on the ordinary never-conflicted path).
+            if let Ok(Some(mut mr)) =
+                find_mr_by_author_branch(state, &repo.id, &agent.agent_id, &agent.branch).await
+            {
+                if mr.has_conflicts == Some(true) {
+                    mr.has_conflicts = Some(false);
+                    let _ = state.merge_requests.update(&mr).await;
+                }
+            }
+
+            // Notify the agent: baseline moved, here is the new base.
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Agent(agent.agent_id.clone()),
+                    gyre_common::message::MessageKind::Custom("baseline_moved".to_string()),
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "rebased_count": rebased_count,
+                    })),
+                )
+                .await;
+            true
+        }
+        Ok(JjRebaseOutcome::Conflict {
+            rebased_count,
+            files,
+        }) => {
+            let now = crate::jobs::now_secs();
+            if let Err(e) = state
+                .kv_store
+                .kv_set(
+                    JJ_REBASE_BACKOFF_NS,
+                    agent.agent_id.as_str(),
+                    now.to_string(),
+                )
+                .await
+            {
+                warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
+            }
+
+            record_rebase_audit(
+                state,
+                repo,
+                agent,
+                target_branch,
+                "conflict",
+                rebased_count,
+                &files,
+                new_base_sha,
+            )
+            .await;
+
+            // Conflict-as-state (plan item 3): surface the conflict on the
+            // MR and via SpeculativeConflict + Escalation events. The agent
+            // keeps working on non-conflicting files.
+            if let Ok(Some(mut mr)) =
+                find_mr_by_author_branch(state, &repo.id, &agent.agent_id, &agent.branch).await
+            {
+                mr.has_conflicts = Some(true);
+                let _ = state.merge_requests.update(&mr).await;
+            }
+
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
+                    gyre_common::message::MessageKind::SpeculativeConflict,
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "conflicting_files": files,
+                    })),
+                )
+                .await;
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Agent(agent.agent_id.clone()),
+                    gyre_common::message::MessageKind::Escalation,
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "reason": "rebase conflict",
+                        "conflicting_files": files,
+                    })),
+                )
+                .await;
+            true
+        }
+        Err(e) => {
+            // Infrastructure failure: do NOT consume a pending deferral
+            // (R2 F8) and do NOT write the backoff (R2 F4 — a failed
+            // rebase must not consume the window).
+            record_rebase_failure(
+                state,
+                repo,
+                agent,
+                target_branch,
+                &e.to_string(),
+                new_base_sha,
+            )
+            .await;
+            false
+        }
+    }
+}
+
+/// Find the (non-Closed) MR authored by `agent_id` on `branch` in `repo`.
+/// The repo filter is load-bearing (R3 F10): an agent can hold Open MRs on
+/// the same-named source branch in two repos, and a rebase conflict in one
+/// repo must not flag the other repo's MR.
+async fn find_mr_by_author_branch(
+    state: &AppState,
+    repo_id: &Id,
+    agent_id: &Id,
+    branch: &str,
+) -> anyhow::Result<Option<MergeRequest>> {
+    let all = state.merge_requests.list().await?;
+    Ok(all.into_iter().find(|m| {
+        m.repository_id == *repo_id
+            && m.author_agent_id.as_ref() == Some(agent_id)
+            && m.source_branch == branch
+            && m.status != MrStatus::Closed
+    }))
+}
+
+/// Record an audit event for a failed rebase attempt.
+async fn record_rebase_failure(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    error: &str,
+    new_base_sha: &str,
+) {
+    let now = crate::jobs::now_secs();
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        AuditEventType::Custom("jj_rebase".to_string()),
+        Some(agent.agent_id.clone()),
+        None,
+        None,
+        Some(repo.workspace_id.clone()),
+        Some(repo.id.clone()),
+        "merge_queue".to_string(),
+        Some(agent.branch.clone()),
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "outcome": "error",
+            "error": error,
+            "new_base_sha": new_base_sha,
+            "target_branch": target_branch,
+            "worktree": agent.worktree_path,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        warn!(agent_id = %agent.agent_id, error = %e, "failed to record jj rebase audit event");
+    }
+    warn!(
+        agent_id = %agent.agent_id,
+        branch = %agent.branch,
+        error = error,
+        "automatic jj rebase failed"
+    );
+}
+
+/// Rebase all in-flight agents after a merge landed on `target_branch`
+/// (plan item 1). Called as the LAST step of a successful merge, after
+/// post-merge gates pass (R2 F3: never rebase onto a base that recovery
+/// might revert).
+async fn rebase_inflight_agents(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    target_branch: &str,
+    new_base_sha: &str,
+    merged_author_agent_ids: &[Id],
+) {
+    let targets = find_rebase_targets(state, repo, target_branch, merged_author_agent_ids).await;
+    for target in targets {
+        rebase_one_agent(state, repo, &target, target_branch, new_base_sha).await;
+    }
+}
+
+/// Replay deferred rebases whose backoff window has expired (plan item 5
+/// batch semantics). Runs on every processor cycle. A replay attempt that
+/// fails with an infrastructure error keeps the pending marker (R2 F8).
+async fn replay_pending_rebases(state: &AppState) {
+    let pendings = match state.kv_store.kv_list(JJ_REBASE_PENDING_NS).await {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(error = %e, "cannot list pending rebases");
+            return;
+        }
+    };
+    for (agent_id, raw) in pendings {
+        let Ok(pending) = serde_json::from_str::<PendingRebase>(&raw) else {
+            // Corrupt marker — drop it; a future movement re-records it.
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+            continue;
+        };
+        let in_window = match state.kv_store.kv_get(JJ_REBASE_BACKOFF_NS, &agent_id).await {
+            Ok(Some(v)) => match v.parse::<u64>() {
+                Ok(last) => crate::jobs::now_secs().saturating_sub(last) < JJ_REBASE_WINDOW_SECS,
+                Err(_) => false,
+            },
+            _ => false,
+        };
+        if in_window {
+            continue;
+        }
+
+        // Re-derive the current rebase target for this agent — the agent
+        // may have completed or the worktree removed since deferral. When
+        // the deferral is no longer actionable, drop the marker.
+        let actionable = async {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(&pending.repo_id))
+                .await
+                .ok()
+                .flatten()?;
+            let agent = state
+                .agents
+                .find_by_id(&Id::new(&agent_id))
+                .await
+                .ok()
+                .flatten()?;
+            if agent.status != AgentStatus::Active {
+                return None;
+            }
+            let worktrees = state.worktrees.find_by_agent(&agent.id).await.ok()?;
+            // Repo-scoped only (R12 F1): the deferral names this repo; a
+            // worktree in any other repo must never receive it. When the
+            // agent no longer has a worktree in the pending repo, the
+            // deferral is not actionable and the marker is dropped below.
+            let wt = worktrees
+                .iter()
+                .find(|wt| wt.repository_id.as_str() == pending.repo_id)?;
+            if !std::path::Path::new(&wt.path).exists() {
+                return None;
+            }
+            Some((
+                repo,
+                RebaseTarget {
+                    agent_id: agent.id.clone(),
+                    worktree_path: wt.path.clone(),
+                    branch: wt.branch.clone(),
+                },
+            ))
+        }
+        .await;
+
+        let Some((repo, target)) = actionable else {
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+            continue;
+        };
+
+        let consumed = run_rebase(
+            state,
+            &repo,
+            &target,
+            &pending.target_branch,
+            &pending.new_base_sha,
+        )
+        .await;
+        if consumed {
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+        }
+        // else: keep the marker — an infra failure must not drop the
+        // deferral (R2 F8); the next cycle retries.
+    }
+}
+
 // ── Circuit Breaker (platform-model.md §6) ──
 
 const REVERT_COUNTS_NS: &str = "revert_counts";
@@ -157,6 +720,8 @@ pub(crate) async fn trip_circuit_breaker(
             ),
             Some(mr_id.to_string()),
             Some(repo_id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -557,6 +1122,8 @@ async fn warn_deep_chain(state: &AppState, depth: usize, workspace_id: &Id) {
             Some(body_json.clone()),
             None,
             None,
+            "workspace",
+            None,
         )
         .await;
     }
@@ -934,6 +1501,16 @@ async fn merge_atomic_group(
                 &failure_reason,
             )
             .await;
+        } else {
+            // source-control.md §4: the group landing moved the baseline —
+            // rebase the other in-flight agents onto the new HEAD, after
+            // the group's post-merge gates pass (R2 F3: never rebase onto
+            // a base a group-recovery revert could strand).
+            let merged_authors: Vec<Id> = merged_entries
+                .iter()
+                .filter_map(|(_, m)| m.author_agent_id.clone())
+                .collect();
+            rebase_inflight_agents(state, &repo, target_branch, last_sha, &merged_authors).await;
         }
     }
 
@@ -1064,6 +1641,8 @@ async fn rollback_atomic_group(
             Some(body_json.clone()),
             Some(failing_mr_id.to_string()),
             Some(repo.id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -1097,6 +1676,15 @@ async fn rollback_atomic_group(
 }
 
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
+    // Replay deferred rebases whose backoff window has expired on EVERY
+    // cycle, not only idle ones (R3 F12): under sustained merge-queue load —
+    // source-control.md §4's "20+ agents pushing concurrently" scenario —
+    // the queue never fully drains, and idle-only replay would starve
+    // expired deferrals until it does. The per-agent backoff window checked
+    // inside the replay is the rate limit: at most one rebase attempt per
+    // agent per window, and the processor's 5s cycle bounds the scan cost.
+    replay_pending_rebases(state).await;
+
     // Step 1: Get all queued entries.
     let all_queued = state.merge_queue.list_queue().await?;
     let queued_entries: Vec<_> = all_queued
@@ -1377,7 +1965,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             if let Some(spec_ref) = mr.spec_ref.as_deref() {
                 // Parse "path@sha" — same format used by verify_spec_ref.
                 if let Some((path, sha)) = spec_ref.rsplit_once('@') {
-                    let current = crate::git_refs::resolve_blob_sha(&repo.path, path).await;
+                    let current = crate::git_refs::resolve_spec_blob_sha(&repo.path, path).await;
                     let is_stale = match &current {
                         // If the file can't be resolved (new/empty repo), treat as non-stale.
                         Some(cur) => cur != sha,
@@ -1854,6 +2442,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 None
             };
 
+            // Agent-runtime §2: record exactly which meta-specs the authoring
+            // agent ran under (loaded from the prompt-set record stored at
+            // spawn time). Empty for agents spawned before prompt assembly or
+            // with no applicable meta-specs.
+            let meta_specs_used = match updated_mr.author_agent_id.as_ref() {
+                Some(agent_id) => {
+                    crate::prompt_assembly::load_prompt_set_record(state, agent_id.as_str())
+                        .await
+                        .map(|rec| rec.meta_specs_used)
+                        .unwrap_or_default()
+                }
+                None => vec![],
+            };
+
             let attestation = crate::attestation::MergeAttestation {
                 attestation_version: 1,
                 mr_id: updated_mr.id.to_string(),
@@ -1868,7 +2470,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 // when the agent calls agent.complete with a summary. At merge time, the
                 // processor does not re-fetch the summary — it is stored at agent.complete time.
                 completion_summary: None,
-                meta_specs_used: vec![],
+                meta_specs_used,
             };
 
             let bundle =
@@ -2032,6 +2634,21 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     &failure_reason,
                 )
                 .await;
+            } else {
+                // source-control.md §4: the baseline just moved — rebase
+                // every other in-flight agent on this target branch onto
+                // the new HEAD. Runs AFTER post-merge gates pass, so a
+                // gate failure + revert never strands agents on an
+                // orphaned base (R2 F3).
+                let merged_authors: Vec<Id> = updated_mr.author_agent_id.iter().cloned().collect();
+                rebase_inflight_agents(
+                    state,
+                    &repo,
+                    &updated_mr.target_branch,
+                    &merge_commit_sha,
+                    &merged_authors,
+                )
+                .await;
             }
         }
         Ok(MergeResult::Conflict { message }) => {
@@ -2107,6 +2724,49 @@ pub(crate) async fn pause_merge_queue(
             })),
         )
         .await;
+
+    // Notify workspace Admins/Owners (user-management.md §Notification
+    // Entity: MergeQueuePaused — High; "Who Gets Notified" table routes it
+    // to all workspace Admins/Owners). Best-effort, like every notify path.
+    // The tenant scope comes from the workspace lookup — when it cannot be
+    // resolved there is no scoperable tenant, so skip rather than fabricate
+    // one (check-fabricated-scope-defaults.sh).
+    if let Ok(Some(ws)) = state.workspaces.find_by_id(&repo.workspace_id).await {
+        let tenant_id = ws.tenant_id.to_string();
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&repo.workspace_id)
+            .await
+            .unwrap_or_default();
+        for member in &members {
+            if !matches!(
+                member.role,
+                gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
+            ) {
+                continue;
+            }
+            crate::notifications::notify_rich(
+                state,
+                repo.workspace_id.clone(),
+                member.user_id.clone(),
+                gyre_common::NotificationType::MergeQueuePaused,
+                format!("Merge queue paused for '{}': {reason}", repo.name),
+                &tenant_id,
+                Some(
+                    serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "reason": reason,
+                    })
+                    .to_string(),
+                ),
+                Some(repo.id.to_string()),
+                Some(repo.id.to_string()),
+                "repo",
+                None,
+            )
+            .await;
+        }
+    }
 }
 
 /// Resume the merge queue for this repo: clear the pause state and emit
@@ -2317,6 +2977,8 @@ pub(crate) async fn apply_revert_side_effects(
             Some(payload.to_string()),
             Some(updated.id.to_string()),
             Some(repo.id.to_string()),
+            "mr",
+            None,
         )
         .await;
     }
@@ -2532,6 +3194,8 @@ async fn notify_escalation(
         ),
         Some(mr.id.to_string()),
         Some(repo.id.to_string()),
+        "mr",
+        None,
     )
     .await;
 }
@@ -2686,6 +3350,8 @@ pub(crate) async fn trigger_cascade_tests(
                 Some(body_json),
                 Some(dep_edge.source_repo_id.to_string()),
                 Some(merged_repo_id.to_string()),
+                "repo",
+                None,
             )
             .await;
         }
@@ -2812,6 +3478,8 @@ pub(crate) async fn report_cascade_test_result(
                 "default",
                 Some(body_json),
                 Some(task.repo_id.to_string()),
+                None,
+                "repo",
                 None,
             )
             .await;
@@ -3098,6 +3766,26 @@ mod tests {
         name: &str,
         workspace_id: &str,
     ) -> Repository {
+        // Seed the workspace record (idempotent): emissions resolve the
+        // tenant scope from it and skip when it does not exist (task-099 F1),
+        // so the workspace a fixture references must be real for event and
+        // notification assertions to observe anything.
+        if state
+            .workspaces
+            .find_by_id(&Id::new(workspace_id))
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                Id::new(workspace_id),
+                Id::new("t1"),
+                workspace_id,
+                workspace_id,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(workspace_id),
@@ -3570,14 +4258,14 @@ mod tests {
 
         // Verify entity_ref and priority (F3).
         assert_eq!(
-            notif.entity_ref.as_deref(),
-            Some(repo_a.id.as_str()),
-            "entity_ref should be the repo_id"
+            notif.source.entity_id.as_str(),
+            repo_a.id.as_str(),
+            "source entity should be the repo_id"
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::CascadeTestFailed.default_priority(),
-            "priority should match CascadeTestFailed priority"
+            notif.priority_rank,
+            gyre_common::NotificationType::CascadeTestFailed.default_priority_rank(),
+            "priority rank should match CascadeTestFailed priority"
         );
 
         // Verify cascade_test_failed event was also emitted (F1).
@@ -3725,14 +4413,14 @@ mod tests {
 
         // Verify entity_ref and priority
         assert_eq!(
-            notif.entity_ref.as_deref(),
-            Some(repo_a.id.as_str()),
-            "entity_ref should be the dependent repo_id"
+            notif.source.entity_id.as_str(),
+            repo_a.id.as_str(),
+            "source entity should be the dependent repo_id"
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::CascadeTestTriggered.default_priority(),
-            "priority should match CascadeTestTriggered priority"
+            notif.priority_rank,
+            gyre_common::NotificationType::CascadeTestTriggered.default_priority_rank(),
+            "priority rank should match CascadeTestTriggered priority"
         );
     }
 
@@ -4105,11 +4793,11 @@ mod tests {
             gyre_common::NotificationType::DependencyChainTooDeep
         );
         assert_eq!(
-            notif.priority,
-            gyre_common::NotificationType::DependencyChainTooDeep.default_priority(),
+            notif.priority_rank,
+            gyre_common::NotificationType::DependencyChainTooDeep.default_priority_rank(),
         );
         assert_eq!(
-            notif.priority, 7,
+            notif.priority_rank, 7,
             "DependencyChainTooDeep should be priority 7"
         );
         assert!(notif.title.contains("11 levels deep"));
@@ -4317,6 +5005,7 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
@@ -4441,6 +5130,7 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
@@ -4555,6 +5245,7 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
@@ -5118,9 +5809,9 @@ mod tests {
 
         // Verify entity_ref.
         assert_eq!(
-            notifs_a[0].entity_ref.as_deref(),
-            Some(mr_second.id.as_str()),
-            "entity_ref should be the failing MR id"
+            notifs_a[0].source.entity_id.as_str(),
+            mr_second.id.as_str(),
+            "source entity should be the failing MR id"
         );
 
         // Check notifications for author-B.
@@ -5925,6 +6616,7 @@ mod tests {
             command: Some(command.to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: Some(30),
@@ -6000,7 +6692,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -6278,7 +6970,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -6331,7 +7023,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+                .any(|n| n.notification_type == NotificationType::MrMerged),
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -7164,6 +7856,93 @@ mod tests {
         );
     }
 
+    /// Verification repair (task-116): `MergeAttestation.meta_specs_used`
+    /// is populated from the spawn-time prompt-set record of the MR's author
+    /// agent. Reverting the wiring in `process_next` to `meta_specs_used:
+    /// vec![]` (or dropping the `load_prompt_set_record` lookup) fails this
+    /// test — the persisted, signed attestation bundle must carry exactly
+    /// the record's meta-spec references (id, kind, content_hash, version,
+    /// required, scope), and the signature must verify over that payload.
+    #[tokio::test]
+    async fn merge_attestation_records_author_prompt_set_meta_specs() {
+        let state = test_state();
+        for policy in crate::abac_middleware::m34_builtin_policies() {
+            state.policies.create(&policy).await.unwrap();
+        }
+        let (_repo, mr) = setup_mr_with_attestation_chain(&state).await;
+
+        // The spawn-time prompt-set record for the MR's author agent, exactly
+        // as `spawn_agent_core` persists via `store_prompt_set_record`: two
+        // meta-specs (required tenant persona, optional bound standard).
+        let record = crate::prompt_assembly::AgentPromptSetRecord {
+            agent_id: Id::new("agent-merge-abac"),
+            task_id: Id::new("task-merge-abac"),
+            spec_path: None,
+            set_sha: "set-sha-meta-specs".to_string(),
+            assembled_at: 1_700_000_000,
+            meta_specs_used: vec![
+                gyre_domain::MetaSpecUsed {
+                    id: Id::new("ms-persona"),
+                    kind: "meta:persona".to_string(),
+                    content_hash: "hash-persona".to_string(),
+                    version: 2,
+                    required: true,
+                    scope: "global".to_string(),
+                },
+                gyre_domain::MetaSpecUsed {
+                    id: Id::new("ms-standard"),
+                    kind: "meta:standard".to_string(),
+                    content_hash: "hash-standard".to_string(),
+                    version: 5,
+                    required: false,
+                    scope: "workspace".to_string(),
+                },
+            ],
+        };
+        crate::prompt_assembly::store_prompt_set_record(&state, &record).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged, "MR must merge");
+
+        let bundle = state
+            .attestation_store
+            .find_by_mr_id(mr.id.as_str())
+            .await
+            .unwrap()
+            .expect("attestation bundle must be persisted for the merged MR");
+        let used = &bundle.attestation.meta_specs_used;
+        assert_eq!(
+            used.len(),
+            2,
+            "both prompt-set meta-specs must be attested, got {used:?}"
+        );
+        for (got, want) in used.iter().zip(record.meta_specs_used.iter()) {
+            assert_eq!(got.id, want.id, "meta-spec id must match the record");
+            assert_eq!(got.kind, want.kind, "meta-spec kind must match the record");
+            assert_eq!(
+                got.content_hash, want.content_hash,
+                "meta-spec content_hash must match the record"
+            );
+            assert_eq!(got.version, want.version, "meta-spec version must match");
+            assert_eq!(got.required, want.required, "required flag must match");
+            assert_eq!(got.scope, want.scope, "scope must match the record");
+        }
+
+        // The signature covers the meta_specs_used payload: the bundle
+        // verifies with the server's real Ed25519 public key.
+        assert!(
+            crate::attestation::verify_bundle(&bundle, &state.agent_signing_key.public_key_bytes),
+            "attestation signature must verify over the full payload incl. meta_specs_used"
+        );
+    }
+
     /// TASK-095 R2-1: post-merge gates must execute against the exact
     /// `head_sha` tree, in a detached worktree, not against whatever the
     /// first registered worktree happens to have checked out.
@@ -7248,6 +8027,1112 @@ mod tests {
             worktrees,
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
+        );
+    }
+
+    // ── TASK-106: automatic jj rebase on target branch movement ────────
+    // (source-control.md §4)
+
+    use crate::mem::test_state_with_jj_ops;
+    use gyre_domain::AgentWorktree;
+    use gyre_ports::JjRebaseOutcome;
+    use std::sync::Arc;
+
+    /// Shared fixture: one repo, one merged MR (author agent `merged`), and
+    /// one in-flight MR (author agent `inflight`) targeting the same
+    /// branch. `inflight`'s worktree dir is a real tempdir so the
+    /// path-exists safeguard passes. Returns (state, jj double, repo,
+    /// inflight MR).
+    async fn setup_rebase_fixture() -> (
+        Arc<AppState>,
+        Arc<crate::mem::ConfigurableJjOps>,
+        Repository,
+        gyre_domain::MergeRequest,
+    ) {
+        let jj = Arc::new(crate::mem::ConfigurableJjOps::default());
+        let state = test_state_with_jj_ops(jj.clone());
+        let repo = create_repo_in_workspace(&state, "rebase-repo", "ws-1").await;
+
+        // Landed agent + MR (merged by the processor in these tests).
+        let mut merged_agent = gyre_domain::Agent::new(Id::new("agent-merged"), "merged", 1000);
+        merged_agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&merged_agent).await.unwrap();
+        let mut merged_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged"),
+            repo.id.clone(),
+            "merged work",
+            "feat/merged",
+            "main",
+            1000,
+        );
+        merged_mr.workspace_id = Id::new("ws-1");
+        merged_mr.author_agent_id = Some(Id::new("agent-merged"));
+        state.merge_requests.create(&merged_mr).await.unwrap();
+
+        // In-flight agent + MR: Active, real worktree dir on disk.
+        let mut inflight = gyre_domain::Agent::new(Id::new("agent-inflight"), "inflight", 1000);
+        inflight.workspace_id = Id::new("ws-1");
+        inflight.status = AgentStatus::Active;
+        state.agents.create(&inflight).await.unwrap();
+        let mut inflight_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-inflight"),
+            repo.id.clone(),
+            "in-flight work",
+            "feat/inflight",
+            "main",
+            1000,
+        );
+        inflight_mr.workspace_id = Id::new("ws-1");
+        inflight_mr.author_agent_id = Some(Id::new("agent-inflight"));
+        state.merge_requests.create(&inflight_mr).await.unwrap();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = AgentWorktree::new(
+            Id::new("wt-inflight"),
+            Id::new("agent-inflight"),
+            repo.id.clone(),
+            None,
+            "feat/inflight",
+            wt_dir.path().to_str().unwrap(),
+            1000,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        // Leak the tempdir: the worktree must outlive this function and be
+        // cleaned up by std::process::tempdir semantics at test end.
+        std::mem::forget(wt_dir);
+
+        (state, jj, repo, inflight_mr)
+    }
+
+    /// The core §4 contract: a merge landing on the target branch rebases
+    /// every OTHER in-flight agent on that branch (the merged author is
+    /// excluded), onto the branch that MOVED, in the agent's recorded
+    /// worktree.
+    #[tokio::test]
+    async fn merge_triggers_rebase_of_inflight_agents() {
+        let (state, jj, _repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        // The merged MR landed.
+        let merged = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-merged"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.status, MrStatus::Merged);
+
+        // Exactly one rebase: the in-flight agent, not the merged author.
+        let calls = jj.rebase_calls.lock().clone();
+        assert_eq!(calls.len(), 1, "exactly one rebase call, got {calls:?}");
+        assert_eq!(calls[0].0, worktree_path_of(&state, "agent-inflight").await);
+        assert_eq!(calls[0].1, "@");
+        assert_eq!(calls[0].2, "main");
+
+        // The in-flight agent was notified of the baseline movement.
+        let mut saw_baseline_moved = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let gyre_common::message::Destination::Agent(a) = &msg.to {
+                if a.as_str() == "agent-inflight" && msg.kind.as_str() == "baseline_moved" {
+                    saw_baseline_moved = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("target_branch"),
+                        Some(&serde_json::json!("main"))
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_baseline_moved,
+            "in-flight agent must receive baseline_moved"
+        );
+    }
+
+    /// §4 destination pin: the rebase targets the branch that MOVED, not
+    /// the repo's default branch. MRs can target non-default branches
+    /// (create_mr performs no default-branch validation); rebasing an
+    /// agent onto the default branch when their MR targets `develop`
+    /// splices their work into an unrelated line of history. Fails on the
+    /// pre-fix behavior (destination hardcoded to `repo.default_branch`).
+    #[tokio::test]
+    async fn rebase_destination_is_moved_target_branch_not_default() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // Point BOTH MRs at a non-default target branch.
+        let non_default = "develop";
+        assert_ne!(
+            repo.default_branch, non_default,
+            "fixture must use a non-default target to pin the destination"
+        );
+        for mr_id in ["mr-merged", "mr-inflight"] {
+            let mut mr = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            mr.target_branch = non_default.to_string();
+            state.merge_requests.update(&mr).await.unwrap();
+        }
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let merged = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-merged"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.status, MrStatus::Merged);
+
+        let calls = jj.rebase_calls.lock().clone();
+        assert_eq!(calls.len(), 1, "exactly one rebase call, got {calls:?}");
+        assert_eq!(
+            calls[0].2, non_default,
+            "rebase must target the moved branch ({non_default}), not the default ({})",
+            repo.default_branch
+        );
+    }
+
+    /// Conflicts are state, not errors (jj conflict-as-state): the MR is
+    /// flagged, the workspace sees SpeculativeConflict, the agent sees
+    /// Escalation with the conflicting files.
+    #[tokio::test]
+    async fn rebase_conflict_surfaces_as_state() {
+        let (state, jj, _repo, inflight_mr) = setup_rebase_fixture().await;
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Conflict {
+            rebased_count: 1,
+            files: vec!["src/lib.rs".to_string()],
+        }));
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        // MR flagged with conflicts (consumed by the API layer).
+        let updated = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.has_conflicts, Some(true));
+
+        let mut workspace_saw_conflict = false;
+        let mut agent_saw_escalation = false;
+        while let Ok(msg) = rx.try_recv() {
+            match &msg.to {
+                gyre_common::message::Destination::Workspace(ws)
+                    if ws.as_str() == "ws-1"
+                        && msg.kind == gyre_common::message::MessageKind::SpeculativeConflict =>
+                {
+                    workspace_saw_conflict = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("conflicting_files"),
+                        Some(&serde_json::json!(["src/lib.rs"]))
+                    );
+                }
+                gyre_common::message::Destination::Agent(a)
+                    if a.as_str() == "agent-inflight"
+                        && msg.kind == gyre_common::message::MessageKind::Escalation =>
+                {
+                    agent_saw_escalation = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("conflicting_files"),
+                        Some(&serde_json::json!(["src/lib.rs"]))
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            workspace_saw_conflict,
+            "workspace must see SpeculativeConflict"
+        );
+        assert!(agent_saw_escalation, "agent must see Escalation");
+    }
+
+    /// F10: the conflict flag is scoped to the repo whose rebase
+    /// conflicted. An agent can hold Open MRs on the same-named source
+    /// branch in two repos; a conflict in one repo's rebase must not flag
+    /// the other repo's MR.
+    #[tokio::test]
+    async fn rebase_conflict_does_not_flag_other_repo_mr() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Conflict {
+            rebased_count: 1,
+            files: vec!["src/lib.rs".to_string()],
+        }));
+
+        // A SECOND repo whose MR shares the author AND the source branch
+        // name — the exact ambiguity find_mr_by_author_branch must resolve
+        // by repository scoping.
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo", "ws-1").await;
+        let mut other_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-inflight-other"),
+            other_repo.id.clone(),
+            "same-named branch in another repo",
+            "feat/inflight",
+            "main",
+            1000,
+        );
+        other_mr.workspace_id = Id::new("ws-1");
+        other_mr.author_agent_id = Some(Id::new("agent-inflight"));
+        state.merge_requests.create(&other_mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        // The conflicted repo's MR is flagged...
+        let flagged = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-inflight"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flagged.has_conflicts,
+            Some(true),
+            "the conflicted repo's MR must be flagged"
+        );
+        // ...and the other repo's MR is not (F10).
+        let untouched = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-inflight-other"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            untouched.has_conflicts,
+            Some(true),
+            "another repo's MR must not inherit the conflict flag (F10)"
+        );
+
+        // Direct pin of the scoping itself: the lookup is deterministic
+        // per repo regardless of store iteration order (the mem store is a
+        // HashMap — the end-to-end path above can pick either MR when the
+        // filter is wrong; this call pins the exact contract).
+        let in_repo = find_mr_by_author_branch(
+            &state,
+            &repo.id,
+            &Id::new("agent-inflight"),
+            "feat/inflight",
+        )
+        .await
+        .unwrap()
+        .expect("the repo's own MR must be found");
+        assert_eq!(in_repo.id, Id::new("mr-inflight"));
+        let in_other = find_mr_by_author_branch(
+            &state,
+            &other_repo.id,
+            &Id::new("agent-inflight"),
+            "feat/inflight",
+        )
+        .await
+        .unwrap()
+        .expect("the other repo's MR must be found");
+        assert_eq!(in_other.id, Id::new("mr-inflight-other"));
+    }
+
+    /// R19 F3: a clean rebase clears the conflict flag an earlier
+    /// conflicted rebase surfaced on the author's MR — the
+    /// conflicts-as-state surface must not report state jj no longer
+    /// has (the agent resolved the conflict in their workspace; the
+    /// next movement of the target rebases their stack cleanly). Fails
+    /// on the pre-fix behavior: the success arm never reset the flag.
+    #[tokio::test]
+    async fn rebase_success_clears_stale_conflict_flag() {
+        let (state, jj, repo, inflight_mr) = setup_rebase_fixture().await;
+
+        // First movement conflicts — the in-flight MR is flagged.
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Conflict {
+            rebased_count: 1,
+            files: vec!["src/lib.rs".to_string()],
+        }));
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        let flagged = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flagged.has_conflicts,
+            Some(true),
+            "precondition: the conflict round must flag the MR"
+        );
+
+        // The agent resolves the conflict; the backoff window expires
+        // (backdated, as the replay tests do) so the next movement
+        // rebases instead of deferring.
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        // A second MR lands on the same target branch — clean this time.
+        let mut second_agent = gyre_domain::Agent::new(Id::new("agent-merged-2"), "merged-2", 1000);
+        second_agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&second_agent).await.unwrap();
+        let mut second_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged-2"),
+            repo.id.clone(),
+            "second landed work",
+            "feat/merged-2",
+            "main",
+            1000,
+        );
+        second_mr.workspace_id = Id::new("ws-1");
+        second_mr.author_agent_id = Some(Id::new("agent-merged-2"));
+        state.merge_requests.create(&second_mr).await.unwrap();
+
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        enqueue_mr(&state, "mr-merged-2", 100, 2000).await;
+        process_next(&state).await.unwrap();
+
+        // The clean rebase really ran (not deferred away).
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "precondition: the second movement must rebase the agent again"
+        );
+        let cleared = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleared.has_conflicts,
+            Some(false),
+            "a clean rebase must clear the stale conflict flag (R19 F3)"
+        );
+    }
+
+    /// Safeguard (plan item 5): Dead/Completed agents are never rebased —
+    /// their in-progress work no longer exists.
+    #[tokio::test]
+    async fn rebase_skips_dead_agents() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        let mut dead = state
+            .agents
+            .find_by_id(&Id::new("agent-inflight"))
+            .await
+            .unwrap()
+            .unwrap();
+        dead.status = AgentStatus::Dead;
+        state.agents.update(&dead).await.unwrap();
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "dead agent must not be rebased, got {calls:?}"
+        );
+    }
+
+    /// R12 F1 (trigger path): the worktree-selection fallback is
+    /// repo-scoped. An Active agent with an Open MR in repo A whose
+    /// (repo A, source_branch) worktree record is absent — deleted after
+    /// MR creation, or the branch record drifted — while an on-disk
+    /// repo-B worktree exists must NOT have the repo-B worktree rebased
+    /// when a merge lands on repo A's main: the agent's other-repo
+    /// in-flight work is unrelated to this repo's baseline movement.
+    /// Pre-fix, `.or_else(|| worktrees.first())` picked any worktree and
+    /// rebased repo B's `@` onto repo B's same-named branch while telling
+    /// the agent `baseline_moved` with repo A's new base SHA.
+    #[tokio::test]
+    async fn rebase_skips_agent_with_only_other_repo_worktree() {
+        let (state, jj, _repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // The agent's (repo A, feat/inflight) worktree record is gone...
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        // ...but the agent has an on-disk worktree in repo B (same branch
+        // name — the near-universal-name hazard from the finding).
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1a", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1a"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "no worktree in the moved repo -> no rebase; the other repo's worktree must not be touched, got {calls:?}"
+        );
+        drop(calls);
+
+        // And no false baseline_moved for repo A's movement.
+        let mut agent_notified = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let gyre_common::message::Destination::Agent(a) = &msg.to {
+                if a.as_str() == "agent-inflight" && msg.kind.as_str() == "baseline_moved" {
+                    agent_notified = true;
+                }
+            }
+        }
+        assert!(
+            !agent_notified,
+            "agent must not be told baseline_moved for a repo it has no worktree in"
+        );
+    }
+
+    /// R12 F1 (trigger path, positive pin): when the (repo,
+    /// source_branch) worktree record is absent but the agent has another
+    /// worktree in the SAME repo, the fallback rebases that same-repo
+    /// worktree — never a different repo's, regardless of store iteration
+    /// order (the mem store is a HashMap).
+    #[tokio::test]
+    async fn rebase_worktree_fallback_stays_within_moved_repo() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // Replace the fixture's worktree record with a drifted-branch
+        // record in the SAME repo, and add a same-named worktree in
+        // repo B — the exact ambiguity the fallback must resolve by
+        // repository scoping.
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        let drift_dir = tempfile::tempdir().unwrap();
+        let drift_wt = AgentWorktree::new(
+            Id::new("wt-inflight-drift"),
+            Id::new("agent-inflight"),
+            repo.id.clone(),
+            None,
+            "feat/renamed",
+            drift_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&drift_wt).await.unwrap();
+        std::mem::forget(drift_dir);
+
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1b", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1b"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the same-repo fallback worktree must be rebased, got {calls:?}"
+        );
+        assert_eq!(
+            calls[0].0,
+            drift_wt.path.clone(),
+            "the rebase must target the moved repo's worktree, not the other repo's"
+        );
+        assert_eq!(calls[0].2, "main");
+    }
+
+    /// R12 F1 (replay path): a pending rebase names its repo. When the
+    /// agent's only remaining worktree is in a DIFFERENT repo, the replay
+    /// drops the marker instead of rebasing the other repo's worktree.
+    /// Pre-fix, `.or_else(|| worktrees.first())` replayed the deferral
+    /// against whatever worktree existed.
+    #[tokio::test]
+    async fn replay_drops_pending_rebase_when_worktree_left_the_repo() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // The agent's worktree in the pending repo is gone; only an
+        // on-disk repo-B worktree remains.
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1c", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1c"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        // Defer a second movement (in-window), then expire the window.
+        let pending = PendingRebase {
+            repo_id: repo_id_of(&state).await.to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "b".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        process_next(&state).await.unwrap();
+
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            1,
+            "the replay must not rebase another repo's worktree"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "a deferral with no worktree in the pending repo is not actionable and must be dropped"
+        );
+    }
+
+    /// F4: a failed rebase must not consume the backoff window — the next
+    /// movement inside the window still attempts a rebase instead of
+    /// silently deferring forever on a broken workspace.
+    #[tokio::test]
+    async fn rebase_failure_does_not_consume_backoff_window() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+        *jj.rebase_outcome.lock() = Some(Err("workspace missing".to_string()));
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // No backoff was persisted for the failed rebase.
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_BACKOFF_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "failed rebase must not write the backoff window"
+        );
+
+        // Program success and move the target again immediately: the
+        // rebase must be attempted (no window to suppress it).
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        let mut second_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged-2"),
+            state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id,
+            "second landed work",
+            "feat/merged2",
+            "main",
+            1001,
+        );
+        second_mr.workspace_id = Id::new("ws-1");
+        second_mr.author_agent_id = Some(Id::new("agent-merged"));
+        state.merge_requests.create(&second_mr).await.unwrap();
+        enqueue_mr(&state, "mr-merged-2", 100, 1001).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "second movement must attempt a rebase — failure consumed no window"
+        );
+    }
+
+    /// Plan item 5 (batch semantics): a movement inside the backoff window
+    /// is deferred via the pending marker, not dropped; once the window
+    /// expires the replay runs it on an idle processor cycle.
+    #[tokio::test]
+    async fn rebase_window_hit_defers_then_replays_after_expiry() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // Simulate a second movement inside the window: record the pending
+        // marker exactly as rebase_one_agent's window-hit path does.
+        let pending = PendingRebase {
+            repo_id: state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id
+                .to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "f".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Idle cycle while still inside the window: replay must NOT run
+        // (kv marker intact).
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            1,
+            "inside the window the replay must not run"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_some(),
+            "pending marker must survive the in-window idle cycle"
+        );
+
+        // Expire the window: backdate the backoff timestamp.
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+        process_next(&state).await.unwrap();
+
+        // The deferred rebase replayed and the marker was consumed.
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "expired window must replay the deferred rebase"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "successful replay must consume the pending marker"
+        );
+    }
+
+    /// F12: the replay of expired deferrals must not depend on the merge
+    /// queue being empty. Under sustained queue load — source-control.md
+    /// §4's "20+ agents pushing concurrently" scenario — the queue never
+    /// fully drains; idle-only replay starves the batch-retry guarantee.
+    #[tokio::test]
+    async fn replay_pending_rebase_runs_under_sustained_queue_load() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // Defer a second movement (in-window), then expire the window.
+        let pending = PendingRebase {
+            repo_id: state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id
+                .to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "a".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Keep the merge queue permanently NON-empty: an MR blocked on a
+        // dependency that never merges is never ready, so every cycle
+        // takes the busy path. Pre-fix, replay only ran on idle cycles and
+        // the expired deferral starved until the queue drained.
+        create_mr_with_deps(&state, "mr-blocked", "ws-1", vec!["mr-never-lands"]).await;
+        enqueue_mr(&state, "mr-blocked", 50, 1002).await;
+
+        process_next(&state).await.unwrap();
+
+        // The queue really stayed busy: the blocked entry is still Queued.
+        let queue = state.merge_queue.list_queue().await.unwrap();
+        assert!(
+            queue
+                .iter()
+                .any(|e| e.merge_request_id.as_str() == "mr-blocked"
+                    && e.status == MergeQueueEntryStatus::Queued),
+            "fixture must keep the merge queue busy (blocked entry still queued)"
+        );
+
+        // The expired deferral replayed anyway (F12), and the marker was
+        // consumed by the terminal outcome.
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "expired pending rebase must replay under sustained queue load (F12)"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "successful replay must consume the pending marker"
+        );
+    }
+
+    /// F8: an infrastructure failure during REPLAY must keep the pending
+    /// marker — the deferral guarantee holds on every consumer of the
+    /// marker, not just the trigger path.
+    #[tokio::test]
+    async fn replay_failure_keeps_pending_rebase() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // Defer a second movement (in-window), then expire the window.
+        let pending = PendingRebase {
+            repo_id: state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id
+                .to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "e".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        // The replay attempt itself fails (infrastructure error).
+        *jj.rebase_outcome.lock() = Some(Err("jj binary vanished".to_string()));
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "the replay must have been attempted"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_some(),
+            "a failed replay must keep the pending marker (F8)"
+        );
+
+        // Recovery: the next cycle retries and consumes it on success.
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 3);
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "successful retry must consume the pending marker"
+        );
+    }
+
+    /// F3: a post-merge gate failure reverts the merge — no agent may be
+    /// rebased onto the base that recovery just undid.
+    #[tokio::test]
+    async fn post_merge_gate_failure_skips_inflight_rebase() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // Required post-merge gate that always fails.
+        create_post_merge_gate(&state, &repo_id_of(&state).await, "false", true).await;
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "gate failure + revert must skip the rebase, got {calls:?}"
+        );
+    }
+
+    /// Path of the in-flight agent's recorded worktree (helper for call
+    /// assertions).
+    async fn worktree_path_of(state: &AppState, agent_id: &str) -> String {
+        state
+            .worktrees
+            .find_by_agent(&Id::new(agent_id))
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .path
+            .clone()
+    }
+
+    /// Id of the fixture's rebase repo (helper for gate creation).
+    async fn repo_id_of(state: &AppState) -> Id {
+        state
+            .repos
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "rebase-repo")
+            .unwrap()
+            .id
+    }
+
+    /// Spec Approval Ledger regression (agent-gates.md §Forge Enforcement
+    /// Policies): `require_current_spec` must block merges whose spec_ref SHA
+    /// is not the current HEAD blob SHA.
+    ///
+    /// Spec refs carry ledger paths ("system/foo.md") while the file lives at
+    /// "specs/system/foo.md" in the repo; without the specs/-prefix fallback
+    /// the blob SHA never resolved, `is_stale` was always false, and the
+    /// policy silently enforced nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn require_current_spec_blocks_stale_spec_ref() {
+        let state = test_state();
+
+        // Real repo whose HEAD contains the spec file at a known blob SHA.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("stale-spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let head_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        let repo = Repository::new(
+            Id::new("repo-stale-spec"),
+            Id::new("ws-1"),
+            "stale-spec-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Enable the blocking policy.
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    require_current_spec: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // MR referencing a LEDGER path ("system/identity.md", as spawn.rs
+        // builds from the spec ledger) with a stale SHA.
+        let stale_sha = "e".repeat(40);
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-stale-spec"),
+            repo.id.clone(),
+            "Stale spec MR",
+            "feat/stale",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.spec_ref = Some(format!("system/identity.md@{stale_sha}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-stale-spec"), mr.id.clone(), 50, 1000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        // The stale entry must have reached the exact terminal status Failed.
+        // Absence from list_queue() alone cannot prove this — Merged is also
+        // terminal and leaves the queue identically, so a regression that
+        // silently merges the stale MR would pass an absence assertion
+        // (finding dcf03cee mutation probe).
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("stale entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Failed,
+            "stale spec_ref must block the merge with a Failed entry"
+        );
+        let err = entry_after
+            .error_message
+            .as_deref()
+            .expect("stale-spec failure carries a reason");
+        assert!(
+            err.contains("requires current spec"),
+            "failure reason must be the stale-spec policy, got: {err}"
+        );
+
+        // Control: an MR referencing the CURRENT blob SHA must proceed past
+        // the spec check and complete the merge (Merged, not merely
+        // not-Failed — the git-ops double always succeeds, so only the
+        // stale-spec policy could hold this entry back).
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-current-spec"),
+            repo.id.clone(),
+            "Current spec MR",
+            "feat/current",
+            "main",
+            1001,
+        );
+        mr2.workspace_id = Id::new("ws-1");
+        mr2.spec_ref = Some(format!("system/identity.md@{head_blob}"));
+        state.merge_requests.create(&mr2).await.unwrap();
+        let entry2 = MergeQueueEntry::new(Id::new("entry-current-spec"), mr2.id.clone(), 50, 1001);
+        state.merge_queue.enqueue(&entry2).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry2_after = state
+            .merge_queue
+            .find_by_id(&entry2.id)
+            .await
+            .unwrap()
+            .expect("entry survives processing");
+        assert_eq!(
+            entry2_after.status,
+            MergeQueueEntryStatus::Merged,
+            "current spec_ref must not be blocked by require_current_spec (error: {:?})",
+            entry2_after.error_message
         );
     }
 
@@ -8068,5 +9953,82 @@ mod tests {
             "hold must name supervised trust, got: {:?}",
             entry.error_message
         );
+    }
+
+    /// user-management.md §Notification Entity: pausing a merge queue
+    /// notifies workspace Admins/Owners (MergeQueuePaused, High) with a deep
+    /// link to the repo — and nobody else.
+    #[tokio::test]
+    async fn pause_merge_queue_notifies_admins_and_owners() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-pause");
+        let ws = Workspace::new(
+            ws_id.clone(),
+            Id::new("tenant-1"),
+            "pause-ws",
+            "pause-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = create_repo_in_workspace(&state, "paused-repo", "ws-pause").await;
+
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-dev", WorkspaceRole::Developer),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                Id::new(uid),
+                ws_id.clone(),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        pause_merge_queue(&state, &repo, "post-merge validation failed").await;
+
+        for uid in ["user-admin", "user-owner"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(notifs.len(), 1, "{uid} must be notified");
+            let n = &notifs[0];
+            assert_eq!(
+                n.notification_type,
+                gyre_common::NotificationType::MergeQueuePaused
+            );
+            assert_eq!(
+                n.priority,
+                gyre_common::NotificationPriority::High,
+                "MergeQueuePaused is High per user-management.md"
+            );
+            assert_eq!(n.source.entity_type, "repo");
+            assert_eq!(n.source.entity_id, repo.id.as_str());
+            assert_eq!(
+                n.action_url.as_deref(),
+                Some("/workspaces/pause-ws/r/paused-repo"),
+                "deep link resolves through the workspace slug + repo name"
+            );
+        }
+        for uid in ["user-dev", "user-viewer"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .await
+                .unwrap();
+            assert!(
+                notifs.is_empty(),
+                "{uid} must not be notified for a queue pause"
+            );
+        }
     }
 }

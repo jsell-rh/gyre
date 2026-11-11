@@ -28,11 +28,11 @@
 
 use gyre_common::message::{Destination, MessageKind};
 use gyre_common::Id;
-use gyre_domain::{Task, TaskStatus};
+use gyre_domain::{SpecLifecycleConfig, Task, TaskStatus};
 use serde::Deserialize;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
-use crate::git_http::SPEC_WATCHED_PATHS;
 use crate::spec_patrol::{PatrolFinding, PatrolResponse};
 use crate::AppState;
 
@@ -228,9 +228,12 @@ fn check_stale_implementation_backlog_tasks(
 /// repo — otherwise an identically-named spec in another repo would mask the gap.
 ///
 /// Deliberate exclusions (each is "not a modification awaiting a task"):
-/// - paths outside [`SPEC_WATCHED_PATHS`] — only `specs/system/` and
-///   `specs/development/` trigger lifecycle tasks (spec-lifecycle.md §What This
-///   Does NOT Do), so anything else can never have a task;
+/// - paths the entry's repo does not watch — the post-receive hook only
+///   creates tasks for paths the repo's `SpecLifecycleConfig` watches
+///   (spec-lifecycle.md §Configuration / §What This Does NOT Do), so anything
+///   else can never have a task; repos with the lifecycle hook disabled
+///   (`enabled = false`) are skipped entirely, mirroring
+///   `git_http::process_spec_lifecycle`'s early return;
 /// - `Deprecated` entries — removal is handled by the hook's `spec-deprecated`
 ///   task at deprecation time, and that task closing would otherwise leave a
 ///   permanently un-actionable finding;
@@ -246,9 +249,22 @@ async fn check_modified_specs_without_tasks(
     grace_secs: u64,
     findings: &mut Vec<PatrolFinding>,
 ) -> anyhow::Result<()> {
+    // Per-repo watched-path configuration, cached per patrol run: the same
+    // config the post-receive hook consults (`process_spec_lifecycle`), so
+    // the patrol and the hook can never disagree about which specs are
+    // supposed to have tasks. Absent rows mean "defaults"
+    // (`SpecLifecycleRepository::get_for_repo` contract).
+    let mut config_cache: HashMap<String, SpecLifecycleConfig> = HashMap::new();
+
     for entry in ledger {
         let path = normalize_spec_path(&entry.path);
-        if !is_watched_spec_path(&path) {
+        let config = repo_config(state, entry.repo_id.as_deref(), &mut config_cache).await?;
+        if !config.enabled {
+            // The lifecycle hook is configured off for this repo: missing
+            // tasks are configured behavior, not an accountability gap.
+            continue;
+        }
+        if !config.is_watched(&path) {
             continue;
         }
         if entry.approval_status == gyre_domain::ApprovalStatus::Deprecated {
@@ -415,14 +431,27 @@ fn has_label(task: &Task, label: &str) -> bool {
     task.labels.iter().any(|l| l == label)
 }
 
-/// True when a spec path is under a watched prefix
-/// (`specs/system/`, `specs/development/`) — the same list the post-receive
-/// hook filters on, so the patrol and the hook can never disagree about which
-/// specs are supposed to have tasks.
-fn is_watched_spec_path(path: &str) -> bool {
-    SPEC_WATCHED_PATHS
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+/// The repo's spec-lifecycle config, or defaults when the ledger entry has no
+/// repo scope.
+///
+/// Fails (rather than defaulting) when the config store itself errors: a
+/// patrol that cannot read its inputs must not report "nothing wrong".
+async fn repo_config(
+    state: &AppState,
+    repo_id: Option<&str>,
+    cache: &mut HashMap<String, SpecLifecycleConfig>,
+) -> anyhow::Result<SpecLifecycleConfig> {
+    match repo_id {
+        Some(id) if !id.is_empty() => match cache.get(id) {
+            Some(c) => Ok(c.clone()),
+            None => {
+                let c = state.spec_lifecycle_configs.get_for_repo(id).await?;
+                cache.insert(id.to_string(), c.clone());
+                Ok(c)
+            }
+        },
+        _ => Ok(SpecLifecycleConfig::default()),
+    }
 }
 
 /// Canonical `specs/`-rooted form of a spec path.
@@ -1039,10 +1068,86 @@ mod tests {
             normalize_spec_path("specs/system/x.md"),
             "specs/system/x.md"
         );
-        assert!(is_watched_spec_path("specs/system/x.md"));
-        assert!(is_watched_spec_path("specs/development/y.md"));
-        assert!(!is_watched_spec_path("specs/milestones/z.md"));
-        assert!(!is_watched_spec_path("specs/prior-art/z.md"));
-        assert!(!is_watched_spec_path("src/system/x.md"));
+    }
+
+    /// Check 3's watched-path filter is the repo's spec-lifecycle config
+    /// (spec-lifecycle.md §Configuration), not a hardcoded list: with repo1
+    /// configured to watch only `specs/milestones/`, the orphaned milestone
+    /// spec is flagged while the default-watched `system/` orphan is not
+    /// (under that config the hook would never create a task for it) — and a
+    /// repo with the lifecycle hook disabled produces no findings at all
+    /// (mirrors `process_spec_lifecycle`'s early return).
+    #[tokio::test]
+    async fn check3_watched_paths_follow_per_repo_config() {
+        let state = test_state();
+        let old = NOW - DRIFT_MAX - 1;
+
+        // repo1 watches only specs/milestones/ (ignored_paths cleared — the
+        // defaults ignore milestones, which would mask the watched-path
+        // assertion).
+        let mut cfg = SpecLifecycleConfig::default();
+        cfg.watched_paths = vec!["specs/milestones/".to_string()];
+        cfg.ignored_paths = vec![];
+        state
+            .spec_lifecycle_configs
+            .set_for_repo("repo1", cfg)
+            .await
+            .unwrap();
+        // Orphaned milestone spec: watched under this repo's config.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "milestones/m36.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        // Orphaned system spec: default-watched, but NOT watched by repo1's
+        // config — flagging it would mean the filter is hardcoded.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/agent-runtime.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        // repo2 has the lifecycle hook disabled: an orphaned, default-watched
+        // spec there is configured behavior, not an accountability gap.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                "repo2",
+                SpecLifecycleConfig {
+                    enabled: false,
+                    ..SpecLifecycleConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut disabled_repo_entry = make_ledger_entry(
+            "system/disabled-repo.md",
+            Some("ws1"),
+            old,
+            ApprovalStatus::Approved,
+        );
+        disabled_repo_entry.repo_id = Some("repo2".to_string());
+        state.spec_ledger.save(&disabled_repo_entry).await.unwrap();
+
+        let findings = run(&state).await;
+        let orphaned: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.finding_type == "spec_without_task")
+            .map(|f| f.spec_path.as_str())
+            .collect();
+        assert_eq!(
+            orphaned,
+            vec!["specs/milestones/m36.md"],
+            "watched paths must come from the repo's config, not a hardcoded list: {findings:?}"
+        );
     }
 }

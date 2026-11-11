@@ -8,6 +8,24 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 
+// DependencyGraph lays out via ELK (WASM, unavailable in jsdom) — mock the
+// layout engine with deterministic positions (same pattern as
+// DependencyGraph.test.js). Keep the module's other exports intact for the
+// repo-scope ExplorerCanvas tests in this file.
+vi.mock('../lib/layout-engines.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    elkLayout: vi.fn().mockImplementation(async (nodes) => {
+      const positions = {};
+      nodes.forEach((n, i) => {
+        positions[n.id] = { x: 100 + i * 200, y: 80 };
+      });
+      return positions;
+    }),
+  };
+});
+
 // Shared mock: every api method is a cached vi.fn() defaulting to an empty
 // result; tests override the ones they exercise.
 const fns = new Map();
@@ -205,8 +223,8 @@ describe('Explorer default views selector (HSI §3)', () => {
   });
 });
 
-describe('Boundary View Level 1 — workspace repo cards (HSI §3)', () => {
-  it('shows repos as cards with type and endpoint counts from the workspace graph', async () => {
+describe('Boundary View Level 1 — workspace graph nodes (HSI §3, ui-layout.md §5)', () => {
+  it('renders repos as graph nodes with type and endpoint counts from the workspace graph', async () => {
     fn('repos').mockResolvedValue([
       { id: 'repo-1', name: 'payment-api', description: 'Payments' },
       { id: 'repo-2', name: 'ledger-svc' },
@@ -226,24 +244,28 @@ describe('Boundary View Level 1 — workspace repo cards (HSI §3)', () => {
       ],
       edges: [],
     });
-    fn('repoDependencies').mockResolvedValue([
-      { id: 'dep-1', source_repo_id: 'repo-1', target_repo_id: 'repo-2', target_artifact: 'ledger-core' },
-    ]);
+    // Cross-repo dependency renders as a canvas edge (ui-layout.md §5:
+    // repos as nodes, cross-repo dependencies as edges).
+    fn('workspaceDependencyGraph').mockResolvedValue({
+      nodes: [],
+      edges: [
+        { id: 'dep-1', source: 'repo-1', target: 'repo-2', type: 'code', status: 'active' },
+      ],
+    });
 
     renderWorkspaceScope();
 
-    const card1 = await screen.findByRole('button', { name: /payment-api/ });
-    expect(card1.textContent).toContain('payment-api');
-    expect(card1.textContent).toContain('2 types');
-    expect(card1.textContent).toContain('1 endpoints');
-    // Cross-repo dependency chip (name resolved from the repo list) — loads
-    // in a second async phase after the counts.
-    await waitFor(() => {
-      expect(card1.textContent).toContain('→ ledger-svc');
-    });
+    const node1 = await waitFor(() => screen.getByTestId('dep-node-repo-1'));
+    expect(node1.textContent).toContain('payment-api');
+    expect(node1.textContent).toContain('2 types');
+    expect(node1.textContent).toContain('1 endpoints');
 
-    const card2 = screen.getByRole('button', { name: /ledger-svc/ });
-    expect(card2.textContent).toContain('1 types');
-    expect(card2.textContent).toContain('2 endpoints');
+    const node2 = screen.getByTestId('dep-node-repo-2');
+    expect(node2.textContent).toContain('ledger-svc');
+    expect(node2.textContent).toContain('1 types');
+    expect(node2.textContent).toContain('2 endpoints');
+
+    // The cross-repo dependency is an edge on the canvas, not a chip.
+    expect(document.querySelectorAll('[data-testid^="dep-edge-"]').length).toBe(1);
   });
 });

@@ -330,7 +330,9 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-1", &auth).await.is_ok());
     }
@@ -362,7 +364,9 @@ mod tests {
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-1", &auth).await.is_ok());
     }
@@ -392,7 +396,9 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-A", &auth).await.is_ok());
     }
@@ -423,7 +429,9 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-B", &auth).await.is_err());
     }
@@ -472,7 +480,9 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(check_repo_abac(&state, "repo-A", &auth).await.is_ok());
         assert!(check_repo_abac(&state, "repo-B", &auth).await.is_err());
@@ -501,7 +511,9 @@ mod tests {
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(
             check_repo_abac(&state, "repo-corrupt", &admin_auth)
@@ -517,7 +529,9 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
+            bearer_token: None,
             deprecated_token_auth: false,
+            impersonation: None,
         };
         assert!(
             check_repo_abac(&state, "repo-corrupt", &agent_auth)

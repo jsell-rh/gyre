@@ -23,7 +23,7 @@ from pipeline.store import Store, StaleClaim, STAGES
 from pipeline.settings import configuration, save_configuration
 
 pipeline = helper('dev-pipeline')
-COMPUTE = {'triage', 'implement', 'review', 'verify'}
+COMPUTE = {'triage', 'assess', 'implement', 'review', 'verify'}
 AGENTS = {'implement': 'code-implementation', 'review': 'code-review'}
 
 

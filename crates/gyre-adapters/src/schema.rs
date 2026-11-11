@@ -39,6 +39,8 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        // TASK-099 F2: persona attached to this agent (orchestrators).
+        persona_id -> Nullable<Text>,
     }
 }
 
@@ -59,6 +61,7 @@ diesel::table! {
         tenant_id -> Text,
         workspace_id -> Text,
         spec_path -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,
@@ -185,6 +188,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        // TASK-099 F1: tenant binding; nullable for legacy OIDC users
+        // (the auth extractor fail-closes on unbound users).
         username -> Text,
         avatar_url -> Nullable<Text>,
         preferences -> Nullable<Text>,
@@ -376,6 +381,10 @@ diesel::table! {
         body -> Nullable<Text>,
         entity_ref -> Nullable<Text>,
         repo_id -> Nullable<Text>,
+        entity_type -> Nullable<Text>,
+        action_url -> Nullable<Text>,
+        read -> Integer,
+        read_at -> Nullable<BigInt>,
         resolved_at -> Nullable<BigInt>,
         dismissed_at -> Nullable<BigInt>,
         created_at -> BigInt,
@@ -427,7 +436,7 @@ diesel::table! {
         spec_sha -> Text,
         approver_id -> Text,
         signature -> Nullable<Text>,
-        approved_at -> BigInt,
+        approved_at -> Nullable<BigInt>,
         revoked_at -> Nullable<BigInt>,
         revoked_by -> Nullable<Text>,
         revocation_reason -> Nullable<Text>,
@@ -484,6 +493,7 @@ diesel::table! {
         command -> Nullable<Text>,
         required_approvals -> Nullable<Integer>,
         persona -> Nullable<Text>,
+        validation_type -> Nullable<Text>,
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
@@ -518,6 +528,13 @@ diesel::table! {
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
         enforce_manifest -> Integer,
+    }
+}
+
+diesel::table! {
+    spec_lifecycle_configs (repo_id) {
+        repo_id -> Text,
+        config -> Text,
     }
 }
 
@@ -726,6 +743,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     gate_results,
     repo_push_gates,
     spec_policies,
+    spec_lifecycle_configs,
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,
@@ -751,6 +769,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    commit_signatures,
     spec_assertion_results,
 );
 
@@ -997,6 +1016,27 @@ diesel::table! {
         created_at -> BigInt,
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
+        tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    commit_signatures (repo_id, commit_sha) {
+        repo_id -> Text,
+        commit_sha -> Text,
+        signer_id -> Text,
+        task_id -> Text,
+        spawned_by -> Text,
+        algorithm -> Text,
+        signature -> Text,
+        signing_key_id -> Text,
+        signed_at -> BigInt,
+        sigstore_mode -> Text,
+        oidc_subject -> Text,
+        oidc_issuer -> Text,
+        certificate_pem -> Nullable<Text>,
+        certificate_chain_pem -> Nullable<Text>,
+        rekor_entry_id -> Nullable<Text>,
         tenant_id -> Text,
     }
 }

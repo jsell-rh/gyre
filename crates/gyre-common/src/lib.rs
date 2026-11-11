@@ -29,7 +29,7 @@ pub use graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibi
 pub use id::Id;
 pub use key_binding::KeyBinding;
 pub use message::{Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer};
-pub use notification::{Notification, NotificationType};
+pub use notification::{Notification, NotificationPriority, NotificationSource, NotificationType};
 pub use protocol::{ActivityEventData, AgEventType, SubscribeScope, WsMessage};
 pub use secret::{Secret, SecretScope, SecretType};
 pub use trace::{GateTrace, SpanKind, SpanStatus, TraceSpan};

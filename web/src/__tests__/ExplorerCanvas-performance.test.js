@@ -150,8 +150,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
   cleanup();
+  // restoreAllMocks restores spies, but vi.fn draw mocks retain their call
+  // histories. Release those large graph traces after each case's assertions.
+  vi.clearAllMocks();
+  vi.restoreAllMocks();
   resetCapture();
 });
 
