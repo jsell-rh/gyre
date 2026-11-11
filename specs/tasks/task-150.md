@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["b3b97d79e47705e77bda31294fd7cbd4a4814440", "894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,7 +71,7 @@ From `platform-model.md` §4 — Agent Coordination Protocol (MCP-Based):
 
 ## Shipped
 
-### MCP prompts/list + prompts/get (mcp.rs, 30fba783)
+### MCP prompts/list + prompts/get (mcp.rs)
 
 `prompts/list` returns the four §4.3 prompts (`system://persona`,
 `system://protocol`, `system://context`, `system://constraints`) with
@@ -93,9 +93,9 @@ text}}]}`; unknown or missing `name` → JSON-RPC `-32602`.
 - `system://context` — task title/spec ref/description/status/priority,
   worktree branch+path, repo name/path/default branch (explicit `task_id`
   argument, else the caller's bound task; unknown task errors). Every
-  task load is containment-checked against the caller's scope (repair
-  12c5fe5e5): a task in another workspace (or, for a repo-scoped agent,
-  another repo) is rejected instead of rendered.
+  task load is containment-checked against the caller's scope: a task in
+  another workspace (or, for a repo-scoped agent, another repo) is
+  rejected instead of rendered.
 - `system://constraints` — workspace + tenant budget limits with remaining
   budget, agent lifetime cap, and workspace/tenant scope boundaries, read
   from the same `budget_configs`/`budget_usages` stores spawn-time
@@ -116,29 +116,45 @@ assembled meta-spec prompt set — exactly the set delivered as
 `GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — null when the assembled
 set is empty; no value is fabricated.
 
-### Merge repair: launch-ctx refactor drift (b3b97d79e, this round)
+### Merge repair: launch-ctx refactor drift (b3b97d79e)
 
 Assignment base `cba416b46` (task-118) extracted
 `launch_agent_process(state, ctx)` behind an `AgentLaunchCtx` shared by
 first spawn and the Ralph-loop re-spawn. The merge kept task-150's
 prompt-building block inside the extracted function but left it
-referencing `spawn_agent_core` locals (`req`, `is_interrogation`,
-`persona`) — E0425 x4 — and `signal_chain`'s `try_spawn_worker`
-`SpawnAgentRequest` initializer lost `persona_slug` (E0063). Repaired
-within the base's shared-context design: `AgentLaunchCtx` now carries the
+referencing `spawn_agent_core` locals — E0425 x4 — and `signal_chain`'s
+`try_spawn_worker` initializer lost `persona_slug` (E0063). Repaired
+within the base's shared-context design: `AgentLaunchCtx` carries the
 resolved `persona` and `is_interrogation`; the prompt scope/builders read
-from `ctx` (task id, branch, worktree path); the Ralph-loop re-spawn
-resolves the persona bound to the agent row at first spawn (fail-closed
-when the binding no longer resolves to an Approved persona) and passes
-`is_interrogation: false` (workers only — the path requires a worktree,
-interrogation agents have none); `try_spawn_worker` sets
-`persona_slug: None` (scheduler spawns carry no persona request).
+from `ctx`; the Ralph-loop re-spawn resolves the persona bound to the
+agent row at first spawn (fail-closed when the binding no longer resolves
+to an Approved persona); `try_spawn_worker` sets `persona_slug: None`.
+
+### Review repair: orchestrator persona approval fail-closed (this round, review F1)
+
+`launch_orchestrator_process` (api/orchestrator.rs) previously injected
+the bound persona's `system_prompt` as `GYRE_PROMPT_PERSONA` with no
+`approval_status` check — the one persona-injection site that failed
+open. Reachable in production: a persona-file push (git_http.rs) resets
+an Approved persona to Pending while swapping its `system_prompt`, and
+the stale-agent detector restarts a dead orchestrator with the preserved
+`persona_id` by calling `launch_orchestrator_process` directly, so the
+replacement would have run under the new, human-unapproved prompt
+content. The launch now fails closed: a bound persona that is not
+`Approved` returns `launch_status: "launch_failed"` with a detail naming
+the persona and approval state plus an error-level log — consistent with
+`relaunch_agent_session` (workers) and `resolve_orchestrator_persona`
+(first spawn). Regression test
+`orchestrator_launch_fails_closed_on_unapproved_persona` simulates the
+push (system_prompt swap + Pending reset), invokes the launch exactly as
+`restart_orchestrator` does, and asserts both the failed outcome and that
+no process was spawned (the prompt-dump script never ran).
 
 ### Test evidence
 
-`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
-clean (the 5 merge-drift errors are gone); `cargo fmt --check` and
-`scripts/check-arch.sh` pass. gyre-server test compilation exceeds this
+`cargo check -p gyre-server` and `cargo check -p gyre-server --lib
+--tests` clean (production and test code type-checked in this sandbox);
+`cargo fmt --check` passes. gyre-server test compilation exceeds this
 sandbox's 4 GiB budget (build-wrapper blocked), so the verifier must run
 the focused suites (also recorded in /tmp/stage/review-evidence):
 
@@ -147,6 +163,10 @@ the focused suites (also recorded in /tmp/stage/review-evidence):
   persona scope-chain fallback + bound-persona + unapproved/unknown
   rejection, context task+spec+worktree + cross-scope task rejection,
   constraints budget+scope, protocol content, agent-identity requirement.
+- `cargo test -p gyre-server --lib api::orchestrator::tests` — includes
+  `orchestrator_launch_fails_closed_on_unapproved_persona` (F1 repair)
+  and `orchestrator_launch_injects_system_prompts` (approved-persona
+  injection still works), plus the spawn/restart/JWT regressions.
 - `cargo test -p gyre-server --lib
   spawn_injects_all_four_system_prompts_with_persona` and
   `spawn_without_persona_injects_prompts_but_no_persona` and
@@ -155,7 +175,7 @@ the focused suites (also recorded in /tmp/stage/review-evidence):
 - `cargo test -p gyre-server --lib
   gate_failure_respawns_agent_with_fresh_context` and
   `max_iterations_blocks_task_and_fails_agent` — Ralph-loop re-spawn
-  path touched by the repair.
+  path touched by the launch-ctx repair.
 - `cargo test -p gyre-server --lib
   spawn_omits_meta_spec_set_sha_without_required_meta_specs` and
   `spawn_delivers_meta_spec_prompt_to_agent_env` — meta-spec SHA
