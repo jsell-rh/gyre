@@ -1772,10 +1772,7 @@ mod tests {
         // tree, paired with the LEDGER path (not the repo tree path).
         let blob_sha = {
             let out = std::process::Command::new("git")
-                .args([
-                    "rev-parse",
-                    &format!("{v1_commit}:specs/system/widget.md"),
-                ])
+                .args(["rev-parse", &format!("{v1_commit}:specs/system/widget.md")])
                 .current_dir(&repo_path)
                 .output()
                 .unwrap();

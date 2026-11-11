@@ -521,7 +521,11 @@ async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
     let tmp = tempfile::TempDir::new().unwrap();
     let repo_path = tmp.path().join("spec-probe-repo");
     std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
-    std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v1\n").unwrap();
+    std::fs::write(
+        repo_path.join("specs/system/identity.md"),
+        "# Identity v1\n",
+    )
+    .unwrap();
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(args)
@@ -620,7 +624,10 @@ async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
             "{scope} gate agent must fetch GYRE_SPEC_URL: {text}"
         );
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json["content"], "# Identity v1\n", "{scope} sees pinned spec");
+        assert_eq!(
+            json["content"], "# Identity v1\n",
+            "{scope} sees pinned spec"
+        );
         assert_eq!(json["spec_sha"], v1_blob.as_str());
 
         // Same token, route outside the allow-list: still contained.
@@ -643,6 +650,10 @@ async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
         );
 
         // Teardown: revoke so later iterations mint fresh tokens.
-        state.kv_store.kv_remove("agent_tokens", agent).await.unwrap();
+        state
+            .kv_store
+            .kv_remove("agent_tokens", agent)
+            .await
+            .unwrap();
     }
 }
