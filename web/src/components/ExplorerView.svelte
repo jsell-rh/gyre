@@ -1864,11 +1864,14 @@
   // just the hidden leaf-id set.
   let explorerHiddenCategories = $derived(CATEGORY_IDS.filter((id) => !activeFilterCategories[id]));
 
-  // ── Evaluative lens risk overlay (task-178) ───────────────────
+  // ── Evaluative lens risk overlay (task-178 / task-181) ───────────
   // GET /repos/:id/graph/risks — fetched when the Evaluative lens is active
-  // (best-effort, non-blocking; the lens renders fine without it). The score
-  // mirrors the canvas's client-side risk definition (churn × complexity)
-  // but sourced from the server's stored metrics.
+  // (best-effort, non-blocking; the lens renders fine without it).
+  // riskEntries keeps the full RiskMetricsResponse records (churn_rate,
+  // fan_in, fan_out, complexity, spec_covered) for the Risk Map heat map
+  // and anomaly callouts (system-explorer.md §7); riskByNode reduces them
+  // to the task-178 churn × complexity aggregate.
+  let riskEntries = $state([]);
   let riskByNode = $state({});
   let riskLoadedFor = $state('');
   $effect(() => {
@@ -1879,13 +1882,16 @@
     api.repoGraphRisks(currentRepoId)
       .then((risks) => {
         if (selectedRepoId !== currentRepoId) return; // stale
+        const entries = [];
         const m = {};
         for (const r of Array.isArray(risks) ? risks : []) {
           if (!r?.node_id) continue;
+          entries.push(r);
           const churn = Number(r.churn_rate ?? 0) || 0;
           const complexity = Number(r.complexity ?? 0) || 0;
           m[r.node_id] = churn * complexity;
         }
+        riskEntries = entries;
         riskByNode = m;
       })
       .catch(() => {
@@ -2563,6 +2569,7 @@
                 timelineScrubIndex={timelineScrubIndex}
                 {gateRecords}
                 riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
+                riskEntries={explorerLens === 'evaluative' ? riskEntries : []}
                 hiddenNodeIds={explorerHiddenNodeIds}
                 hiddenCategories={explorerHiddenCategories}
                 filterConcepts={activeFilterConcepts}
