@@ -10,13 +10,14 @@
 //! bridge onto the message bus. It derives user-facing Inbox notifications from
 //! Event-tier messages:
 //!
-//! - `GateFailure`            → priority-3 `GateFailure` notification for the MR
+//! - `GateFailure`            → rank-3 `GateFailure` notification for the MR
 //!   author agent's spawning user (HSI §8 p3).
-//! - `BudgetWarning`          → priority-7 `BudgetWarning` notification for the
-//!   workspace's Admin/Developer/Owner members (agent-runtime.md budget table).
-//! - `AgentError`             → priority-5 `AgentEscalation` notification for the
-//!   failing agent's spawning user (HSI §8 p5).
-//! - `ReconciliationCompleted` → priority-6 `MetaSpecDrift` notification for the
+//! - `BudgetWarning`          → rank-4 `AgentBudgetWarning` notification for the
+//!   workspace's Admin/Developer/Owner members (user-management.md
+//!   §Notification Entity taxonomy, task-123 unification).
+//! - `AgentError`             → rank-2 `AgentEscalation` notification for the
+//!   failing agent's spawning user (HSI §8 p2).
+//! - `ReconciliationCompleted` → rank-6 `MetaSpecDrift` notification for the
 //!   workspace's Admin/Developer/Owner members (HSI §8 p6 — explicitly routed
 //!   "Via MessageConsumer consuming ReconciliationCompleted events").
 //!
@@ -25,7 +26,7 @@
 
 use crate::AppState;
 use gyre_common::message::{Message, MessageKind};
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, NotificationType};
 use gyre_domain::WorkspaceRole;
 use gyre_ports::MessageConsumer;
 use std::sync::Arc;
@@ -219,14 +220,7 @@ impl NotificationBridge {
         }
     }
 
-    fn now_secs() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-    }
-
-    /// GateFailure → priority-3 GateFailure notification for the MR author's
+    /// GateFailure → rank-3 GateFailure notification for the MR author's
     /// spawning user (HSI §8 p3). Payload per message-bus.md §Payload Schemas:
     /// `{mr_id, gate_name, gate_type, status, output, spec_ref, gate_agent_id}`.
     async fn on_gate_failure(&self, msg: &Message) {
@@ -248,15 +242,16 @@ impl NotificationBridge {
 
         // Resolve the MR's author agent, then its spawning user. If either
         // lookup fails there is no human to notify — skip rather than notify
-        // a fabricated identity.
-        let author_agent_id = self
+        // a fabricated identity. The MR lookup also yields the repo for the
+        // notification's deep link.
+        let mr = self
             .state
             .merge_requests
             .find_by_id(&Id::new(mr_id.to_string()))
             .await
             .ok()
-            .flatten()
-            .and_then(|mr| mr.author_agent_id);
+            .flatten();
+        let author_agent_id = mr.as_ref().and_then(|mr| mr.author_agent_id.clone());
         let Some(author_agent_id) = author_agent_id else {
             tracing::debug!(
                 "NotificationBridge: GateFailure for MR {mr_id} with no author agent; skipping"
@@ -293,14 +288,17 @@ impl NotificationBridge {
             title: format!("Gate '{gate_name}' failed on MR {mr_id}"),
             tenant_id,
             body: Some(body),
+            entity_type: "gate",
             entity_ref: Some(mr_id.to_string()),
+            repo_id: mr.as_ref().map(|m| m.repository_id.to_string()),
         })
         .await;
     }
 
-    /// BudgetWarning → priority-7 BudgetWarning notification for workspace
-    /// Admin/Developer/Owner members (agent-runtime.md budget table: at 80%
-    /// usage, "BudgetWarning notification created (Inbox priority 7)").
+    /// BudgetWarning → rank-4 AgentBudgetWarning notification for workspace
+    /// Admin/Developer/Owner members (user-management.md §Notification
+    /// Entity: at 80% usage the spawner and Admins are warned; the bus bridge
+    /// fans the workspace-targeted event out to the human roles).
     /// Payload: `{agent_id, workspace_id, usage_pct}`.
     async fn on_budget_warning(&self, msg: &Message) {
         let Some(ws_id) = msg.workspace_id.clone() else {
@@ -322,18 +320,20 @@ impl NotificationBridge {
             self.create(NotificationDraft {
                 workspace_id: ws_id.clone(),
                 user_id,
-                notification_type: NotificationType::BudgetWarning,
+                notification_type: NotificationType::AgentBudgetWarning,
                 title: title.clone(),
                 tenant_id: tenant_id.clone(),
                 body: msg.payload.as_ref().map(|p| p.to_string()),
+                entity_type: "workspace",
                 entity_ref: None,
+                repo_id: None,
             })
             .await;
         }
     }
 
-    /// AgentError → priority-5 AgentEscalation notification for the failing
-    /// agent's spawning user (HSI §8 p5: "an agent has escalated or failed
+    /// AgentError → rank-2 AgentEscalation notification for the failing
+    /// agent's spawning user (HSI §8: "an agent has escalated or failed
     /// and needs human attention"). Payload: `{agent_id, error, context?}`.
     async fn on_agent_error(&self, msg: &Message) {
         let Some(ws_id) = msg.workspace_id.clone() else {
@@ -382,7 +382,9 @@ impl NotificationBridge {
             title: format!("Agent error: {error}"),
             tenant_id,
             body: msg.payload.as_ref().map(|p| p.to_string()),
+            entity_type: "agent",
             entity_ref: Some(agent_id),
+            repo_id: None,
         })
         .await;
     }
@@ -410,32 +412,33 @@ impl NotificationBridge {
                 title: title.clone(),
                 tenant_id: tenant_id.clone(),
                 body: msg.payload.as_ref().map(|p| p.to_string()),
+                entity_type: "workspace",
                 entity_ref: None,
+                repo_id: None,
             })
             .await;
         }
     }
 
+    /// Persist the derived notification through the shared rich-notification
+    /// helper — one creation path for every producer, so bridge-created
+    /// notifications get the same structured source and deep-link derivation
+    /// as the synchronous helpers (notifications.rs `notify_rich`).
     async fn create(&self, draft: NotificationDraft) {
-        let priority = draft.notification_type.default_priority();
-        let notif = Notification {
-            id: Id::new(uuid::Uuid::new_v4().to_string()),
-            workspace_id: draft.workspace_id,
-            user_id: draft.user_id,
-            notification_type: draft.notification_type,
-            priority,
-            title: draft.title,
-            body: draft.body,
-            entity_ref: draft.entity_ref,
-            repo_id: None,
-            resolved_at: None,
-            dismissed_at: None,
-            created_at: Self::now_secs(),
-            tenant_id: draft.tenant_id,
-        };
-        if let Err(e) = self.state.notifications.create(&notif).await {
-            tracing::warn!("NotificationBridge: failed to create notification: {e}");
-        }
+        crate::notifications::notify_rich(
+            &self.state,
+            draft.workspace_id,
+            draft.user_id,
+            draft.notification_type,
+            draft.title,
+            draft.tenant_id,
+            draft.body,
+            draft.entity_ref,
+            draft.repo_id,
+            draft.entity_type,
+            None,
+        )
+        .await;
     }
 }
 
@@ -448,7 +451,11 @@ struct NotificationDraft {
     title: String,
     tenant_id: String,
     body: Option<String>,
+    /// Source entity kind ("gate", "agent", ...) — only read when
+    /// `entity_ref` is Some.
+    entity_type: &'static str,
     entity_ref: Option<String>,
+    repo_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -467,6 +474,7 @@ impl MessageConsumer for NotificationBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gyre_common::Notification;
     use gyre_common::message::{Destination, MessageOrigin};
 
     /// Serializes tests that mutate process-global env vars
@@ -566,9 +574,10 @@ mod tests {
         let notifs = list_notifications(&state, "user-1").await;
         assert_eq!(notifs.len(), 1);
         assert_eq!(notifs[0].notification_type, NotificationType::GateFailure);
-        assert_eq!(notifs[0].priority, 3);
+        assert_eq!(notifs[0].priority_rank, 3);
         assert_eq!(notifs[0].tenant_id, "tenant-1");
-        assert_eq!(notifs[0].entity_ref.as_deref(), Some("mr-1"));
+        assert_eq!(notifs[0].source.entity_type, "gate");
+        assert_eq!(notifs[0].source.entity_id, "mr-1");
     }
 
     #[tokio::test]
@@ -589,11 +598,8 @@ mod tests {
 
         let admin_notifs = list_notifications(&state, "user-admin").await;
         assert_eq!(admin_notifs.len(), 1);
-        assert_eq!(
-            admin_notifs[0].notification_type,
-            NotificationType::MetaSpecDrift
-        );
-        assert_eq!(admin_notifs[0].priority, 6);
+        assert_eq!(admin_notifs[0].notification_type, NotificationType::MetaSpecDrift);
+        assert_eq!(admin_notifs[0].priority_rank, 6);
 
         let dev_notifs = list_notifications(&state, "user-dev").await;
         assert_eq!(dev_notifs.len(), 1);
@@ -623,8 +629,11 @@ mod tests {
 
         let notifs = list_notifications(&state, "user-1").await;
         assert_eq!(notifs.len(), 1);
-        assert_eq!(notifs[0].notification_type, NotificationType::BudgetWarning);
-        assert_eq!(notifs[0].priority, 7);
+        assert_eq!(
+            notifs[0].notification_type,
+            NotificationType::AgentBudgetWarning
+        );
+        assert_eq!(notifs[0].priority_rank, 4);
     }
 
     #[tokio::test]
@@ -650,8 +659,9 @@ mod tests {
             notifs[0].notification_type,
             NotificationType::AgentEscalation
         );
-        assert_eq!(notifs[0].priority, 5);
-        assert_eq!(notifs[0].entity_ref.as_deref(), Some("agent-1"));
+        assert_eq!(notifs[0].priority_rank, 2);
+        assert_eq!(notifs[0].source.entity_type, "agent");
+        assert_eq!(notifs[0].source.entity_id, "agent-1");
     }
 
     #[tokio::test]

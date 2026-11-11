@@ -1294,14 +1294,15 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
-                && repo_filter.is_none_or(|f| n.repo_id.as_deref() == Some(f))
+                && repo_filter
+                    .is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),
                 description: n.body.clone().unwrap_or_default(),
                 entity_type: "spec_assertion_failure".to_string(),
-                entity_id: n.entity_ref.clone(),
-                spec_path: n.entity_ref.clone(),
+                entity_id: Some(n.source.entity_id.clone()),
+                spec_path: Some(n.source.entity_id.clone()),
                 timestamp: n.created_at as u64,
                 actions: vec![
                     "View Spec".to_string(),
@@ -2858,6 +2859,7 @@ mod tests {
         // Keycloak-style JWT: Admin role (passes middleware for "generate"),
         // raw claims (subject for the per-repo policy check).
         let claims = serde_json::json!({
+            "tenant_id": "default",
             "sub": "admin-no-repo-scope",
             "preferred_username": "admin-no-repo-scope",
             "realm_access": { "roles": ["admin"] }

@@ -381,8 +381,10 @@ if [ -f "$CLI_MAIN" ] && [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
     # (4) Find CLI display code that consumes the parsed data and check
     #     its ["field"] accesses against the server fields
 
-    # Find SSE-consuming client functions
-    SSE_FN_LINES=$(grep -n '"complete"' "$CLI_CLIENT" 2>/dev/null | head -20 || true)
+    # Find SSE-consuming client functions. Skip comment lines so a mention
+    # of "complete" in a comment does not re-run the whole check (duplicate
+    # findings for the same function).
+    SSE_FN_LINES=$(grep -n '"complete"' "$CLI_CLIENT" 2>/dev/null | grep -v ':[[:space:]]*//' | head -20 || true)
 
     if [ -n "$SSE_FN_LINES" ]; then
         while IFS= read -r sse_line; do
@@ -448,12 +450,44 @@ if [ -f "$CLI_MAIN" ] && [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
                         [ -z "$call_site" ] && continue
                         CS_LINENO=$(echo "$call_site" | cut -d: -f1)
                         CS_WINDOW_END=$((CS_LINENO + 30))
+                        DISPLAY_WINDOW=$(sed -n "${CS_LINENO},${CS_WINDOW_END}p" "$CLI_MAIN")
 
-                        # Extract all ["field"] accesses in the display window
-                        CLI_FIELDS=$(sed -n "${CS_LINENO},${CS_WINDOW_END}p" "$CLI_MAIN" \
-                            | grep -oP '\["([a-z_]+)"\]' \
-                            | sed 's/\["\|"\]//g' \
-                            | sort -u || true)
+                        # Only field accesses on the complete-event values themselves are
+                        # comparable against the server's top-level complete-event fields.
+                        # Determine which variables hold those values:
+                        #   RETVAR  — assigned directly from the api.<fn_name>(...) call
+                        #             (holds the collected event values)
+                        #   LOOPVAR — iterates RETVAR (holds one event value)
+                        # Accesses on any other receiver (e.g. `d["op"]` on a diff-op
+                        # element nested inside the "diff" field) target values the
+                        # server sends INSIDE a top-level field; comparing them against
+                        # the top-level field set is a category error and produced false
+                        # positives (diff-op fields op/path/content flagged against the
+                        # top-level diff/error/explanation set). The nested diff-op shape
+                        # is validated server-side at construction (specs_assist.rs) and
+                        # by Check 9 doc-drift detection, not by this comparison.
+                        RETVAR=$(echo "$call_site" | grep -oP "let\s+\K\w+(?=\s*=[^;]*\b${fn_name}\()" | head -1 || true)
+                        LOOPVAR=""
+                        if [ -n "$RETVAR" ]; then
+                            LOOPVAR=$(echo "$DISPLAY_WINDOW" | grep -oP "for\s+\K\w+(?=\s+in\s+&?${RETVAR}\b)" | head -1 || true)
+                        fi
+
+                        RECEIVERS=""
+                        [ -n "$RETVAR" ] && RECEIVERS="$RETVAR"
+                        [ -n "$LOOPVAR" ] && RECEIVERS="${RECEIVERS:+${RECEIVERS}|}${LOOPVAR}"
+
+                        if [ -n "$RECEIVERS" ]; then
+                            # Extract ["field"] accesses on the event-value receivers only.
+                            CLI_FIELDS=$(echo "$DISPLAY_WINDOW" \
+                                | grep -oP "\b(${RECEIVERS})\[\"[a-z_]+\"\]" \
+                                | grep -oP '\["\K[a-z_]+(?="\])' \
+                                | sort -u || true)
+                        else
+                            # No identifiable receiver for the call's return value —
+                            # the window's other ["field"] accesses belong to unknown
+                            # receivers and cannot be attributed to this endpoint.
+                            CLI_FIELDS=""
+                        fi
 
                         for cli_field in $CLI_FIELDS; do
                             [ -z "$cli_field" ] && continue

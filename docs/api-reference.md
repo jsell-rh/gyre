@@ -54,7 +54,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |
-| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: `test_command`, `lint_command`, `required_approvals`, `agent_review`, `agent_validation` — serialized as snake_case) (M12.1, M12.3). See [agent-protocol.md](agent-protocol.md) for `AgentReview`/`AgentValidation` env vars. |
+| `POST/GET` | `/api/v1/repos/{id}/gates` | Create (**Admin required**) / list quality gates for a repo (`GateType`: `test_command`, `lint_command`, `required_approvals`, `agent_review`, `agent_validation` — serialized as snake_case; `agent_validation` accepts optional `validation_type` string identifying the domain-specific check, delivered to the agent as `GYRE_VALIDATION_TYPE`) (M12.1, M12.3). See [agent-protocol.md](agent-protocol.md) for `AgentReview`/`AgentValidation` env vars. |
 | `DELETE` | `/api/v1/repos/{id}/gates/{gate_id}` | Delete a quality gate (M12.1) |
 | `POST` | `/api/v1/specs/approve` | Record spec approval: `{path, sha, signature?}` — `sha` must be 40-char hex; **approver identity derived server-side from auth token** (client must not supply `approver_id`) (CISO M12.3-A, M12.3) |
 | `GET` | `/api/v1/specs/approvals` | List spec approvals (`?path=<relative-path>` to filter by spec file) (M12.3) |
@@ -123,7 +123,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/graph/diff` | Graph diff between commits — `{from, to, message, deltas}`; `?from=<ref>&to=<ref>` (defaults: `HEAD~1`/`HEAD`) (M30) |
 | `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (M30) |
-| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
+| `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`); every agent response carries `orchestrator_type`: `worker` \| `workspace_orchestrator` \| `repo_orchestrator` (platform-model §3 — the role signal for the HSI §4 scoped-chat recipient lookup) |
 | `GET` | `/api/v1/agents/{id}` | Get agent |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
 | `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{model, input_tokens, output_tokens, cost_usd?}`; accumulated in budget tracking; `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
@@ -181,8 +181,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
 | `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
 | `GET` | `/api/v1/users/me/judgments` | Judgment ledger — history of human decisions (approve/reject/trust-adjust) made through the UI; used to personalize future LLM suggestions (HSI §12) |
-| `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, `SpecChanged`, `AgentCompleted`, etc.; 4 priority levels); **auto-created by server event pipeline**: spec changes, gate failures, agent complete/fail, MR merge, and workspace divergence events all emit notifications automatically — no explicit API call required (M22.8, event-notification pipeline) |
-| `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
+| `GET` | `/api/v1/users/me/notifications` | Notifications — full `NotificationType` taxonomy (user-management.md §Notification Entity: 18 variants incl. `SpecApprovalRequested`, `AgentFailed`, `GatePassed`, `MrMerged`, `MrReverted`, `MergeQueuePaused`, `BreakingChangeDetected`, `SpecDriftDetected`, `DependencyStale`, `SecurityFinding`, `InvitationReceived`, `MembershipChanged`, `SystemAlert`, plus HSI §2 inbox types); response items carry `priority` (HSI 1–10 rank, numeric for sort/P-badge), `priority_level` (`Low`/`Medium`/`High`/`Urgent`), `entity_type` + `entity_ref` + `repo_id` (structured `NotificationSource`), `action_url` (deep link), and `read`/`read_at`; **auto-created by server event pipeline**: spec changes, gate failures/passes, agent complete/fail, MR merge/revert, queue pauses, budget thresholds, staleness, invitations and membership changes all emit notifications automatically — no explicit API call required (M22.8, event-notification pipeline) |
+| `GET` | `/api/v1/users/me/notifications/count` | Unread badge count (active = unresolved, undismissed) (HSI §2) |
+| `POST` | `/api/v1/notifications/{id}/read` | Mark a notification read — stamps `read_at` (user-management.md §Notification Entity; per-handler auth like dismiss/resolve) |
+| `POST` | `/api/v1/notifications/{id}/unread` | Clear the read state and `read_at` (user-management.md §Notification Entity) |
 | `POST` | `/api/v1/notifications/{id}/dismiss` | Dismiss a notification (removes from inbox view) (HSI §2) |
 | `POST` | `/api/v1/notifications/{id}/resolve` | Resolve a notification (marks underlying issue addressed) (HSI §2) |
 | `GET` | `/api/v1/conversations/{sha}` | Conversation provenance — returns agent conversation history anchored to a commit SHA; `{sha, turns: [{role, content, timestamp, model}]}`; records the agent reasoning that produced the commit (HSI §5, S2.3) |
@@ -239,10 +241,11 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/repos/{id}/jj/init` | Initialize jj (Jujutsu) in colocated mode on a repo |
 | `GET` | `/api/v1/repos/{id}/jj/log` | List recent jj changes (`?limit=N`) |
 | `POST` | `/api/v1/repos/{id}/jj/new` | Create a new anonymous jj change (WIP commit); JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
-| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change; returns `200 JSON` `CommitSignature` `{sha, signature (base64 Ed25519), key_id, algorithm, mode, timestamp}` — use `GET /commits/{sha}/signature` to verify later (M13.8); JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
+| `POST` | `/api/v1/repos/{id}/jj/squash` | Squash working copy into parent change; returns `200 JSON` `CommitSignature` `{commit_sha, signature (base64), algorithm ("EdDSA" or "ECDSA_P256_SHA256"), sigstore_mode ("local"/"fulcio"), signer_id, task_id, spawned_by, certificate_pem?, certificate_chain_pem?, rekor_entry_id?, signed_at}` — signing backend from `GYRE_SIGNING_MODE`; use `GET /commits/{sha}/signature` to retrieve later (M13.8, task-107); JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `POST` | `/api/v1/repos/{id}/jj/undo` | Undo the last jj operation; JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `POST` | `/api/v1/repos/{id}/jj/bookmark` | Create a jj bookmark (branch) pointing to a change; JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
-| `GET` | `/api/v1/repos/{id}/commits/{sha}/signature` | Look up and verify the `CommitSignature` for a given commit SHA; 404 if SHA not in store (M13.8) |
+| `GET` | `/api/v1/repos/{id}/commits/{sha}/signature` | Look up the stored `CommitSignature` for a given commit SHA, scoped to the repo; 404 if SHA not in store (M13.8) |
+| `GET` | `/api/v1/repos/{id}/commits/{sha}/signature/verification` | Verify the stored commit signature against the server's configured trust anchors; returns `SignatureVerificationResult` `{valid, signature_valid, certificate_chain_valid, subject_matches, rekor_entry_exists, signer_id, task_id, spawned_by, sigstore_mode, reason?}`; fulcio records check ECDSA signature, certificate chain (incl. validity window, multi-chain trust bundle), SAN/CN subject match, and Rekor entry content match; local records do real Ed25519 verification against the forge key (task-107); 404 if no record |
 | `GET` | `/healthz` | Liveness probe — `{status, checks}` JSON |
 | `GET` | `/readyz` | Readiness probe — `{status, checks}` JSON |
 | `POST` | `/api/v1/analytics/events` | Record an analytics event |
@@ -463,8 +466,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_cross_repo_task` | Create a cross-repo coordination task scoped to the caller's workspace (task-093). Workspace-orchestrator JWT only. Params: `title` (required), `description`, `priority`, `labels`. |
 | `gyre_decompose_spec` | Decompose a parent task into Implementation subtasks bound to the caller's repo (task-093). Repo-orchestrator JWT only. Params: `parent_task_id` (required), `subtasks` (array of `{title, description?, priority?, order?}`). |
 | `gyre_spawn_worker` | Spawn a worker agent for a task in the caller's repo (task-093). Repo-orchestrator JWT only; delegates to the `/agents/spawn` core. Params: `task_id`, `name`, `branch` (required), plus optional spawn fields. |
-| `graph_concept` | Search knowledge graph by concept name. Params: `concept` (required), `repo_id` or `workspace_id` (one required), `depth` (optional, default 2). Returns matching nodes and edges. (HSI §11) |
-| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
+| `graph_concept` | Search knowledge graph by concept name (manifest-based concept-view projection). Params: `concept` (required), `repo_id` or `workspace_id` (one required). Returns matching nodes and edges. Also callable and listed as `graph.concept` — the HSI §11 parity-table spelling. (HSI §11) |
+| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. Also callable and listed as `spec.assist` — the HSI §11 parity-table spelling. (HSI §11) |
 
 **Available resources** (from `resources/list`):
 

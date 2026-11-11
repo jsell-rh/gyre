@@ -33,6 +33,12 @@ def source(store):
         subprocess.run(['git', 'checkout', '--quiet', '--detach', 'origin/main'], cwd=path, check=True)
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=path, text=True).strip()
         sync_checkout(store, path, revision)
+        recovery = store.setting('requirements_recovery_revision')
+        if recovery:
+            from pipeline.requirement_migration import plan, apply
+            apply(store, plan(store, path, recovery))
+        from pipeline.fulfillment import reconcile
+        reconcile(store, path, revision)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -72,7 +78,7 @@ def discover_stage(store, stage, base):
 
 def run_one(store, stage, task=None):
     limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
+    if stage in ('implement', 'assess', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work),
@@ -87,9 +93,6 @@ def run_claim(store, claim):
     execution = Execution(store, claim)
     try:
         with execution.heartbeat():
-            if stage in ('triage','implement','review','verify'):
-                from pipeline.compute import check_admission
-                check_admission(execution)
             item = store.task(claim['task'])
             if item['data'].get('task_override'):
                 from pipeline.catalog import contract
@@ -119,11 +122,11 @@ def run_claim(store, claim):
                 body, count = re.subn(r'(?m)^depends_on:[^\n]*(?:\n[ \t]+-[^\n]*)*', declaration, item['body'], count=1)
                 if count != 1:
                     raise ValueError('cannot persist prerequisite without a unique dependency field')
-                generation = generation_for(store, body)
+                generation = generation_for(store, body, item['name'])
                 updates['triaged'] = None
             if stage in ('triage', 'implement') and result.get('task_body'):
                 body = result['task_body']
-                generation = generation_for(store, body)
+                generation = generation_for(store, body, item['name'])
                 updates.update(metadata(body))
                 updates['task_override'] = None
                 updates['triaged'] = generation if stage == 'triage' else (
