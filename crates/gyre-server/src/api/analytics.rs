@@ -9,20 +9,32 @@ use gyre_ports::analytics::AnalyticsQueryFilter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
 
 // ─── Analytics Events ────────────────────────────────────────────────────────
 
+/// Inbound analytics event (client-side push). The identity fields
+/// `agent_id`/`user_id` are accepted for backward compatibility but
+/// IGNORED — the caller identity from auth is always recorded (task-146
+/// review F1, same anti-forgery rule as audit events / NEW-31).
+/// `workspace_id`/`repo_id` are validated against the caller's tenant;
+/// cross-tenant or unknown scope attribution rejects the write.
 #[derive(Deserialize)]
 pub struct RecordEventRequest {
     pub event_name: String,
+    /// Ignored: derived from the verified caller identity.
     pub agent_id: Option<String>,
+    /// Ignored: derived from the verified caller identity.
     pub user_id: Option<String>,
     pub session_id: Option<String>,
+    /// Validated against the caller's tenant; mismatch or unknown id
+    /// rejects the write (Forbidden/NotFound).
     pub workspace_id: Option<String>,
+    /// Validated against the caller's tenant (and against `workspace_id`
+    /// when both are given); mismatch or unknown id rejects the write.
     pub repo_id: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
@@ -126,21 +138,64 @@ impl From<AnalyticsEvent> for AnalyticsEventResponse {
 
 pub async fn record_event(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Json(req): Json<RecordEventRequest>,
 ) -> Result<(StatusCode, Json<AnalyticsEventResponse>), ApiError> {
+    // Bind the identity fields to the verified caller (task-146 review F1):
+    // the request-body agent_id/user_id fields are ignored — the recorded
+    // event always reflects who actually made the call, not what the caller
+    // claims, so an authenticated caller cannot attribute analytics events
+    // to an arbitrary user or agent. Agent JWT callers carry an agent
+    // identity; user/API-key callers carry user_id; impersonation sessions
+    // attribute to the impersonator (identity-security.md §Impersonation) —
+    // the same rule the audit trail enforces (NEW-31).
+    let agent_id = if auth.agent_id.is_empty() {
+        None
+    } else {
+        Some(auth.agent_id.clone())
+    };
+    let user_id = auth
+        .impersonation
+        .as_ref()
+        .map(|imp| imp.impersonator_id.clone())
+        .or_else(|| auth.user_id.clone());
+
+    // Caller-scope validation (task-146 review F1, task-102 F2 pattern in
+    // audit.rs): workspace/repo attribution must resolve within the
+    // caller's tenant. These scope fields are exactly what the query API
+    // filters on, so persisting a caller-forged value would pollute
+    // another scope's filtered results and the agent-consumable decision
+    // loop. Mismatch or unknown id rejects the write.
+    let workspace_id = match req.workspace_id {
+        Some(w) => {
+            let id = Id::new(w);
+            super::audit::validate_workspace_scope(&state, &id, &auth).await?;
+            Some(id)
+        }
+        None => None,
+    };
+    let repo_id = match req.repo_id {
+        Some(r) => {
+            let id = Id::new(r);
+            super::audit::validate_repo_scope(&state, &id, &auth, workspace_id.as_ref()).await?;
+            Some(id)
+        }
+        None => None,
+    };
+
     let event = AnalyticsEvent::new(
         new_id(),
         req.event_name,
-        req.agent_id,
+        agent_id,
         req.properties
             .unwrap_or(serde_json::Value::Object(Default::default())),
         now_secs(),
     )
     .with_scope(
-        req.user_id.as_deref().map(Id::new).as_ref(),
+        user_id.as_ref(),
         req.session_id,
-        req.workspace_id.as_deref().map(Id::new).as_ref(),
-        req.repo_id.as_deref().map(Id::new).as_ref(),
+        workspace_id.as_ref(),
+        repo_id.as_ref(),
     );
     state.analytics.record(&event).await?;
     Ok((
@@ -752,7 +807,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+        // build_router layers require_auth + ABAC on every /api/v1/ route,
+        // matching production: the record handler authenticates the caller
+        // and binds/scopes the event to that identity (task-146 review F1).
+        crate::build_router(test_state())
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -774,6 +832,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .method("POST")
                     .uri("/api/v1/analytics/events")
                     .header("content-type", "application/json")
@@ -787,6 +846,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/events")
                     .body(Body::empty())
                     .unwrap(),
@@ -806,6 +866,7 @@ mod tests {
             app.clone()
                 .oneshot(
                     Request::builder()
+                        .header("Authorization", "Bearer test-token")
                         .method("POST")
                         .uri("/api/v1/analytics/events")
                         .header("content-type", "application/json")
@@ -819,6 +880,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/count?event_name=mr.merged&since=0&until=9999999999")
                     .body(Body::empty())
                     .unwrap(),
@@ -843,6 +905,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .method("POST")
                     .uri("/api/v1/costs")
                     .header("content-type", "application/json")
@@ -856,6 +919,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/costs?agent_id=agent-1")
                     .body(Body::empty())
                     .unwrap(),
@@ -880,6 +944,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .method("POST")
                     .uri("/api/v1/costs")
                     .header("content-type", "application/json")
@@ -892,6 +957,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/costs/summary?since=0&until=9999999999")
                     .body(Body::empty())
                     .unwrap(),
@@ -914,6 +980,7 @@ mod tests {
             app.clone()
                 .oneshot(
                     Request::builder()
+                        .header("Authorization", "Bearer test-token")
                         .method("POST")
                         .uri("/api/v1/analytics/events")
                         .header("content-type", "application/json")
@@ -927,6 +994,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri(
                         "/api/v1/analytics/usage?event_name=agent.spawned&since=0&until=9999999999",
                     )
@@ -949,6 +1017,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/usage?event_name=no.events&since=0&until=9999999999")
                     .body(Body::empty())
                     .unwrap(),
@@ -969,6 +1038,7 @@ mod tests {
         // get the current timestamp — just check that before=0 gives change_pct=null.
         let resp = app.oneshot(
             Request::builder()
+                .header("Authorization", "Bearer test-token")
                 .uri("/api/v1/analytics/compare?event_name=mr.merged&before=0&pivot=1&after=9999999999")
                 .body(Body::empty()).unwrap(),
         ).await.unwrap();
@@ -990,6 +1060,7 @@ mod tests {
             app.clone()
                 .oneshot(
                     Request::builder()
+                        .header("Authorization", "Bearer test-token")
                         .method("POST")
                         .uri("/api/v1/analytics/events")
                         .header("content-type", "application/json")
@@ -1003,6 +1074,7 @@ mod tests {
         app.clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .method("POST")
                     .uri("/api/v1/analytics/events")
                     .header("content-type", "application/json")
@@ -1015,6 +1087,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/top?limit=10&since=0")
                     .body(Body::empty())
                     .unwrap(),
@@ -1038,6 +1111,7 @@ mod tests {
             app.clone()
                 .oneshot(
                     Request::builder()
+                        .header("Authorization", "Bearer test-token")
                         .method("POST")
                         .uri("/api/v1/analytics/events")
                         .header("content-type", "application/json")
@@ -1051,6 +1125,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/events?event_name=task.completed")
                     .body(Body::empty())
                     .unwrap(),
@@ -1063,8 +1138,9 @@ mod tests {
 
     // ─── Query Parameters (analytics.md §Query Parameters) ─────────────────────
 
-    /// Helper: POST an event with full scope fields, return the state for
-    /// direct repository assertions.
+    /// Helper: POST an event over HTTP. Scope fields in the body are
+    /// validated against the caller (task-146 review F1); pass `None` to
+    /// record a scope-free event.
     async fn record_scoped(
         app: &Router,
         event_name: &str,
@@ -1085,6 +1161,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .method("POST")
                     .uri("/api/v1/analytics/events")
                     .header("content-type", "application/json")
@@ -1101,6 +1178,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri(format!("/api/v1/analytics/events?{query}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1111,37 +1189,351 @@ mod tests {
         body_json(resp).await
     }
 
+    // ─── task-146 review F1: caller-bound identity + scope validation ──────────
+
+    /// POST an analytics event over HTTP, returning (status, parsed body).
+    async fn post_event(app: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/analytics/events")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn record_event_binds_identity_to_caller_not_request_body() {
+        // F1 regression: agent_id/user_id in the request body are ignored —
+        // the recorded event carries the verified caller identity (the
+        // global test token authenticates as the "system" agent with no
+        // user), so a caller cannot attribute analytics events to an
+        // arbitrary user or agent.
+        let app = app();
+        let (status, json) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "agent_id": "forged-agent",
+                "user_id": "forged-user",
+                "session_id": "sess-1",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            json["agent_id"].as_str().unwrap(),
+            "system",
+            "agent_id must be the caller identity, not the forged body value"
+        );
+        assert_ne!(json["agent_id"].as_str().unwrap(), "forged-agent");
+        assert!(
+            json["user_id"].is_null(),
+            "user_id must come from the caller identity, not the body"
+        );
+        // session_id is not an identity/scope field and stays caller-supplied.
+        assert_eq!(json["session_id"].as_str().unwrap(), "sess-1");
+
+        // The persisted event (not just the response) carries the caller
+        // identity — query it back through the API.
+        let events = get_events(&app, "event_name=feature.used").await;
+        let arr = events.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["agent_id"].as_str().unwrap(), "system");
+        assert!(arr[0]["user_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn record_event_workspace_scope_validated_against_caller_tenant() {
+        // F1 regression: workspace attribution must resolve within the
+        // caller's tenant (global test token -> "default"). A forged
+        // cross-tenant attribution is rejected and never lands in the
+        // victim scope's filtered query results.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own"),
+                gyre_common::Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        // Own-tenant workspace: accepted and attributed.
+        let (status, json) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "workspace_id": "ws-own",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["workspace_id"].as_str().unwrap(), "ws-own");
+
+        // Cross-tenant workspace: Forbidden — no forged attribution.
+        let (status, _) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "workspace_id": "ws-victim",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown workspace: NotFound, not a silent attribution.
+        let (status, _) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "workspace_id": "ws-nope",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The rejected writes never polluted the victim scope's results —
+        // the exact repro from the review finding.
+        let events = get_events(&app, "workspace_id=ws-victim").await;
+        assert_eq!(
+            events.as_array().unwrap().len(),
+            0,
+            "forged event must not appear in the victim workspace's filtered results"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_event_repo_scope_validated_against_caller_tenant() {
+        // F1 regression: repo attribution requires the repo to exist, its
+        // workspace to resolve within the caller's tenant, and — when the
+        // event is also labeled with a workspace — the repo to belong to
+        // that workspace (audit.rs task-102 F2 pattern).
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own"),
+                gyre_common::Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own-2"),
+                gyre_common::Id::new("default"),
+                "Own 2",
+                "own-2",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-own"),
+                gyre_common::Id::new("ws-own"),
+                "own-repo",
+                "/repos/own-repo",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-own-2"),
+                gyre_common::Id::new("ws-own-2"),
+                "own-repo-2",
+                "/repos/own-repo-2",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-victim"),
+                gyre_common::Id::new("ws-victim"),
+                "victim-repo",
+                "/repos/victim-repo",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        // Consistent own-tenant pair: accepted.
+        let (status, json) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "workspace_id": "ws-own",
+                "repo_id": "repo-own",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["repo_id"].as_str().unwrap(), "repo-own");
+
+        // Repo in another tenant: Forbidden.
+        let (status, _) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "repo_id": "repo-victim",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Repo in the caller's tenant but labeled with a different
+        // (individually authorized) workspace: inconsistent attribution
+        // is Forbidden.
+        let (status, _) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "workspace_id": "ws-own",
+                "repo_id": "repo-own-2",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown repo: NotFound.
+        let (status, _) = post_event(
+            &app,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "repo_id": "repo-nope",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // No forged event reached the victim repo's filtered results.
+        let events = get_events(&app, "repo_id=repo-victim").await;
+        assert_eq!(
+            events.as_array().unwrap().len(),
+            0,
+            "forged event must not appear in the victim repo's filtered results"
+        );
+    }
+
     #[tokio::test]
     async fn query_events_filters_by_scope_ids() {
         // Spec: agent_id, workspace_id, repo_id, user_id must each filter.
-        let app = app();
-        record_scoped(
-            &app,
-            "mr.merged",
-            Some("agent-1"),
-            None,
-            Some("ws-1"),
-            Some("repo-1"),
-        )
-        .await;
-        record_scoped(
-            &app,
-            "mr.merged",
-            Some("agent-2"),
-            None,
-            Some("ws-2"),
-            Some("repo-1"),
-        )
-        .await;
-        record_scoped(
-            &app,
-            "mr.closed",
-            Some("agent-1"),
-            Some("user-9"),
-            Some("ws-1"),
-            None,
-        )
-        .await;
+        // Events are seeded directly against the repository: the POST
+        // handler binds identity to the caller and validates scope fields
+        // (task-146 review F1), so arbitrary scope attribution for filter
+        // coverage is a storage-level concern — the HTTP attribution rules
+        // are pinned by the record_event_* regression tests below.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let seed = |id: &str, name: &str, agent: Option<&str>, user: Option<&str>, ws: Option<&str>, repo: Option<&str>| {
+            gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(id),
+                name,
+                agent.map(|s| s.to_string()),
+                serde_json::json!({ "k": "v" }),
+                100,
+            )
+            .with_scope(
+                user.map(gyre_common::Id::new).as_ref(),
+                None,
+                ws.map(gyre_common::Id::new).as_ref(),
+                repo.map(gyre_common::Id::new).as_ref(),
+            )
+        };
+        state
+            .analytics
+            .record(&seed(
+                "e-1",
+                "mr.merged",
+                Some("agent-1"),
+                None,
+                Some("ws-1"),
+                Some("repo-1"),
+            ))
+            .await
+            .unwrap();
+        state
+            .analytics
+            .record(&seed(
+                "e-2",
+                "mr.merged",
+                Some("agent-2"),
+                None,
+                Some("ws-2"),
+                Some("repo-1"),
+            ))
+            .await
+            .unwrap();
+        state
+            .analytics
+            .record(&seed(
+                "e-3",
+                "mr.closed",
+                Some("agent-1"),
+                Some("user-9"),
+                Some("ws-1"),
+                None,
+            ))
+            .await
+            .unwrap();
 
         let json = get_events(&app, "agent_id=agent-1").await;
         assert_eq!(
@@ -1242,10 +1634,34 @@ mod tests {
     #[tokio::test]
     async fn query_events_group_by_aggregates() {
         // Spec: group_by ∈ {event_name, agent_id, workspace_id, day}.
-        let app = app();
-        record_scoped(&app, "mr.merged", Some("a1"), None, Some("ws-1"), None).await;
-        record_scoped(&app, "mr.merged", Some("a1"), None, Some("ws-1"), None).await;
-        record_scoped(&app, "mr.closed", Some("a2"), None, Some("ws-2"), None).await;
+        // Seeded directly against the repository — the POST handler binds
+        // identity/scope to the caller (task-146 review F1), so multi-agent /
+        // multi-workspace aggregation coverage seeds at the storage level.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let seed =
+            |id: &str, name: &str, agent: &str, ws: &str, ts: u64| {
+                gyre_domain::AnalyticsEvent::new(
+                    gyre_common::Id::new(id),
+                    name,
+                    Some(agent.to_string()),
+                    serde_json::json!({}),
+                    ts,
+                )
+                .with_scope(None, None, Some(&gyre_common::Id::new(ws)), None)
+            };
+        for (id, ts) in [("g-1", 100u64), ("g-2", 101)] {
+            state
+                .analytics
+                .record(&seed(id, "mr.merged", "a1", "ws-1", ts))
+                .await
+                .unwrap();
+        }
+        state
+            .analytics
+            .record(&seed("g-3", "mr.closed", "a2", "ws-2", 102))
+            .await
+            .unwrap();
 
         let json = get_events(&app, "group_by=event_name").await;
         let obj = json.as_object().expect("group_by returns an object");
@@ -1262,7 +1678,8 @@ mod tests {
         assert_eq!(obj.get("ws-1").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(obj.get("ws-2").and_then(|v| v.as_u64()), Some(1));
 
-        // day grouping: all events recorded "now" land on today's UTC date.
+        // day grouping: the deterministic timestamps all land on the same
+        // 1970-01-01 UTC bucket.
         let json = get_events(&app, "group_by=day").await;
         let obj = json.as_object().unwrap();
         let total: u64 = obj.values().filter_map(|v| v.as_u64()).sum();
@@ -1414,6 +1831,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/events?event_name=ev.iso&since=not-a-date")
                     .body(Body::empty())
                     .unwrap(),
@@ -1451,6 +1869,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/daily?event_name=ev.daily&days=30")
                     .body(Body::empty())
                     .unwrap(),
@@ -1472,6 +1891,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/daily?event_name=ev.daily&days=60")
                     .body(Body::empty())
                     .unwrap(),
@@ -1494,6 +1914,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/daily?event_name=ev.daily")
                     .body(Body::empty())
                     .unwrap(),
@@ -1511,6 +1932,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("Authorization", "Bearer test-token")
                     .uri("/api/v1/analytics/daily?event_name=ev.daily&since=9999&until=1")
                     .body(Body::empty())
                     .unwrap(),

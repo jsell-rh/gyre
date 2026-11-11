@@ -122,7 +122,8 @@ pub async fn emit_server_audit_event(state: &AppState, event: AuditEvent) {
 /// another workspace and corrupt the compliance record the query API
 /// filters on. Each named scope is looked up and its tenant compared
 /// against the caller's; mismatch or unknown id rejects the write.
-async fn validate_workspace_scope(
+/// Shared with the analytics record handler (task-146 review F1).
+pub(crate) async fn validate_workspace_scope(
     state: &AppState,
     id: &gyre_common::Id,
     auth: &AuthenticatedAgent,
@@ -144,7 +145,7 @@ async fn validate_workspace_scope(
 /// must resolve within the caller's tenant, and — when the event is also
 /// labeled with a workspace — the repo must belong to that workspace.
 /// Inconsistent or cross-tenant attribution is rejected.
-async fn validate_repo_scope(
+pub(crate) async fn validate_repo_scope(
     state: &AppState,
     id: &gyre_common::Id,
     auth: &AuthenticatedAgent,
