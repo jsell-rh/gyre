@@ -39,17 +39,25 @@ def reconcile_generated(store):
     resolved=[]
     for task in store.tasks():
         data=task['data'];repair=data.get('repair') or {};review=data.get('review') or {}
-        if (repair.get('category')!='review' or review.get('candidate')!=data.get('candidate')
-                or data.get('assessment_pending') or (data.get('requirements') or {}).get('errors')):continue
-        findings,deferred=source_findings(repair.get('details'))
-        if findings or not deferred:continue
+        if data.get('assessment_pending') or (data.get('requirements') or {}).get('errors'):continue
+        if repair.get('category')=='review' and review.get('candidate')==data.get('candidate'):
+            findings,deferred=source_findings(repair.get('details'))
+            if findings or not deferred:continue
+        elif not repair and not review and not data.get('review_retry'):
+            # Recover an older executor that already deferred this rejection
+            # but did not give the new review a distinct work identity.
+            event=store.db.execute("SELECT detail FROM events WHERE task=? AND kind='generated_only_review_rescheduled' ORDER BY id DESC LIMIT 1",(task['name'],)).fetchone()
+            previous=json.loads(event['detail']) if event else {}
+            if not data.get('candidate') or previous.get('candidate')!=data['candidate']:continue
+            deferred=previous.get('deferred',[])
+        else:continue
         with store.transaction():
             current=store.task(task['name'])
             if current['generation']!=task['generation'] or current['data']!=data:continue
             if store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(task['name'],)).fetchone():continue
             store.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,unixepoch())',
                 (task['name'],task['generation'],task['body'],json.dumps(data)))
-            store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data|{'repair':None,'review':None,'verified':None}),task['name']))
+            store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data|{'repair':None,'review':None,'verified':None,'review_retry':{'candidate':data['candidate'],'policy':'generated-assets-owned-by-verifier-v1'}}),task['name']))
             store.db.execute("UPDATE work SET state='obsolete',token=token+1,updated=unixepoch() WHERE task=? AND stage='implement' AND state IN ('ready','retry')",(task['name'],))
             store.event('generated_only_review_rescheduled',{'candidate':data['candidate'],'deferred':deferred},task['name'])
             resolved.append(task['name'])

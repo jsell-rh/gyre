@@ -135,7 +135,13 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(reconcile_generated(self.store),['task-001'])
         self.assertIsNone(self.store.task('task-001')['data']['review'])
         self.assertIsNone(self.store.task('task-001')['data']['repair'])
-        self.assertEqual(self.store.task('task-001')['data']['candidate'],self.head)
+        data=self.store.task('task-001')['data']
+        self.assertEqual(data['candidate'],self.head)
+        self.assertEqual(data['review_retry']['policy'],'generated-assets-owned-by-verifier-v1')
+        old=self.store.enqueue('review','task-001','g',{'candidate':self.head,'base':self.base})
+        fresh=self.store.enqueue('review','task-001','g',{'candidate':self.head,'base':self.base,'review_retry':data['review_retry']})
+        self.assertNotEqual(old,fresh)
+        self.assertEqual(reconcile_generated(self.store),[])
 
     def test_review_defers_only_generated_findings_and_still_blocks_real_source_defects(self):
         from pipeline.stages import review
