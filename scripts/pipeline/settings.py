@@ -20,7 +20,7 @@ def configuration(store):
     add('verification_slots', 'Reserved verification slots', store.setting('verification_slots', 1), live,
         help='0–1000, within total capacity. Effective reserve clamps to capacity minus one; existing workers finish.')
     limits = store.setting('limits', {})
-    for stage, label in [('triage', 'Triage'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
+    for stage, label in [('triage', 'Triage'), ('assess', 'Spec assessment'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
         add('limit.' + stage, label + ' concurrency', limits.get(stage, ''), live,
             help='1–1000, or empty to inherit total capacity. Global sandbox admission still applies. Running work is not canceled.')
     add('model_timeout', 'Agent deadline (seconds)', store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT), 'New assignments',

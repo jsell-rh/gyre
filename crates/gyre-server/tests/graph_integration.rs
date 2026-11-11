@@ -1264,8 +1264,8 @@ async fn test_divergence_detection_creates_notifications() {
         admin_notifs[0].notification_type,
         NotificationType::ConflictingInterpretations
     );
-    assert_eq!(admin_notifs[0].priority, 5);
-    assert_eq!(admin_notifs[0].entity_ref.as_deref(), Some(spec_ref));
+    assert_eq!(admin_notifs[0].priority_rank, 5);
+    assert_eq!(admin_notifs[0].source.entity_id.as_str(), spec_ref);
 
     let dev_notifs = ctx
         .state
