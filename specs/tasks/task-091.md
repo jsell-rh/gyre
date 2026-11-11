@@ -6,7 +6,7 @@ progress: complete
 coverage_sections:
   - "human-system-interface.md §4 Scoped Inline Chat"
   - "human-system-interface.md §4 Hard Interrupt"
-commits: ["76b3da22e99d4cf0724289376b17bf62db3eda01", "3e22e49085b3a488bfe9acc680dd940f873333e6", "a8d036f466482a9a00157a496d10000d0f36d25c", "58e4568219fd5324a2d2a2b30642602e36a47180"]
+commits: ["76b3da22e99d4cf0724289376b17bf62db3eda01", "3e22e49085b3a488bfe9acc680dd940f873333e6", "a8d036f466482a9a00157a496d10000d0f36d25c", "58e4568219fd5324a2d2a2b30642602e36a47180", "0674cb65ca1589c3822136c4dc0dd94c97fefe70"]
 ---
 
 ## Spec Excerpt
