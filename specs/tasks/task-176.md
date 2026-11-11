@@ -50,14 +50,14 @@ The preview loop is the primary meta-spec interaction: edit → preview → iter
 
 ## Acceptance Criteria
 
-- [x] Meta-spec editing uses EditorSplit layout
-- [x] Target spec selector with checkbox list in right panel
-- [x] Preview triggers agent runs, shows per-spec progress
-- [x] Editor locked during preview with diff display
-- [x] Preview results show Architecture and Code Diff tabs
-- [x] [Iterate] returns to editing with results visible
-- [x] [Publish] triggers approval workflow
-- [x] Tests pass for state transitions
+- [ ] Meta-spec editing uses EditorSplit layout
+- [ ] Target spec selector with checkbox list in right panel
+- [ ] Preview triggers agent runs, shows per-spec progress
+- [ ] Editor locked during preview with diff display
+- [ ] Preview results show Architecture and Code Diff tabs
+- [ ] [Iterate] returns to editing with results visible
+- [ ] [Publish] triggers approval workflow
+- [ ] Tests pass for state transitions
 
 ## Agent Instructions
 
@@ -65,61 +65,59 @@ Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read 
 
 ## Shipped
 
-The §9 preview loop runs through the shared EditorSplit (task-172) in
-`context="meta-spec"`, mounted by the MetaSpecs workspace view: State 1
-target-spec checkbox selector + Preview/Publish; State 2 locked editor
-showing the pending-changes diff vs the published registry prompt (LCS
-line diff, `+`/`-` markers, add/remove summary) + per-spec ◐/✓ progress
-+ Cancel Preview (button and Esc); State 3 Architecture (default)/Code
-Diff tabs rendering the real PreviewResponse fields; Iterate returns to
-editing with results retained; Publish → registry PUT resets approval
-to Pending and refreshes the diff baseline so a post-publish preview
-never diffs against a stale pre-publish prompt.
+The §9 meta-specs preview loop runs through the shared EditorSplit (task-172)
+in `context="meta-spec"`, mounted by the MetaSpecs workspace view:
 
-### Review repairs (prior rounds, intact at HEAD)
+- **State 1 (Editing):** left panel is the persona/principle editor plus the
+  Preview/Publish actions; right panel is the target-spec checkbox selector
+  (specs from repos in the workspace) with Select All / Select None.
+- **State 2 (Preview Running):** the editor is locked and renders the
+  pending-changes diff — an LCS line diff of the edited prompt against the
+  published registry prompt (`+`/`-` markers, add/remove summary). The right
+  panel shows per-spec ◐ running / ✓ complete indicators from the real
+  preview-status poll plus aggregate progress, with a [Cancel Preview]
+  action (button and Esc) that aborts the running preview.
+- **State 3 (Preview Complete):** the right panel has [Architecture]
+  (default) and [Code Diff] tabs rendering the server-computed
+  PreviewResponse fields: structural impact (scope, affected spec count,
+  blast radius with affected repos and pin reasons) and per-spec statuses
+  from the throwaway-branch agent runs.
+- **Iterate** returns to State 1 with the selector restored AND the last
+  preview results still visible (Architecture/Code Diff tabs retained
+  below the height-capped selector).
+- **Publish** PUTs the edited prompt to the meta-spec registry, resets the
+  spec's approval state to Pending, and refreshes the in-session diff
+  baseline so the next preview diffs against the newly published prompt.
 
-- **Iterate keeps results visible:** the meta-spec editing state
-  previously rendered ONLY the target-spec selector, so Iterate
-  (State 3 → State 1) removed the Architecture/Code Diff tabs from the
-  DOM even though `metaPreviewResult` was retained in state. The
-  right-pane chain now gives `preview_running` priority, renders the
-  selector in the meta-spec editing state (height-capped via a
-  `.stacked` modifier when results are retained), and renders the
-  Architecture/Code Diff tabs whenever a preview result exists
-  (`showResultTabs`). The Code Diff meta-spec status list is bound to
-  `metaPreviewResult` instead of `previewState` so it survives Iterate.
-  Spec-context behavior is unchanged. A meta-spec-context test runs a
-  real-shape `previewPersona` poll to completion, clicks Iterate, and
-  asserts the selector AND the retained results stay visible; it was
-  verified to fail on the pre-fix component at `tab-architecture`.
-- **Post-publish diff baseline:** Publish refreshes the in-session diff
-  baseline from the registry write so the next preview diffs against
-  the newly published prompt, not the stale pre-publish one.
+### Test evidence
 
-### This round (contract restoration)
-
-The executor restored the assigned task document to its contract form
-(repair `3ef92ac0e053413dab4e4980a7b920a5`); this round changes no
-production code — it re-verifies and re-records the existing fix.
-`git diff 91fe1e86d HEAD -- web/src` is empty (verified this round),
-confirming the Iterate results-visibility repair is intact at HEAD
-`3e9cd7780` after the base merge; the only task-doc changes restore the
-`commits:` attribution (the three product-surface task-176 commits:
-`eee86b3e6`, `6e3bb1a7a`, `91fe1e86d`), the acceptance boxes, and these
-notes. Focused vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` +
-`lineDiff.test.js` (after `npm ci` from the lockfile): 3 files,
-**166/166 passed**, exit 0. Evidence:
-`/tmp/stage/review-evidence/task-176-focused-tests.log`.
-`web/dist` regeneration is executor-owned (restored from the assignment
-base; final integration rebuilds and publishes remotely), so no dist
-commit is made here.
+- `npx vitest run src/__tests__/EditorSplit.test.js
+  src/__tests__/MetaSpecs.test.js` — 153 passed (this round, at HEAD
+  2f87b4428; log in /tmp/stage/review-evidence/task-176-focused-tests.log).
+- The §9 Iterate test uses real PreviewResponse/PreviewStatusResponse
+  shapes, runs the poll to completion, clicks Iterate, and asserts the
+  selector AND the retained Architecture/Code Diff results stay visible.
+  Mutation probe: reverting `showResultTabs` to the pre-fix logic fails
+  that test, confirming it kills the prior round's real defect (Iterate
+  dropping results from the DOM).
+- Preview cancellation, state transitions, architecture delta display,
+  and 404-rejection handling are covered in the same suites.
 
 ### Known limitation
 
-The production §9 surface (workspace meta-specs page) mounts
-EditorSplit without `repoId`, and `specs/assist` is repo-scoped, so the
-State 1 LLM chat input renders but is disabled there.
-Implementation-plan item 4 is reachable only in the repo-scoped spec
-context (covered by the §3 Accept/Edit/Dismiss tests). Unblocking it
-needs a workspace-scoped assist endpoint — follow-up work against the
-API surface, not this UI task.
+The State 1 LLM chat input is rendered but disabled in the workspace-level
+meta-specs surface: EditorSplit requires a repo context for chat and the
+API layer has no workspace-scoped assist endpoint (the repo-scoped
+`specs/assist` is what produces inline suggestion blocks). This is outside
+this task's acceptance criteria and blocked by the existing repo-scoped
+API surface; wiring a workspace-level assist is follow-up work.
+
+### Round note
+
+Contract-restoration round (repair 0dd2210389e24853b605b0d561caf316): the
+executor restored the assigned task document, so this round changes no
+production code — it re-verifies the existing fix (focused suites above,
+mutation probe) and re-records these notes. The acceptance criteria above
+are left in their assigned contract form; satisfaction is judged by the
+independent reviewer and deterministic gates, not by editing the protected
+text.
