@@ -166,6 +166,15 @@ impl GitOpsPort for NoopGitOps {
         Ok(None)
     }
 
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     async fn revert_commit(
         &self,
         _repo_path: &str,
@@ -353,6 +362,15 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -1951,6 +1969,16 @@ impl MemWorkspaceRepository {
         }
     }
 
+    /// Set the workspace store (builder over `with_policy_store`): lets a
+    /// paired `MemComputeTargetRepository` share this repo's workspace map.
+    pub fn with_workspace_store(
+        mut self,
+        workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+    ) -> Self {
+        self.store = workspaces;
+        self
+    }
+
     /// Test hook: cause subsequent `apply_trust_transition` calls to fail.
     /// Only used by `#[cfg(test)]` wiring (`shared_workspace_policy_pair`),
     /// so gated to test builds to avoid dead-code warnings in the lib.
@@ -2479,15 +2507,15 @@ impl NotificationRepository for MemNotificationRepository {
             .filter(|n| {
                 n.user_id == *user_id
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
-                    && min_priority.is_none_or(|min| n.priority >= min)
-                    && max_priority.is_none_or(|max| n.priority <= max)
+                    && min_priority.is_none_or(|min| n.priority_rank >= min)
+                    && max_priority.is_none_or(|max| n.priority_rank <= max)
                     && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
             })
             .cloned()
             .collect();
         items.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
+            a.priority_rank
+                .cmp(&b.priority_rank)
                 .then(b.created_at.cmp(&a.created_at))
         });
         Ok(items
@@ -2519,6 +2547,21 @@ impl NotificationRepository for MemNotificationRepository {
         for n in self.store.lock().await.iter_mut() {
             if n.id == *id && n.user_id == *user_id {
                 n.resolved_at = Some(now);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for n in self.store.lock().await.iter_mut() {
+            if n.id == *id && n.user_id == *user_id {
+                n.read = read;
+                n.read_at = if read { Some(now) } else { None };
                 break;
             }
         }
@@ -2568,6 +2611,25 @@ impl NotificationRepository for MemNotificationRepository {
         }))
     }
 
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> Result<bool> {
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.source.entity_id == entity_ref
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+                && n.created_at >= since
+        }))
+    }
+
     async fn delete_older_than(
         &self,
         read_cutoff_secs: u64,
@@ -2575,9 +2637,10 @@ impl NotificationRepository for MemNotificationRepository {
     ) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        // "Read" = the human resolved or dismissed it (business-continuity.md §5).
+        // "Read" = the human resolved it, dismissed it, or marked it read in
+        // the UI (business-continuity.md §5 + user-management.md read state).
         store.retain(|n| {
-            let read = n.resolved_at.is_some() || n.dismissed_at.is_some();
+            let read = n.read || n.resolved_at.is_some() || n.dismissed_at.is_some();
             let cutoff = if read {
                 read_cutoff_secs
             } else {
@@ -2940,6 +3003,32 @@ impl gyre_ports::PushGateRepository for MemPushGateRepository {
     }
     async fn set_for_repo(&self, repo_id: &str, gates: Vec<String>) -> Result<()> {
         self.store.lock().await.insert(repo_id.to_string(), gates);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecLifecycleRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecLifecycleConfig>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
+    async fn get_for_repo(&self, repo_id: &str) -> Result<gyre_domain::SpecLifecycleConfig> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn set_for_repo(
+        &self,
+        repo_id: &str,
+        config: gyre_domain::SpecLifecycleConfig,
+    ) -> Result<()> {
+        self.store.lock().await.insert(repo_id.to_string(), config);
         Ok(())
     }
 }
@@ -3793,16 +3882,32 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build an AppState with a custom JjOpsPort for tests that need to
 /// control/observe jj behavior (e.g., programmed rebase outcomes).
 #[cfg(test)]
 pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
@@ -3814,11 +3919,12 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
 pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         Some(storage),
         None,
         None,
@@ -3833,8 +3939,8 @@ pub fn test_state_with_jj_and_git_ops(
     jj_ops: Arc<dyn gyre_ports::JjOpsPort>,
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(git_ops, workspaces, policies, None, None, None);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None);
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
@@ -3847,11 +3953,12 @@ pub fn test_state_with_jj_and_git_ops(
 pub fn test_state_with_secrets(
     secrets: Arc<dyn gyre_ports::SecretRepository>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         None,
         Some(secrets),
         None,
@@ -3863,11 +3970,12 @@ pub fn test_state_with_secrets(
 /// must abort, not overwrite, when the stored state cannot be read).
 #[cfg(test)]
 pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
+        ws_store,
         None,
         None,
         Some(kv),
@@ -3878,8 +3986,16 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
 /// used to exercise the `update_workspace`/`create_workspace` 409 error path.
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(true);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a test AppState whose policy repo fails every `create`, used to
@@ -3889,11 +4005,14 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
     policies.fail_creates();
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     test_state_inner(
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        ws_store,
         None,
         None,
         None,
@@ -3908,45 +4027,57 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
     policies.fail_lists();
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     test_state_inner(
         Arc::new(NoopGitOps),
         Arc::new(workspaces),
         Arc::new(policies),
+        ws_store,
         None,
         None,
         None,
     )
 }
 
+/// The paired workspace + policy repositories (and the shared workspace
+/// store behind them) returned by `shared_workspace_policy_pair`. A named
+/// alias keeps the tuple's use sites readable and under clippy's
+/// `type_complexity` threshold.
+#[cfg(test)]
+type SharedWorkspacePolicyPair = (
+    Arc<dyn WorkspaceRepository>,
+    Arc<dyn gyre_ports::PolicyRepository>,
+    Arc<Mutex<HashMap<String, Workspace>>>,
+);
+
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
-/// trust transition (simulating a DB rollback).
+/// trust transition (simulating a DB rollback). Also returns the shared
+/// workspace store so the compute-target repo can pair with it (real
+/// `has_workspace_references` in tests).
 #[cfg(test)]
-fn shared_workspace_policy_pair(
-    fail_trust: bool,
-) -> (
-    Arc<dyn WorkspaceRepository>,
-    Arc<dyn gyre_ports::PolicyRepository>,
-) {
+fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     if fail_trust {
         workspaces.fail_trust_transitions();
     }
-    (Arc::new(workspaces), policies)
+    (Arc::new(workspaces), policies, ws_store)
 }
 
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None)
 }
-
 /// Shared builder for all in-memory test states. Callers supply the git ops
 /// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
 /// `secrets` overrides the default in-memory SecretRepository when given.
@@ -3955,6 +4086,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
     kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
@@ -4006,10 +4138,12 @@ fn test_state_inner(
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
+        spawned_backends: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(crate::log_compression::AgentLogBuffer::new()),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
+        spec_lifecycle_configs: Arc::new(MemSpecLifecycleRepository::default()),
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(MemPushGateRepository::default()),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
@@ -4022,10 +4156,10 @@ fn test_state_inner(
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
+        commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
+        signing_config: crate::commit_signatures::SigningConfig::default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
@@ -4085,12 +4219,13 @@ fn test_state_inner(
         conversations: Arc::new(MemConversationRepository::default()),
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
-        compute_targets: Arc::new(MemComputeTargetRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::with_workspace_store(ws_store)),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
+        orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
@@ -4662,9 +4797,35 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
 
 // ── In-memory ComputeTargetRepository ────────────────────────────────────────
 
-#[derive(Default)]
 pub struct MemComputeTargetRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::ComputeTargetEntity>>>,
+    /// Workspace store shared with the paired `MemWorkspaceRepository` so
+    /// `has_workspace_references` performs a real scan instead of a
+    /// hardcoded false (agent-runtime.md §3: DELETE must fail with 409
+    /// when workspaces reference the target). Defaults to an independent
+    /// empty store, so standalone use (no pairing) behaves like before.
+    workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+}
+
+impl Default for MemComputeTargetRepository {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl MemComputeTargetRepository {
+    /// Construct a compute-target repo that shares the workspace store of a
+    /// paired `MemWorkspaceRepository`, giving `has_workspace_references`
+    /// real cross-repo visibility.
+    pub fn with_workspace_store(workspaces: Arc<Mutex<HashMap<String, Workspace>>>) -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces,
+        }
+    }
 }
 
 #[async_trait]
@@ -4726,11 +4887,16 @@ impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
             .cloned())
     }
 
-    async fn has_workspace_references(&self, _id: &Id) -> Result<bool> {
-        // The in-memory adapter does not share state with MemWorkspaceRepository,
-        // so this always returns false in tests. The 409 Conflict path is covered
-        // by the SQLite adapter integration tests.
-        Ok(false)
+    async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
+        // Real scan of the shared workspace store (same contract as the
+        // SQLite adapter's join). Unpaired standalone use sees an empty
+        // workspace set, which is the honest result for that mode.
+        Ok(self
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .any(|ws| ws.compute_target_id.as_ref() == Some(id)))
     }
 }
 
@@ -5369,6 +5535,48 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
         Ok(())
     }
 }
+
+// ── In-memory CommitSignatureRepository (identity-security.md §Layer 3) ──────
+
+/// In-memory `CommitSignatureRepository` for pure-mem mode and tests.
+/// Mirrors the SQLite adapter's `(repo_id, commit_sha)` keying.
+#[derive(Default)]
+pub struct MemCommitSignatureRepository {
+    store: Arc<Mutex<Vec<gyre_ports::commit_signature_repo::CommitSignature>>>,
+}
+
+#[async_trait]
+impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitSignatureRepository {
+    async fn save(
+        &self,
+        record: &gyre_ports::commit_signature_repo::CommitSignature,
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store
+            .iter_mut()
+            .find(|r| r.repo_id == record.repo_id && r.commit_sha == record.commit_sha)
+        {
+            Some(existing) => *existing = record.clone(),
+            None => store.push(record.clone()),
+        }
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        repo_id: &str,
+        commit_sha: &str,
+    ) -> Result<Option<gyre_ports::commit_signature_repo::CommitSignature>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|r| r.repo_id == repo_id && r.commit_sha == commit_sha)
+            .cloned())
+    }
+}
+
 #[cfg(test)]
 mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's

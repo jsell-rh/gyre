@@ -145,6 +145,75 @@ pub async fn create_persona(
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+
+    // New personas start Pending approval: request it from the persona's
+    // owner, or when no owner is set, from the workspace Admins/Owners
+    // (user-management.md §Notification Entity: PersonaApprovalRequested;
+    // "Who Gets Notified" routes it to the persona's owner). Best-effort —
+    // the persona exists regardless of notification delivery.
+    if persona.approval_status == gyre_domain::PersonaApprovalStatus::Pending {
+        let (scope_workspace, tenant_id) = match &persona.scope {
+            gyre_domain::PersonaScope::Workspace(ws_id) => {
+                match state.workspaces.find_by_id(ws_id).await {
+                    Ok(Some(ws)) => (Some(ws_id.clone()), ws.tenant_id.to_string()),
+                    _ => (None, String::new()),
+                }
+            }
+            _ => (None, String::new()),
+        };
+        let mut recipients: Vec<Id> = Vec::new();
+        if let Some(owner) = persona.owner.as_deref().filter(|o| !o.is_empty()) {
+            recipients.push(Id::new(owner.to_string()));
+        } else if let Some(ws_id) = scope_workspace.as_ref() {
+            let members = state
+                .workspace_memberships
+                .list_by_workspace(ws_id)
+                .await
+                .unwrap_or_default();
+            recipients.extend(
+                members
+                    .into_iter()
+                    .filter(|m| {
+                        matches!(
+                            m.role,
+                            gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
+                        )
+                    })
+                    .map(|m| m.user_id),
+            );
+        }
+        for user_id in &recipients {
+            if let Some(ws_id) = scope_workspace.as_ref() {
+                crate::notifications::notify_rich(
+                    state.as_ref(),
+                    ws_id.clone(),
+                    user_id.clone(),
+                    gyre_common::NotificationType::PersonaApprovalRequested,
+                    format!("Persona '{}' awaits approval", persona.name),
+                    &tenant_id,
+                    Some(
+                        serde_json::json!({
+                            "persona_id": persona.id.as_str(),
+                            "persona_name": persona.name,
+                        })
+                        .to_string(),
+                    ),
+                    Some(persona.id.to_string()),
+                    None,
+                    "persona",
+                    None,
+                )
+                .await;
+            }
+        }
+        if recipients.is_empty() {
+            tracing::info!(
+                persona_id = %persona.id,
+                "persona approval requested: no routable owner (no owner set, non-workspace scope)"
+            );
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
 
@@ -679,5 +748,91 @@ mod tests {
             msg.contains("workspace"),
             "expected workspace-not-found error, got: {msg}"
         );
+    }
+
+    /// user-management.md §Notification Entity: creating a Pending persona
+    /// requests approval from the workspace Admins/Owners when no owner is
+    /// set (PersonaApprovalRequested).
+    #[tokio::test]
+    async fn create_pending_persona_requests_approval_from_workspace_admins() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let ws_id = Id::new("ws-pa");
+        let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), "pa-ws", "pa-ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                crate::api::new_id(),
+                Id::new(uid),
+                ws_id.clone(),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({
+            "name": "reviewer",
+            "slug": "reviewer",
+            "scope": { "kind": "Workspace", "id": "ws-pa" },
+            "system_prompt": "You review things.",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/personas")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for uid in ["user-admin", "user-owner"] {
+            let notifs = gyre_ports::NotificationRepository::list_for_user(
+                state.notifications.as_ref(),
+                &Id::new(uid),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(notifs.len(), 1, "{uid} must be asked to approve");
+            let n = &notifs[0];
+            assert_eq!(
+                n.notification_type,
+                gyre_common::NotificationType::PersonaApprovalRequested
+            );
+            assert_eq!(n.source.entity_type, "persona");
+            assert!(n.source.entity_id.starts_with("persona-") || !n.source.entity_id.is_empty());
+        }
+        let viewer_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-viewer"),
+            Some(&ws_id),
+            None,
+            None,
+            None,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(viewer_notifs.is_empty(), "Viewer is not an approver");
     }
 }
