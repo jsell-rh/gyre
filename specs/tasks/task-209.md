@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,88 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-All three HSI §12 gaps are implemented in production code on this branch.
-This round repairs the three findings from review 0242394a on top of the
-earlier delivery rounds.
-
-### Behavior shipped
-
-- **Spec amendment (Part 1)** — `specs/system/human-system-interface.md` §12
-  Judgment Ledger carries a concrete Sources table (category → table →
-  human-attribution key → workspace-attribution key), states when each event
-  is written, and pins `?type=` values to `approval|rejection|gate|trust|meta-spec`
-  (exactly the `JudgmentType` wire strings). Approvals attribute via
-  `spec_approvals.approver_id`; rejections/revocations via `rejected_by`/
-  `revoked_by`; `audit_events.user_id` is the human key for gate/trust/meta-spec
-  events.
-- **Write paths (Part 3)** — `AuditEventType` has `TrustChange`/`GateOverride`/
-  `MetaSpecPublish` variants. Trust transition via `PUT /api/v1/workspaces/:id`
-  writes a `trust_change` audit event attributed to the acting user. A human
-  approval review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_type/from/to); agent-token approvals do
-  not qualify. Meta-spec registry create/update write `meta_spec_publish`
-  events with kind/name/version/content_hash and workspace attribution.
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user` in both
-  SQL adapters (and the mem adapter) unions spec approvals/rejections with
-  audit-carried gate/trust/meta-spec judgments: `?workspace_id=` filters in
-  SQL (not stamps), `?type=` selects the source, reverse-chronological sort
-  across the merged stream, limit/offset applied after union+sort. The
-  source-1 rows load through a named `SpecApprovalJudgmentRow` struct (see
-  repairs below), and the source-2 rows materialize through the shared
-  `AuditEventRow::into_event` read path so log-compressed `detail_zstd`
-  payloads decompress transparently.
-- **Auth provider info** — `GET /api/v1/users/me` returns read-only
-  `oidc_issuer` + `last_login_at` recorded by the JWT login path; PUT has no
-  field for either. The profile UI displays both (Auth Provider, Last Login).
-- **Notification filtering** — inbox list and badge count exclude types
-  disabled in `user_notification_preferences` (canonical-name comparison,
-  default all enabled); `PUT /users/me/notification-preferences` normalizes
-  legacy alias spellings to canonical names before storing.
-
-### Review repairs in this round (0242394a)
-
-- **F2 (unnamed tuple carriers)** — the 10-element positional tuple carrier
-  for the spec_approvals select in both SQL adapters'
-  `JudgmentLedgerRepository::list_for_user` is replaced by a named
-  `SpecApprovalJudgmentRow` (Queryable derive, same column order,
-  field-named destructuring). `scripts/check-unnamed-tuple-carriers.sh`
-  drops from 6 hits to the 4 pre-existing baseline ones (all in
-  gyre-server, untouched by this task).
-- **F3 (curated toggle subset)** — the profile UI's Notification Preferences
-  tab previously exposed 22 of the 39 canonical
-  `NotificationType::as_str()` names; HSI §12 requires a toggle for any
-  variant. `NOTIF_TYPE_IDS` now lists all 39 canonical names in enum
-  order, with the 17 missing en.json labels added; a cross-check confirms
-  the Svelte ids, en.json keys, and Rust canonical set are identical
-  (39/39). Tests assert toggle count 39 and spot-check previously-omitted
-  types (AgentFailed, SecurityFinding, MergeQueuePaused,
-  PersonaChangePendingApproval).
-- **F1 (stale web/dist)** — fixed in source only: the canonical-id,
-  full-toggle-list and last-login changes live in `web/src`. Per
-  implement-stage policy the executor restores `web/dist` from the
-  assignment base and final integration rebuilds/publishes it remotely
-  from final source; the committed bundle was NOT rebuilt in this
-  assignment. Publication must verify the regenerated bundle contains all
-  39 canonical preference ids (grep dist for 'AgentFailed',
-  'SecurityFinding', 'PersonaChangePendingApproval') and no legacy ids
-  ('SpecPendingApproval'/'BudgetWarning').
-
-### Test evidence
-
-- `cargo test -p gyre-adapters sqlite::user_profile` — 12 passed (judgment
-  ledger aggregation, compression round-trip, notification filtering, token
-  and login tests) through the new named-row read path. Run in this sandbox;
-  exit 0.
-- `cd web && npm ci && npm test` — 99 files / 2014 tests passed, including
-  the updated UserProfile cases (27 tests: toggle count 39, saved-wire
-  canonical names, alias-row handling). Exit 0.
-- `scripts/check-unnamed-tuple-carriers.sh` — the two candidate-introduced
-  violations are gone; only the 4 pre-existing baseline hits remain.
-- Deferred to the independent verifier (server test compile exceeds this
-  sandbox's budget): `cargo test -p gyre-server users::` — in particular
-  `preference_alias_normalizes_to_canonical_before_storing`,
-  `disabled_preference_excludes_type_from_inbox_and_count`, and the
-  judgments/get_me endpoint tests — plus the full workspace suite and CI.
