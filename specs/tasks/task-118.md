@@ -12,7 +12,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["26edb8fc38732bcb23f8c96770ccdbe60d79e4e7", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9"]
+commits: ["6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
 ---
 
 ## Spec Excerpt
