@@ -2,10 +2,10 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "631e821555325960b44efb361a527ef8f52fe59b"]
+commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "11a702b89c608d1b843aa098922a729c5a97b2b1", "333030908ce0ff64b2810ea0003fc0e28598abf3", "bd83468915b374048847de7dc7d4551aaa95f857", "631e821555325960b44efb361a527ef8f52fe59b", "4ab6c017e0b264afd773c0a77df02890112cfc29"]
 ---
 
 ## Spec Excerpt
@@ -67,35 +67,38 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 ## Shipped
 
 **Drift evaluation (§9)** — `crates/gyre-server/src/reconciliation.rs`:
-`mr_meta_spec_drift(state, mr)` resolves the MR's provenance attestation (by
-source-branch head commit first, then the author agent's current task,
-walking derived nodes to the chain's root `SignedInput`) and compares the
-recorded `meta_spec_set_sha` against the workspace's current set SHA
-(`compute_meta_spec_set_sha`). Returns no drift when the workspace has no
-bound set, the MR has no attestation, or the attestation records an empty
-SHA — all skip the check gracefully. `format_meta_spec_drift_warning`
-produces the exact §9 text `[WARN] meta-spec-drift: code produced under
-meta-spec set {old}, current is {new}. Reconciliation may be needed.` and
+`mr_meta_spec_drift(state, mr)` resolves the MR's provenance attestation
+(by source-branch head commit first, then the author agent's current
+task, walking derived nodes to the chain's root `SignedInput`) and
+compares the recorded `meta_spec_set_sha` against the workspace's
+current set SHA (`compute_meta_spec_set_sha`). Returns no drift when
+the workspace has no bound set, the MR has no attestation, or the
+attestation records an empty SHA — all skip the check gracefully.
+`format_meta_spec_drift_warning` produces the exact §9 text
+`[WARN] meta-spec-drift: code produced under meta-spec set {old},
+current is {new}. Reconciliation may be needed.` and
 `parse_meta_spec_drift_warning` round-trips it for the queue graph.
 
 **Merge-gate wiring (§9)** — `crates/gyre-server/src/merge_processor.rs`:
-the drift + merge-policy evaluation runs DURING candidate selection in
-`process_next` (step 4c'', `selection_meta_spec_drift_hold`). Default (warn
-only): a gate result with id `meta-spec-drift`, `GateStatus::Passed` and the
-§9 warning output is recorded on the MR (idempotent across retry cycles)
-and the merge proceeds. Strict policy (`require_current_meta_spec_set:
-true`): the entry is requeued carrying the drift reason and the processor
-continues to the next candidate in the SAME cycle, so a strictly-blocked
-drifted MR at the head of the shared queue cannot starve later entries —
-in its own workspace or in other workspaces. `selection_meta_spec_drift_hold`
-expands atomic-group candidates to all group members, so a drifted member
-holds the whole group without blocking later entries in that cycle.
+drift + merge-policy evaluation runs during candidate selection in
+`process_next` (step 4c'', `selection_meta_spec_drift_hold`). Default
+(warn only): a gate result with id `meta-spec-drift`,
+`GateStatus::Passed` and the §9 warning output is recorded on the MR
+(idempotent across retry cycles) and the merge proceeds. Strict policy
+(`require_current_meta_spec_set: true`): the entry is requeued carrying
+the drift reason and the processor continues to the next candidate in
+the same cycle, so a strictly-blocked drifted MR at the head of the
+shared queue cannot starve later entries — in its own workspace or in
+other workspaces. `selection_meta_spec_drift_hold` expands atomic-group
+candidates to all group members, so a drifted member holds the whole
+group without blocking later entries in that cycle.
 
-**Workspace merge policy + API** — `crates/gyre-server/src/merge_policy.rs`
-+ `crates/gyre-server/src/api/workspaces.rs`: `WorkspaceMergePolicy {
+**Workspace merge policy + API** —
+`crates/gyre-server/src/merge_policy.rs` +
+`crates/gyre-server/src/api/workspaces.rs`: `WorkspaceMergePolicy {
 require_current_meta_spec_set }` persisted through the port-backed KV
-store (namespace `workspace_merge_policies`, key = workspace id), default
-false. Exposed via `GET/PUT /api/v1/workspaces/:id/merge-policy`
+store (namespace `workspace_merge_policies`, key = workspace id),
+default false. Exposed via `GET/PUT /api/v1/workspaces/:id/merge-policy`
 (ABAC-registered in `abac_middleware.rs`). A corrupt stored policy
 surfaces as an error on direct lookup and degrades to the spec default
 (warn only) inside the merge processor so a policy-store outage cannot
@@ -106,16 +109,32 @@ warning badge ("Meta-spec drift: produced under v{old}, current is
 v{new}") alongside other gate results, covered by
 `web/src/__tests__/MergeQueueGraph.test.js`.
 
-### Verification repair round
+### CI repair round
 
-The prior verification round (candidate fae71f881, base cfeefbda) failed
-only the diff-scoped rustfmt gate: changed drift-gate lines in
-`abac_middleware.rs`, `merge_policy.rs`, `merge_processor.rs` and
-`reconciliation.rs` needed formatting. Commit bd8346891 realigns those
-lines to the rustfmt canonical form — whitespace-only, no behavior
-change. `python3 scripts/check-rustfmt-diff.py cfeefbda` now reports
-`rustfmt: changed lines clean (8 Rust files checked)`; `cargo check -p
-gyre-server` passes on the merged tree (8m 14s, no errors).
+Candidate head 36826a9b (PR #784) failed only the E2E job (run
+43046986838), at the "Install mold linker" step: apt could not fetch
+mold from the Ubuntu mirrors (`Temporary failure resolving
+'azure.archive.ubuntu.com'`) — a runner network failure that aborted
+the job before any build or test step ran. mold is a link-performance
+optimization, not a correctness requirement, so a transient network
+failure must not fail an otherwise-green run.
+
+Commit 4ab6c017e adds `scripts/ci-install-mold.sh`: refresh the apt
+index, retry the install, and when mold still cannot be fetched, emit
+a workflow warning and remove `.cargo/config.toml` (which only pins
+the mold/clang linker) so cargo falls back to the default GNU linker —
+the configuration every CI job used before mold was adopted. All four
+mold steps (e2e, clippy, test, build-release) now call the script.
+
+Local evidence: stub-environment simulation of both script outcomes —
+network-failure path retries, warns, removes the config, exits 0;
+healthy-apt path installs mold, keeps the config, exits 0
+(PASS=4 FAIL=0). Workflow YAML re-parsed after the edits (8 ci jobs +
+1 e2e job; all mold steps invoke the script). `bash -n` clean;
+`check-no-em-dash.sh` clean on all touched files. A direct
+linker-fallback build probe was blocked by this sandbox's 4 GiB cargo
+wrapper (even for an isolated hello-world project) — infrastructure
+restriction, deferred to exact-head remote verification.
 
 ### Tests for the verifier to execute
 
@@ -138,7 +157,3 @@ independent verifier per the 4 GiB budget):
   `drift_resolved_fires_when_all_drift_review_tasks_terminal`
 - merge_policy: corrupt-policy/default round-trip tests
 - web: `MergeQueueGraph.test.js` (drift badge rendering)
-
-These cover the four required cases — match (no warning), mismatch
-(warning in gate results), strict-policy hard block, and no-attestation
-skip — plus starvation and idempotence hardening.
