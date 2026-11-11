@@ -2,7 +2,7 @@
 title: "Flow Canvas — Animated Trace Visualization"
 spec_ref: "ui-layout.md §4 (Flow Layout), system-explorer.md §5 (Flow Traces), human-system-interface.md §3a (Test-Time Trace Capture — Explorer Visualization)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections: []
 commits: ["19136d8fa68871d99f7ac44f55855ac2b1a474d1", "06e0fd50ebf715a61872ba200b5edf4c66c1abdb"]
 ---
