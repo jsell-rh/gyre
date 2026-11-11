@@ -162,16 +162,34 @@ pub async fn set_repo_access_override(
     over.validate(membership.role)
         .map_err(ApiError::InvalidInput)?;
 
+    // Guard-before-insert (the compute_targets / invite_member pattern):
+    // the duplicate check runs as a real lookup against whichever storage
+    // backend is wired, so the 409 does not depend on any one adapter's
+    // error-message shape. The storage UNIQUE constraint remains as the
+    // backstop for the guard's race window, mapped by
+    // `is_duplicate_override_error` below.
+    if state
+        .repo_access_overrides
+        .find_by_repo_and_user(&repo.id, &uid)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(format!(
+            "an access override for user {uid} on repo {repo_id} already exists; delete it \
+             before setting a new one"
+        )));
+    }
+
     state
         .repo_access_overrides
         .create(&over)
         .await
         .map_err(|e| {
-            if e.to_string().contains("already exists") {
+            if is_duplicate_override_error(&e) {
                 ApiError::Conflict(format!(
-                "an access override for user {uid} on repo {repo_id} already exists; delete it \
-                 before setting a new one"
-            ))
+                    "an access override for user {uid} on repo {repo_id} already exists; delete \
+                     it before setting a new one"
+                ))
             } else {
                 ApiError::Internal(e)
             }
@@ -181,6 +199,28 @@ pub async fn set_repo_access_override(
         StatusCode::CREATED,
         Json(RepoAccessOverrideResponse::from(over)),
     ))
+}
+
+/// Whether an override `create` failure is a duplicate (repo, user) pair.
+///
+/// The adapters report the port contract's uniqueness failure differently:
+/// the mem adapter fails with "... already exists", while the SQLite and
+/// PostgreSQL adapters surface the driver's UNIQUE violation wrapped in
+/// their own context ("insert repo access override") — the marker lives in
+/// a cause of the chain, never in the top-level message. Matching the whole
+/// chain keeps the 409 mapping correct on every backend; a top-level-only
+/// check silently degrades to 500 on the DB adapters (the exact
+/// mem-green/DB-broken failure class this repo's standards call out).
+fn is_duplicate_override_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        let msg = cause.to_string();
+        // mem adapter (guard in code)
+        msg.contains("already exists")
+            // SQLite driver UNIQUE violation
+            || msg.contains("UNIQUE constraint failed")
+            // PostgreSQL driver UNIQUE violation
+            || msg.contains("duplicate key value violates unique constraint")
+    })
 }
 
 /// GET /api/v1/repos/:id/access-overrides — list the repo's overrides.
@@ -270,6 +310,7 @@ pub async fn get_repo_access(
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
+    use super::is_duplicate_override_error;
     use axum::{body::Body, Router};
     use gyre_common::Id;
     use gyre_domain::{Repository, User, Workspace, WorkspaceMembership, WorkspaceRole};
@@ -640,7 +681,9 @@ mod tests {
     #[tokio::test]
     async fn override_create_is_idempotent_rejected() {
         // The port contract: an existing (repo, user) override is a 409, not
-        // a silent rewrite.
+        // a silent rewrite. The handler's guard-before-insert performs the
+        // duplicate check as a storage lookup, so this path is identical on
+        // the mem, SQLite, and PostgreSQL adapters.
         let f = seed(WorkspaceRole::Developer).await;
 
         let resp = f
@@ -660,6 +703,59 @@ mod tests {
             resp.status(),
             StatusCode::CONFLICT,
             "setting a second override for the same (repo, user) must be a 409"
+        );
+    }
+
+    #[test]
+    fn duplicate_override_error_mapping_covers_all_adapter_chains() {
+        // Race-window backstop: a concurrent PUT that slips past the
+        // guard-before-insert surfaces as the storage backend's UNIQUE
+        // violation. The SQLite and PostgreSQL adapters wrap the driver
+        // error with .context("insert repo access override"), so the
+        // duplicate marker only appears in a cause of the chain — a
+        // top-level-only check (the mem adapter's "already exists"
+        // message) maps both DB backends' duplicates to 500 instead of the
+        // documented 409 (docs/api-reference.md). These chains reproduce
+        // each adapter's error shape exactly:
+        //
+        //   diesel::result::Error::DatabaseError(UniqueViolation, ..)
+        //     .context("insert repo access override")
+        let sqlite_chain = anyhow::anyhow!(
+            "UNIQUE constraint failed: repo_access_overrides.repo_id, \
+             repo_access_overrides.user_id"
+        )
+        .context("insert repo access override");
+        assert!(
+            is_duplicate_override_error(&sqlite_chain),
+            "a SQLite UNIQUE violation wrapped in adapter context must map to 409"
+        );
+
+        let postgres_chain = anyhow::anyhow!(
+            "duplicate key value violates unique constraint \
+             \"repo_access_overrides_repo_id_user_id_key\""
+        )
+        .context("insert repo access override");
+        assert!(
+            is_duplicate_override_error(&postgres_chain),
+            "a PostgreSQL UNIQUE violation wrapped in adapter context must map to 409"
+        );
+
+        // mem adapter: the port contract's uniqueness guard in code.
+        let mem_chain =
+            anyhow::anyhow!("repo access override for user u-1 on repo r-1 already exists");
+        assert!(
+            is_duplicate_override_error(&mem_chain),
+            "the mem adapter's duplicate error must map to 409"
+        );
+
+        // The old bug shape: top-level message is exactly the adapter
+        // context with an unrelated cause underneath — that is a real
+        // internal error, never a 409.
+        let other_db_error = anyhow::anyhow!("no such table: repo_access_overrides")
+            .context("insert repo access override");
+        assert!(
+            !is_duplicate_override_error(&other_db_error),
+            "a non-duplicate storage failure must stay a 500, not become a 409"
         );
     }
 
