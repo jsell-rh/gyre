@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "fc0c24e8b3e55bd043906436edf2e484129f5e30"]
 ---
 
 ## Spec Excerpt
@@ -118,7 +118,7 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
 
 ### Port — `crates/gyre-ports/src/search.rs`
 
-- `SearchQuery` now carries `parsed: ParsedQuery` alongside the raw `query`
+- `SearchQuery` carries `parsed: ParsedQuery` alongside the raw `query`
   text (built via `SearchQuery::parse`, so the two stay consistent);
   `entity_type`/`workspace_id` remain as documented fallback shortcuts.
 - `SearchDocument` gained `updated_at: Option<i64>` — the document timestamp
@@ -137,16 +137,15 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
   the result limit — not post-filtered.
 - **PostgreSQL**: terms + quoted phrases flow through
   `websearch_to_tsquery` (implicit AND, real phrase semantics) and are
-  applied as the `s.tsv @@ q` row filter — RESTORED by the review repair
-  (task-154 round 2): a rewrite of `build_filters()` had reserved the
-  tsquery for ranking but dropped the match predicate, so every text query
-  returned all facet-passing rows (cross join) and `facet_counts(Some(q))`
-  with text aggregated the whole index. Four SQL-shape regression tests in
-  `postgres/search.rs` now pin the predicate (and the facet-only / bind-order
+  applied as the `s.tsv @@ q` row filter — restored by the review repair
+  (round 2): a `build_filters()` rewrite had reserved the tsquery for
+  ranking but dropped the match predicate, so every text query returned all
+  facet-passing rows. Four SQL-shape regression tests in
+  `postgres/search.rs` pin the predicate (and the facet-only / bind-order
   shapes); a mutation check confirmed they fail when the predicate is
   removed. Facet filters use `IN` lists on columns / `metadata->>key`;
-  `updated_at` is a real BIGINT column (PG tables can be ALTERed in place,
-  `ADD COLUMN IF NOT EXISTS` covers pre-existing deployments).
+  `updated_at` is a real BIGINT column (`ADD COLUMN IF NOT EXISTS` covers
+  pre-existing deployments).
 - **Mem**: same contract in code — phrase = exact case-insensitive
   substring, facet AND/OR composition, time bounds on `updated_at`.
 - `facet_counts(Some(q))` in all three adapters aggregates the same
@@ -160,8 +159,21 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
   `entity_type` / `workspace_id` params (they remain as fallback shortcuts).
 - MCP `gyre_search` (mcp.rs) parses `q` with the same grammar and the same
   precedence; the tool description and input schema document the language.
-- The three index-on-create sites (tasks/agents/MRs) now pass the entity's
+- The three index-on-create sites (tasks/agents/MRs) pass the entity's
   real update time as `updated_at`.
+
+### Verification repair (this round)
+
+Verification finding `1bcd3647914240fd8c081890366fec38` failed only
+`check-rustfmt-diff` — unformatted changed lines in the seven task-surface
+files. Fixed by a whitespace-only rustfmt pass (every reformat region falls
+inside lines this task changed vs base); all other gates in that run
+already passed (clippy changed-lines clean, arch, ABAC, migration
+portability, web build). Post-fix probes: `check-rustfmt-diff` exit 0,
+`cargo test -p gyre-domain search_query` 25 passed, `cargo test -p
+gyre-adapters --lib search` 30 passed, `cargo check -p gyre-server` clean.
+Evidence: `/tmp/stage/review-evidence/` (rustfmt-diff.txt,
+rustfmt-diff-after.txt, focused-tests.txt).
 
 ### Test evidence
 
@@ -170,25 +182,19 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
   `facet_filters_and_or_within_compose`,
   `time_facets_since_and_until_relative_and_absolute`,
   `facet_only_query_browses_without_text`,
-  `facet_counts_honor_query_language_filters`, plus all 11 pre-existing
-  search tests unchanged in intent (constructions migrated to
-  `SearchQuery::parse`).
+  `facet_counts_honor_query_language_filters`, plus all pre-existing search
+  tests unchanged in intent (constructions migrated to `SearchQuery::parse`).
 - `gyre-adapters` mem — `query_language_phrases_and_facets`,
   `query_language_time_bounds`, `query_language_facet_counts_and_malformed_queries`.
 - `gyre-server` — `tests/search_wiring.rs` drives phrases, facet narrowing,
   facet-only browse, facet-over-param precedence, and since/until bounds
   through the real middleware router against the SQLite FTS5 backend;
   `mcp.rs` `mcp_search_query_language` exercises the same grammar over MCP
-  (mem-backed state).
-- Full suites re-run green: `cargo test -p gyre-adapters` (438 passed),
-  `cargo test -p gyre-server --lib` (1670) and `--tests` (all bins),
-  `cargo test -p gyre-domain --lib search_query` (25); arch, migration
-  portability, byte-slice, mem-port-contract, ABAC, MCP-write-gate and
-  related `scripts/check-*.sh` all pass; clippy emits no warnings in any
-  touched file.
+  (mem-backed state). Server test compilation is deferred to the
+  independent verifier per the 4 GiB budget; `cargo check -p gyre-server`
+  is clean.
 - Known limit: the PostgreSQL leg compiles and mirrors the SQLite contract
-  but has no runtime test — the repo has no PG test harness (no PG tests,
-  no client in this sandbox). The restored `s.tsv @@ q` predicate is pinned
-  by SQL-shape regression tests (mutation-verified) and by review probe
-  evidence (`grep '@@'` over the captured statement now matches); execution
-  against a live PG instance is recorded for remote verification.
+  but has no runtime test — the repo has no PG test harness. The restored
+  `s.tsv @@ q` predicate is pinned by SQL-shape regression tests
+  (mutation-verified); execution against a live PG instance is recorded
+  for remote verification.
