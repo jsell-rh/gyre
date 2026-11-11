@@ -8,7 +8,7 @@
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
-| agent-runtime.md | 33 | 1 | 0 | 23 | 9 | 0 | 28% |
+| agent-runtime.md | 33 | 1 | 0 | 16 | 16 | 0 | 50% |
 | analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 11 | 0 | 21 | 4 | 0 | 16% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **262** | **157** | **163** | **54%** |
+| **TOTAL** | **802** | **220** | **0** | **255** | **164** | **163** | **56%** |
