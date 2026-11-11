@@ -60,10 +60,27 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 ## Shipped
 
-All three coverage sections are implemented in production code on this branch
-(full chain of checkpoints and repair rounds in `commits:`; latest assignment
-base `cba416b46` merged at `b436a91a7`). This round repaired the single
-verification finding against candidate `7b367f39d` (`3399157f0`):
+All three coverage sections are implemented in production code on this
+branch (full chain of checkpoints and repair rounds in `commits:`; latest
+assignment base `cba416b46` merged at `b436a91a7`). This round was a
+**contract repair** (finding `6ed209f6`): the protected task text had
+diverged because acceptance boxes were checked in place; the executor
+restored the assigned task document, and this round re-applies the
+ready-for-review state without touching any production file.
+
+### Round: contract restoration (no code change)
+
+- `git diff bad7119ac --name-only` lists only `specs/tasks/task-168.md`;
+  `git diff bad7119ac -- crates/ web/src scripts/` is empty (0 lines) — the
+  working tree is byte-identical to candidate `bad7119ac`, which repaired
+  the E0063 `ralph_loop` fixture (`3399157f0`, `position: 0`) and passed
+  `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` and
+  `cargo fmt -p gyre-server -- --check`. Evidence saved under
+  `/tmp/stage/review-evidence/contract-round-source-identity.txt`.
+- The prior code change (E0063 fixture repair) is described in the next
+  subheading; all behavior sections below are unchanged and still accurate.
+
+### Round: E0063 verification repair (prior, retained)
 
 - **E0063 in `gyre-server` lib test** — the base merge brought the `position`
   field on `gyre_domain::QualityGate` into a tree where the `ralph_loop.rs`
@@ -104,14 +121,17 @@ verification finding against candidate `7b367f39d` (`3399157f0`):
   `list_gates_orders_by_position` and the upsert regression guard in
   `sqlite/quality_gate.rs`.
 
-### Evidence (this round)
+### Evidence
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` → clean
-  (lib, lib test, bins, integration tests; the previous round's E0063 is
-  gone). Exit 0.
-- `cargo fmt -p gyre-server -- --check` → clean. Exit 0.
+- This contract round: `git diff bad7119ac --name-only` → only
+  `specs/tasks/task-168.md`; product surface diff empty (see
+  `/tmp/stage/review-evidence/contract-round-source-identity.txt`). No
+  recompile needed — source byte-identical to the checked candidate.
+- Prior round: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` →
+  clean (lib, lib test, bins, integration tests; the previous round's E0063
+  is gone). Exit 0. `cargo fmt -p gyre-server -- --check` → clean. Exit 0.
 - All 19 mechanical `scripts/check-*.sh` gates passed in the previous
-  verification round; the only failing step was the compile error fixed here.
+  verification round.
 - Verifier must run (deferred per 4 GiB budget): full `cargo test --all` —
   notably the `ralph_loop` tests that consume the repaired fixture
   (`gate_failure_respawns_agent_with_fresh_context`,
