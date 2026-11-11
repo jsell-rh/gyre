@@ -57,8 +57,30 @@ const MERGE_REQUESTS_GATES_ROUTE: &str = "/api/v1/merge-requests/:id/gates";
 const MERGE_REQUESTS_DEPENDENCIES_ROUTE: &str = "/api/v1/merge-requests/:id/dependencies";
 const AGENTS_MESSAGES_ROUTE: &str = "/api/v1/agents/:id/messages";
 const MERGE_REQUESTS_ID_ROUTE: &str = "/api/v1/merge-requests/:id";
+const MERGE_REQUESTS_COMMENTS_ROUTE: &str = "/api/v1/merge-requests/:id/comments";
+const MERGE_REQUESTS_REVIEWS_ROUTE: &str = "/api/v1/merge-requests/:id/reviews";
+const MERGE_REQUESTS_DIFF_ROUTE: &str = "/api/v1/merge-requests/:id/diff";
 const AGENTS_ID_STATUS_ROUTE: &str = "/api/v1/agents/:id/status";
 const AGENTS_MESSAGES_ACK_ROUTE: &str = "/api/v1/agents/:id/messages/:message_id/ack";
+
+/// Routes a `review:submit` gate agent may touch: read MR context, submit
+/// its verdict, read comments and gate state.
+const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
+    MERGE_REQUESTS_ID_ROUTE,
+    MERGE_REQUESTS_REVIEWS_ROUTE,
+    MERGE_REQUESTS_DIFF_ROUTE,
+    MERGE_REQUESTS_COMMENTS_ROUTE,
+    MERGE_REQUESTS_GATES_ROUTE,
+    "/api/v1/version",
+];
+
+/// Routes a `validation:report` gate agent may touch: read-only MR context
+/// for its check and nothing else (its contract is the process exit code).
+const VALIDATOR_ALLOWED_ROUTES: &[&str] = &[
+    MERGE_REQUESTS_ID_ROUTE,
+    MERGE_REQUESTS_DIFF_ROUTE,
+    "/api/v1/version",
+];
 
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
@@ -233,17 +255,9 @@ impl ResourceResolver {
                     "merge_request",
                     Some("write"),
                 ),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/comments",
-                    "merge_request",
-                    None,
-                ),
-                RouteResourceMapping::api(
-                    "/api/v1/merge-requests/:id/reviews",
-                    "merge_request",
-                    None,
-                ),
-                RouteResourceMapping::api("/api/v1/merge-requests/:id/diff", "merge_request", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_COMMENTS_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_REVIEWS_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_DIFF_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",
@@ -1637,12 +1651,75 @@ pub async fn abac_middleware(
 
     let req = Request::from_parts(parts, body);
 
+    // Resolve action (needed by the scoped-token allow-list below and by
+    // policy evaluation).
+    let action = action_override.unwrap_or_else(|| method_to_action(&method));
+
     // System token bypasses ABAC entirely. `is_system_principal()` (not an
     // agent_id string match): API-key/JWT auth sets agent_id from the user's
     // display_name, so a user named "system" would otherwise spoof this
     // bypass (task-099 F1 revision).
     if auth.is_system_principal() {
         return next.run(req).await;
+    }
+
+    // Task-134 (agent-gates.md §Gate Agent Lifecycle): scoped tokens are
+    // allow-listed to their capability's routes. A `review:submit` gate
+    // agent may read MR context and submit its verdict; a
+    // `validation:report` agent may read MR context for its check and
+    // nothing else (its contract is the process exit code). Anything else
+    // is denied before policy evaluation, so no repo/admin policy can
+    // widen a single-purpose gate agent into a general-purpose caller.
+    // Capability comparison is exact-match: a substring check would let a
+    // hypothetical `review:submit:admin` scope inherit the allow-list
+    // (review F3).
+    if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        let is_reviewer = scope == crate::auth::REVIEW_SUBMIT_SCOPE;
+        let is_validator = scope == crate::auth::VALIDATION_REPORT_SCOPE;
+        if is_reviewer || is_validator {
+            // Read-only MR context for validators; reviewers additionally
+            // get review submission, comments, and gate state. No repo/admin
+            // route is reachable, so no policy can widen a single-purpose
+            // gate agent into a general-purpose caller.
+            let allowed = if is_reviewer {
+                REVIEWER_ALLOWED_ROUTES.contains(&pattern.as_str())
+            } else {
+                VALIDATOR_ALLOWED_ROUTES.contains(&pattern.as_str())
+            };
+            if !allowed {
+                tracing::warn!(
+                    subject_id = %auth.agent_id,
+                    pattern = %pattern,
+                    scope = %scope,
+                    "ABAC denied request: scoped gate-agent token outside allow-list"
+                );
+                let decision = policy_engine::build_decision(
+                    &policy_engine::EvalResult {
+                        effect: gyre_domain::PolicyEffect::Deny,
+                        matched_policy: None,
+                        evaluated_count: 0,
+                        evaluation_ms: 0.0,
+                    },
+                    &auth.agent_id,
+                    "agent",
+                    action,
+                    resource_type,
+                    &pattern,
+                );
+                let _ = state.policies.record_decision(&decision).await;
+                let error = if is_reviewer {
+                    "review-scoped token is limited to review routes"
+                } else {
+                    "validation-scoped token is limited to read-only MR routes"
+                };
+                return (StatusCode::FORBIDDEN, Json(json!({"error": error}))).into_response();
+            }
+        }
     }
 
     // Build attribute context (§Attributes).
@@ -1808,9 +1885,6 @@ pub async fn abac_middleware(
             crate::merge_processor::queue_health(&state, &repo_id).await,
         );
     }
-
-    // Resolve action.
-    let action = action_override.unwrap_or_else(|| method_to_action(&method));
 
     // Load policies and evaluate.
     // Policies are loaded from the shared store on EVERY request — there is
@@ -4314,7 +4388,7 @@ pub mod tests {
         // Mint a worker JWT scoped to repo-7 with a stack hash claim.
         let token = state
             .agent_signing_key
-            .mint_scoped(
+            .mint_worker_scoped(
                 "agent-claims-1",
                 "task-1",
                 "spawner",
@@ -4539,7 +4613,7 @@ pub mod tests {
         // Two agents: one with a persona + full attestation, one with neither.
         let strong = state
             .agent_signing_key
-            .mint_scoped(
+            .mint_worker_scoped(
                 "agent-persona-1",
                 "task-1",
                 "spawner",
@@ -4554,7 +4628,7 @@ pub mod tests {
             .unwrap();
         let weak = state
             .agent_signing_key
-            .mint_scoped(
+            .mint_worker_scoped(
                 "agent-persona-2",
                 "task-1",
                 "spawner",
