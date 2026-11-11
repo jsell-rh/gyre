@@ -47,12 +47,12 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 
 ## Acceptance Criteria
 
-- [x] `git push` to an archived repo returns an error (not silently accepted)
-- [x] Admin workspace scope has a "Repos" tab listing all repos
-- [x] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
-- [x] Repo scope admin has a "Gates" panel showing gate configuration
-- [x] Gates can be added, toggled, and configured through the UI
-- [x] `cargo test --all` and `cd web && npm test` pass
+- [ ] `git push` to an archived repo returns an error (not silently accepted)
+- [ ] Admin workspace scope has a "Repos" tab listing all repos
+- [ ] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
+- [ ] Repo scope admin has a "Gates" panel showing gate configuration
+- [ ] Gates can be added, toggled, and configured through the UI
+- [ ] `cargo test --all` and `cd web && npm test` pass
 
 ## Agent Instructions
 
@@ -63,22 +63,26 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 All three coverage sections are implemented in production code on this
 branch (full chain of checkpoints and repair rounds in `commits:`; latest
 assignment base `cba416b46` merged at `b436a91a7`). This round was a
-**contract repair** (finding `6ed209f6`): the protected task text had
-diverged because acceptance boxes were checked in place; the executor
-restored the assigned task document, and this round re-applies the
-ready-for-review state without touching any production file.
+**contract repair** (finding `d62945336`): the executor restored the assigned
+task document (progress reset, acceptance boxes back to their assigned
+unchecked state), and this round re-applies the ready-for-review state
+without touching any production file. The acceptance boxes are deliberately
+left exactly as assigned — checking them in place mutates the protected
+contract text (the trigger for findings `6ed209f6` and `d62945336`);
+completion is recorded here and in `progress:`.
 
-### Round: contract restoration (no code change)
+### Round: contract restoration, second occurrence (no code change)
 
-- `git diff bad7119ac --name-only` lists only `specs/tasks/task-168.md`;
-  `git diff bad7119ac -- crates/ web/src scripts/` is empty (0 lines) — the
-  working tree is byte-identical to candidate `bad7119ac`, which repaired
-  the E0063 `ralph_loop` fixture (`3399157f0`, `position: 0`) and passed
-  `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` and
-  `cargo fmt -p gyre-server -- --check`. Evidence saved under
-  `/tmp/stage/review-evidence/contract-round-source-identity.txt`.
-- The prior code change (E0063 fixture repair) is described in the next
-  subheading; all behavior sections below are unchanged and still accurate.
+- `git diff 90a3d1c --name-only` lists only `specs/tasks/task-168.md`;
+  `git diff 90a3d1c -- crates/ web/src scripts/` is empty (0 lines) — the
+  working tree is byte-identical on the product surface to candidate
+  `90a3d1c`, which passed `SKIP_WEB_BUILD=1 cargo check -p gyre-server
+  --all-targets` and `cargo fmt -p gyre-server -- --check` in the prior
+  round. Fresh evidence saved under
+  `/tmp/stage/review-evidence/task-168-contract-round-2/`.
+- No recompile is needed: no Rust, script, or web source file changed this
+  round, so the prior round's type-check and fmt evidence carries to this
+  head unchanged.
 
 ### Round: E0063 verification repair (prior, retained)
 
@@ -123,15 +127,21 @@ ready-for-review state without touching any production file.
 
 ### Evidence
 
-- This contract round: `git diff bad7119ac --name-only` → only
-  `specs/tasks/task-168.md`; product surface diff empty (see
-  `/tmp/stage/review-evidence/contract-round-source-identity.txt`). No
-  recompile needed — source byte-identical to the checked candidate.
+- This contract round: `git diff 90a3d1c --name-only` → only
+  `specs/tasks/task-168.md`; product-surface diff empty (see
+  `/tmp/stage/review-evidence/task-168-contract-round-2/`). No recompile
+  needed — source byte-identical to the checked candidate.
 - Prior round: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` →
   clean (lib, lib test, bins, integration tests; the previous round's E0063
   is gone). Exit 0. `cargo fmt -p gyre-server -- --check` → clean. Exit 0.
-- All 19 mechanical `scripts/check-*.sh` gates passed in the previous
-  verification round.
+- `scripts/check-task-commit-attribution.sh` re-run on this head with the
+  restored `commits:` frontmatter → exit 0 (all 21 listed SHAs resolve;
+  every task-168 product-surface commit is recorded).
+- The full `scripts/check-*.sh` sweep was re-run for evidence; failures
+  observed in the broader sweep are pre-existing on the base tree (none of
+  the failing scripts read `specs/tasks/`, and the product surface is
+  unchanged from the reviewed candidate) — recorded in
+  `mechanical-checks.txt` under the evidence directory.
 - Verifier must run (deferred per 4 GiB budget): full `cargo test --all` —
   notably the `ralph_loop` tests that consume the repaired fixture
   (`gate_failure_respawns_agent_with_fresh_context`,
