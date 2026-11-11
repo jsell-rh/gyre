@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780", "b3b97d79e47705e77bda31294fd7cbd4a4814440"]
+commits: ["b3b97d79e47705e77bda31294fd7cbd4a4814440", "894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
 ---
 
 ## Spec Excerpt
