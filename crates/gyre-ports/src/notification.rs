@@ -2,7 +2,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::{Id, Notification};
 
-
 /// Repository for inbox notifications (HSI §2).
 ///
 /// Per-handler auth — callers MUST verify that the notification's `user_id` and
