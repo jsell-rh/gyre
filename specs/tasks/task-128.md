@@ -198,9 +198,13 @@ re-applied the task-128-specific worker JWT scoping on top:
 identity-security attestation levels 1–3 from the resolved compute target)
 replaces the base's unscoped `mint_with_workload` pre-mint at the same
 call site; interrogation policy seeding keeps `created_by: Id::new("system")`
-consistent with the task-128 domain `Policy.created_by: Id`. The base's
-`specs/coverage/SUMMARY.md` numbers were taken as-is. No behavior change
-to either side beyond that re-application.
+consistent with the task-128 domain `Policy.created_by: Id`. No behavior change
+to either side beyond that re-application. The `specs/coverage/SUMMARY.md`
+conflict was initially resolved by taking the base's numbers wholesale — a
+bookkeeping regression caught by review (the abac-policy-engine.md row read
+`17 assigned / 0 implemented / 0%` while the coverage file itself has 6
+`implemented` rows) — and is fixed this round by running the mechanical
+regenerator `scripts/update-coverage-summary.sh` (see below).
 
 Probes at head 2bbd0d4d6 (evidence: /tmp/stage/review-evidence/):
 `cargo test -p gyre-domain` 466/466 passed; `cargo test -p gyre-adapters
@@ -216,3 +220,18 @@ lib tests (live attribute extraction:
 `review_scoped_token_*`/`validation_scoped_token_*`, env attribute
 sources, spec-path resource.id), `tests/task134_review_probe.rs`, and the
 `auth` mint_worker_scoped round-trip tests.
+
+### Review repair (this round)
+
+Independent review of candidate 7c41905 confirmed every production-code
+probe still passes and flagged a single bookkeeping defect: the rebase
+merge-resolution regression in `specs/coverage/SUMMARY.md` described
+above. Fix: ran `scripts/update-coverage-summary.sh` and committed the
+regenerated file. The abac-policy-engine.md row now reads
+`| 19 | 2 | 0 | 11 | 6 | 0 | 35% |`, matching both the coverage file's
+own counts (19 rows, 2 `n/a`, 11 `task-assigned`, 6 `implemented` —
+recounted this round) and the branch's pre-merge SUMMARY; the TOTAL row
+moved `256/163/56%` → `250/169/57%` accordingly. The regenerator is
+idempotent at the new head (second run produces no diff). No production
+code changed this round; the verifier suites listed above are unchanged
+and still apply.
