@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
 ---
 
 ## Spec Excerpt
@@ -71,15 +71,14 @@ From `platform-model.md` §4 — Agent Coordination Protocol (MCP-Based):
 
 ## Shipped
 
-### MCP prompts/list + prompts/get (mcp.rs)
+### MCP prompts/list + prompts/get (mcp.rs, 30fba783f)
 
 `prompts/list` returns the four §4.3 prompts (`system://persona`,
 `system://protocol`, `system://context`, `system://constraints`) with
 descriptions and argument schemas (`slug` for persona, `task_id` for
-context). `prompts/get` renders one prompt as
-`{description, messages: [{role, content: {type, text}}]}`; unknown or
-missing `name` → JSON-RPC `-32602`. `initialize` advertises the `prompts`
-capability.
+context); `initialize` advertises the `prompts` capability. `prompts/get`
+renders one prompt as `{description, messages: [{role, content: {type,
+text}}]}`; unknown or missing `name` → JSON-RPC `-32602`.
 
 ### Prompt builders (api/prompts.rs, single source of truth)
 
@@ -93,9 +92,9 @@ capability.
   (observe/plan/act/monitor/reconcile), and escalation rules.
 - `system://context` — task title/spec ref/description/status/priority,
   worktree branch+path, repo name/path/default branch (explicit `task_id`
-  argument, else the caller's bound task; unknown task errors). Every task
-  load is containment-checked against the caller's scope (see the repair
-  section below): a task in another workspace (or, for a repo-scoped agent,
+  argument, else the caller's bound task; unknown task errors). Every
+  task load is containment-checked against the caller's scope (repair
+  12c5fe5e5): a task in another workspace (or, for a repo-scoped agent,
   another repo) is rejected instead of rendered.
 - `system://constraints` — workspace + tenant budget limits with remaining
   budget, agent lifetime cap, and workspace/tenant scope boundaries.
@@ -108,121 +107,35 @@ unapproved slugs, and persists the binding as the agent's `persona_id`.
 The four prompts are injected into the container env as `GYRE_PROMPT_PERSONA`
 (only when a persona is bound), `GYRE_PROMPT_PROTOCOL`,
 `GYRE_PROMPT_CONTEXT`, and `GYRE_PROMPT_CONSTRAINTS` — content identical
-to what `prompts/get` serves.
+to what `prompts/get` serves. `meta_spec_set_sha` follows task-116's
+approved semantics (reconciliation 727befd94): the spawn response carries
+the SHA-256 of the assembled meta-spec prompt set — exactly the set
+delivered as `GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — null when
+the assembled set is empty; no value is fabricated.
 
-### meta_spec_set_sha semantics (merge reconciliation)
+### Verification repair: bearer-token merge drift (894fe8b73)
 
-This round merged the assignment base `402142b1` (task-106 jj rebase +
-task-116 meta-spec prompt assembly) into the candidate branch. Where both
-sides had fixed the previously-hardcoded `None` `meta_spec_set_sha`, the
-resolution keeps task-116's approved semantics: the spawn response carries
-the SHA-256 of the **assembled meta-spec prompt set** (required tenant →
-required workspace → spec bindings), which is exactly the set delivered as
-`GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — the response attests
-what was actually injected. Null when the assembled set is empty. The
-candidate's parallel workspace-`meta_spec_sets` hash was dropped in favor
-of that single source of truth, and `docs/api-reference.md` describes the
-actual semantics. `docs/agent-protocol.md` retains the pre-existing M32
-wording inherited unchanged from the base.
-
-### Review repair: system://context scope containment (12c5fe5e5)
-
-Review found that `context_prompt_for_caller` (prompts.rs, reached from
-`prompts/get system://context`) loaded a caller-supplied `task_id` with no
-containment check — any authenticated agent could render any task's title,
-description, and acceptance criteria across workspace/tenant boundaries.
-The repair mirrors `handle_spawn_worker`'s check in mcp.rs: a task whose
-workspace differs from the caller's scope workspace is rejected (error
-carries no task text), and a repo mismatch is rejected when both the caller
-and the task carry a repo; a workspace-scoped agent (no repo scope) may
-still read same-workspace tasks in any repo. The check applies to both the
-explicit `task_id` argument and the caller's bound task.
-`mcp_prompts_get_context_rejects_cross_scope_task_id` reproduces the exact
-disclosure scenario from the finding (victim workspace in another tenant,
-"SECRET victim title", attacker agent with explicit `task_id`) and asserts
-the denial, plus bound-task, cross-repo, workspace-scoped-allow, and
-in-scope-render cases.
-
-### Verification repair: impersonation-field merge drift (010dad798)
-
-The candidate merged assignment base `b5a87208` (task-108 admin user
-impersonation), which added `AuthenticatedAgent::impersonation`. Three
-task-150 MCP prompt test initializers (`agent_auth_with_task` and the two
+This round merged assignment base `cfeefbda` (task-091 HSI + task-107
+Fulcio signing boundary), which added a required `bearer_token:
+Option<String>` field to `auth::AuthenticatedAgent`. The three task-150
+MCP prompt test initializers (`agent_auth_with_task` and the two
 user-token auths in the prompts suites) still constructed the struct
-without the field, failing the lib-test build with E0063, and
-`api/prompts.rs` had three rustfmt-dirty lines in the context-prompt
-containment error. Both fixed; `cargo fmt --check -p gyre-server` is clean
-and the focused suites pass (below). No production behavior changed.
+without the field, failing `cargo check -p gyre-server --tests` with
+E0063 at mcp.rs:5966/6476/6506. All three now set `bearer_token: None`
+(header-token auth is irrelevant to `handle_prompt_get` — those handlers
+never sign). No production behavior changed.
 
-### Rebase repair: task-117 compute target model merge (0cbd5cecb)
+### Test evidence (this round)
 
-This round merged assignment base `bd49c78` (task-117 compute target
-model) into the candidate branch. The `spawn.rs` conflict kept both
-sides: task-117's SSH agent-name validation, relocated by the base to
-before any state is written (M19.5-A), runs first, followed by task-150's
-§4.3 persona chain resolution and binding — both reject before the agent
-row, token, worktree, or task assignment are created, preserving the
-handler's compensating-rollback invariant.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — exit 0
+  (evidence `/tmp/stage/review-evidence/task-150-bearer-token-repair.md`).
+- `rustfmt --check crates/gyre-server/src/mcp.rs` — clean.
+- `scripts/check-arch.sh` — passes.
 
-The merge also exposed test drift: task-117 added a real Kubernetes
-dispatch arm (`kubectl apply` with a generated Pod manifest), so
-Kubernetes-typed compute targets no longer fall through the container/ssh
-arms to `LocalTarget`. `create_prompt_dump_compute_target` still relied
-on that fall-through executing `config.command` as a local `env | sort`
-script, so `spawn_injects_all_four_system_prompts_with_persona` and
-`spawn_without_persona_injects_prompts_but_no_persona` never observed a
-dump. The helper now uses the same stub-`kubectl` manifest capture double
-as `create_env_dump_compute_target` / `create_meta_prompt_dump_compute_target`
-(real kubernetes dispatch, stub binary at the process boundary), and the
-assertions were upgraded from substring scans of a raw env dump to exact
-name/value pairing on `spec.containers[0].env` via `pod_env_map` — the
-persona assertion is now a full equality on the injected
-`GYRE_PROMPT_PERSONA` value. No production behavior changed; the §4.3
-injection code itself was untouched by the drift.
-
-### Review repair: coverage row 23 meta_spec_set_sha wording (98f7daf73)
-
-Review found that coverage row 23 still carried the pre-merge wording
-from 30fba783f: it claimed the spawn response's `meta_spec_set_sha` is
-"computed via `compute_meta_spec_set_sha`" (SHA-256 of the stored
-workspace set JSON) and that the test asserts that stored-set hash. Both
-claims were false after merge reconciliation 727befd94 switched to
-task-116's semantics — spawn.rs computes `prompt_set.set_sha`
-(`prompt_assembly::prompt_set_sha`, hash of the assembled prompt-set
-section metadata), null when the assembled set is empty, and the test
-asserts it matches the injected `GYRE_META_SPEC_SET_SHA` env var. Row 23
-now describes the actual semantics, matching the Shipped section above
-and docs/api-reference.md. Docs-only change; no production behavior or
-tests touched.
-
-### Test evidence
-
-Focused probes (logs under `/tmp/stage/review-evidence/`):
-
-- `cargo test -p gyre-server --lib -- mcp::tests:: api::spawn::tests::
-  api::prompts::` — **157 passed, 0 failed** (this round, log
-  `task150-merge-resolution-tests.log`; full lib test target compiles),
-  including:
-  `spawn_injects_all_four_system_prompts_with_persona` (stub-kubectl Pod
-  manifest capture asserts all four `GYRE_PROMPT_*` vars with exact
-  name/value pairing — task title, spec ref, branch, workspace scope),
-  `spawn_without_persona_injects_prompts_but_no_persona`,
-  `spawn_persona_slug_fails_closed` (unknown slug 400 "not found in scope
-  chain", Pending persona 400, no orphaned agent rows), the four
-  `mcp_prompts_*` suites (list shape, all four get handlers, `-32602`
-  errors, scope-chain persona resolution, budget/scope constraints),
-  `spawn_delivers_meta_spec_prompt_to_agent_env` (task-116 delivery guard)
-  and `spawn_omits_meta_spec_set_sha_without_required_meta_specs`
-  (empty-set null case).
-- `docker/gyre-agent` `npm test` — 12/12 pass (cred-proxy + agent-runner)
-  (pre-repair round; the repair touches no agent-runner code).
-- Invariant scripts all exit 0: check-arch, check-mcp-write-tools,
-  check-abac-exempt-handlers (re-run this round), check-abac-route-registry,
-  check-migration-versions, check-byte-slice-truncation,
-  check-relative-path-defaults, check-inert-enforcement,
-  check-dead-message-kinds, check-mem-port-contracts,
-  check-fail-open-ref-resolution.
-- `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) succeeds. A
-  `cargo clippy` failure in `gyre-common` (`used as a loop counter`) is
-  pre-existing on the assigned base — `gyre-common` is byte-identical to
-  `402142b1` in this branch; not introduced by this task.
+gyre-server test compilation is blocked in the implement sandbox by the
+4 GiB build wrapper; the independent verifier must run
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_prompts` and
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spawn` (prior round:
+157 passed, 0 failed across `mcp::tests::`, `api::spawn::tests::`,
+`api::prompts::`; this round's change only adds a `None` field to three
+test auth initializers, so those suites' behavior is unchanged).
