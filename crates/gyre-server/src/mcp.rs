@@ -603,7 +603,10 @@ fn tool_definitions() -> Value {
     let tools = defs["tools"]
         .as_array_mut()
         .expect("tool definitions must be an array");
-    for (dotted, canonical) in [("graph.concept", "graph_concept"), ("spec.assist", "spec_assist")] {
+    for (dotted, canonical) in [
+        ("graph.concept", "graph_concept"),
+        ("spec.assist", "spec_assist"),
+    ] {
         let canonical_def = tools
             .iter()
             .find(|t| t["name"].as_str() == Some(canonical))
@@ -6883,9 +6886,10 @@ specs:
                 .find(|t| t["name"].as_str() == Some(name))
                 .unwrap_or_else(|| panic!("tool `{name}` must be listed"))
         };
-        for (dotted, canonical) in
-            [("graph.concept", "graph_concept"), ("spec.assist", "spec_assist")]
-        {
+        for (dotted, canonical) in [
+            ("graph.concept", "graph_concept"),
+            ("spec.assist", "spec_assist"),
+        ] {
             assert_eq!(
                 find(dotted)["inputSchema"],
                 find(canonical)["inputSchema"],
@@ -6964,7 +6968,11 @@ concepts:
             .create_node(node("JwtAuthProvider"))
             .await
             .unwrap();
-        state.graph_store.create_node(node("Invoice")).await.unwrap();
+        state
+            .graph_store
+            .create_node(node("Invoice"))
+            .await
+            .unwrap();
 
         // Dotted §11 spelling.
         let (status, json) = mcp_post(
