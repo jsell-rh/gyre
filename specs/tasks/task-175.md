@@ -47,13 +47,13 @@ commits: ["f535c58cd389e684df6721fcca36a698c9763ed4", "956897081069ec8199ba0bf6e
 
 ## Acceptance Criteria
 
-- [x] Specs view renders sortable table with implementation progress
-- [x] Spec detail panel has Content/Edit/Progress/Links/History tabs
-- [x] Inbox cards show priority badge, description, attribution, timestamp
-- [x] Inbox accordion shows action buttons for all 10 priority levels
-- [x] Briefing renders COMPLETED/IN PROGRESS/CROSS-WORKSPACE/EXCEPTIONS/METRICS sections
-- [x] Entity references in briefing are clickable (open detail panel)
-- [x] Tests pass
+- [ ] Specs view renders sortable table with implementation progress
+- [ ] Spec detail panel has Content/Edit/Progress/Links/History tabs
+- [ ] Inbox cards show priority badge, description, attribution, timestamp
+- [ ] Inbox accordion shows action buttons for all 10 priority levels
+- [ ] Briefing renders COMPLETED/IN PROGRESS/CROSS-WORKSPACE/EXCEPTIONS/METRICS sections
+- [ ] Entity references in briefing are clickable (open detail panel)
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -61,12 +61,11 @@ Read `ui-layout.md` §6-§8 for the exact layout specifications. Also reference 
 
 ## Shipped
 
-The full §6-§8 surface was built and review-hardened across earlier rounds; this round
-rebased the branch onto main's unified notification taxonomy (base `cfeefbda`,
-user-management.md §Notification Entity) and resolved every conflict without losing
-either side's behavior.
+The full §6-§8 surface is implemented and review-hardened; the branch was rebased onto
+main's unified notification taxonomy (base `cfeefbda`, user-management.md §Notification
+Entity) with every conflict resolved without losing either side's behavior.
 
-### §6-§8 surface (carried through the rebase)
+### §6-§8 surface
 
 - **§6 Specs View** (`SpecDashboard.svelte` + `DetailPanel.svelte`): sortable table (Path,
   Status, Kind, Owner, Last Updated) at tenant/workspace scope with status/kind filters and
@@ -85,37 +84,29 @@ either side's behavior.
   CROSS-WORKSPACE, EXCEPTIONS, METRICS), inline action buttons, clickable entity references
   opening the detail panel, time-range selector, "Ask about this briefing" chat input.
 
-### Rebase resolution (this round, commits `6f5273d4` + `f535c58c`)
+### Rebase onto notification taxonomy (commits `6f5273d4` + `f535c58c`)
 
 Main renamed `SpecPendingApproval` → `SpecApprovalRequested` (legacy rows still parse),
 replaced the flat `entity_ref`/`repo_id` notification fields with the structured
-`NotificationSource`, and added `bearer_token` to `AuthenticatedAgent`. The resolution:
+`NotificationSource`, and added `bearer_token` to `AuthenticatedAgent`. The resolution
+keeps task-175's P2 fan-out + structured body but emits the renamed type and populates
+`source.entity_type/entity_id/repo_id` so both the Inbox body-driven actions and main's
+deep links work; ports/adapters (gyre-ports, SQLite, PostgreSQL, mem) union both sides'
+methods (`update_body_by_entity_ref` + `mark_read`/`has_active_notification`);
+`Inbox.svelte` + `en.json` type/badge maps cover every server `NotificationType` variant
+including legacy `SpecPendingApproval`/`BudgetWarning` rows.
 
-- `specs_assist.rs` keeps task-175's P2 fan-out + structured body but emits the renamed
-  `SpecApprovalRequested` type and populates `source.entity_type/entity_id/repo_id` so both
-  the Inbox body-driven actions and main's notification-entity deep links work; the
-  append-to-existing-MR body refresh now keys on the renamed type string. Test fixes:
-  `bearer_token: None` in the fan-out initializer, `source.entity_id` assertions.
-- `gyre-ports`/`sqlite`/`mem`: both sides' port methods unioned
-  (`update_body_by_entity_ref` + `mark_read`/`has_active_notification`); the mem adapter's
-  entity match migrated to `source.entity_id`; the SQLite test adapted to the renamed type
-  and structured source.
-- `Inbox.svelte` + `en.json`: the badge-variant and type-normalization maps are the union
-  of both sides, covering every server `NotificationType` variant (including
-  `SpecApprovalRequested` and legacy `SpecPendingApproval`/`BudgetWarning` rows) so no card
-  renders without actions or a label.
+### Contract-repair round (this round)
 
-### Test evidence (focused probes; full gates owned by verification)
+The prior round's checkpoint had modified the protected task text (acceptance-criteria
+checkboxes); the executor restored the assigned document. No production code changed this
+round — the fix above is preserved as-is and re-verified:
 
-- `cargo test -p gyre-adapters --lib sqlite::notification` — 5 passed, 0 failed (both
-  sides' tests: update_body_by_entity_ref, mark_read, has_active_notification, source/read
-  persistence, retention split).
-- Web vitest (locked deps): `Inbox.test.js` 74 passed; `Briefing.test.js` +
-  `SpecDashboard.test.js` 59 passed; `view-spec` + `MetaSpecs` 119 passed.
-- `cargo check --workspace --all-targets` — clean (lib + all test targets type-check
-  after the `bearer_token`/`source.entity_id` adaptations).
-- `scripts/check-arch.sh`, `check-rustfmt-diff.py` and `check-clippy-diff.py` against base
-  `cfeefbda` — all clean.
+- Web vitest (locked deps via `npm ci`): `Inbox.test.js` + `Briefing.test.js` +
+  `SpecDashboard.test.js` — 133 passed, 0 failed.
+- `cargo test -p gyre-adapters --lib sqlite::notification` — 5 passed, 0 failed.
+- `cargo check -p gyre-server` — clean.
+- `scripts/check-arch.sh` — passed.
 
 Server tests for the verifier to execute (large test compilation deferred per assignment):
 `cargo test -p gyre-server --lib api::specs_assist` (save_spec P2 fan-out, stale-SHA
