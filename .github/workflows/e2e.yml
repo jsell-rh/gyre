@@ -24,8 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust linker (mold, lld fallback)
-        uses: ./.github/actions/setup-linker
+      - name: Install mold linker
+        run: bash scripts/ci-install-mold.sh
 
       - uses: dtolnay/rust-toolchain@stable
 

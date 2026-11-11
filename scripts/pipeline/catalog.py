@@ -206,6 +206,8 @@ def discover(store, stage, base):
         elif stage == 'review' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') != candidate:
                 inputs = {'candidate': candidate, 'base': data['candidate_base']}
+                if (data.get('review_retry') or {}).get('candidate')==candidate:
+                    inputs['review_retry']=data['review_retry']
         elif stage == 'verify' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') == candidate and review.get('approved'):
                 if verified.get('candidate') != candidate or verified.get('base') != base:
