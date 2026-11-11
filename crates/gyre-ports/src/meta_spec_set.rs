@@ -21,3 +21,23 @@ pub trait MetaSpecSetRepository: Send + Sync {
     /// Delete the meta-spec set for a workspace.
     async fn delete(&self, workspace_id: &Id) -> Result<()>;
 }
+
+/// Repository for tenant-level meta-spec sets (meta-spec-reconciliation.md §8).
+///
+/// A tenant meta-spec set is the tenant-wide default binding: every workspace
+/// in the tenant inherits its pinned entries unless the workspace's own
+/// meta-spec set overrides them (workspace pin wins on conflict). Persistence
+/// model mirrors `MetaSpecSetRepository` — raw JSON in, raw JSON out;
+/// serialization to `TenantMetaSpecSet` happens in the server layer.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
+#[async_trait]
+pub trait TenantMetaSpecSetRepository: Send + Sync {
+    /// Get the raw JSON for a tenant's meta-spec set, or `None` if not set.
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>>;
+
+    /// Upsert (insert or replace) the meta-spec set for a tenant.
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()>;
+
+    /// Delete the meta-spec set for a tenant.
+    async fn delete(&self, tenant_id: &Id) -> Result<()>;
+}

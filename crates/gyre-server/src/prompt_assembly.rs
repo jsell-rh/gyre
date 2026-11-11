@@ -2,7 +2,9 @@
 //!
 //! Builds the ordered prompt set injected into every spawned agent:
 //!
-//! 1. All REQUIRED tenant (Global) meta-specs — ordered by kind
+//! 1. All REQUIRED tenant-level meta-specs — Global entries plus
+//!    Tenant-scoped entries for the workspace's own tenant (meta-spec-
+//!    reconciliation.md §8) — ordered by kind
 //!    (persona → principle → standard → process)
 //! 2. All REQUIRED workspace meta-specs (same kind ordering)
 //! 3. Spec-level bindings at their pinned versions
@@ -41,7 +43,7 @@ pub struct PromptSection {
     pub kind: String,
     /// The prompt text injected into agent context.
     pub prompt: String,
-    /// "global" (tenant scope) or "workspace".
+    /// "global", "tenant", or "workspace".
     pub scope: String,
     /// Which injection band the section came from: "required-tenant",
     /// "required-workspace", or "binding".
@@ -71,6 +73,7 @@ fn kind_rank(kind: &MetaSpecKind) -> u8 {
 fn scope_str(scope: &MetaSpecScope) -> &'static str {
     match scope {
         MetaSpecScope::Global => "global",
+        MetaSpecScope::Tenant => "tenant",
         MetaSpecScope::Workspace => "workspace",
     }
 }
@@ -144,16 +147,49 @@ fn filter_approved(specs: Vec<MetaSpec>) -> Vec<MetaSpec> {
 pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSet {
     let workspace_id = task.workspace_id.to_string();
 
-    // Band 1: required tenant (Global) meta-specs.
-    let tenant = state
-        .meta_specs
-        .list(&gyre_ports::MetaSpecFilter {
-            scope: Some(MetaSpecScope::Global),
-            required: Some(true),
-            ..Default::default()
-        })
-        .await
-        .unwrap_or_default();
+    // Band 1: required tenant-level meta-specs. Global entries apply to
+    // every tenant; Tenant-scoped entries (§8) apply to the workspaces of
+    // the tenant named by their scope_id — resolve the caller's tenant via
+    // the task's workspace and inject that tenant's required specs too.
+    let mut tenant = filter_approved(
+        state
+            .meta_specs
+            .list(&gyre_ports::MetaSpecFilter {
+                scope: Some(MetaSpecScope::Global),
+                required: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default(),
+    );
+    match state.workspaces.find_by_id(&task.workspace_id).await {
+        Ok(Some(ws)) => {
+            let tenant_scoped = state
+                .meta_specs
+                .list(&gyre_ports::MetaSpecFilter {
+                    scope: Some(MetaSpecScope::Tenant),
+                    scope_id: Some(ws.tenant_id.to_string()),
+                    required: Some(true),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_default();
+            tenant.extend(filter_approved(tenant_scoped));
+        }
+        Ok(None) => {
+            tracing::warn!(
+                workspace_id = %task.workspace_id,
+                "prompt assembly: task workspace not found; skipping tenant-scoped required meta-specs"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %task.workspace_id,
+                error = %e,
+                "prompt assembly: failed to load task workspace; skipping tenant-scoped required meta-specs"
+            );
+        }
+    }
     // Band 2: required meta-specs scoped to this workspace.
     let workspace = state
         .meta_specs
@@ -166,7 +202,6 @@ pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSe
         .await
         .unwrap_or_default();
 
-    let mut tenant = filter_approved(tenant);
     let mut workspace = filter_approved(workspace);
     sort_by_kind(&mut tenant);
     sort_by_kind(&mut workspace);
