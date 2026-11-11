@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: ["059586a37a49b184d7a32a47d8c11c59da5702a3", "99edd0bcaddd740a5b560e61ef2937b156d780fb"]
+commits: ["99edd0bcaddd740a5b560e61ef2937b156d780fb", "059586a37a49b184d7a32a47d8c11c59da5702a3", "ec05bf9afe4de6256b57ba977c6e5f63ea7e1fa4", "33cc4941521a7e94d9742f2f7bb626b18adc4e45"]
 ---
 
 ## Spec Excerpt
@@ -88,10 +88,9 @@ Read `specs/system/agent-gates.md` §Forge Enforcement Policies and §Integratio
 
 All five forge enforcement policies run at merge time with real ledger and
 git lookups, violations reach the MR author directly, and the
-spec-alignment gate receives the spec at the pinned SHA. Four policies
-(`require_spec_ref`, `require_approved_spec`, `warn_stale_spec`,
-`require_current_spec`) and the `spec_ref` MR field shipped with the
-task-138 lineage; commit 99edd0bc adds the missing pieces:
+spec-alignment gate receives the spec at the pinned SHA — including the
+production blob-pinned spec_ref shape, through a channel the gate agents
+can actually fetch.
 
 ### The five policies, configurable per repo
 
@@ -138,6 +137,29 @@ task-138 lineage; commit 99edd0bc adds the missing pieces:
   gate agent processes (documented in `docs/agent-protocol.md`), derived
   from the review context's pinned `spec_ref` — review runs against the
   version the code was written for, not HEAD.
+- The scoped gate-agent tokens the URL is minted for can actually fetch
+  it: `MR_SPEC_ROUTE` is in both `REVIEWER_ALLOWED_ROUTES` and
+  `VALIDATOR_ALLOWED_ROUTES` (review-repair finding 1 — previously the
+  scoped-token gate 403'd the URL before policy evaluation). Proven
+  through the full auth+ABAC router by
+  `scoped_gate_tokens_can_fetch_pinned_mr_spec`
+  (`tests/task134_review_probe.rs`): `review:submit` and
+  `validation:report` tokens GET the spec (200, pinned content not HEAD)
+  while staying 403 on routes outside their allow-list.
+- The gate's primary spec channel resolves BOTH pin shapes (review-repair
+  finding 2): a commit SHA + tree path, and the production blob SHA +
+  ledger path that `spawn.rs` pins from `spec_ledger.current_sha`.
+  `Git2OpsAdapter::read_file_at_commit` resolves a blob OID directly to
+  the blob's content (a ledger path is not a repo tree path); a SHA that
+  is neither a commit nor a blob is an error, never `Ok(None)`
+  (fail-closed). Covered by
+  `test_read_file_at_commit_resolves_blob_pinned_sha` (adapter) and
+  `agent_review_context_resolves_blob_pinned_spec_ref` (gate context
+  gathering: `system/widget.md@<blob-sha>` delivers the pinned v1 spec,
+  not the tip v2).
+- `notifications::notify_spec_policy_violation` truncates the fallback
+  MR label on a char boundary (`chars().take(8)`), not a fixed byte index
+  (review-repair finding 3).
 
 ### Test evidence
 
@@ -156,22 +178,23 @@ migration 000059 runs), plus regression controls
 `revoked_approval_no_longer_verifies_spec_ref`,
 `find_by_spec_sha_scopes_to_exact_version`).
 
-Prior-round suite evidence on equivalent source: `cargo test -p
-gyre-server --lib` 1664/1664; `gyre-domain` 426+6; `gyre-adapters --lib`
-448; integration git/api/graph 17/66/38; frontend RepoSettings vitest
-58/58; all check-* mechanical invariants pass.
+### This round: review repair (commits ec05bf9a, 33cc4941)
 
-### This round: verification repair (commit 059586a3)
-
-Verification attempt 24d519fb failed only the rustfmt changed-lines gate
-(4 files). This round applies rustfmt to those changed regions — 41
-lines, no semantic changes — and re-proves locally:
-`scripts/check-rustfmt-diff.py cba416b` clean; `cargo check -p
-gyre-server` and `cargo check -p gyre-server --tests` clean; all 20
-check-* invariants pass; `check-task-commit-attribution` clean with both
-commits recorded. Evidence: `review-evidence/rustfmt-repair.txt`.
-
-Deferred to the independent verifier (sandbox wrapper refuses
-gyre-server test compilation): `cargo test -p gyre-server --lib`
-(merge_processor and api suites named above), integration suites, full
-`cargo test --all`, all-target Clippy, and exact-head GitHub CI.
+- `cargo test -p gyre-adapters read_file_at_commit` — 4/4 passed in this
+  sandbox, including the new `test_read_file_at_commit_resolves_blob_pinned_sha`.
+- `cargo check -p gyre-ports -p gyre-adapters -p gyre-server` and
+  `cargo check -p gyre-server --tests` — exit 0. The sandbox build wrapper
+  refuses gyre-server test codegen (4 GiB budget), so the server test runs
+  are recorded for the independent verifier (evidence:
+  `/tmp/stage/review-evidence/task-139-repair.md`):
+  `cargo test -p gyre-server --lib agent_review_context_resolves_blob_pinned_spec_ref`,
+  `cargo test -p gyre-server --test task134_review_probe` (new
+  `scoped_gate_tokens_can_fetch_pinned_mr_spec`),
+  `cargo test -p gyre-server --lib gate_executor`,
+  `cargo test -p gyre-server --lib get_mr_spec`, plus the full
+  `cargo test --all`, all-target Clippy, and exact-head GitHub CI owned by
+  verification/publication.
+- Mechanical checks re-run clean after the repair: check-arch,
+  check-abac-route-registry, check-abac-exempt-handlers,
+  check-byte-slice-truncation, check-mem-port-contracts,
+  check-fail-open-ref-resolution.
