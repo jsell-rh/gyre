@@ -375,7 +375,7 @@ class Store:
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
             self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
-            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage','requirements_triage'):
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage','requirements_triage','repair_stalled','ci_infrastructure'):
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
                     (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
             if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning','sandbox_admission')):

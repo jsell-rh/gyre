@@ -99,7 +99,7 @@ def implement(execution, task):
     # not require unrelated production edits merely to clear its finding.
     requires_fix = (repair.get('category') in ('review', 'verification', 'ci') and
                     execution.claim['input']['base'] == task['data'].get('candidate_base'))
-    if not contract_changed and (not complete or requires_fix):
+    if not complete or requires_fix:
         path = checkout(execution, result['head'])
         seed = execution.claim['input'].get('candidate') or execution.claim['input']['base']
         execution.command('git', 'fetch', '--quiet', 'origin', seed, cwd=path, timeout=180)
@@ -107,7 +107,10 @@ def implement(execution, task):
         substantive = [name for name in changed if name != f"specs/tasks/{task['name']}.md"
                        and not name.startswith(('web/dist/', 'specs/reviews/'))]
         if not substantive:
-            raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
+            from .repair_budget import check
+            check(execution,task,path,result['head'],{'category':'contract','delta':contract_delta} if contract_changed else
+                  {'category':'no_source_progress','repair':repair.get('details') or repair.get('detail')})
+            if not contract_changed:raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
     updates = {'candidate': result['head'], 'candidate_base': result.get('base', execution.claim['input']['base']),
                'branch': result['branch'], 'task_override': result['task_body'],
                'review': None, 'verified': None,
@@ -148,19 +151,26 @@ def review(execution, task):
         result['valid'] = False
         result['source_edits'] = invalid
     verdict = result.get('verdict') or {}
-    approved = (result['valid'] and verdict.get('approved') is True and
+    from .repair_budget import source_findings
+    findings,deferred=source_findings(verdict.get('findings'))
+    # Generated assets have a mandatory deterministic rebuild/test/publish gate.
+    # The original independent verdict remains in outcome.json.
+    affirmative=(verdict.get('approved') is True or bool(deferred) and not findings)
+    approved = (result['valid'] and affirmative and
                 verdict.get('candidate') == execution.claim['input']['candidate'] and
-                isinstance(verdict.get('findings'), list) and not verdict['findings'])
+                isinstance(verdict.get('findings'), list) and not findings)
     receipt = {'candidate': execution.claim['input']['candidate'], 'approved': approved,
                'checkpoint': result['head'], 'branch': result['branch'],
                'record': next((name for name in changes if name.startswith('specs/reviews/')), None),
-               'artifact': str(execution.directory / 'outcome.json')}
+               'artifact': str(execution.directory / 'outcome.json'), 'deferred_generated_findings':deferred}
     if approved:
         return result, {'review': receipt, 'retained_artifacts': None}, []
     finding = {'category': 'review', 'source': execution.claim['input']['candidate'],
                'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
                'artifact': receipt['artifact'], 'id': execution.claim['id']}
+    from .repair_budget import check
+    check(execution,task,path,assigned,findings or finding['details'])
     return result, {'review': receipt, 'repair': finding}, [finding]
 
 
@@ -266,6 +276,7 @@ def verify(execution, task):
                'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
                'engine': 'gateway', 'sandbox': remote['sandbox'],
                'tested_head':remote.get('head'),'artifacts':remote.get('publication')}
+    if remote.get('cache'):receipt['cache']=remote['cache']
     (execution.directory / 'verified.json').write_text(json.dumps(receipt))
     return receipt, {'verified': receipt}, []
 
@@ -348,11 +359,8 @@ def publish(execution, task):
     task = execution.store.task(task['name'])
     observation = observe_ci(execution,task,verified)
     if observation['status'] == 'infrastructure':
-        for ident in observation.get('runs', []):
-            if ident is not None:
-                execution.command('gh', 'run', 'rerun', str(ident), '--failed', '--repo', repo,
-                                  timeout=30, check=False)
-        raise Retry('GitHub infrastructure checks were rerun on the same verified head')
+        from .ci import retry_infrastructure
+        retry_infrastructure(execution,task,verified,observation)
     rejected = ci_failure(execution,task,verified,observation)
     if rejected:
         return rejected

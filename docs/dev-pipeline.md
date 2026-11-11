@@ -682,3 +682,49 @@ Recovery can explicitly `--reconsider TASK` after an input-binding correction;
 all original ancestry, historical-generation and exact scoped-equivalence checks
 still apply. This supports narrowing a legacy coverage-row reference without
 shipping a formatting-only checkpoint or inventing a new delivery.
+
+## Efficiency and bounded recovery
+
+CI observation examines exact-head terminal workflow jobs and the failed step.
+Transport failures in recognized setup steps, with an unchanged workflow, retry
+that same head with exponential backoff (60 seconds to 30 minutes). If main has
+updated the failing setup inputs, retain review and reverify against that base
+without another coding assignment. Each workflow
+attempt is rerun at most once; six rerun rounds require attention. Product-test
+failures and mixed failures still become implementation findings. Priority-only
+observation during repair polls every ten minutes, without allocating a sandbox.
+
+Generated `web/dist/` observations are deferred to the deterministic verifier.
+Independent review still blocks on source defects. The verifier merges source,
+resolves generated conflicts, rebuilds remotely, runs all required suites, and
+publishes assets bound to the exact verified tree. An already-upstream candidate
+is fetched by its upstream base and checked out at its exact head; no empty Git
+bundle is created.
+
+Three repair rounds with identical findings and unchanged production source
+require attention, retaining source and findings. Notes and generated output
+cannot reset this budget. Explicit retry resets the stage budget and hold, retaining its previous state
+in the audit log; real source
+progress or different findings starts a new budget. Main advancing does not
+clear a stage hold.
+
+Remote verifiers exchange disposable build caches through OpenShell. The host
+only relays archives on disk; compilation remains remote. Archives are bounded
+to 2 GiB compressed / 12 GiB expanded with an 8 GiB local retention budget. Keys
+include image, toolchain, dependency lockfiles/manifests and build settings.
+A cache is reusable only after its successful producer's source is included in
+upstream main. Integrity, ancestry, path, disk-space and size checks reject unsafe
+or stale archives. Credentials and verification decisions are never cached.
+Workspace Rust packages are invalidated before checks; dependency artifacts and
+content-addressed package downloads can be reused. Cache misses run normal full
+verification, with no reduced checks. Set `build_cache_enabled=false` in the
+local ledger to disable exchange.
+
+Read measured compute occupancy, merge throughput, observation wakeups and cache
+use with `python3 scripts/dev-efficiency.py --hours 24`. Worker minutes include
+provisioning/transport waits; they are not CPU utilization measurements.
+
+Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
+resolving distro packages for every job. Download retries remain bounded and a
+checksum mismatch fails setup; linker availability and all build/test gates are
+still required.

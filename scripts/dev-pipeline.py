@@ -39,6 +39,8 @@ def source(store):
             apply(store, plan(store, path, recovery))
         from pipeline.fulfillment import reconcile
         reconcile(store, path, revision)
+        from pipeline.repair_budget import reconcile_generated
+        reconcile_generated(store)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -254,6 +256,8 @@ def main():
                     params += (args.task,)
                 for row in store.db.execute("SELECT task,stage,generation FROM work WHERE state IN ('attention','retry')" + (' AND task=?' if args.command=='retry' else ''), (args.task,) if args.command=='retry' else ()).fetchall():
                     store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
+                    from pipeline.repair_budget import reset
+                    reset(store,row['task'],row['stage'])
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')

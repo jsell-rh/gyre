@@ -78,7 +78,8 @@ def eligible(store, work):
     if candidate != inputs.get('candidate') or data.get('repair'):
         return False
     if stage == 'review':
-        return (data.get('review') or {}).get('candidate') != candidate
+        retry=data.get('review_retry') if (data.get('review_retry') or {}).get('candidate')==candidate else None
+        return (data.get('review') or {}).get('candidate') != candidate and inputs.get('review_retry')==retry
     review = data.get('review') or {}
     if review.get('candidate') != candidate or not review.get('approved'):
         return False
