@@ -241,6 +241,23 @@ impl UserTokenRepository for PgStorage {
 /// publish flows; human attribution via `audit_events.user_id`.
 const JUDGMENT_AUDIT_TYPES: [&str; 3] = ["gate_override", "trust_change", "meta_spec_publish"];
 
+/// Judgment-ledger source-1 row: one `spec_approvals` row left-joined to its
+/// spec-ledger workspace attribution. Named struct rather than a positional
+/// tuple — a 9-column positional carrier is the TASK-048 F1 field-swap class
+/// (check-unnamed-tuple-carriers).
+#[derive(Queryable)]
+struct SpecApprovalJudgmentRow {
+    spec_path: String,
+    approved_at: Option<i64>,
+    revoked_at: Option<i64>,
+    revoked_by: Option<String>,
+    revocation_reason: Option<String>,
+    rejected_at: Option<i64>,
+    rejected_by: Option<String>,
+    rejected_reason: Option<String>,
+    workspace_id: Option<String>,
+}
+
 #[async_trait]
 impl JudgmentLedgerRepository for PgStorage {
     async fn list_for_user(
@@ -327,31 +344,21 @@ impl JudgmentLedgerRepository for PgStorage {
                 if let Some(w) = &ws {
                     query = query.filter(spec_ledger_entries::workspace_id.eq(w));
                 }
-                let rows: Vec<(
-                    String,
-                    Option<i64>,
-                    Option<i64>,
-                    Option<String>,
-                    Option<String>,
-                    Option<i64>,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                )> = query
+                let rows: Vec<SpecApprovalJudgmentRow> = query
                     .load(&mut *conn)
                     .context("judgment ledger: spec_approvals")?;
 
-                for (
-                    path,
+                for SpecApprovalJudgmentRow {
+                    spec_path: path,
                     approved_at,
                     revoked_at,
                     revoked_by,
-                    revoke_reason,
+                    revocation_reason: revoke_reason,
                     rejected_at,
                     rejected_by,
-                    reject_reason,
-                    wid,
-                ) in rows
+                    rejected_reason: reject_reason,
+                    workspace_id: wid,
+                } in rows
                 {
                     // revoked_at/rejected_at indicate a rejection; its
                     // judgment timestamp is the withdrawal/decline time
