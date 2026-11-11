@@ -453,9 +453,15 @@ pub async fn enforce_agent_lifetimes(state: &AppState) {
     }
 }
 
-/// Effective `max_agent_lifetime_secs` for one agent: repo budget override
-/// → effective workspace config (workspace → tenant, tighter wins). `None`
-/// when neither the repo nor the effective workspace config sets a limit.
+/// Effective `max_agent_lifetime_secs` for one agent: min(repo budget
+/// override, effective workspace config). The repo override is
+/// fine-grained control that can TIGHTEN the ceiling, never loosen it —
+/// the cascade bound (repo ≤ workspace ≤ tenant) is recomputed live on
+/// every enforcement pass, so a workspace or tenant budget reduced below
+/// a previously-legitimate repo override binds immediately (the same
+/// "beyond limit handles external budget changes" semantics the
+/// token/cost/concurrent dimensions honor). `None` when neither the repo
+/// nor the effective workspace config sets a limit.
 async fn effective_lifetime_limit_secs(state: &AppState, agent: &gyre_domain::Agent) -> Option<u64> {
     // Repo binding via repo_id (orchestrators) or via a worktree
     // (workers carry no repo_id) — first repo with an override wins.
@@ -470,19 +476,22 @@ async fn effective_lifetime_limit_secs(state: &AppState, agent: &gyre_domain::Ag
             }
         }
     }
+    let mut repo_limit: Option<u64> = None;
     for repo_id in &repo_ids {
         if let Ok(Some(repo)) = state.repos.find_by_id(repo_id).await {
-            if let Some(repo_limit) = repo.budget.as_ref().and_then(|b| b.max_agent_lifetime_secs) {
-                return Some(repo_limit);
+            if let Some(limit) = repo.budget.as_ref().and_then(|b| b.max_agent_lifetime_secs) {
+                repo_limit = Some(limit);
+                break;
             }
         }
     }
-    effective_workspace_config(
+    let ws_limit = effective_workspace_config(
         state,
         &workspace_key(agent.workspace_id.as_str()),
     )
     .await
-    .max_agent_lifetime_secs
+    .max_agent_lifetime_secs;
+    min_opt_u64(repo_limit, ws_limit)
 }
 
 /// Increment active-agent counters for a workspace and the tenant.
@@ -686,7 +695,7 @@ fn min_opt_u32(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 /// config and the tenant ceiling (agent-runtime.md §4 Cascade — the tenant
 /// budget is the absolute ceiling even when the workspace config is
 /// looser, e.g. after a tenant admin lowered the ceiling).
-async fn effective_workspace_config(state: &AppState, ws_key: &str) -> BudgetConfig {
+pub(crate) async fn effective_workspace_config(state: &AppState, ws_key: &str) -> BudgetConfig {
     let ws = state
         .budget_configs
         .get_config(ws_key)
@@ -2380,6 +2389,141 @@ mod tests {
             AgentStatus::Active,
             "an agent under the effective lifetime limit must keep running"
         );
+    }
+
+    #[tokio::test]
+    async fn repo_lifetime_override_bounded_by_tenant_ceiling_workspace_unset() {
+        // Review round 9af67822 F1(b) corner: the tenant sets the absolute
+        // ceiling, the workspace leaves the dimension unset (inherited from
+        // the tenant per platform-model.md §1), and a repo override ABOVE
+        // the tenant ceiling exists in the store (set before the ceiling
+        // was lowered). The repo override must not loosen the cascade:
+        // effective limit = min(repo override, effective workspace limit).
+        let (state, _ws_id, agent_id, _task_id) =
+            enforcement_fixture("ws-life-tenant").await;
+        // The fixture sets only max_tokens_per_day on the workspace — the
+        // lifetime dimension is unset there and inherits the tenant's.
+        state
+            .budget_configs
+            .set_config(
+                super::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_agent_lifetime_secs: Some(1800),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Stale repo override above the tenant ceiling.
+        let repo_id = gyre_common::Id::new("ws-life-tenant-repo");
+        let mut repo = gyre_domain::Repository::new(
+            repo_id.clone(),
+            gyre_common::Id::new("ws-life-tenant"),
+            "life-tenant-repo",
+            "/tmp/repo-life-tenant",
+            0,
+        );
+        repo.budget = Some(gyre_domain::BudgetConfig {
+            max_agent_lifetime_secs: Some(3600),
+            ..Default::default()
+        });
+        state.repos.create(&repo).await.unwrap();
+
+        // Aged 2000s: past the tenant ceiling (1800) even though the repo
+        // override says 3600 — the override cannot loosen the cascade.
+        let mut aged = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        aged.spawned_at = now_secs_static().saturating_sub(2000);
+        state.agents.update(&aged).await.unwrap();
+
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "a repo lifetime override above the tenant ceiling must stay bounded: \
+             effective limit = min(3600, 1800) = 1800, agent aged 2000s"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_lifetime_override_rebinds_after_workspace_reduction() {
+        // A repo override legitimately at 3000s under a 3600s workspace
+        // ceiling binds as-is — until the workspace budget is reduced
+        // below it. The lifetime dimension recomputes the effective limit
+        // live on every enforcement pass (the same semantics the
+        // token/cost/concurrent dimensions honor), so a later reduction
+        // to 1800s kills an agent aged past 1800s even though the repo
+        // override still says 3000s.
+        let (state, _ws_id, agent_id, _task_id) =
+            enforcement_fixture("ws-life-reduce").await;
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-life-reduce"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_agent_lifetime_secs: Some(3600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let repo_id = gyre_common::Id::new("ws-life-reduce-repo");
+        let mut repo = gyre_domain::Repository::new(
+            repo_id.clone(),
+            gyre_common::Id::new("ws-life-reduce"),
+            "life-reduce-repo",
+            "/tmp/repo-life-reduce",
+            0,
+        );
+        repo.budget = Some(gyre_domain::BudgetConfig {
+            max_agent_lifetime_secs: Some(3000),
+            ..Default::default()
+        });
+        state.repos.create(&repo).await.unwrap();
+
+        // Aged 2000s: under min(3000, 3600) = 3000 — keeps running.
+        let mut aged = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        aged.spawned_at = now_secs_static().saturating_sub(2000);
+        state.agents.update(&aged).await.unwrap();
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Active,
+            "an agent aged 2000s is under the legitimate repo override (3000s)"
+        );
+
+        // Workspace budget reduced below the repo override: the effective
+        // limit is now min(3000, 1800) = 1800 — the reduction binds.
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-life-reduce"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_agent_lifetime_secs: Some(1800),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        super::enforce_agent_lifetimes(state.as_ref()).await;
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Stopped,
+            "a workspace budget reduction below the repo override must bind: \
+             effective limit = min(3000, 1800) = 1800, agent aged 2000s"
+        );
+        // Budget-kill semantics: worktree preserved.
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1, "lifetime kill must preserve the worktree");
     }
 
     #[tokio::test]

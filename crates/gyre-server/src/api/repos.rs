@@ -58,7 +58,9 @@ pub struct UpdateRepoRequest {
     /// a field left `null` inside the object means no limit for that
     /// dimension. `{}` (all null) clears the override — the repo then
     /// inherits the workspace limit. Every set field is validated against
-    /// the workspace budget (400 on violation).
+    /// the EFFECTIVE workspace limit (min of the workspace config and the
+    /// tenant absolute ceiling; a dimension the workspace leaves unset is
+    /// inherited from the tenant) — 400 on violation.
     pub budget: Option<gyre_domain::BudgetConfig>,
 }
 
@@ -293,18 +295,18 @@ pub async fn update_repo(
     }
     // agent-runtime.md §4 Cascade / repo-lifecycle.md §3: repo-level budget
     // override. "Repo budget (cannot exceed workspace)" — every set field
-    // is validated against the workspace budget; a violation is a 400.
-    // A dimension the workspace leaves unlimited imposes no ceiling.
+    // is validated against the EFFECTIVE workspace limit (min of the
+    // workspace config and the tenant absolute ceiling): a dimension the
+    // workspace leaves unset is inherited from the tenant
+    // (platform-model.md §1), not unlimited. Only when both the workspace
+    // and the tenant leave a dimension unset is there no ceiling; a
+    // violation is a 400.
     if let Some(budget) = req.budget {
-        let ws_budget = state
-            .budget_configs
-            .get_config(&crate::api::budget::workspace_key(
-                &repo.workspace_id.to_string(),
-            ))
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let ws_budget = crate::api::budget::effective_workspace_config(
+            state.as_ref(),
+            &crate::api::budget::workspace_key(&repo.workspace_id.to_string()),
+        )
+        .await;
         if let (Some(repo_max), Some(ws_max)) =
             (budget.max_tokens_per_day, ws_budget.max_tokens_per_day)
         {
@@ -1447,6 +1449,116 @@ mod tests {
             Some(gyre_domain::BudgetConfig::default()),
             "an empty budget object clears every override dimension"
         );
+    }
+
+    #[tokio::test]
+    async fn repo_budget_validated_against_effective_workspace_limit() {
+        // Review round 9af67822 F1(a): the repo budget validation must
+        // check against the EFFECTIVE workspace limit (min of the
+        // workspace config and the tenant absolute ceiling), not the raw
+        // workspace config. A dimension the workspace leaves unset is
+        // inherited from the tenant (platform-model.md §1) — a repo
+        // override above the tenant ceiling must be a 400 even when the
+        // workspace's own field is unset.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bud-eff"),
+            gyre_common::Id::new("t1"),
+            "BudEff",
+            "bud-eff",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // NO workspace budget config: every dimension inherits the tenant
+        // ceiling below.
+        state
+            .budget_configs
+            .set_config(
+                crate::api::budget::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(5000),
+                    max_agent_lifetime_secs: Some(1800),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-bud-eff"),
+            gyre_common::Id::new("ws-bud-eff"),
+            "budgeted-repo-eff",
+            "/tmp/gyre-test-r-bud-eff",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-bud-eff")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Lifetime above the TENANT ceiling with the workspace field
+        // unset: 400, not persisted (previously accepted because the
+        // raw-config check skipped a dimension the workspace left unset).
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 3600}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.budget, None, "violating budget must not persist");
+
+        // Tokens above the tenant ceiling, workspace unset: 400.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 6000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Within the tenant ceiling: persisted.
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 1500, "max_tokens_per_day": 4000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        let budget = found.budget.expect("repo budget must persist");
+        assert_eq!(budget.max_agent_lifetime_secs, Some(1500));
+        assert_eq!(budget.max_tokens_per_day, Some(4000));
+
+        // Post-reduction: the tenant ceiling drops below the persisted
+        // override; re-asserting the same override is now a 400 (the
+        // effective limit is recomputed live, not snapshotted).
+        state
+            .budget_configs
+            .set_config(
+                crate::api::budget::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(5000),
+                    max_agent_lifetime_secs: Some(900),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 1500}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
