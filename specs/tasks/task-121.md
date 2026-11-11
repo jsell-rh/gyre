@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Membership"
   - "user-management.md §Ownership Transfer & Reclamation"
   - "user-management.md §Repo Access"
-commits: ["93c4017c45159c73c59160eb83f45de08ba2c342", "a8c3af6f3b12a1524964baaef0e48897ad317755", "337447e39cc439505dcebf4f522f65b0c77ebe18", "467e577f5cd6f7507652a2d84e0bd534a17bd4c5"]
+commits: ["467e577f5cd6f7507652a2d84e0bd534a17bd4c5", "337447e39cc439505dcebf4f522f65b0c77ebe18", "a8c3af6f3b12a1524964baaef0e48897ad317755", "93c4017c45159c73c59160eb83f45de08ba2c342", "8fc4245da30d5c96d1c0cb2568ef70e573ed84d3"]
 ---
 
 ## Spec Excerpt
@@ -93,10 +93,10 @@ Read `specs/system/user-management.md` §Workspace Membership through §Repo Acc
 
 ## Shipped
 
-Workspace membership, ownership transfer/reclamation, and repo access are implemented end-to-end,
-plus this review-repair round closing all five findings from the independent review of the
-candidate (user-management.md §Workspace Membership, §Ownership Transfer & Reclamation,
-§Repo Access).
+Workspace membership, ownership transfer/reclamation, and repo access are implemented
+end-to-end, plus the review-repair round and this verification-repair round clearing the
+clippy-diff gate findings (user-management.md §Workspace Membership, §Ownership Transfer &
+Reclamation, §Repo Access).
 
 ### Behavior (feature)
 
@@ -117,34 +117,48 @@ candidate (user-management.md §Workspace Membership, §Ownership Transfer & Rec
   role is the more restrictive of workspace role and override (restrict-only). git_http
   read/write paths enforce the effective permission set via `authorize_repo_access`.
 
-### Behavior (this repair round)
+### Behavior (review repair)
 
-- `subject.workspace_role` is now resolved for repo-addressed routes
-  (`/api/v1/repos/:id/...`) by loading the repo's workspace before policy evaluation, so the
-  builtin `repo-access-override-management` policy is live on the override routes: a workspace
-  Owner/Admin member with a plain global role can manage per-repo overrides through the
-  production router (previously default-denied 403 before the handler ran — dead policy).
+- `subject.workspace_role` is resolved for repo-addressed routes (`/api/v1/repos/:id/...`)
+  by loading the repo's workspace before policy evaluation, so the builtin
+  `repo-access-override-management` policy is live on the override routes (previously
+  default-denied 403 before the handler ran — dead policy).
 - `load_repo_scoped` is fail-closed on an unresolvable workspace scope: a dangling
   repo→workspace reference or a failed lookup is NotFound, never a pass-through of the tenant
   gate.
 - `create_workspace` seeds the creator's active Owner membership (same-tenant user
   principals), and ownerless tracking fires only on owner departure (evidence: an Owner
   membership row, which survives user deletion). Never-owned workspaces (system/agent-operated)
-  are no longer flagged orphaned or generate TenantAdmin notification noise.
+  are not flagged orphaned and generate no TenantAdmin notification noise.
+
+### Behavior (verification repair)
+
+- gyre-ports `RepoAccessOverrideRepository` carries the codebase-standard
+  `#[allow(clippy::double_must_use)]` for async_trait's generated must_use futures: the new
+  file made that pre-existing pattern lint fall on changed lines in the clippy-diff gate.
+- git_http `authorize_repo_access`: doc list continuations indented
+  (`clippy::doc_lazy_continuation`) and the error type boxed to `Box<Response>`
+  (`clippy::result_large_err`); denial responses are dereferenced unchanged at all three
+  call sites (fetch/push/rpc), so 403/500 behavior is identical.
+- workspace_ownership: test-only `NotificationPriority` import moved into the `#[cfg(test)]`
+  module (`unused_imports` in the lib target).
 
 ### Test evidence
 
-Focused runs (`/tmp/stage/bin/cargo`, summary under /tmp/stage/review-evidence/):
-`api::repo_access` 7/7 — now through the production pipeline (api_router + abac_middleware +
-seeded builtin policies) with workspace-member API keys, including the regression test that
-fails (403) when the repo-addressed workspace-role resolution is disabled; non-Admin members
-denied 403 by ABAC; dangling-scope fail-closed. `workspace_ownership` 8/8 (incl. new
-never-owned test). `api::workspaces::tests` 20/20 (incl. creator-Owner seeding).
-`api::users::tests` 23/23 (membership test now runs the production ABAC path and asserts the
-Allow decision, proving the 403 is the handler's). `git_http::` 61/61 (incl. new
-`repo_access_enforced_on_git_transport_for_user_principals`: Developer fetch/push 200, Viewer
-fetch 200 / push 403, non-member 403, Developer-restricted-to-Viewer push 403 — with user API
-keys, not the system token). `abac_middleware` 14/14. Full gyre-server lib suite 1727/1727.
-Mechanical guards PASS: arch, ABAC route registry, ABAC exempt handlers, inert enforcement,
-mem port contracts, task commit attribution; `cargo fmt --all -- --check` clean. Full
-workspace suites, all-target Clippy, and GitHub CI are owned by the verification stage.
+- Feature/review rounds (focused runs via `/tmp/stage/bin/cargo`, summaries retained under
+  /tmp/stage/review-evidence): `api::repo_access` 7/7 through the production router
+  (api_router + abac_middleware + seeded builtin policies) with workspace-member API keys,
+  including the regression test that fails (403) when repo-addressed workspace-role
+  resolution is disabled; `workspace_ownership` 8/8; `api::workspaces::tests` 20/20;
+  `api::users::tests` 23/23; `git_http` 61/61 (incl.
+  `repo_access_enforced_on_git_transport_for_user_principals`: Developer fetch/push 200,
+  Viewer fetch 200 / push 403, non-member 403, Developer-restricted-to-Viewer push 403);
+  `abac_middleware` 14/14; full gyre-server lib suite 1727/1727.
+- This verification-repair round: `cargo clippy -p gyre-server --all-targets
+  --all-features -- -W clippy::all` reports 0 findings on changed lines vs base 65f71e65
+  (previously double_must_use, unused_imports, doc_lazy_continuation ×4, result_large_err);
+  same for `-p gyre-common -p gyre-domain -p gyre-ports -p gyre-adapters`;
+  `scripts/check-rustfmt-diff.py` clean; `cargo test -p gyre-domain repo_access` 8/8.
+- Deferred to the independent verifier (server test compilation exceeds this sandbox's
+  budget): rerun the gyre-server suites above — the `Box<Response>` change is
+  behavior-transparent (deref at call sites) and type-checked with `--all-targets`.
