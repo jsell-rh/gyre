@@ -269,7 +269,8 @@ async fn notify_workspace_members(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(source_path.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = source_path.to_string();
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(

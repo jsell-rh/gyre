@@ -360,7 +360,7 @@ docker/gyre-agent/
 - `nix build .#agent-image-docker` — Docker-loadable tarball
 - `nix build .#agent-image-tar` — Tarball for air-gapped transfer
 
-The Nix flake pins all dependencies (Node.js version, Claude Agent SDK version, git, curl) for bit-reproducible builds. The image hash is recorded in workload attestation (`wl_image_hash` JWT claim).
+The Nix flake pins all dependencies (Node.js version, Claude Agent SDK version, git, curl) for bit-reproducible builds. The image hash is recorded in workload attestation (`wl_image_hash` JWT claim): the spawn flow resolves the image digest before minting the agent JWT — `docker image inspect` needs no running container — so container and SSH backends carry the digest of the exact local image in the initial token. Kubernetes records the digest the cluster actually pulled (pod `imageID`) in the post-spawn workload attestation record (`GET /api/v1/agents/:id/workload`), because the `imageID` only exists once the Pod is scheduled and the JWT must pre-exist the Pod it is injected into.
 
 One definition, all targets. The `Dockerfile` is replaced by the Nix flake.
 

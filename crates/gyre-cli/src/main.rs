@@ -2052,7 +2052,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     let mut client_api = api;
     if !args.dev {
         let username = args.admin_user.as_deref().unwrap_or("admin");
-        match client_api.create_user(username).await {
+        // F1: bind the admin user to the tenant created in step 1 — the
+        // server rejects an unbound user, and the auth extractor fail-closes
+        // on one at API-key auth time.
+        match client_api.create_user(username, &summary.tenant_id).await {
             Ok(created) => {
                 summary.admin_username = Some(created.user.username.clone());
                 summary.api_key = Some(created.api_key.key.clone());
@@ -2074,23 +2077,67 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
             }
             Err(e) => {
-                // Resume path: the user already exists from a prior run. The
-                // API key minted then was saved to ~/.gyre/config — reuse it.
+                // Resume path — but ONLY for a real duplicate: a 409 from the
+                // server means the user already exists. Any other failure
+                // (403 from a non-admin token, validation, network) must
+                // fail the run: silently adopting whatever token sits in
+                // ~/.gyre/config would continue as the wrong principal
+                // (the config is also written by `gyre register` with
+                // agent tokens, and a matching server URL says nothing
+                // about which user the token belongs to).
+                let duplicate_detail = match &e {
+                    client::CreateUserError::Duplicate(detail) => detail.clone(),
+                    client::CreateUserError::Other(_) => return Err(step.fail(e.into())),
+                };
+                // The API key minted on the first run was saved to
+                // ~/.gyre/config — VERIFY it authenticates as the
+                // requested user before adopting it.
                 let saved = config::Config::load().ok();
-                let reuse = saved
+                let token = saved
                     .filter(|c| c.server == args.server)
                     .and_then(|c| c.token)
                     .filter(|t| !t.is_empty());
-                match reuse {
-                    Some(token) => {
-                        println!(
-                            "  Admin user '{username}' already exists - reusing saved credentials"
-                        );
-                        summary.admin_username = Some(username.to_string());
-                        client_api = client::GyreClient::new(args.server.clone(), token);
+                let resume_client = match token {
+                    Some(token) => client::GyreClient::new(args.server.clone(), token),
+                    None => {
+                        return Err(step.fail(anyhow::anyhow!(
+                            "admin user '{username}' already exists ({duplicate_detail}) \
+                             but ~/.gyre/config holds no credentials for {} — remove \
+                             the user server-side or resume with a different --admin-user",
+                            args.server
+                        )))
                     }
-                    None => return Err(step.fail(e)),
+                };
+                let me = match resume_client.me().await {
+                    Ok(me) => me,
+                    Err(err) => {
+                        return Err(step.fail(anyhow::anyhow!(
+                            "admin user '{username}' already exists but the saved \
+                             credential no longer authenticates ({err}) — mint a new \
+                             key server-side or resume with a different --admin-user"
+                        )))
+                    }
+                };
+                if me.username != username {
+                    return Err(step.fail(anyhow::anyhow!(
+                        "saved credentials authenticate as '{}', not '{username}' — \
+                         ~/.gyre/config belongs to a different user; remove it or pass \
+                         the matching token via --token",
+                        me.username
+                    )));
                 }
+                if me.tenant_id.as_deref() != Some(summary.tenant_id.as_str()) {
+                    return Err(step.fail(anyhow::anyhow!(
+                        "admin user '{username}' is bound to tenant {}, but this bootstrap \
+                         targets tenant {} — the saved credential cannot administer it; \
+                         resume with a different --admin-user",
+                        me.tenant_id.as_deref().unwrap_or("(none)"),
+                        summary.tenant_id
+                    )));
+                }
+                println!("  Admin user '{username}' already exists - reusing saved credentials");
+                summary.admin_username = Some(username.to_string());
+                client_api = resume_client;
             }
         }
     }
@@ -2152,10 +2199,32 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register personas");
 
     // ── Step 5: register built-in personas (pre-approved; resume: skip existing) ──
+    // The resume lookup is scoped to THIS tenant: the unscoped persona list
+    // spans all tenants, which made a second tenant's bootstrap skip
+    // registration and die at spawn with a persona 404 (round-3 finding 3).
     for persona in bootstrap::BUILTIN_PERSONAS {
-        match client_api.find_persona_by_slug(persona.slug).await? {
-            Some(_) => {
-                println!("  Persona '{}' already registered - skipping", persona.slug);
+        match client_api
+            .find_persona_by_slug_in_tenant(persona.slug, &summary.tenant_id)
+            .await?
+        {
+            Some(existing) => {
+                if existing.approval_status == "Approved" {
+                    println!("  Persona '{}' already registered - skipping", persona.slug);
+                } else {
+                    // A run interrupted between create_persona and
+                    // approve_persona leaves a Pending persona: spawn would
+                    // 409 on it (persona Pending, NOT "orchestrator already
+                    // live"). Approve it here so a resume converges instead
+                    // of exiting 0 with zero orchestrators.
+                    println!(
+                        "  Persona '{}' registered but {} - approving",
+                        persona.slug, existing.approval_status
+                    );
+                    client_api
+                        .approve_persona(&existing.id)
+                        .await
+                        .map_err(|e| step.fail(e))?;
+                }
             }
             None => {
                 let created = client_api
@@ -2163,7 +2232,7 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                         persona.name,
                         persona.slug,
                         &summary.tenant_id,
-                        persona.prompt,
+                        persona.system_prompt,
                         persona.capabilities,
                         persona.protocols,
                     )
@@ -2183,65 +2252,184 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     );
     step.advance("init spec registry");
 
-    // ── Step 6: spec registry (report-only; sync happens on push) ──
-    match &repo_path {
-        Some(path) if path.join("specs").join("manifest.yaml").exists() => {
-            println!(
-                "  Spec manifest found at {} - ledger syncs on push to the default branch",
-                path.join("specs").join("manifest.yaml").display()
-            );
-        }
-        _ => {
-            println!("  No spec manifest found - spec registry stays empty until specs are pushed")
-        }
-    }
+    // ── Step 6: initialize spec registry (platform-model.md §8 step 6) ──
+    // With a manifest present (pre-existing or just written by the starter
+    // kit), push the local tree to the server repo and run the server-side
+    // ledger sync so the registry is populated at first-run time. The
+    // post-receive hook keeps it in sync on every later push.
     if args.starter_kit {
-        // A bare `repo_name` here would default to a RELATIVE path resolved
-        // against the process cwd (task-099 F6) — the starter kit must land
-        // at an explicit, operator-visible location instead.
+        // F6: a bare `repo_name` here would default to a RELATIVE path
+        // resolved against the process cwd -- the starter kit must land at
+        // an explicit, operator-visible location instead.
         let target = repo_path.clone().ok_or_else(|| {
             step.fail(anyhow::anyhow!(
-                "--starter-kit needs --repo-path: pass the directory to write the kit into"
+                "--starter-kit requires --repo-path: pass the directory to write the kit into"
             ))
         })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
+    match &repo_path {
+        Some(path) if path.join("specs").join("manifest.yaml").exists() => {
+            let clone_url = repo
+                .clone_url
+                .clone()
+                .unwrap_or_else(|| format!("{}/git/{}/{}", args.server, workspace.slug, repo_name));
+            match bootstrap::push_and_sync_specs(&client_api, path, &summary.repo_id, &clone_url)
+                .await
+            {
+                Ok(registered) => {
+                    summary.specs_registered = registered;
+                    println!(
+                        "  Spec manifest registered - {registered} spec(s) in the platform registry"
+                    );
+                }
+                Err(e) => {
+                    // Non-fatal: the specs register on the next push to the
+                    // default branch (post-receive hook). Report why.
+                    println!(
+                        "  Spec manifest found but not registered yet ({e}); \
+                         it will register on your next push to the default branch"
+                    );
+                }
+            }
+        }
+        Some(path) => {
+            println!(
+                "  No spec manifest found under {} - spec registry stays empty \
+                 until specs are pushed",
+                path.display()
+            );
+        }
+        None => {
+            println!("  No --repo-path given - spec registry stays empty until specs are pushed")
+        }
+    }
     step.advance("configure gates");
 
     // ── Step 7: configure default gates ──
     if let Some(path) = &repo_path {
-        for gate in bootstrap::detect_default_gates(path) {
-            client_api
-                .create_gate(&summary.repo_id, gate.name, gate.gate_type, gate.command)
+        let detected = bootstrap::detect_default_gates(path);
+        if detected.is_empty() {
+            println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
+        } else {
+            // Resume: skip gates already configured for this repo. The
+            // server also rejects duplicates (409), but skipping here keeps
+            // a re-run from duplicating the gate set — every subsequent MR
+            // runs each gate once per bootstrap run otherwise.
+            let existing: std::collections::HashSet<String> = client_api
+                .list_gates(&summary.repo_id)
                 .await
-                .map_err(|e| step.fail(e))?;
-            summary.gates_configured.push(gate.name.to_string());
+                .map_err(|e| step.fail(e))?
+                .into_iter()
+                .map(|g| g.name)
+                .collect();
+            for gate in detected {
+                if existing.contains(gate.name) {
+                    println!("  Gate '{}' already configured - skipping", gate.name);
+                    continue;
+                }
+                client_api
+                    .create_gate(&summary.repo_id, gate.name, gate.gate_type, gate.command)
+                    .await
+                    .map_err(|e| step.fail(e))?;
+                summary.gates_configured.push(gate.name.to_string());
+            }
+            if summary.gates_configured.is_empty() {
+                println!("  All default gates already configured - nothing to do");
+            } else {
+                println!(
+                    "  Gates configured: {}",
+                    summary.gates_configured.join(", ")
+                );
+            }
         }
-    }
-    if summary.gates_configured.is_empty() {
-        println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
-    } else {
-        println!(
-            "  Gates configured: {}",
-            summary.gates_configured.join(", ")
-        );
     }
     step.advance("spawn repo orchestrator");
 
     // ── Step 8: spawn repo orchestrator ──
     // Task-093 endpoint: repo-tier orchestrator with exactly-one-live
     // semantics, repo-scoped JWT, and restart-on-failure — no synthetic task.
-    let orchestrator_name = format!("{repo_name}-orchestrator");
-    match client_api
-        .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
-        .await
-    {
+    //
+    // Agent names are unique server-wide. A stopped predecessor holding the
+    // default name is released server-side (orchestrator.rs), but a LIVE
+    // agent elsewhere — e.g. another tenant's bootstrap of a same-named repo
+    // — still owns it; retry with a suffix instead of failing the run.
+    let base_orchestrator_name = format!("{repo_name}-orchestrator");
+    let mut orchestrator_name = base_orchestrator_name.clone();
+    let spawn_result = loop {
+        match client_api
+            .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
+            .await
+        {
+            Ok(client::SpawnRepoOrchestratorOutcome::NameTaken) => {
+                let attempt = orchestrator_name
+                    .rsplit('-')
+                    .next()
+                    .and_then(|n| n.parse::<u32>().ok());
+                let next = attempt.map(|n| n + 1).unwrap_or(2);
+                // Strip any previous numeric suffix before appending the new one.
+                let stem = match attempt {
+                    Some(_) => orchestrator_name
+                        .rsplit_once('-')
+                        .map(|(s, _)| s.to_string())
+                        .unwrap_or(base_orchestrator_name.clone()),
+                    None => orchestrator_name.clone(),
+                };
+                if next > 20 {
+                    break Err(anyhow::anyhow!(
+                        "could not find a free orchestrator name (tried up to {orchestrator_name})"
+                    ));
+                }
+                println!(
+                    "  Name '{orchestrator_name}' is taken by a live agent elsewhere - \
+                     retrying as {stem}-{next}"
+                );
+                orchestrator_name = format!("{stem}-{next}");
+            }
+            other => break other,
+        }
+    };
+    match spawn_result {
         Ok(client::SpawnRepoOrchestratorOutcome::Spawned(spawned)) => {
             summary.orchestrator_agent_id = Some(spawned.agent.id.clone());
+            // F3: record the truthful process-launch outcome so the summary
+            // cannot claim "running" for a row whose process never started.
+            summary.orchestrator_launch_status = Some(spawned.launch_status.clone());
+            summary.orchestrator_launch_detail = spawned.launch_detail.clone();
+            if spawned.launch_status == "launch_failed" {
+                println!(
+                    "  WARNING: orchestrator process failed to launch{} - \
+                     auto-restart will retry",
+                    spawned
+                        .launch_detail
+                        .as_deref()
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default()
+                );
+            }
         }
         Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
             println!("  A repo orchestrator is already active for this repo - keeping it");
+        }
+        Ok(client::SpawnRepoOrchestratorOutcome::PersonaPending(detail)) => {
+            // The persona resolves but is not Approved — no orchestrator
+            // exists. Failing truthfully beats the previous false "already
+            // active" success. Step 5's resume approval fixes the tenant-
+            // scope case; a persona created outside bootstrap (repo or
+            // workspace scope, still Pending) lands here for the operator
+            // to resolve.
+            return Err(step.fail(anyhow::anyhow!(
+                "repo-orchestrator persona is not approved — no orchestrator was \
+                 spawned. Approve the persona (or re-run bootstrap) and try again. \
+                 Server detail: {detail}"
+            )));
+        }
+        // Unreachable: the retry loop above only breaks on a non-NameTaken
+        // outcome (or an error). Kept explicit so a future refactor of the
+        // loop cannot silently drop the case.
+        Ok(client::SpawnRepoOrchestratorOutcome::NameTaken) => {
+            return Err(step.fail(anyhow::anyhow!("orchestrator name still taken")));
         }
         Err(e) => return Err(step.fail(e)),
     }
@@ -5112,6 +5300,341 @@ mod tests {
             ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
             ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
         ])
+    }
+
+    // ── Bootstrap resume flow tests (task-099 repair) ──────────────────
+    //
+    // Scripted full-bootstrap runs against a mock HTTP server. These pin
+    // the resume semantics the review found broken: the saved-credential
+    // fallback must verify the token actually authenticates as the
+    // requested admin (wrong-identity continuation), a Pending persona
+    // from an interrupted run must be approved (not skipped — spawn 409s
+    // on it), and step 7 must not duplicate the gate set on re-run.
+
+    /// Serialize tests that touch $HOME (the resume path reads
+    /// ~/.gyre/config via Config::load). A tokio mutex so the guard can be
+    /// held across the awaited bootstrap run.
+    static HOME_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct HomeRestore(Option<String>);
+    impl Drop for HomeRestore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Point $HOME at `dir` until the returned guard drops. Caller must
+    /// hold HOME_GUARD.
+    fn set_home(dir: &std::path::Path) -> HomeRestore {
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir);
+        HomeRestore(previous)
+    }
+
+    /// An isolated $HOME holding a saved ~/.gyre/config for `server` with
+    /// token `token` (what a prior bootstrap or `gyre register` left
+    /// behind).
+    fn isolated_home(server: &str, token: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".gyre")).unwrap();
+        let cfg = config::Config {
+            server: server.to_string(),
+            token: token.map(|t| t.to_string()),
+            agent_id: None,
+            agent_name: None,
+        };
+        std::fs::write(
+            dir.path().join(".gyre").join("config"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn persona_list(slug: &str, status: &str) -> String {
+        format!(r#"[{{"id":"p-{slug}","slug":"{slug}","approval_status":"{status}"}}]"#)
+    }
+
+    const BOOTSTRAP_SPAWN_JSON: &str = r#"{
+        "agent": {"id":"a-1","name":"main-orchestrator","status":"active"},
+        "token": "jwt",
+        "launch_status": "running"
+    }"#;
+
+    fn bootstrap_args(server: String, repo_path: Option<String>) -> BootstrapArgs {
+        BootstrapArgs {
+            server,
+            token: "boot-tok".to_string(),
+            tenant: Some("Acme Corp".to_string()),
+            workspace: None,
+            repo: None,
+            repo_path,
+            admin_user: Some("jsell".to_string()),
+            oidc_issuer: None,
+            dev: false,
+            starter_kit: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_approves_pending_persona_and_skips_existing_gates() {
+        let _guard = HOME_GUARD.lock().await;
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            // create_user -> 409 duplicate: the resume path begins.
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // whoami with the saved token: verifies it IS jsell of t-1.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"jsell","tenant_id":"t-1"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"ws-1","name":"default","slug":"default"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"r-1","name":"main"}"#.to_string(),
+            ),
+            // Persona resume: approved, PENDING (approve follows), approved, approved.
+            (
+                "200 OK".to_string(),
+                persona_list("workspace-orchestrator", "Approved"),
+            ),
+            (
+                "200 OK".to_string(),
+                persona_list("repo-orchestrator", "Pending"),
+            ),
+            ("200 OK".to_string(), "{}".to_string()), // approve
+            (
+                "200 OK".to_string(),
+                persona_list("accountability", "Approved"),
+            ),
+            ("200 OK".to_string(), persona_list("security", "Approved")),
+            // Gate resume: cargo-test already configured -> only clippy is created.
+            (
+                "200 OK".to_string(),
+                r#"[{"name":"cargo-test"}]"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"name":"cargo-clippy"}"#.to_string(),
+            ),
+            ("200 OK".to_string(), BOOTSTRAP_SPAWN_JSON.to_string()),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let result = run_bootstrap(bootstrap_args(
+            base.clone(),
+            Some(repo_dir.path().to_string_lossy().to_string()),
+        ))
+        .await;
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        result.expect("verified resume bootstrap must succeed");
+        assert_eq!(
+            reqs.len(),
+            14,
+            "unexpected request count: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
+        // The saved credential is verified before adoption, then used for
+        // every subsequent call.
+        assert_eq!(reqs[3].request_line, "GET /api/v1/users/me HTTP/1.1");
+        assert!(reqs[3]
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer saved-tok"));
+        assert!(reqs[4]
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer saved-tok"));
+        // A Pending persona from an interrupted run is approved, not skipped.
+        assert_eq!(
+            reqs[8].request_line, "POST /api/v1/personas/p-repo-orchestrator/approve HTTP/1.1",
+            "Pending persona must be approved on resume"
+        );
+        // Gates: exactly one create (the missing one), for the right name.
+        let gate_posts: Vec<&client::test_http::CapturedRequest> = reqs
+            .iter()
+            .filter(|r| r.request_line == "POST /api/v1/repos/r-1/gates HTTP/1.1")
+            .collect();
+        assert_eq!(
+            gate_posts.len(),
+            1,
+            "re-run must not duplicate the gate set"
+        );
+        assert!(
+            gate_posts[0].body.contains("cargo-clippy")
+                && !gate_posts[0].body.contains("cargo-test"),
+            "only the unconfigured gate is created; body: {}",
+            gate_posts[0].body
+        );
+        assert_eq!(
+            reqs[13].request_line,
+            "POST /api/v1/repos/r-1/orchestrator/spawn HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_rejects_saved_token_for_a_different_user() {
+        let _guard = HOME_GUARD.lock().await;
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // The saved token belongs to a DIFFERENT user.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"someone-else","tenant_id":"t-1"}"#.to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("wrong-identity saved credential must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("someone-else") && msg.contains("jsell"),
+            "error must name the mismatch: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            4,
+            "no request may follow the failed identity verification: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resume_rejects_admin_bound_to_a_different_tenant() {
+        let _guard = HOME_GUARD.lock().await;
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            (
+                "409 Conflict".to_string(),
+                "user with external id local:jsell already exists (id u-1)".to_string(),
+            ),
+            // Same username, but bound to another tenant: continuing would
+            // let it administer a tenant it was never scoped to.
+            (
+                "200 OK".to_string(),
+                r#"{"username":"jsell","tenant_id":"t-other"}"#.to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("cross-tenant saved credential must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tenant"),
+            "error must name the tenant mismatch: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            4,
+            "no request may follow the failed tenant check"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_create_user_403_fails_without_adopting_saved_credentials() {
+        let _guard = HOME_GUARD.lock().await;
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"status":"ok","version":"t"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","name":"Acme Corp","slug":"acme-corp"}"#.to_string(),
+            ),
+            // 403 is NOT "already exists": a non-admin bootstrap token
+            // must fail the run, never adopt the saved credential.
+            (
+                "403 Forbidden".to_string(),
+                "only Admin role may create users".to_string(),
+            ),
+        ]);
+
+        let home = isolated_home(&base, Some("saved-tok"));
+        let _home_reset = set_home(home.path());
+
+        let err = run_bootstrap(bootstrap_args(base, None))
+            .await
+            .expect_err("non-duplicate create_user error must fail the run");
+        let reqs = captured.lock().unwrap().clone();
+        drop(_home_reset);
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("create admin user") && msg.contains("only Admin role"),
+            "error should name the failed step and server detail: {msg}"
+        );
+        assert_eq!(
+            reqs.len(),
+            3,
+            "the saved credential must never be consulted for a non-duplicate error: {:?}",
+            reqs.iter()
+                .map(|r| r.request_line.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

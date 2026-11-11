@@ -143,6 +143,13 @@ pub async fn send_message(
     if matches!(to, Destination::Broadcast) {
         let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
         if !matches!(from, MessageOrigin::Server) && !is_admin {
+            crate::rbac::record_rbac_denied(
+                &state,
+                &auth,
+                "Server or Admin",
+                "POST /api/v1/workspaces/:workspace_id/messages",
+            )
+            .await;
             return Err(ApiError::Forbidden(
                 "Broadcast destination requires Server origin or Admin role".to_string(),
             ));

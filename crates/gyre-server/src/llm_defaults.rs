@@ -26,6 +26,18 @@ pub const PROMPT_BRIEFING_ASK: &str = "You are a workspace briefing assistant fo
 work based on the workspace briefing data. Context: {{context}} \
 Answer the following question concisely and accurately: {{question}}";
 
+/// Fallback system prompt for LLM-synthesized architecture narratives
+/// (realized-model.md §6) used in the workspace briefing summary.
+///
+/// Variables: `{{facts}}` — JSON of graph-grounded delta facts.
+pub const PROMPT_GRAPH_NARRATIVE: &str = "You are an architecture briefing assistant. \
+Summarize the following architectural delta facts as a short plain-prose narrative \
+(2-4 sentences) for a human workspace briefing. Ground every statement strictly in \
+the facts: never invent names, modules, traits, specs, motivations, or \
+recommendations that are not present in the facts. \
+If the facts contain no meaningful change, say so in one sentence. \
+\n\nFacts: {{facts}}";
+
 /// Fallback system prompt for spec editing assistance.
 ///
 /// Variables: `{{spec_path}}`, `{{spec_content}}`, `{{graph_context}}`, `{{instruction}}`.

@@ -188,7 +188,13 @@ const AUTH_SPEC = {
   name: 'How auth works',
   description: 'Authentication view',
   data: { concept: 'auth', node_types: ['Module', 'Function'], edge_types: ['Contains'], depth: 2 },
-  layout: 'hierarchical',
+  // Canvas-rendered layout: this fixture pins the ViewQuery translation +
+  // canvas query annotation (the LLM explanation in the sidebar). Since
+  // task-177 the `layout` field selects the renderer through the layout
+  // registry — 'hierarchical' would render on the SVG canvas instead
+  // (covered by ExplorerViewLayoutRenderers.test.js), so the annotation
+  // fixture uses the default canvas layout.
+  layout: 'graph',
   explanation: 'Authentication flows through require_auth_middleware.',
 };
 

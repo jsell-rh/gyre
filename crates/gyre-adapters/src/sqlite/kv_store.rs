@@ -5,7 +5,7 @@ use gyre_domain::BudgetUsage;
 use gyre_ports::{BudgetUsageRepository, KvJsonStore};
 use std::sync::Arc;
 
-use super::SqliteStorage;
+use super::{DbPool, SqliteStorage};
 use crate::schema::{budget_usages, kv_store};
 
 // ── KV store rows ─────────────────────────────────────────────────────────────
@@ -38,51 +38,69 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Blocking core of `kv_set`, shared by the async trait method and the
+/// synchronous startup accessor `kv_set_sync`.
+fn kv_set_blocking(pool: &DbPool, namespace: &str, key: &str, value: &str) -> Result<()> {
+    let mut conn = pool.get().context("get db connection")?;
+    let now = now_secs();
+    let row = NewKvRow {
+        namespace,
+        key,
+        value_json: value,
+        updated_at: now,
+    };
+    diesel::insert_into(kv_store::table)
+        .values(&row)
+        .on_conflict((kv_store::namespace, kv_store::key))
+        .do_update()
+        .set((kv_store::value_json.eq(value), kv_store::updated_at.eq(now)))
+        .execute(&mut *conn)
+        .context("upsert kv_store")?;
+    Ok(())
+}
+
+/// Blocking core of `kv_get`, shared by the async trait method and the
+/// synchronous startup accessor `kv_get_sync`.
+fn kv_get_blocking(pool: &DbPool, namespace: &str, key: &str) -> Result<Option<String>> {
+    let mut conn = pool.get().context("get db connection")?;
+    let result = kv_store::table
+        .filter(kv_store::namespace.eq(namespace))
+        .filter(kv_store::key.eq(key))
+        .first::<KvRow>(&mut *conn)
+        .optional()
+        .context("get kv_store")?;
+    Ok(result.map(|r| r.value_json))
+}
+
+impl SqliteStorage {
+    /// Synchronous KV read for startup paths that run before the async
+    /// runtime is serving (task-107 F12: `build_state` loads the persisted
+    /// forge signing key). Semantically identical to [`KvJsonStore::kv_get`].
+    pub fn kv_get_sync(&self, namespace: &str, key: &str) -> Result<Option<String>> {
+        kv_get_blocking(&self.pool, namespace, key)
+    }
+
+    /// Synchronous KV write for startup paths. Semantically identical to
+    /// [`KvJsonStore::kv_set`].
+    pub fn kv_set_sync(&self, namespace: &str, key: &str, value: &str) -> Result<()> {
+        kv_set_blocking(&self.pool, namespace, key, value)
+    }
+}
+
 #[async_trait]
 impl KvJsonStore for SqliteStorage {
     async fn kv_set(&self, namespace: &str, key: &str, value: String) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ns = namespace.to_string();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut conn = pool.get().context("get db connection")?;
-            let now = now_secs();
-            let row = NewKvRow {
-                namespace: &ns,
-                key: &k,
-                value_json: &value,
-                updated_at: now,
-            };
-            diesel::insert_into(kv_store::table)
-                .values(&row)
-                .on_conflict((kv_store::namespace, kv_store::key))
-                .do_update()
-                .set((
-                    kv_store::value_json.eq(&value),
-                    kv_store::updated_at.eq(now),
-                ))
-                .execute(&mut *conn)
-                .context("upsert kv_store")?;
-            Ok(())
-        })
-        .await?
+        tokio::task::spawn_blocking(move || kv_set_blocking(&pool, &ns, &k, &value)).await?
     }
 
     async fn kv_get(&self, namespace: &str, key: &str) -> Result<Option<String>> {
         let pool = Arc::clone(&self.pool);
         let ns = namespace.to_string();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let result = kv_store::table
-                .filter(kv_store::namespace.eq(&ns))
-                .filter(kv_store::key.eq(&k))
-                .first::<KvRow>(&mut *conn)
-                .optional()
-                .context("get kv_store")?;
-            Ok(result.map(|r| r.value_json))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || kv_get_blocking(&pool, &ns, &k)).await?
     }
 
     async fn kv_remove(&self, namespace: &str, key: &str) -> Result<()> {

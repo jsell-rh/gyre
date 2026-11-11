@@ -17,8 +17,22 @@ def observe(store, force=False):
         if not force and time.time()-store.setting('runtime_observed_at',0)<5:return
         store.set_setting('runtime_observed_at',time.time())
         try:
+            sandboxes=None
+            pending=list(store.db.execute("SELECT * FROM resources WHERE kind='sandbox' AND state='deleting'"))
+            if pending:
+                try:
+                    value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,
+                                          'get','sandboxes.agents.x-k8s.io','-o','json'],capture_output=True,text=True,timeout=10,check=True)
+                    listing=json.loads(value.stdout)
+                    if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete sandbox inventory')
+                    sandboxes={item['metadata']['name']:item for item in listing['items']}
+                except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as exc:
+                    # Capacity diagnostics must not suppress existing OOM evidence.
+                    store.set_setting('runtime_observer_error',{'kind':type(exc).__name__,'at':time.time()})
             value=subprocess.run(['kubectl','--context',context,'--request-timeout=8s','-n',namespace,'get','pods','-o','json'],capture_output=True,text=True,timeout=10,check=True)
-            pods=json.loads(value.stdout)['items']
+            listing=json.loads(value.stdout)
+            if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete pod inventory')
+            pods=listing['items']
             for pod in pods:
                 meta=pod['metadata'];name=meta['name']
                 if meta.get('labels',{}).get('openshell.ai/boundary-role')!='workload':continue
@@ -34,9 +48,40 @@ def observe(store, force=False):
                     data['runtime']=evidence
                     store.db.execute('UPDATE resources SET data=? WHERE name=?',(json.dumps(data),name))
                     store.event('sandbox_terminated',{'sandbox':name,**evidence},work=row['work'])
-        except (OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
+            if sandboxes is not None:observe_capacity(store,pods,context,namespace,sandboxes,pending)
+        except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as exc:
             # Missing cluster diagnostics must never make an otherwise healthy worker fail.
             store.set_setting('runtime_observer_error',{'kind':type(exc).__name__,'at':time.time()})
+
+
+def observe_capacity(store, pods, context, namespace, sandboxes, pending):
+    """Do not confuse retained gateway metadata with an allocated workload.
+
+    A missing pod alone is insufficient: an active sandbox could recreate it.
+    Require a suspended/deleting or absent Kubernetes sandbox as well. Never
+    change cleanup state or release in-flight creation/admission reservations.
+    """
+    for original in pending:
+        name=original['name'];sandbox=sandboxes.get(name)
+        meta=(sandbox or {}).get('metadata',{})
+        ident=meta.get('labels',{}).get('openshell.ai/sandbox-id')
+        def belongs(pod):
+            pm=pod['metadata'];labels=pm.get('labels',{})
+            return (pm['name']==name or labels.get('openshell.ai/sandbox-name')==name
+                or bool(ident and ident in (labels.get('openshell.ai/sandbox-id'),labels.get('openshell.ai/boundary-pair')))
+                or bool(meta.get('uid') and any(r.get('uid')==meta['uid'] for r in pm.get('ownerReferences',[]))))
+        inactive=(sandbox is None or bool(meta.get('deletionTimestamp'))
+                  or sandbox.get('spec',{}).get('operatingMode')=='Suspended')
+        absent=inactive and not any(belongs(pod) for pod in pods)
+        with store.transaction():
+            row=store.db.execute("SELECT * FROM resources WHERE name=? AND kind='sandbox' AND state='deleting'",(name,)).fetchone()
+            if not row or row['work']!=original['work'] or row['token']!=original['token']:continue
+            data=json.loads(row['data']);old=data.get('compute_observation') or {}
+            data['compute_observation']={'absent':absent,'at':time.time(),'context':context,'namespace':namespace,
+                'work':row['work'],'token':row['token'],'sandbox_uid':meta.get('uid')}
+            store.db.execute('UPDATE resources SET data=? WHERE name=?',(json.dumps(data),name))
+            if old.get('absent')!=absent:
+                store.event('compute_occupancy_observed',{'sandbox':name,'absent':absent,'cleanup_pending':True},work=row['work'])
 
 
 def failure(execution, name):
@@ -78,62 +123,43 @@ def save_failure(execution, error):
 
 
 def ensure_workspace(execution, name, invoke=None):
-    """Size only this owned PVC before builds; never alter gateway-wide defaults."""
-    from .execution import Attention
+    """Inspect owned sandbox disk via OpenShell; never patch Kubernetes storage."""
+    from .execution import Attention, Retry
     execution.current()
     store=execution.store
-    context,namespace=store.setting('runtime_kube_context'),store.setting('runtime_namespace')
-    if not context or not namespace:return  # Other backends provision storage at the gateway.
-    from .compute import WORKSPACE_GIB
-    required=WORKSPACE_GIB
+    if not store.setting('runtime_namespace'):return
     row=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
     if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token'] or row['state'] not in ('intent','present'):
-        raise Attention('refuse workspace provisioning after sandbox ownership changed')
-    if json.loads(row['data']).get('workspace_ready_gib',0)>=required:return
-    execution.phase('ProvisioningStorage',sandbox=name,workspace_gib=required)
-    prefix=['kubectl','--context',context,'--request-timeout=15s','-n',namespace]
-    def query(*args):
-        return subprocess.run(prefix+list(args),capture_output=True,text=True,timeout=20,check=True)
-    def size(value):
-        return float(value[:-2])/(1024 if value.endswith('Mi') else 1) if value.endswith(('Gi','Mi')) else 0
-    deadline=time.monotonic()+1800
-    bound=False
-    while time.monotonic()<deadline:
-        execution.current()
-        try:
-            if not bound:
-                observed=(invoke(['sandbox','get',name,'--output','json'],capture_output=True,text=True,timeout=20) if invoke else
-                          execution.os('sandbox','get',name,'--output','json',check=False,timeout=20))
-                if observed.returncode:
-                    execution.cancelled.wait(5);continue
-                labels=json.loads(observed.stdout[observed.stdout.find('{'):]).get('labels',{})
-                if labels.get('gyre.dev/pipeline')!=store.setting('owner') or labels.get('gyre.dev/work')!=execution.claim['id']:
-                    error=Attention('refuse workspace provisioning for a foreign gateway sandbox');error.category='sandbox_storage';raise error
-                bound=True
-            sandbox=json.loads(query('get','sandbox',name,'-o','json').stdout)
-            pvc=json.loads(query('get','pvc','workspace-'+name,'-o','json').stdout)
-            if sandbox['metadata'].get('deletionTimestamp') or pvc['metadata'].get('deletionTimestamp'):
-                error=Attention('Assigned workspace is being deleted; refusing to start a build');error.category='sandbox_storage';raise error
-            if not any(r.get('uid')==sandbox['metadata']['uid'] for r in pvc['metadata'].get('ownerReferences',[])):
-                error=Attention('workspace PVC ownership differs from the assigned sandbox');error.category='sandbox_storage';raise error
-            requested=size(pvc['spec']['resources']['requests']['storage'])
-            if requested<required:
-                patch=json.dumps({'spec':{'resources':{'requests':{'storage':str(required)+'Gi'}}}})
-                query('patch','pvc','workspace-'+name,'--type','merge','-p',patch)
-                store.event('workspace_expansion_requested',{'sandbox':name,'gib':required},execution.claim['task'],execution.claim['id'])
-            elif size(pvc.get('status',{}).get('capacity',{}).get('storage','0Gi'))>=required and not any(c['status']=='True' and c['type'] in ('Resizing','FileSystemResizePending') for c in pvc.get('status',{}).get('conditions',[])):
-                total=int(query('exec',name,'-c','agent','--','python3','-c',"import shutil;print(shutil.disk_usage('/sandbox/workspace').total)").stdout.strip())
-                if total>=required*1024**3*.95:
-                    execution.current()
-                    current=store.db.execute('SELECT state,data FROM resources WHERE name=?',(name,)).fetchone()
-                    store.resource_state(name,current['state'],json.loads(current['data'])|{'workspace_ready_gib':required})
-                    return
-        except subprocess.CalledProcessError as exc:
-            if any(term in (exc.stderr or '').lower() for term in ('forbidden','unauthorized','does not support volume expansion')):
-                error=Attention('Workspace storage provisioning was denied; configure scoped access or provision adequate gateway storage');error.category='sandbox_storage';raise error from exc
-        except (OSError,ValueError,subprocess.TimeoutExpired):pass
-        execution.cancelled.wait(5)
-    error=Attention('Workspace did not reach 30 GiB before the storage infrastructure deadline; no build was started');error.category='sandbox_storage';raise error
+        raise Attention('refuse storage inspection after sandbox ownership changed')
+    def run(args,**kwargs):
+        if invoke:return invoke(args,**kwargs)
+        return execution.os(*args,check=False,**{('capture' if k=='capture_output' else k):v for k,v in kwargs.items() if k!='text'})
+    value=snapshot(execution,name,run)
+    if not value:raise Retry('Cannot establish owned sandbox before checking build disk')
+    execution.phase('CheckingBuildStorage',sandbox=name)
+    code="""import pathlib,shutil,json
+p=pathlib.Path('/tmp/gyre-build')
+if p.is_symlink():raise RuntimeError('refuse symlinked build cache')
+p.mkdir(exist_ok=True)
+mounts=[line.split() for line in pathlib.Path('/proc/mounts').read_text().splitlines()]
+mount=max((v for v in mounts if p==pathlib.Path(v[1]) or pathlib.Path(v[1]) in p.parents),key=lambda v:len(v[1]))
+disk=shutil.disk_usage(p)
+print(json.dumps({'total':disk.total,'free':disk.free,'filesystem':mount[2]}))
+"""
+    result=run(['sandbox','exec','-n',name,'--','python3','-c',code],capture_output=True,text=True,timeout=30)
+    if result.returncode:raise Retry('Cannot inspect sandbox-local build disk through OpenShell')
+    evidence=json.loads(result.stdout)
+    if evidence['filesystem'] in ('tmpfs','ramfs') or evidence['total']<30*1024**3 or evidence['free']<16*1024**3:
+        error=Attention('Insufficient disk-backed build cache space; use supported gateway storage configuration, never a direct PVC patch')
+        error.category='sandbox_storage';error.diagnostic=evidence;raise error
+    execution.current()
+    with store.transaction():
+        current=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
+        if not current or current['work']!=row['work'] or current['token']!=row['token'] or current['state'] not in ('intent','present'):
+            raise Attention('sandbox ownership changed during build storage inspection')
+        data=json.loads(current['data'])|{'build_storage':evidence}
+        store.db.execute('UPDATE resources SET data=? WHERE name=?',(json.dumps(data),name))
+
 
 
 def reclaim_build_cache(execution, name, invoke):
@@ -142,7 +168,7 @@ def reclaim_build_cache(execution, name, invoke):
     row=execution.store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
     if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token'] or row['state'] not in ('intent','present'):
         raise Attention('refuse cache reclamation after sandbox ownership changed')
-    code="import pathlib,shutil\np=pathlib.Path('/sandbox/workspace/.gyre-target')\nif p.is_symlink(): raise RuntimeError('refuse symlinked build cache')\nif p.exists(): shutil.rmtree(p)"
+    code="import pathlib,shutil\np=pathlib.Path('/tmp/gyre-build/target')\nif p.is_symlink(): raise RuntimeError('refuse symlinked build cache')\nif p.exists(): shutil.rmtree(p)"
     result=invoke(['sandbox','exec','-n',name,'--','python3','-c',code],capture_output=True,text=True,timeout=120)
     if result.returncode:raise RuntimeError('generated build cache could not be reclaimed for source capture')
     execution.store.event('build_cache_reclaimed',{'sandbox':name,'reason':'workspace exhausted; preserve source'},execution.claim['task'],execution.claim['id'])
