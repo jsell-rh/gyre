@@ -201,3 +201,83 @@ export function computeTimelineGhostOverlays({ graph, timelineFilteredGraph, tim
 
   return overlays;
 }
+
+/**
+ * Resolve the scrubber position to a unix-epoch-seconds timestamp.
+ *
+ * @param {Array} timeline - Array of ArchitecturalDelta records
+ * @param {number} scrubIndex - Current scrubber index (-1 = present)
+ * @returns {number|null} Epoch seconds at the scrubber position, or null
+ *   when the timeline is empty, the index is out of range, or the delta
+ *   has no usable timestamp.
+ */
+export function resolveScrubTimestamp(timeline, scrubIndex) {
+  if (!timeline?.length || scrubIndex < 0 || scrubIndex >= timeline.length) return null;
+  const delta = timeline[scrubIndex];
+  if (!delta) return null;
+  const ts = typeof delta.timestamp === 'number'
+    ? delta.timestamp
+    : Number(delta.timestamp);
+  if (Number.isFinite(ts) && ts > 0) return ts;
+  const parsed = typeof delta.timestamp === 'string' ? Date.parse(delta.timestamp) : NaN;
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+/**
+ * Debounced point-in-time graph fetcher (system-explorer.md §6).
+ *
+ * Coalesces rapid scrub positions into one server `GET /repos/:id/graph?at=`
+ * request per debounce window (200ms default), and drops stale responses:
+ * only the fetch for the most recent `at` resolves. A failed fetch rejects
+ * so the caller can keep its client-side fallback graph.
+ *
+ * @param {function} fetchAt - `(at: number) => Promise<object>` graph fetcher
+ * @param {number} [delayMs=200] - debounce window in milliseconds
+ * @returns {{ request: (at: number) => Promise<object>, cancel: () => void }}
+ */
+export function createTimelineHistoryFetcher(fetchAt, delayMs = 200) {
+  let timer = null;
+  let latestAt = null;
+  let pending = [];
+
+  function settle(ok, value) {
+    const waiters = pending;
+    pending = [];
+    for (const w of waiters) {
+      if (w.at !== latestAt) {
+        // Superseded by a newer scrub position — resolve null so the
+        // caller keeps its client-side fallback instead of hanging.
+        w.resolve(null);
+        continue;
+      }
+      if (ok) w.resolve(value);
+      else w.reject(value);
+    }
+  }
+
+  return {
+    request(at) {
+      latestAt = at;
+      return new Promise((resolve, reject) => {
+        pending.push({ at, resolve, reject });
+        if (timer != null) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          const target = latestAt;
+          if (target == null) return settle(true, null);
+          fetchAt(target)
+            .then((graph) => settle(true, graph))
+            .catch((err) => settle(false, err));
+        }, delayMs);
+      });
+    },
+    cancel() {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      latestAt = null;
+      settle(true, null); // release waiters without a fetch
+    },
+  };
+}

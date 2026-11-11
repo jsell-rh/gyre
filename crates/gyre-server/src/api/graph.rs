@@ -1,7 +1,7 @@
 //! Knowledge graph API endpoints (realized-model.md §7).
 //!
 //! Endpoints:
-//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges)
+//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges, ?at= point-in-time)
 //!   GET  /api/v1/repos/{id}/graph/types        — nodes by NodeType::Type with edges
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
@@ -166,6 +166,41 @@ pub struct NodeWithEdgesResponse {
 pub struct RepoGraphQuery {
     /// Optional case-insensitive substring filter on node name / qualified_name.
     pub concept: Option<String>,
+    /// Optional point-in-time filter (system-explorer.md §6 Architectural
+    /// Timeline): return the graph as it existed at this instant. Accepts
+    /// either a unix-epoch-second integer or an RFC 3339 / ISO 8601
+    /// timestamp ("2024-06-01T12:00:00Z"). Invalid values yield 400.
+    pub at: Option<String>,
+}
+
+impl RepoGraphQuery {
+    /// Resolve the `at` parameter to unix epoch seconds.
+    ///
+    /// Accepts epoch seconds (`1712000000`) or RFC 3339 timestamps
+    /// (`2024-04-01T16:00:00Z`, `2024-04-01T16:00:00+02:00`). Returns
+    /// `Err(message)` on unparseable input — the caller maps that to a 400.
+    fn resolve_at(&self) -> Result<Option<u64>, String> {
+        let Some(raw) = self.at.as_deref() else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(secs) = raw.parse::<u64>() {
+            return Ok(Some(secs));
+        }
+        let parsed = time::OffsetDateTime::parse(
+            raw,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_err(|e| format!("invalid 'at' timestamp {raw:?}: {e}"))?;
+        let secs = parsed.unix_timestamp();
+        if secs < 0 {
+            return Err(format!("'at' timestamp {raw:?} is before the unix epoch"));
+        }
+        Ok(Some(secs as u64))
+    }
 }
 
 #[derive(Deserialize)]
@@ -386,6 +421,9 @@ fn parse_confidence(s: &str) -> SpecConfidence {
 /// Returns the full knowledge graph (all nodes + all edges) for a repository.
 /// Optional `?concept=<substring>` filters nodes by case-insensitive substring
 /// match on `name` or `qualified_name`.
+/// Optional `?at=<epoch-seconds|RFC3339>` returns the point-in-time graph
+/// (system-explorer.md §6 Architectural Timeline): nodes/edges that existed
+/// at that instant, including ones that have since been soft-deleted.
 pub async fn get_repo_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -394,11 +432,22 @@ pub async fn get_repo_graph(
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
 
-    let all_nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
+    let at = q
+        .resolve_at()
+        .map_err(ApiError::BadRequest)?;
+
+    let (all_nodes, all_edges) = match at {
+        Some(at) => (
+            state.graph_store.list_nodes_at(&repo_id, at).await,
+            state.graph_store.list_edges_at(&repo_id, at).await,
+        ),
+        None => (
+            state.graph_store.list_nodes(&repo_id, None).await,
+            state.graph_store.list_edges(&repo_id, None).await,
+        ),
+    };
+    let all_nodes = all_nodes.map_err(ApiError::Internal)?;
+    let all_edges = all_edges.map_err(ApiError::Internal)?;
 
     let nodes: Vec<GraphNode> = if let Some(pattern) = &q.concept {
         let pat = pattern.to_lowercase();
@@ -412,12 +461,6 @@ pub async fn get_repo_graph(
     } else {
         all_nodes
     };
-
-    let all_edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
 
     // When concept filtering is active, restrict edges to those where both
     // endpoints are in the matched node set (consistent with /graph/concept/:name).
@@ -2332,6 +2375,181 @@ mod tests {
             .unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id.as_str(), nid.as_str());
+    }
+
+    #[tokio::test]
+    async fn repo_graph_at_returns_point_in_time_graph() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo so require_repo passes.
+        let create_body = serde_json::json!({
+            "name": "timeline-at-repo",
+            "workspace_id": "ws-timeline",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Seed the graph store: `early` (first seen 100, active), `late`
+        // (first seen 900), `gone` (first seen 100, soft-deleted at 300).
+        let mut early = _new_node(&repo_id, "EarlyNode", NodeType::Type);
+        early.first_seen_at = 100;
+        early.last_seen_at = 2000;
+        let mut late = _new_node(&repo_id, "LateNode", NodeType::Type);
+        late.first_seen_at = 900;
+        late.last_seen_at = 2000;
+        let mut gone = _new_node(&repo_id, "GoneNode", NodeType::Type);
+        gone.first_seen_at = 100;
+        gone.last_seen_at = 300;
+        gone.deleted_at = Some(300);
+        for node in [early, late, gone] {
+            state.graph_store.create_node(node).await.unwrap();
+        }
+
+        let get = |query: String| {
+            let app = app.clone();
+            let repo = repo_id.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/repos/{repo}/graph{query}"))
+                        .header("Authorization", auth())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // No `at`: the current graph excludes the soft-deleted node.
+        let resp = get("".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "LateNode"]);
+
+        // Epoch-seconds `at=200`: late did not exist yet; gone existed
+        // (deleted later) and MUST be reconstructed.
+        let resp = get("?at=200".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // `at=500`: gone was deleted at 300 — absent again.
+        let resp = get("?at=500".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode"]);
+
+        // RFC 3339 `at`: 1970-01-01T00:03:20Z == epoch 200.
+        let resp = get("?at=1970-01-01T00%3A03%3A20Z".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // Unparseable `at` → 400, not silently ignored.
+        let resp = get("?at=not-a-timestamp".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_mem_list_nodes_at_and_edges_at_contract() {
+        // test_state wires MemGraphStore — this pins the in-code guard to the
+        // same existed-at contract the SQLite adapter enforces in SQL
+        // (check-mem-port-contracts: one adapter's test suite cannot cover
+        // the other's implementation).
+        let state = test_state();
+        let repo = "repo-mem-at";
+
+        let mut n1 = _new_node(repo, "N1", NodeType::Type);
+        n1.first_seen_at = 100;
+        n1.last_seen_at = 900;
+        let mut n2 = _new_node(repo, "N2", NodeType::Type);
+        n2.first_seen_at = 100;
+        n2.last_seen_at = 250;
+        n2.deleted_at = Some(250);
+        state.graph_store.create_node(n1.clone()).await.unwrap();
+        state.graph_store.create_node(n2.clone()).await.unwrap();
+
+        let edge = GraphEdge {
+            id: Id::new("e1"),
+            repo_id: Id::new(repo),
+            source_id: n1.id.clone(),
+            target_id: n2.id.clone(),
+            edge_type: EdgeType::DependsOn,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 250,
+            deleted_at: Some(250),
+        };
+        state.graph_store.create_edge(edge.clone()).await.unwrap();
+
+        let at_150 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(at_150.len(), 2, "n2 existed at 150 (deleted at 250)");
+
+        let at_500 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert_eq!(at_500.len(), 1);
+        assert_eq!(at_500[0].name, "N1");
+
+        let edges_150 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(edges_150.len(), 1, "edge existed at 150");
+        let edges_500 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert!(edges_500.is_empty(), "edge was deleted at 250");
     }
 
     // ── LLM endpoint tests ───────────────────────────────────────────────────

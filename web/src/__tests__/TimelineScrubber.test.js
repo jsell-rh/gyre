@@ -321,4 +321,74 @@ describe('TimelineScrubber', () => {
     expect(slider).toBeTruthy();
     expect(slider.getAttribute('max')).toBe('0');
   });
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────────
+
+  // Plain timeline with no significant deltas — no spec_ref, small adds —
+  // so the only key moment comes from the reconciliation event.
+  const PLAIN_TIMELINE = [
+    { id: 'p1', repo_id: 'r1', commit_sha: 'aa1', timestamp: NOW_TS - 86400 * 30, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p2', repo_id: 'r1', commit_sha: 'bb2', timestamp: NOW_TS - 86400 * 20, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p3', repo_id: 'r1', commit_sha: 'cc3', timestamp: NOW_TS - 86400 * 10, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p4', repo_id: 'r1', commit_sha: 'dd4', timestamp: NOW_TS - 86400 * 5, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p5', repo_id: 'r1', commit_sha: 'ee5', timestamp: NOW_TS, spec_ref: null, agent_id: null, delta_json: null },
+  ];
+
+  const RECONCILIATION_EVENTS = [
+    {
+      id: 'm1',
+      kind: 'reconciliation_completed',
+      created_at: (NOW_TS - 86400 * 15) * 1000, // epoch milliseconds
+      payload: { workspace_id: 'ws1', persona_id: 'per-3', persona_name: 'Architect', specs_evaluated: 12, specs_changed: 3 },
+    },
+  ];
+
+  it('renders reconciliation key moment markers from workspace messages', () => {
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: RECONCILIATION_EVENTS }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    // Reconciliation markers are purple (eventTypeColor('reconciliation'))
+    expect(markers[0].style.background).toBe('rgb(168, 85, 247)');
+    // Positioned by timestamp: -15d in a 30d span → 50% along the time axis
+    const left = parseFloat(markers[0].style.left);
+    expect(left).toBeGreaterThan(46);
+    expect(left).toBeLessThan(54);
+  });
+
+  it('reconciliation marker click shows the narrative in the popover and calls onMarkerClick', async () => {
+    const onMarkerClick = vi.fn();
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: RECONCILIATION_EVENTS, onMarkerClick }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    await fireEvent.click(markers[0]);
+    expect(onMarkerClick).toHaveBeenCalledTimes(1);
+    const passedDelta = onMarkerClick.mock.calls[0][0];
+    expect(passedDelta.narrative).toContain('Architect');
+    expect(passedDelta.narrative).toContain('3 of 12 specs changed');
+    // Popover shows the narrative under the "Why" label
+    const popover = container.querySelector('.tl-popover');
+    expect(popover).toBeTruthy();
+    const labels = Array.from(popover.querySelectorAll('.tl-popover-label')).map((el) => el.textContent);
+    expect(labels).toContain('Why');
+    expect(popover.textContent).toContain('Reconciliation of Architect: 3 of 12 specs changed.');
+  });
+
+  it('popover shows the grounded narrative for delta-backed key moments', async () => {
+    const withNarrative = TIMELINE.map((d) =>
+      d.id === 'd2' ? { ...d, narrative: 'Auth extraction added four types governing session handling.' } : d
+    );
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: withNarrative, active: true, scrubIndex: 4, nodes: [] }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    // d2 (spec_approval) is the first marker
+    await fireEvent.click(markers[0]);
+    const popover = container.querySelector('.tl-popover');
+    expect(popover).toBeTruthy();
+    expect(popover.textContent).toContain('Auth extraction added four types governing session handling.');
+  });
 });

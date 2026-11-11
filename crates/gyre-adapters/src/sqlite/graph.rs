@@ -424,6 +424,31 @@ impl GraphPort for SqliteStorage {
         .await?
     }
 
+    async fn list_nodes_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphNode>> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.clone();
+        let at = at as i64;
+        tokio::task::spawn_blocking(move || -> Result<Vec<GraphNode>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Point-in-time reconstruction (system-explorer.md §6): a node
+            // existed at `at` iff it was first seen at or before `at` and was
+            // not yet soft-deleted. Unlike list_nodes, soft-deleted rows ARE
+            // included when their deletion happened after `at`.
+            let rows = graph_nodes::table
+                .filter(graph_nodes::repo_id.eq(repo_id.as_str()))
+                .filter(graph_nodes::first_seen_at.le(at))
+                .filter(
+                    graph_nodes::deleted_at
+                        .is_null()
+                        .or(graph_nodes::deleted_at.gt(at)),
+                )
+                .load::<GraphNodeRow>(&mut *conn)
+                .context("list graph nodes at timestamp")?;
+            rows.into_iter().map(GraphNodeRow::into_node).collect()
+        })
+        .await?
+    }
+
     async fn create_edge(&self, edge: GraphEdge) -> Result<GraphEdge> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<GraphEdge> {
@@ -482,6 +507,28 @@ impl GraphPort for SqliteStorage {
                     .load::<GraphEdgeRow>(&mut *conn)
                     .context("list graph edges")?
             };
+            rows.into_iter().map(GraphEdgeRow::into_edge).collect()
+        })
+        .await?
+    }
+
+    async fn list_edges_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphEdge>> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.clone();
+        let at = at as i64;
+        tokio::task::spawn_blocking(move || -> Result<Vec<GraphEdge>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Same existed-at contract as list_nodes_at.
+            let rows = graph_edges::table
+                .filter(graph_edges::repo_id.eq(repo_id.as_str()))
+                .filter(graph_edges::first_seen_at.le(at))
+                .filter(
+                    graph_edges::deleted_at
+                        .is_null()
+                        .or(graph_edges::deleted_at.gt(at)),
+                )
+                .load::<GraphEdgeRow>(&mut *conn)
+                .context("list graph edges at timestamp")?;
             rows.into_iter().map(GraphEdgeRow::into_edge).collect()
         })
         .await?
@@ -982,6 +1029,121 @@ mod tests {
             .unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, Id::new("e2"));
+    }
+
+    #[tokio::test]
+    async fn list_nodes_at_reconstructs_point_in_time() {
+        let (_tmp, s) = setup();
+        let repo = "repo1";
+
+        // early: first seen 100, still active — exists at every `at` >= 100.
+        GraphPort::create_node(&s, {
+            let mut n = make_node("early", repo);
+            n.first_seen_at = 100;
+            n.last_seen_at = 1000;
+            n
+        })
+        .await
+        .unwrap();
+        // late: first seen 900 — did not exist at 500.
+        GraphPort::create_node(&s, {
+            let mut n = make_node("late", repo);
+            n.first_seen_at = 900;
+            n.last_seen_at = 1000;
+            n
+        })
+        .await
+        .unwrap();
+        // gone: first seen 100, soft-deleted at 300 — existed at 200 but
+        // not at 500 (even though `list_nodes` never returns it).
+        GraphPort::create_node(&s, {
+            let mut n = make_node("gone", repo);
+            n.first_seen_at = 100;
+            n.last_seen_at = 300;
+            n.deleted_at = Some(300);
+            n
+        })
+        .await
+        .unwrap();
+
+        let at_200 = GraphPort::list_nodes_at(&s, &Id::new(repo), 200)
+            .await
+            .unwrap();
+        let names_200: Vec<String> = at_200.iter().map(|n| n.name.clone()).collect();
+        assert!(names_200.contains(&"fn_early".to_string()), "early exists at 200");
+        assert!(names_200.contains(&"fn_gone".to_string()), "gone existed at 200 (deleted later)");
+        assert!(!names_200.contains(&"fn_late".to_string()), "late did not exist at 200");
+        assert_eq!(names_200.len(), 2);
+
+        let at_500 = GraphPort::list_nodes_at(&s, &Id::new(repo), 500)
+            .await
+            .unwrap();
+        let names_500: Vec<String> = at_500.iter().map(|n| n.name.clone()).collect();
+        assert!(names_500.contains(&"fn_early".to_string()));
+        assert!(!names_500.contains(&"fn_gone".to_string()), "gone was deleted at 300, not present at 500");
+        assert!(!names_500.contains(&"fn_late".to_string()));
+        assert_eq!(names_500.len(), 1);
+
+        let at_1000 = GraphPort::list_nodes_at(&s, &Id::new(repo), 1000)
+            .await
+            .unwrap();
+        assert_eq!(at_1000.len(), 2, "early + late at present");
+    }
+
+    #[tokio::test]
+    async fn list_edges_at_reconstructs_point_in_time() {
+        let (_tmp, s) = setup();
+        let repo = "repo1";
+
+        GraphPort::create_node(&s, make_node("n1", repo))
+            .await
+            .unwrap();
+        GraphPort::create_node(&s, make_node("n2", repo))
+            .await
+            .unwrap();
+
+        // Edge present for the whole window.
+        GraphPort::create_edge(&s, {
+            let mut e = make_edge("e_stable", repo, "n1", "n2");
+            e.first_seen_at = 100;
+            e
+        })
+        .await
+        .unwrap();
+        // Edge first seen at 800.
+        GraphPort::create_edge(&s, {
+            let mut e = make_edge("e_late", repo, "n2", "n1");
+            e.first_seen_at = 800;
+            e.last_seen_at = 1000;
+            e
+        })
+        .await
+        .unwrap();
+        // Edge soft-deleted at 250.
+        GraphPort::create_edge(&s, {
+            let mut e = make_edge("e_gone", repo, "n1", "n2");
+            e.first_seen_at = 100;
+            e.last_seen_at = 250;
+            e.deleted_at = Some(250);
+            e
+        })
+        .await
+        .unwrap();
+
+        let at_200 = GraphPort::list_edges_at(&s, &Id::new(repo), 200)
+            .await
+            .unwrap();
+        let ids_200: Vec<String> = at_200.iter().map(|e| e.id.to_string()).collect();
+        assert!(ids_200.contains(&"e_stable".to_string()));
+        assert!(ids_200.contains(&"e_gone".to_string()), "edge deleted at 250 existed at 200");
+        assert!(!ids_200.contains(&"e_late".to_string()));
+        assert_eq!(ids_200.len(), 2);
+
+        let at_500 = GraphPort::list_edges_at(&s, &Id::new(repo), 500)
+            .await
+            .unwrap();
+        let ids_500: Vec<String> = at_500.iter().map(|e| e.id.to_string()).collect();
+        assert_eq!(ids_500, vec!["e_stable".to_string()], "only the stable edge at 500");
     }
 
     #[tokio::test]

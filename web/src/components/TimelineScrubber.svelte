@@ -9,6 +9,7 @@
     active = false,           // Whether time travel mode is active
     scrubIndex = -1,          // Current index into timeline array (-1 = present)
     nodes = [],               // Current graph nodes (for key moment marker extraction)
+    reconciliationEvents = [], // Workspace reconciliation_completed messages (key moments, system-explorer.md §6)
     onToggle = () => {},      // Callback to toggle time travel mode
     onScrub = (_idx) => {},   // Callback when scrubber position changes
     onMarkerClick = (_delta) => {}, // Callback when a key moment marker is clicked
@@ -24,6 +25,10 @@
   function tsMs(ts) {
     const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
     return Number.isFinite(ms) ? ms : null;
+  }
+
+  function safeParse(s) {
+    try { return JSON.parse(s); } catch { return null; }
   }
 
   let timeScale = $derived.by(() => {
@@ -91,6 +96,30 @@
           moments.push({ index: idx, delta: { timestamp: ts }, eventType: 'milestone', addedCount: 0, removedCount: 0 });
         }
       }
+    }
+
+    // Reconciliation events (persona v3 → v4, system-explorer.md §6): workspace
+    // reconciliation_completed messages. `created_at` is epoch milliseconds.
+    for (const ev of reconciliationEvents ?? []) {
+      const payload = typeof ev?.payload === 'string' ? safeParse(ev.payload) : ev?.payload;
+      const tsMs = typeof ev?.created_at === 'number' ? ev.created_at : null;
+      if (tsMs == null) continue;
+      const ts = Math.floor(tsMs / 1000);
+      const idx = findClosestIndex(ts);
+      if (idx < 0) continue;
+      const persona = payload?.persona_name ?? payload?.persona_id ?? 'persona';
+      const changed = Number(payload?.specs_changed ?? 0);
+      const evaluated = Number(payload?.specs_evaluated ?? 0);
+      const narrative = changed > 0
+        ? `Reconciliation of ${persona}: ${changed} of ${evaluated} specs changed.`
+        : `Reconciliation of ${persona}: ${evaluated} specs evaluated, no changes.`;
+      moments.push({
+        index: idx,
+        delta: { timestamp: ts, spec_ref: payload?.persona_name ?? null, narrative },
+        eventType: 'reconciliation',
+        addedCount: 0,
+        removedCount: 0,
+      });
     }
 
     // Deduplicate by index proximity (merge moments within 1 index)
@@ -337,6 +366,12 @@
               {#if selectedMoment.addedCount && selectedMoment.removedCount}, {/if}
               {#if selectedMoment.removedCount}<span class="tl-stat-remove">-{selectedMoment.removedCount} removed</span>{/if}
             </span>
+          </div>
+        {/if}
+        {#if selectedMoment.delta?.narrative}
+          <div class="tl-popover-field">
+            <span class="tl-popover-label">Why</span>
+            <span class="tl-popover-value">{selectedMoment.delta.narrative}</span>
           </div>
         {/if}
       </div>
