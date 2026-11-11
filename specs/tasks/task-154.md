@@ -2,13 +2,13 @@
 title: "Implement search query language (quoted phrases, faceted filtering)"
 spec_ref: "search.md §Query Language"
 depends_on: [task-153]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "search.md §Query Language"
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "fc0c24e8b3e55bd043906436edf2e484129f5e30"]
 ---
 
 ## Spec Excerpt
@@ -162,18 +162,23 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
 - The three index-on-create sites (tasks/agents/MRs) pass the entity's
   real update time as `updated_at`.
 
-### Verification repair (this round)
+### CI-repair round (this round)
 
-Verification finding `1bcd3647914240fd8c081890366fec38` failed only
-`check-rustfmt-diff` — unformatted changed lines in the seven task-surface
-files. Fixed by a whitespace-only rustfmt pass (every reformat region falls
-inside lines this task changed vs base); all other gates in that run
-already passed (clippy changed-lines clean, arch, ABAC, migration
-portability, web build). Post-fix probes: `check-rustfmt-diff` exit 0,
-`cargo test -p gyre-domain search_query` 25 passed, `cargo test -p
-gyre-adapters --lib search` 30 passed, `cargo check -p gyre-server` clean.
-Evidence: `/tmp/stage/review-evidence/` (rustfmt-diff.txt,
-rustfmt-diff-after.txt, focused-tests.txt).
+Durable finding: candidate head `f061d0e02` failed only the E2E job
+(run 43036531271) at the "Install mold linker" step — `apt-get install -y
+mold` exited 100 after "Temporary failure resolving
+'azure.archive.ubuntu.com'". That is runner network/DNS infrastructure,
+not a code defect; no source change is warranted for it and the E2E job
+needs a remote re-run. Local re-verification of the implementation at the
+same head: `cargo test -p gyre-domain search_query` 25 passed; `cargo
+test -p gyre-adapters search` 30 passed (all three adapters, including
+the PG SQL-shape regression tests pinning the restored `s.tsv @@ q`
+predicate); `cargo check -p gyre-server` clean; `check-arch.sh`,
+`check-mcp-write-tools.sh`, and `check-task-commit-attribution.sh` pass
+with this task's commits restored to the frontmatter. Evidence:
+`/tmp/stage/review-evidence/` (domain-parser-tests.txt,
+adapters-search-tests.txt, server-check.txt, arch.txt, mcp-gate.txt,
+attribution-before.txt).
 
 ### Test evidence
 
@@ -192,7 +197,9 @@ rustfmt-diff-after.txt, focused-tests.txt).
   `mcp.rs` `mcp_search_query_language` exercises the same grammar over MCP
   (mem-backed state). Server test compilation is deferred to the
   independent verifier per the 4 GiB budget; `cargo check -p gyre-server`
-  is clean.
+  is clean. Verifier should run: `cargo test --all` (at minimum
+  `cargo test -p gyre-server --test search_wiring` and the `mcp.rs` unit
+  target) plus the GitHub E2E job re-run.
 - Known limit: the PostgreSQL leg compiles and mirrors the SQLite contract
   but has no runtime test — the repo has no PG test harness. The restored
   `s.tsv @@ q` predicate is pinned by SQL-shape regression tests
