@@ -544,8 +544,11 @@ async fn build_review_agent_context(
 
     // Spec content at the SHA pinned in the MR's spec_ref. The reviewer must
     // judge against the spec the MR was authored under — the branch tip may
-    // have moved since. An unresolvable pinned SHA is a context-gathering
-    // failure (fail-closed), not an empty spec.
+    // have moved since. Both pin shapes resolve through the port: a commit
+    // SHA + tree path, or the production blob SHA from the spec ledger
+    // (whose ledger path is not a repo tree path — the blob IS the content).
+    // An unresolvable pinned SHA is a context-gathering failure
+    // (fail-closed), not an empty spec.
     let spec_ref = mr.spec_ref.clone().unwrap_or_default();
     let spec_content = if let Some((path, sha)) = spec_ref.rsplit_once('@') {
         match state
@@ -1699,6 +1702,139 @@ mod tests {
         state.merge_requests.create(&mr).await.unwrap();
 
         (mr_id, repo_id, spec_sha)
+    }
+
+    /// Review repair finding 2: production MR spec_refs carry the spec
+    /// ledger's BLOB sha with a ledger path ("system/widget.md"), not a
+    /// commit sha + full tree path (spawn.rs pins
+    /// `spec_ledger.current_sha`). The gate's primary spec channel must
+    /// resolve that shape — a commit-only lookup errors on the blob OID and
+    /// the gate would fail without ever receiving the spec.
+    ///
+    /// Runs `build_review_agent_context` directly (the context-gathering
+    /// step that feeds GYRE_SPEC_CONTENT / GYRE_SPEC_FILE and backs
+    /// GYRE_SPEC_URL), so it needs no loopback listener and no agent
+    /// process.
+    #[tokio::test]
+    async fn agent_review_context_resolves_blob_pinned_spec_ref() {
+        let state = test_state();
+
+        // Real bare repo: spec v1 lands on main, then main advances to v2 —
+        // the pinned blob must win over the tip.
+        let dir = std::env::temp_dir().join(format!("gyre-gate-blobref-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo_path = dir.join("bare.git");
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        let git_ops = gyre_adapters::Git2OpsAdapter::new();
+        git_ops.init_bare(&repo_path_str).await.unwrap();
+        git_ops
+            .create_initial_commit(&repo_path_str, "main")
+            .await
+            .unwrap();
+        let v1_commit = git_ops
+            .write_file(
+                &repo_path_str,
+                "main",
+                "specs/system/widget.md",
+                b"# Spec v1",
+                "Add widget spec v1",
+            )
+            .await
+            .unwrap();
+        git_ops
+            .write_file(
+                &repo_path_str,
+                "main",
+                "specs/system/widget.md",
+                b"# Spec v2",
+                "Advance widget spec to v2",
+            )
+            .await
+            .unwrap();
+        // Feature branch diverges so the MR diff resolves.
+        git_ops
+            .create_branch(&repo_path_str, "feature-branch", "refs/heads/main")
+            .await
+            .unwrap();
+        git_ops
+            .write_file(
+                &repo_path_str,
+                "feature-branch",
+                "src/widget.rs",
+                b"pub fn widget() {}",
+                "Add widget",
+            )
+            .await
+            .unwrap();
+
+        // The production pin: the v1 BLOB sha, resolved from the v1 commit's
+        // tree, paired with the LEDGER path (not the repo tree path).
+        let blob_sha = {
+            let out = std::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    &format!("{v1_commit}:specs/system/widget.md"),
+                ])
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git rev-parse failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(blob_sha.len(), 40, "blob sha must be a full OID");
+
+        let repo_id = Id::new(Uuid::new_v4().to_string());
+        let repo = gyre_domain::Repository::new(
+            repo_id.clone(),
+            Id::new("ws-test"),
+            "blobref-repo",
+            &repo_path_str,
+            now_secs(),
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let persona = gyre_domain::Persona::new(
+            Id::new(Uuid::new_v4().to_string()),
+            "Test persona test-reviewer".to_string(),
+            "test-reviewer".to_string(),
+            gyre_domain::PersonaScope::Workspace(Id::new("ws-test")),
+            "You are the test-reviewer reviewer.".to_string(),
+            now_secs(),
+        );
+        state.personas.create(&persona).await.unwrap();
+
+        let mr_id = make_mr_id();
+        let mut mr = gyre_domain::MergeRequest::new(
+            mr_id.clone(),
+            repo_id.clone(),
+            "Add feature",
+            "feature-branch",
+            "main",
+            now_secs(),
+        );
+        // Production shape (spawn.rs): ledger path + ledger blob sha.
+        mr.spec_ref = Some(format!("system/widget.md@{blob_sha}"));
+        mr.workspace_id = Id::new("ws-test");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
+        gate.persona = Some("personas/test-reviewer.md".to_string());
+        gate.repo_id = repo_id;
+
+        let ctx = build_review_agent_context(&state, &gate, &mr_id, "personas/test-reviewer.md")
+            .await
+            .expect("context gathering must resolve the blob-pinned spec_ref");
+        assert_eq!(
+            ctx.spec_content.as_deref(),
+            Some("# Spec v1"),
+            "blob-pinned spec_ref must deliver the PINNED blob content, not the tip"
+        );
+        assert_eq!(ctx.spec_ref, format!("system/widget.md@{blob_sha}"));
     }
 
     // ── truncate_bytes: UTF-8 char-boundary truncation (task-095 F4) ────────

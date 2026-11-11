@@ -493,3 +493,156 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         assert_eq!(status, StatusCode::CREATED);
     }
 }
+
+/// task-139 review finding 1: the gate executor hands AgentReview /
+/// AgentValidation gate agents `GYRE_SPEC_URL =
+/// {base}/api/v1/merge-requests/{id}/spec` and only their scoped token
+/// (`review:submit` / `validation:report`). The scoped-token allow-list
+/// must include the MR spec route, or the documented spec-alignment
+/// protocol (docs/agent-protocol.md) is unfetchable by the very agents
+/// the URL is minted for (403 before policy evaluation).
+///
+/// Proves, through the full router (auth + ABAC layers, oneshot — no
+/// listener required):
+/// 1. a `review:submit` gate agent GETs the pinned spec: 200 + pinned
+///    content (not HEAD);
+/// 2. the same token is still 403 on routes outside its allow-list;
+/// 3. a `validation:report` gate agent can also fetch the spec (its
+///    check compares behavior against the pinned spec version).
+#[tokio::test]
+async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
+    let app: Router = gyre_server::build_router(state.clone());
+
+    // Real repo on disk: spec v1 committed (blob pinned), then v2 at HEAD.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let repo_path = tmp.path().join("spec-probe-repo");
+    std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+    std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity v1\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@test.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["add", "."]);
+    git(&["commit", "-m", "spec v1"]);
+    let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+    std::fs::write(
+        repo_path.join("specs/system/identity.md"),
+        "# Identity v2 — EDITED AT HEAD\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "spec v2"]);
+
+    let ws_id = gyre_common::Id::new("ws-spec-probe");
+    let ws = gyre_domain::Workspace::new(
+        ws_id.clone(),
+        gyre_common::Id::new("tenant-spec-probe"),
+        "ws-spec-probe",
+        "ws-spec-probe",
+        1,
+    );
+    state.workspaces.create(&ws).await.unwrap();
+    let repo_id = gyre_common::Id::new("repo-spec-probe");
+    let repo = gyre_domain::Repository::new(
+        repo_id.clone(),
+        ws_id.clone(),
+        "spec-probe-repo",
+        repo_path.to_str().unwrap(),
+        1,
+    );
+    state.repos.create(&repo).await.unwrap();
+
+    let mr_id = gyre_common::Id::new("mr-spec-probe");
+    let mut mr = gyre_domain::MergeRequest::new(
+        mr_id.clone(),
+        repo_id.clone(),
+        "Spec probe MR",
+        "feat/spec-probe",
+        "main",
+        1,
+    );
+    mr.workspace_id = ws_id;
+    // Production shape: ledger path + pinned blob sha.
+    mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
+    state.merge_requests.create(&mr).await.unwrap();
+
+    let spec_uri = format!("/api/v1/merge-requests/{}/spec", mr_id.as_str());
+
+    for (agent, scope) in [
+        ("gate-review-spec-probe", "review:submit"),
+        ("gate-validate-spec-probe", "validation:report"),
+    ] {
+        let token = state
+            .agent_signing_key
+            .mint_scoped(agent, "gate-1", "forge", "http://localhost:0", 60, scope)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent, token.clone())
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&spec_uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{scope} gate agent must fetch GYRE_SPEC_URL: {text}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["content"], "# Identity v1\n", "{scope} sees pinned spec");
+        assert_eq!(json["spec_sha"], v1_blob.as_str());
+
+        // Same token, route outside the allow-list: still contained.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{scope} gate agent must stay denied outside its allow-list"
+        );
+
+        // Teardown: revoke so later iterations mint fresh tokens.
+        state.kv_store.kv_remove("agent_tokens", agent).await.unwrap();
+    }
+}

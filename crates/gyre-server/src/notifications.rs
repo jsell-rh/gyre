@@ -260,7 +260,11 @@ pub async fn notify_spec_policy_violation(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| {
+            // Char-boundary truncation: a fixed byte index can split a
+            // multibyte UTF-8 id and panic (byte-slice truncation check).
+            mr_id.chars().take(8).collect::<String>()
+        });
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
