@@ -12,7 +12,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 6: MR and Gates"
   - "agent-runtime.md §Phase 7: Ralph Loop"
   - "agent-runtime.md §Phase 8: System-Initiated Agents"
-commits: ["c8b4e5efc28c285c0a81f8f332e68439f72f58a0", "a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "26edb8fc38732bcb23f8c96770ccdbe60d79e4e7"]
+commits: ["26edb8fc38732bcb23f8c96770ccdbe60d79e4e7", "6ae1e989cf44636fc231b4d7b36f4189d2c10ae9", "a08ef0e79e0d8a94559ea0ee3766d0f17bf16d53", "c8b4e5efc28c285c0a81f8f332e68439f72f58a0", "096cd9bd6f97faae2b0bfc4e4a866752089c8953"]
 ---
 
 ## Spec Excerpt
@@ -94,14 +94,13 @@ Read `specs/system/agent-runtime.md` §1 Phases 4-8 in full. Agent spawn is in `
 
 ## Shipped
 
-Commit `26edb8fc3` implements agent-runtime.md §1 Phases 4–8;
-`6ae1e989c` repairs the first review round's findings; `a08ef0e79`
-repairs the second round's (worker-claim release + byte-slice);
-`c8b4e5efc` repairs the verification round's lint failures (two
-clippy `needless_borrow`s on `&state` in spawn.rs, one identity
-`Ok(...?)` wrapper in ralph_loop.rs, one rustfmt drift in
-merge_queue.rs) — no behavior change; `cargo check -p gyre-server`
-and `cargo fmt --check` pass.
+Commits `26edb8fc3` (Phases 4–8 implementation), `6ae1e989c`,
+`a08ef0e79`, `c8b4e5efc` (review/verification repairs) implement
+agent-runtime.md §1 Phases 4–8. `096cd9bd6` repairs the merge with
+main (task-134 added `QualityGate.validation_type`): the `loop_state`
+test fixture in ralph_loop.rs now initializes it (`None` for a
+TestCommand gate) — no behavior change; `cargo check -p gyre-server
+--all-targets` passes in-sandbox.
 
 ### Phase 4 — worker scheduler
 
@@ -124,21 +123,19 @@ task `InProgress` and spawns attempt 0 synchronously through
 000060, SQLite + PG; `PUT /repos/:id` validates repo limit ≤
 workspace per-repo limit).
 
-**Mid-flight claim release (round-3 repair):** when the budget is
-exhausted AFTER the claim was taken (concurrent REST spawn or retry
-backoff racing the pre-check), `spawn_agent_core`'s own check returns
-429, `try_spawn_worker` maps it to `WorkerSpawnOutcome::Blocked`, and
-`release_claim` releases the task to Backlog via the new domain edge
+**Mid-flight claim release:** when the budget is exhausted AFTER the
+claim was taken (concurrent REST spawn or retry backoff racing the
+pre-check), `spawn_agent_core`'s own check returns 429,
+`try_spawn_worker` maps it to `WorkerSpawnOutcome::Blocked`, and
+`release_claim` releases the task to Backlog via the domain edge
 `Task::release_claim` — the ONLY InProgress→Backlog transition,
 reserved for this system-side release (the general transition table
-still has no edge into Backlog, so API transitions cannot requeue).
-The release persists the `budget-exhausted` label on budget blocks —
-the same Phase 4 step 3 marker as the pre-check path — so a later
-cycle's Backlog scan re-spawns the task once the budget clears.
+has no edge into Backlog, so API transitions cannot requeue). The
+release persists the `budget-exhausted` label on budget blocks so a
+later cycle's Backlog scan re-spawns the task once the budget clears.
 Regression test
 `budget_exhausted_mid_flight_releases_claim_and_respawns` drives the
-exact race (claim, exhaust budget, Blocked outcome, release, restore,
-re-spawn).
+exact race.
 
 ### Phase 6 — MR and gates on completion
 
@@ -147,11 +144,10 @@ Both completion surfaces — REST `POST /agents/:id/complete` and MCP
 `ralph_loop::on_agent_mr_created`, which enqueues via
 `merge_queue::enqueue_core`; enqueue triggers `trigger_gates_for_mr`
 so gates run automatically and results are recorded on the MR.
-`enqueue_core` is idempotent per open MR (review repair): a manual
-enqueue of an already-queued MR returns the existing non-terminal
-entry instead of a duplicate that could never be merged twice; a
-terminal entry still allows a fresh enqueue (retry path); gates are
-not re-triggered for an existing entry.
+`enqueue_core` is idempotent per open MR: a manual enqueue of an
+already-queued MR returns the existing non-terminal entry; a terminal
+entry still allows a fresh enqueue (retry path); gates are not
+re-triggered for an existing entry.
 
 ### Phase 7 — Ralph loop
 
@@ -173,7 +169,7 @@ stale-claim recovery never double-claims mid-retry), then task
 removed, budget counter released), `TaskBlocked` to the orchestrator
 and a priority-1 `ComputeTargetUnavailable` notification for
 workspace admins. Worker id prefixes are char-boundary truncated
-(`chars().take(8)`, round-3 repair).
+(`chars().take(8)`).
 
 ### Phase 8 — system-initiated agents
 
@@ -184,21 +180,17 @@ publication spawns the reconciliation agent).
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` — 466 lib tests pass in-sandbox,
-  including the new `release_claim` edge tests
-  (`test_release_claim_from_in_progress`,
-  `test_release_claim_rejects_other_statuses`,
-  `test_transition_table_has_no_edge_into_backlog`).
-- `cargo check -p gyre-server` and `cargo check -p gyre-server
-  --tests` pass in-sandbox (the build wrapper refuses gyre-server
-test codegen under the 4 GiB budget).
+- `cargo check -p gyre-server --all-targets` passes in-sandbox after
+  the merge repair (the build wrapper refuses gyre-server test
+  codegen under the 4 GiB budget).
+- `cargo test -p gyre-domain` — 466 lib tests passed in-sandbox in
+  the implementation round, including the `release_claim` edge tests.
 - Verifier must run: `cargo test -p gyre-server --lib --
   signal_chain::tests` (includes
   `budget_exhausted_mid_flight_releases_claim_and_respawns`,
   `scheduler_flags_budget_exhausted`,
   `worker_spawn_failure_retries_then_blocks`,
   `scheduler_failure_releases_claim_and_retries`),
+  `cargo test -p gyre-server --lib -- ralph_loop::tests`,
   `cargo test -p gyre-server --test e2e_ralph_loop`, and
   `cargo test -p gyre-domain`.
-- `scripts/check-byte-slice-truncation.sh` and
-  `scripts/check-arch.sh` pass in-sandbox.
