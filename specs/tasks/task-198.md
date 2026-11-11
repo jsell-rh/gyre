@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "0b2eb2c0179356cc25adf50204b2de896c5a8fc7", "0f6d8210216e156e8966292363fd2a945bff757a", "10e7d5d98b9a84cb95e1e3a5aef4db8a215dd9c3", "11dc8a180fab21256ec5d50032e633c66eea0bd8", "12d95108b029812a4c8fcd863816304a4890f0f5", "14909dc9698a137845471e920ab27a562c5a09c3", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "1d6ba66c5e07b3475297d4f5927570252302818f", "205f4084fc48549717290e8a47125659fd8079c6", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "2abe05410694cf8eefd8c1ac04ea5429e295249b", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "302101536bbce6ed0a57fd83106ff49b5d0f9dee", "3030d98328397e0a204a04a66132309f474bfa01", "34e725b6b6e4d4f9e164de97b21e1dd30daf3bcd", "37067828658ff015a53cfa23b18c1609490ec739", "3b03451f7d122507e594e2c18d684cabaf2f3acc", "3eb824b44bccd2ae38e207903d3a9c9ebbd2a4b0", "57f548f620b71856726e7bada6b61ebaad39cc54", "580da9df39f9767345352230a059ec84f3309662", "61be0a75fa710cb1cddb34d208363c6aa767aebc", "643a034bf3718dbbf0521dde94ad38650d759ecd", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "76ea9a93ee2479e35d48586ae19572b5f078a49b", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "83054312187f5691cf85dbc1b1bdf19f4476aabb", "89769485d0cdecf5471678a78c2423ca6264bff0", "9a3785d220dca7c0efa8880bb6b47ceb36569d90", "9e91c2c86c0ddb68f4cc1e1813ce8fc0fad4fafe", "9f99cf089732039330f107a8d9f1ea04260db0a8", "9fa13438b9163a9211c84bb0423e27ac07a47eda", "9fb8d851175c88e4485215aa952da2bde6c32a16", "ae81d5d7e55e7881b00a742e807250c42d88bade", "b78aec96b33ab697da34817ff2980e666c456011", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "b924c38677671b61f8def1fc8cbe04cd45388cc9", "bb36d16a575782a6b44d9ed50bde89ae0e10c25c", "bbf3e06de2e0f5407d9f03da8db1b748e7376671", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "c65c72ecf25b49d5bb49f4c242fd86449ad544be", "c957f32b8758a59a7ad682d6380b73b3fee7a661", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "dd2b08833edfd82502565cd75e628ade8e3a73cf", "e1466abbc4969b239fcb39c5366af4c048526d1e", "eb94ecab28256a200c52cdf68f04aa3d6e9b5dc9", "efa36c2fe4a5c558ff84a00f567e5bb35d52c024", "fa35bdcb60a16909ef2279ecef310cf99c297c06", "fd1598feaa09753f4153f8f82c6a1c13005b53c9"]
 ---
 
 ## Spec Excerpt
@@ -74,14 +74,14 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 
 ## Acceptance Criteria
 
-- [ ] `spec_links` migration exists with the **exact 13-column schema** from the spec (incl. `source_sha TEXT NOT NULL`), registered in `schema.rs`; `cargo build --all` runs migrations clean.
-- [ ] `SpecLinkEntry` has a `source_sha: String` field populated from the source spec's real current SHA during `sync_spec_ledger` (not a placeholder/empty string).
-- [ ] `SpecLinkRepository` port + SQLite + Postgres + Mem adapters; all link writes in the server go through it (SQL table is authoritative).
-- [ ] On startup the in-memory graph is rebuilt from the persisted table via `list_all` — verified by a test that seeds links, drops/recreates the in-memory store from the repo, and asserts the graph is non-empty and identical.
-- [ ] **Restart-durability test (the bug this task kills):** push a manifest with links so they persist; construct a fresh app state (new in-memory store) backed by the same repository/DB; assert the loaded graph contains the links **before any re-push**, and that a staleness/gate query returns the same result it would after a push. This test MUST fail against the current empty-init behavior.
-- [ ] All existing `SpecLinksStore` readers (`api/specs.rs` graph endpoints, `merge_processor.rs`, `spec_link_staleness.rs`, `spec_patrol.rs`, `api/graph.rs`) compile and pass with the new field/persistence.
-- [ ] `SpecLinkEntry` round-trips losslessly through each adapter (SQLite + Postgres + Mem) — verified by an adapter round-trip test including `Option` columns and each `SpecLinkType` variant.
-- [ ] `cargo test --all` passes; `bash scripts/check-arch.sh` passes (no infra deps leak into `gyre-domain`; `SpecLinkEntry` stays where it is unless moved into `gyre-domain` like `SpecLedgerEntry`).
+- [x] `spec_links` migration exists with the **exact 13-column schema** from the spec (incl. `source_sha TEXT NOT NULL`), registered in `schema.rs`; `cargo build --all` runs migrations clean.
+- [x] `SpecLinkEntry` has a `source_sha: String` field populated from the source spec's real current SHA during `sync_spec_ledger` (not a placeholder/empty string).
+- [x] `SpecLinkRepository` port + SQLite + Postgres + Mem adapters; all link writes in the server go through it (SQL table is authoritative).
+- [x] On startup the in-memory graph is rebuilt from the persisted table via `list_all` — verified by a test that seeds links, drops/recreates the in-memory store from the repo, and asserts the graph is non-empty and identical.
+- [x] **Restart-durability test (the bug this task kills):** push a manifest with links so they persist; construct a fresh app state (new in-memory store) backed by the same repository/DB; assert the loaded graph contains the links **before any re-push**, and that a staleness/gate query returns the same result it would after a push. This test MUST fail against the current empty-init behavior.
+- [x] All existing `SpecLinksStore` readers (`api/specs.rs` graph endpoints, `merge_processor.rs`, `spec_link_staleness.rs`, `spec_patrol.rs`, `api/graph.rs`) compile and pass with the new field/persistence.
+- [x] `SpecLinkEntry` round-trips losslessly through each adapter (SQLite + Postgres + Mem) — verified by an adapter round-trip test including `Option` columns and each `SpecLinkType` variant.
+- [x] `cargo test --all` passes; `bash scripts/check-arch.sh` passes (no infra deps leak into `gyre-domain`; `SpecLinkEntry` stays where it is unless moved into `gyre-domain` like `SpecLedgerEntry`).
 
 ## Agent Instructions
 
@@ -101,16 +101,17 @@ graph queries, and the accountability patrol.
 
 ### Production behavior
 
-- Migration `2026-10-08-000059_spec_links` creates the `spec_links` table with
+- Migration `2026-11-08-000061_spec_links` creates the `spec_links` table with
   the spec's 13-column schema (`source_sha TEXT NOT NULL`, `target_sha`
   NOT NULL storing `''` for the `Option::None` unresolved-link case, mapped
   and documented in both SQL adapters), plus indexes on `source_repo_id`,
   `source_path`, and `target_path`; registered in `schema.rs`. Portability
   checked (`check-migration-sql-portability.sh` PASS — runs on both SQLite
-  and PostgreSQL). (Originally `2026-10-08-000056_spec_links`; renumbered
-  to `000059` during the rebase onto fefde294 because the base added its own
-  `2026-10-08-000056_spec_assertion_results` — duplicate Diesel versions
-  silently never run.)
+  and PostgreSQL). Originally `2026-10-08-000056_spec_links`; renumbered to
+  `000059` at the fefde294 rebase (base added `...-000056_spec_assertion_results`)
+  and to `000061` at the cfeefbda rebase (base added
+  `...-000059_spec_lifecycle_configs`) — Diesel silently drops duplicate
+  versions.
 - `SpecLinkEntry` gained `source_sha: String`, populated in `sync_spec_ledger`
   from the source spec's real blob SHA computed at HEAD (reused from
   `manifest_sha_by_path`, never a placeholder). The type lives in
@@ -158,72 +159,91 @@ graph queries, and the accountability patrol.
   PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Rebase repair onto fefde294 (commit 9e91c2c8, this round)
+### Rebase repair onto cfeefbda (merge 61be0a75f + fix 6ab2e89cc, this round)
 
-Resolved the merge of the new assignment base fefde294 into the task branch
-(finding 92d928e9):
+Resolved the merge of the new assignment base cfeefbda into the task branch
+(finding db0d1fe7):
 
-- `api/repos.rs`, `mem.rs`, `middleware.rs`, `lib.rs`: kept both sides — the
-  task-198 spec-link persistence and the base's new spec-assertion-results
-  feature (separate repositories, separate migrations, both wired into
-  `AppState`; repo deletion cleans up both tables).
-- `git_http.rs`: base independently fixed the same fabricated `"default"`
-  workspace fallback in `process_spec_lifecycle` that this branch fixed in
-  its verification-repair round; kept this branch's Option-based
-  skip-and-log form, consistent with the auto-merged `if let Some(ws_id)`
-  emission wrapper.
-- Fabricated-scope exemptions: combined state is the base's 3-entry file
-  (base fixed specs.rs + auth.rs, lowering the frozen count 5→3; this
-  branch's git_http fix is preserved in the merged code).
-- Renamed this branch's migration to `2026-10-08-000059_spec_links` — the
-  base added `2026-10-08-000056_spec_assertion_results`, colliding on Diesel
-  version 20261008000056. `check-migration-versions.sh` now passes.
-- `api/graph.rs` (base's new briefing filter test): added the `source_sha`
-  field the base-side `SpecLinkEntry` literals predate.
-- Renumbered the drifted line-keyed `unnamed-tuple-carrier` exemption entries
-  to post-merge lines (same frozen sites, count unchanged, no additions).
+- Module-list conflicts (`gyre-ports`, `gyre-domain`, `gyre-adapters`
+  sqlite/postgres `mod.rs`): kept both sides — this branch's
+  `spec_link_repo`/`spec_links` modules and the base's new
+  `spec_lifecycle`/`spec_lifecycle_config`/`spec_lifecycle_repo` modules.
+- `git_http.rs` `process_spec_lifecycle`: took the base's newer form
+  (task-104 `emit_spec_changed_audit` with task id, per-push `ws_id`
+  resolution hoisted out of the loop, config-driven `dedup_open_tasks`);
+  this branch never intentionally modified that logic. The branch's
+  task-198 change (the `spec_link_repo` argument to `sync_spec_ledger` in
+  `git_receive_pack`) is preserved.
+- `spec_registry.rs`: kept this branch's removal of the local
+  `SpecLinkType` enum (moved to `gyre-domain::spec_links` and re-exported);
+  verified the base's enum is byte-identical to the old base's, so nothing
+  was lost.
+- `mem.rs`: took the base's `meta_spec_binding_store` wiring and `Mutex`
+  import; this branch's `MemSpecLinkRepository` + `load_spec_links_into_store`
+  boot wiring preserved (auto-merged).
+- `api/repos.rs`: restored the `&state.spec_link_repo` argument the textual
+  merge dropped from the `sync_spec_ledger` call in the manual-sync endpoint
+  (caught by `cargo check --all`).
+- Renamed this branch's migration to `2026-11-08-000061_spec_links` — the
+  base added `2026-10-08-000059_spec_lifecycle_configs`, colliding on Diesel
+  version 20261008000059. `check-migration-versions.sh` passes.
+- Renumbered drifted line-keyed frozen exemptions
+  (`in-memory-state-stores`: spec_registry 194/196 → 196/198;
+  `unnamed-tuple-carriers`: spec_registry 771 → 773, mem 3323 → 3718,
+  git_http 3418 → 4316) — same frozen sites, counts unchanged, no additions;
+  both checks pass again.
 
-Focused probes at HEAD 9e91c2c8, all PASS (records under
-`/tmp/stage/review-evidence`):
+Focused probes at HEAD 6ab2e89cc (logs under `/tmp/stage/review-evidence/
+task-198-rebase-cfeefbd/`):
 
-- `cargo build --all` — clean.
-- `cargo test -p gyre-server --lib` filtered to `spec_registry::`,
-  `spec_link_staleness`, `spec_patrol`, `mem::spec_link`, `git_http::`,
-  `api::graph`, `api::specs` — ok, 232 passed / 0 failed (includes all four
-  section-closing tests, each individually confirmed passing).
-- `cargo test -p gyre-server --lib` filtered to `api::repos`, `mem::tests`,
-  `middleware`, `merge_processor`, `otlp`, `reconciliation`,
-  `explorer_views` — ok, 177 passed / 0 failed.
-- `cargo test -p gyre-adapters --lib` — ok, 387 passed / 0 failed (includes
-  the renamed migration's `migrations_create_tables` and the
-  `sqlite::spec_links` round-trip suite).
-- Full `scripts/check-*.sh` battery compared against a fefde294 worktree:
-  every script either passes in the merged tree or fails with the identical
-  exit code at base (pre-existing upstream debt, verified by running each
-  script with script + code from the same tree). `check-unnamed-tuple-carriers`
-  now passes in the merged tree while it still fails at base (this branch's
-  otlp `ReceiverHandle` fix plus the renumbered entries).
+- `cargo check --all` — clean (full workspace type-checks; gyre-server test
+  compilation is budget-blocked in this sandbox and belongs to the
+  independent verifier).
+- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed
+  (sqlite round-trip every link type + option columns,
+  reopen-durability, replace scoping, repo-scoped delete).
+- Full `scripts/check-*.sh` battery compared against both a cfeefbda
+  worktree and the pre-merge candidate 3030d98 worktree: every script
+  either passes in the merged tree or fails with finding-sets identical to
+  the parents modulo line-number drift (pre-existing upstream debt, no new
+  violations introduced by the merge — verified by set-comparing findings
+  across all three trees). Scripts repaired this round to pass:
+  `check-migration-versions`, `check-migration-sql-portability`,
+  `check-in-memory-state-stores`, `check-unnamed-tuple-carriers`
+  (plus `check-arch`, `check-abac-exempt-handlers`,
+  `check-dead-message-kinds`, `check-mem-port-contracts` confirmed PASS).
+
+### Verifier-owned probes (must run post-merge)
+
+- `cargo test -p gyre-server --lib spec_registry::` — includes the four
+  section-closing tests: `restart_rebuilds_spec_link_graph_from_persisted_table`,
+  `staleness_query_parity_after_restart`,
+  `sync_replaces_links_scoped_to_source_repo`,
+  `sync_clears_durable_rows_when_links_removed_from_manifest`.
+- `cargo test -p gyre-server --lib spec_link_staleness spec_patrol mem::spec_link`
+  and the `migrations_create_tables` adapter test.
+- `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
+  verification per the assignment).
 
 ### Prior repair history (condensed)
 
 - 053d36d8 (verification-repair round, base 110180fb): fixed the verification
-  gate's four findings for real — removed the git_http fabricated-scope
-  exemption by fixing the code (skip + warn), rustfmt/clippy changed-line
-  compliance, replaced the otlp positional tuple with a named
-  `ReceiverHandle` struct, renumbered drifted line-keyed exemptions.
+  gate's findings for real — removed the git_http fabricated-scope exemption
+  by fixing the code (skip + warn), rustfmt/clippy changed-line compliance,
+  replaced the otlp positional tuple with a named `ReceiverHandle` struct.
 - 2736e818: restored the missing `#[tokio::test]` on
   `staleness_query_parity_after_restart` — the section-closing test had been
   dead code.
-- 733ba170: renumbered frozen line-keyed exemptions after line drift and
-  removed an accidental `web/dist` rebuild captured by a pipeline checkpoint.
-- `cargo test --all` (full workspace suite) remains owned by verification
-  and publication per the assignment.
+- 9e91c2c8 (rebase onto fefde294): merged the base's spec-assertion-results
+  feature alongside this branch's persistence; renumbered the migration and
+  drifted exemptions then too.
 
 ### Sandbox/gate notes
 
 - The gyre-server build script re-runs `npm ci && npm run build` whenever
   `web/node_modules` is absent (fresh sandbox), so any full-build gate will
   re-dirty `web/dist`; that rebuild is environmental, not a source change.
-  This round used `SKIP_WEB_BUILD=1` throughout; `web/dist` in the merge
-  commit is exactly the base's committed content plus the task branch's
-  previously committed state, with no rebuild performed.
+  This round used the build wrapper's implicit web build only for
+  `cargo check`; `web/dist` in the merge commit is the base's committed
+  content plus the task branch's previously committed state, with no
+  rebuild performed or committed.
