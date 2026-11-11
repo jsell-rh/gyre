@@ -99,7 +99,7 @@ def implement(execution, task):
     # not require unrelated production edits merely to clear its finding.
     requires_fix = (repair.get('category') in ('review', 'verification', 'ci') and
                     execution.claim['input']['base'] == task['data'].get('candidate_base'))
-    if not contract_changed and (not complete or requires_fix):
+    if not complete or requires_fix:
         path = checkout(execution, result['head'])
         seed = execution.claim['input'].get('candidate') or execution.claim['input']['base']
         execution.command('git', 'fetch', '--quiet', 'origin', seed, cwd=path, timeout=180)
@@ -108,8 +108,9 @@ def implement(execution, task):
                        and not name.startswith(('web/dist/', 'specs/reviews/'))]
         if not substantive:
             from .repair_budget import check
-            check(execution,task,path,result['head'],{'category':'no_source_progress','repair':repair.get('details') or repair.get('detail')})
-            raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
+            check(execution,task,path,result['head'],{'category':'contract','delta':contract_delta} if contract_changed else
+                  {'category':'no_source_progress','repair':repair.get('details') or repair.get('detail')})
+            if not contract_changed:raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
     updates = {'candidate': result['head'], 'candidate_base': result.get('base', execution.claim['input']['base']),
                'branch': result['branch'], 'task_override': result['task_body'],
                'review': None, 'verified': None,

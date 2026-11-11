@@ -162,6 +162,20 @@ class EfficiencyTests(unittest.TestCase):
         self.assertNotEqual(old,fresh)
         self.assertEqual(reconcile_generated(self.store),[])
 
+    def test_repeated_protected_checkbox_edits_without_code_progress_are_bounded(self):
+        from pipeline.stages import implement
+        body='---\ntitle: Test\nspec_ref: behavior.md §One\nprogress: ready-for-review\n---\n## Acceptance Criteria\n- [ ] Real implementation\n'
+        checked=body.replace('- [ ]','- [x]')
+        path=self.repo/'specs/tasks/task-001.md';path.parent.mkdir(parents=True);path.write_text(checked);self.commit('checkbox only')
+        candidate=self.git('rev-parse','HEAD');self.git('remote','add','origin',str(self.repo))
+        self.store.put_task('task-001','g',body,{'candidate':self.head})
+        self.execution.claim['input']={'base':self.base,'candidate':self.head}
+        def result(*args):return {'valid':True,'head':candidate,'base':self.base,'branch':'private','task_body':checked,'agent_exit':0}
+        with patch.object(self.execution,'cloud_step',side_effect=result),patch('pipeline.stages.prompt',return_value='assignment'),patch('pipeline.stages.checkout',return_value=self.repo):
+            for _ in range(2):implement(self.execution,self.store.task('task-001'))
+            with self.assertRaises(Attention) as error:implement(self.execution,self.store.task('task-001'))
+        self.assertEqual(error.exception.category,'repair_stalled')
+
     def test_review_defers_only_generated_findings_and_still_blocks_real_source_defects(self):
         from pipeline.stages import review
         body='---\ntitle: Test\nspec_ref: behavior.md §One\nprogress: ready-for-review\n---\n## Acceptance\nReal code.\n'
