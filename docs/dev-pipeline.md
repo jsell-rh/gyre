@@ -720,3 +720,8 @@ local ledger to disable exchange.
 Read measured compute occupancy, merge throughput, observation wakeups and cache
 use with `python3 scripts/dev-efficiency.py --hours 24`. Worker minutes include
 provisioning/transport waits; they are not CPU utilization measurements.
+
+Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
+resolving distro packages for every job. Download retries remain bounded and a
+checksum mismatch fails setup; linker availability and all build/test gates are
+still required.

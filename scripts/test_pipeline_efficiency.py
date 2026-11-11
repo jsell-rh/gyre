@@ -89,6 +89,13 @@ class EfficiencyTests(unittest.TestCase):
         archive.write_bytes(archive.read_bytes()+b'corrupt')
         with self.assertRaises(ValueError):remote.restore(archive,value['sha256'],dst)
 
+    def test_cache_export_is_downloadable_inside_the_gateway_workspace(self):
+        stage=self.root/'stage';stage.mkdir()
+        with patch.object(remote.subprocess,'run'),patch.object(remote,'pack',return_value={'bytes':1}) as pack:
+            value=remote.export(self.repo,{},stage,{'key':'k'})
+        pack.assert_called_once_with(self.repo.parent/'.gyre-build-cache.tar.gz')
+        self.assertEqual(value['export']['bytes'],1)
+
     def test_cache_rejects_links_traversal_and_decompression_bombs(self):
         for name,kind,size in [('../escape',tarfile.REGTYPE,1),('target/link',tarfile.SYMTYPE,0),('target/huge',tarfile.REGTYPE,5)]:
             with self.subTest(name=name):
