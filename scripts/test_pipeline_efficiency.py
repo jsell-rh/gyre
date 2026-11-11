@@ -81,6 +81,7 @@ class EfficiencyTests(unittest.TestCase):
     def test_real_archive_round_trip_excludes_secrets_and_rejects_corruption(self):
         src=self.root/'cache';(src/'target/debug/deps').mkdir(parents=True)
         (src/'target/debug/deps/libdep.rlib').write_bytes(b'compiled dependency'*100)
+        os.link(src/'target/debug/deps/libdep.rlib',src/'target/debug/deps/duplicate.rlib')
         (src/'cargo').mkdir();(src/'cargo/credentials.toml').write_text('must never export')
         archive=self.root/'cache.tar.gz';value=remote.pack(archive,src)
         dst=self.root/'restored';remote.restore(archive,value['sha256'],dst)

@@ -72,7 +72,7 @@ def pack(destination, root=ROOT):
     if not files:return None
     if shutil.disk_usage(destination.parent).free<min(size,MAX_ARCHIVE)+1024**3:raise ValueError('insufficient cache export disk')
     try:
-        with tarfile.open(destination,'w:gz',compresslevel=1) as tar:
+        with tarfile.open(destination,'w:gz',compresslevel=1,dereference=True) as tar:
             for path in files:
                 tar.add(path,arcname=str(path.relative_to(root)),recursive=False)
                 if destination.stat().st_size>MAX_ARCHIVE:raise ValueError('compressed cache exceeds budget')
