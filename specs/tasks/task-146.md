@@ -77,11 +77,11 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [x] AnalyticsEvent struct matches spec schema (all fields present)
-- [x] All 12 auto-emitted events are recorded at their trigger points
-- [x] Each event includes all spec-required properties
-- [x] Query API supports all spec-required filter parameters
-- [x] Tests pass for each auto-emitted event
+- [ ] AnalyticsEvent struct matches spec schema (all fields present)
+- [ ] All 12 auto-emitted events are recorded at their trigger points
+- [ ] Each event includes all spec-required properties
+- [ ] Query API supports all spec-required filter parameters
+- [ ] Tests pass for each auto-emitted event
 
 ## Agent Instructions
 
@@ -157,28 +157,33 @@ base's new `QualityGate.validation_type` field (migration
 setting `validation_type: None` like every other test literal
 (02b8c9073).
 
+### Contract-repair round (repair 2844c8be45d24eaba689edd5e8be265c)
+
+The executor restored the assigned task document over the checkpoint
+(acceptance checkboxes and frontmatter reset). No product-source change
+was needed: the production fix above is preserved intact at the assigned
+head, and this round only re-verified the merged tree and restored the
+bookkeeping (progress, commits list, these Shipped notes) without
+altering the protected contract text. Evidence:
+/tmp/stage/review-evidence/contract-repair-2844c8be-verification.md.
+
 ### Test evidence
 
-- In-sandbox (this round, merged tree): `cargo check -p gyre-server` and
-  `cargo check -p gyre-server --tests` clean; `cargo test -p
-  gyre-domain --lib analytics` 3 passed; `cargo test -p gyre-adapters
+- This round (merged tree at head 6c0a0aa23): `cargo check -p
+  gyre-server` and `cargo check -p gyre-server --tests` clean; `cargo
+  test -p gyre-domain --lib analytics` 3 passed (incl.
+  `analytics_event_matches_spec_schema`); `cargo test -p gyre-adapters
   --lib sqlite::analytics` 13 passed (incl.
   `analytics_query_filtered_all_params`); `cargo test -p gyre-adapters
   --lib migration` 7 passed (incl.
-  `no_duplicate_migration_version_prefixes`); arch, migration-versions,
-  migration-portability, ABAC registry + exempt handlers,
-  mcp-write-tools, dead-message-kinds, byte-slice, mem-port-contracts,
-  inert-enforcement, scope-literal, fail-open-ref, lossy-secret,
-  forwarded-header, in-memory-state, unbounded-external-http,
-  forged-scope, fabricated-scope, event-payload, relative-path,
-  cli-parity, abac-context-parity, api-auth, tenant-filter* checks exit
-  0. (*`check-event-emission-coverage.sh` and
-  `check-tenant-filter.sh` need gawk's three-arg `match()`; this sandbox
-  has mawk only — both scripts are byte-identical to the base, so run
-  them in CI/gawk environments.)
+  `no_duplicate_migration_version_prefixes`); arch,
+  migration-versions, migration-portability, and fabricated-scope
+  checks exit 0. `check-task-commit-attribution.sh` passes once the
+  restored commits list is in place (it flags the executor-restored
+  `commits: []` frontmatter, not a source defect).
 - Verifier-owned (4 GiB budget — recorded in
-  /tmp/stage/review-evidence/rebase-1887db69-verification.md): `cargo
-  test -p gyre-server --lib analytics`, `--lib search`, `--test
+  /tmp/stage/review-evidence/contract-repair-2844c8be-verification.md):
+  `cargo test -p gyre-server --lib analytics`, `--lib search`, `--test
   api_integration`, `--test search_wiring`; full workspace suite,
   all-target clippy, fmt, and GitHub CI.
 - Prior rounds' full local evidence (mutation-verified adapter filters,
