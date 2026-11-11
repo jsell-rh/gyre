@@ -88,18 +88,18 @@ From §5 (Agent Prompt Structure): Describes the three-section prompt assembly (
 
 ## Acceptance Criteria
 
-- [x] Budget cascade validated: repo ≤ workspace ≤ tenant
-- [x] max_agents validated: repo ≤ workspace max_agents_per_repo
-- [x] Usage aggregated per repo, rolled up to workspace
-- [x] 80% threshold: BudgetWarning notification created
-- [x] 100% threshold: BudgetExhausted messages + 60s grace + kill
-- [x] Beyond-limit: immediate kill
-- [x] Compute minutes tracked (spawn-to-complete wall clock)
-- [x] User-initiated LLM queries charged to workspace
-- [x] Budget reset job clears expired entries on rolling 24h window
-- [x] Agent prompt structure follows three-section model
-- [x] MCP prompts deliver assembled content
-- [x] `cargo test --all` passes
+- [ ] Budget cascade validated: repo ≤ workspace ≤ tenant
+- [ ] max_agents validated: repo ≤ workspace max_agents_per_repo
+- [ ] Usage aggregated per repo, rolled up to workspace
+- [ ] 80% threshold: BudgetWarning notification created
+- [ ] 100% threshold: BudgetExhausted messages + 60s grace + kill
+- [ ] Beyond-limit: immediate kill
+- [ ] Compute minutes tracked (spawn-to-complete wall clock)
+- [ ] User-initiated LLM queries charged to workspace
+- [ ] Budget reset job clears expired entries on rolling 24h window
+- [ ] Agent prompt structure follows three-section model
+- [ ] MCP prompts deliver assembled content
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -107,11 +107,18 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 
 ## Shipped
 
-agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt Structure)
-implemented in production code — no stubs, no audit-only paths. Commit
-4bfdf85b8 shipped the cascade, enforcement levels, tracking, reset, and
-prompt structure; commit 7bdc60603 repaired the four review findings
-(F1–F4) from the first review round.
+agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
+Structure) implemented in production code — no stubs, no audit-only
+paths. Commit 4bfdf85b8 shipped the cascade, enforcement levels,
+tracking, reset, and prompt structure; commit 7bdc60603 repaired the
+four review findings (F1–F4) from the first review round. This round
+(contract repair d933e376) made no code change: the working tree is
+byte-identical to the reviewed candidate 1b2b8456 for every path under
+crates/, web/, scripts/, specs/system/, and specs/coverage/ (verified:
+`git diff 1b2b8456 --stat -- crates/ web/ scripts/ specs/system/
+specs/coverage/` is empty); only this task document was restored to
+the assigned contract text (acceptance criteria left as assigned,
+unchecked) with progress notes consolidated under this heading.
 
 ### Cascade (repo ≤ workspace ≤ tenant)
 
@@ -224,8 +231,8 @@ prompt structure; commit 7bdc60603 repaired the four review findings
 
 The sandbox cannot build gyre-server tests (4 GiB limit — `cargo test -p
  gyre-server` is blocked by the build wrapper; `cargo check -p gyre-server
- --tests` passed clean, zero warnings). The independent verifier must
-run:
+ --tests` passed clean, zero warnings, on this exact code). The
+independent verifier must run:
 
 - `cargo test -p gyre-server --lib api::budget` — the full budget suite
   incl. the new/updated tests: `repo_concurrent_budget_override_blocks_spawns`,
