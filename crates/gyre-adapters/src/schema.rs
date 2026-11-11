@@ -70,6 +70,7 @@ diesel::table! {
         task_type -> Nullable<Text>,
         order -> Nullable<Integer>,
         depends_on -> Text,
+        generation -> Integer,
     }
 }
 
