@@ -687,7 +687,9 @@ shipping a formatting-only checkpoint or inventing a new delivery.
 
 CI observation examines exact-head terminal workflow jobs and the failed step.
 Transport failures in recognized setup steps, with an unchanged workflow, retry
-that same head with exponential backoff (60 seconds to 30 minutes). Each workflow
+that same head with exponential backoff (60 seconds to 30 minutes). If main has
+updated the failing setup inputs, retain review and reverify against that base
+without another coding assignment. Each workflow
 attempt is rerun at most once; six rerun rounds require attention. Product-test
 failures and mixed failures still become implementation findings. Priority-only
 observation during repair polls every ten minutes, without allocating a sandbox.

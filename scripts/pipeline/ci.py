@@ -235,7 +235,7 @@ def recover_setup_handoff(execution,task,receipt,observation):
     retained for normal review. Only the unchanged published head can recover
     its actual recorded independent approval and verification.
     """
-    if observation['status'] not in ('infrastructure','passed','policy_pending'):return False
+    if observation['status'] not in ('infrastructure','passed','policy_pending','environment_refresh'):return False
     data=task['data'];repair=data.get('repair') or {}
     if (repair.get('category')!='ci' or repair.get('source')!=receipt['head']
             or data.get('candidate')!=receipt['head'] or not receipt.get('passed')):return False

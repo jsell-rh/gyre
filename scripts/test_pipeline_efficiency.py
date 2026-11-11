@@ -205,12 +205,13 @@ class EfficiencyTests(unittest.TestCase):
         result=metrics.report(self.store.db,hours=1,now=now)
         self.assertEqual(sum(result['compute_worker_minutes'].values()),0)
 
-    def setup_result(self, *, product=False, changed=False, stale=False, mixed=False, unknown=False):
+    def setup_result(self, *, product=False, changed=False, stale=False, mixed=False, unknown=False, refresh=False):
         checks=[{'name':'Test','detailsUrl':'https://github.com/x/y/actions/runs/10/job/100'}]
         if mixed:checks.append({'name':'Other','detailsUrl':'https://github.com/x/y/actions/runs/10/job/101'})
         def run(*args,**kwargs):
             url=args[2]
-            if '/contents/' in url:value={'type':'file','sha':('d' if changed and self.head in url else 'c')*40}
+            if '/git/ref/' in url:value={'object':{'sha':'f'*40 if refresh else self.base}}
+            elif '/contents/' in url:value={'type':'file','sha':('d' if changed and self.head in url or refresh and 'f'*40 in url else 'c')*40}
             elif '/jobs/' in url:value={'id':int(url.rsplit('/',1)[1]),'run_id':10,'name':'Other' if url.endswith('101') else 'Test','head_sha':self.base if stale else self.head,'status':'completed','conclusion':'failure','run_attempt':1,'steps':[{'name':'Run tests' if product or url.endswith('101') else 'Install mold linker','conclusion':'failure','started_at':'2026-11-11T10:00:00Z','completed_at':'2026-11-11T10:01:00Z'}]}
             else:value={'id':10,'head_sha':self.head,'status':'completed','conclusion':'failure','run_attempt':1,'path':'.github/workflows/ci.yml'}
             return subprocess.CompletedProcess(args,0,json.dumps(value),'')
@@ -219,6 +220,9 @@ class EfficiencyTests(unittest.TestCase):
     def test_real_dns_setup_signature_is_infrastructure_but_product_and_changed_inputs_are_not(self):
         self.assertEqual(self.setup_result()['status'],'infrastructure')
         self.assertEqual(self.setup_result(unknown=True)['status'],'infrastructure')
+        refreshed=self.setup_result(refresh=True)
+        self.assertEqual(refreshed['status'],'environment_refresh')
+        self.assertEqual(refreshed['target_base'],'f'*40)
         for kwargs in ({'product':True},{'changed':True},{'mixed':True}):self.assertIsNone(self.setup_result(**kwargs))
         with self.assertRaisesRegex(RuntimeError,'evidence changed'):self.setup_result(stale=True)
 

@@ -174,7 +174,25 @@ def transient_setup_failure(run, repo, head, base, failed, logs):
                 inputs.append(input_cache[key])
             if inputs[0]!=inputs[1]:return None
         evidence.append({'run':ident,'attempt':job['run_attempt'],'job':job_id,'steps':steps})
-    return {'status':'infrastructure','infrastructure_evidence':evidence,'detail':'Transient setup transport failure; retry the same head, without implementation.'}
+    original={path:value for (path,ref),value in input_cache.items() if ref==head}
+    main=json.loads(run('gh','api',f'repos/{repo}/git/ref/heads/main',timeout=30).stdout).get('object',{}).get('sha','')
+    if not re.fullmatch(r'[a-f0-9]{40}',main):raise RuntimeError('Cannot establish upstream CI setup identity')
+    changed=False
+    for path,sha in original.items():
+        key=(path,main)
+        if key not in input_cache:
+            response=run('gh','api',f'repos/{repo}/contents/{path}?ref={main}',timeout=30,check=False)
+            value=json.loads(response.stdout)
+            if str(value.get('status'))=='404':input_cache[key]=None
+            elif response.returncode or value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):
+                raise RuntimeError('Cannot establish upstream setup inputs')
+            else:input_cache[key]=value['sha']
+        changed=changed or input_cache[key]!=sha
+    result={'status':'infrastructure','infrastructure_evidence':evidence,'detail':'Transient setup transport failure; retry the same head, without implementation.'}
+    if changed:
+        result.update(status='environment_refresh',target_base=main,
+            failure_signature=hashlib.sha256(json.dumps(['setup-transport',original],sort_keys=True).encode()).hexdigest())
+    return result
 
 
 def observe(run, url, head, base, directory):
