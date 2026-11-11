@@ -35,6 +35,24 @@ pub struct SpecAssistRequest {
     pub draft_content: Option<String>,
 }
 
+/// Request body for POST /api/v1/workspaces/:id/meta-specs/assist — the
+/// workspace-scoped LLM assist for the §9 meta-spec preview loop's State 1
+/// chat (ui-layout.md §9). No repo or spec file is involved; the effective
+/// content is the caller's in-editor draft (or the stored registry prompt
+/// when only `meta_spec_id` is given).
+#[derive(Deserialize)]
+pub struct MetaSpecAssistRequest {
+    pub instruction: String,
+    /// The in-editor draft of the meta-spec prompt; overrides the stored
+    /// registry prompt when present.
+    #[serde(default)]
+    pub draft_content: Option<String>,
+    /// Registry id of the meta-spec being edited. Used to load the stored
+    /// prompt (when no draft is given) and to scope-check the target.
+    #[serde(default)]
+    pub meta_spec_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct SpecSaveRequest {
     pub spec_path: String,
@@ -480,12 +498,177 @@ pub async fn assist_spec(
         );
     }
 
-    // Build SSE events: partial events stream the explanation progressively,
-    // complete event carries the full {diff, explanation} response.
+    Ok(assist_sse_response(assist_sse_events(&full_text)))
+}
+
+/// POST /api/v1/workspaces/:id/meta-specs/assist
+///
+/// Workspace-scoped LLM assist for the §9 meta-spec preview loop's State 1
+/// chat (ui-layout.md §9): the persona/principle editor's chat input calls
+/// this endpoint with the in-editor draft, and the response uses the same
+/// SSE `{diff, explanation}` protocol as the repo-scoped specs/assist so the
+/// editor renders the same inline Accept/Edit/Dismiss suggestion blocks.
+///
+/// Unlike the repo-scoped route there is no repo or spec file: the effective
+/// content is the caller's `draft_content`, falling back to the stored
+/// registry prompt when only `meta_spec_id` is given. Rate limiting and
+/// budget accounting are keyed to the workspace.
+///
+/// ABAC: resource_type "meta_spec", action "generate" (same action as the
+/// repo-scoped specs/assist).
+pub async fn assist_meta_spec(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    caller: AuthenticatedAgent,
+    Json(req): Json<MetaSpecAssistRequest>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
+    let ws_id = Id::new(&workspace_id);
+    let ws = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s —
+    // same limits as the repo-scoped assist, keyed to the workspace.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &workspace_id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
+
+    // Require LLM to be configured.
+    let factory = state
+        .llm
+        .as_ref()
+        .ok_or(super::error::ApiError::LlmUnavailable)?;
+
+    // Resolve the meta-spec target: registry entry (when an id is given) plus
+    // the effective content (draft overrides the stored prompt). A
+    // Workspace-scoped meta-spec from another workspace is a cross-scope
+    // access, not a miss — reject it as Forbidden rather than leaking its
+    // existence via a different error shape.
+    let (meta_kind, meta_name, published_prompt) = match req.meta_spec_id.as_deref() {
+        Some(id) => {
+            let ms = state
+                .meta_specs
+                .get_by_id(&Id::new(id))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("meta-spec {id} not found")))?;
+            if ms.scope == gyre_domain::MetaSpecScope::Workspace
+                && ms.scope_id.as_deref() != Some(workspace_id.as_str())
+            {
+                return Err(ApiError::Forbidden(format!(
+                    "meta-spec {id} does not belong to workspace {workspace_id}"
+                )));
+            }
+            (ms.kind.as_str().to_string(), ms.name.clone(), Some(ms.prompt))
+        }
+        None => ("meta-spec".to_string(), "draft".to_string(), None),
+    };
+
+    let spec_content = req
+        .draft_content
+        .clone()
+        .or(published_prompt)
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "draft_content or meta_spec_id is required for meta-spec assist".to_string(),
+            )
+        })?;
+
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&ws_id, "meta-specs-assist")
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_META_SPECS_ASSIST.to_string());
+
+    let system_prompt = template_content
+        .replace("{{meta_spec_kind}}", &meta_kind)
+        .replace("{{meta_spec_name}}", &meta_name)
+        .replace("{{meta_spec_content}}", &spec_content)
+        .replace("{{instruction}}", &req.instruction);
+    let user_prompt = format!("Instruction: {}", req.instruction);
+
+    // Resolve model and call streaming LLM.
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &ws_id, "meta-specs-assist").await;
+    let llm_stream = factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let full_text = chunks.join("");
+
+    // Budget tracking: charge the workspace for LLM usage (same estimate as
+    // the repo-scoped assist — ~4 chars per token plus response overhead and
+    // a 3x reasoning multiplier), split into input/output for the per-call
+    // budget record.
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        base_estimate,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record meta-specs/assist cost entry: {e}");
+    }
+
+    super::budget::record_llm_call_usage(
+        &state,
+        &super::budget::LlmCallUsage {
+            tenant_id: ws.tenant_id.clone(),
+            workspace_id: ws.id.clone(),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: estimated_input as u64,
+            output_tokens: (base_estimate - estimated_input as f64) as u64,
+            cost_usd: 0.0,
+            model: model.clone(),
+        },
+    )
+    .await;
+
+    Ok(assist_sse_response(assist_sse_events(&full_text)))
+}
+
+// ── Shared SSE protocol ───────────────────────────────────────────────────────
+
+/// Build the SSE event list for an LLM assist response.
+///
+/// Shared by the repo-scoped spec assist (`POST /repos/:id/specs/assist`) and
+/// the workspace-scoped meta-spec assist (`POST /workspaces/:id/meta-specs/assist`)
+/// so both surfaces emit the identical wire protocol the editor's SSE parser
+/// consumes: `partial` events streaming the explanation progressively, a final
+/// `complete` event carrying `{diff, explanation}`, or an `error` event when the
+/// LLM output is not valid `{diff, explanation}` JSON with well-formed ops.
+fn assist_sse_events(full_text: &str) -> Vec<Result<Event, std::convert::Infallible>> {
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
 
     // Try to parse the LLM response as the spec-required {diff, explanation} JSON.
-    match serde_json::from_str::<serde_json::Value>(&full_text) {
+    match serde_json::from_str::<serde_json::Value>(full_text) {
         Ok(parsed) if parsed.get("diff").is_some() && parsed.get("explanation").is_some() => {
             // Valid response — stream explanation as partial events.
             let explanation = parsed["explanation"].as_str().unwrap_or("");
@@ -551,12 +734,19 @@ pub async fn assist_spec(
         }
     }
 
+    events
+}
+
+/// Wrap pre-built assist SSE events in a keep-alive SSE response.
+fn assist_sse_response(
+    events: Vec<Result<Event, std::convert::Infallible>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let s = stream::iter(events);
-    Ok(Sse::new(s).keep_alive(
+    Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    ))
+    )
 }
 
 /// POST /api/v1/repos/:id/specs/save
@@ -1758,5 +1948,414 @@ mod tests {
                 "submitted lines should appear as add ops in the persisted diff"
             );
         }
+    }
+
+    // ── POST /workspaces/:id/meta-specs/assist (§9 State 1 chat) ──────────
+
+    /// App with a fixed-response mock LLM, returning the state so tests can
+    /// seed meta-specs directly.
+    fn app_with_llm_response_and_state(
+        response: &str,
+    ) -> (Router, std::sync::Arc<crate::AppState>) {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
+        }));
+        let state = Arc::new(s);
+        (crate::api::api_router().with_state(state.clone()), state)
+    }
+
+    async fn create_workspace(app: &Router, slug: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": slug,
+                            "slug": slug,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        json["id"].as_str().unwrap().to_string()
+    }
+
+    async fn seed_meta_spec(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        name: &str,
+        scope: gyre_domain::MetaSpecScope,
+        scope_id: Option<String>,
+        prompt: &str,
+    ) {
+        let ms = gyre_domain::MetaSpec {
+            id: Id::new(id),
+            kind: gyre_domain::MetaSpecKind::Persona,
+            name: name.to_string(),
+            scope,
+            scope_id,
+            prompt: prompt.to_string(),
+            version: 1,
+            content_hash: "h1".to_string(),
+            required: false,
+            approval_status: gyre_domain::MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_content_hash: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.meta_specs.create(&ms).await.expect("seed meta-spec");
+    }
+
+    async fn post_meta_spec_assist(
+        app: &Router,
+        workspace_id: &str,
+        body: &serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}/meta-specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_unknown_workspace_returns_404() {
+        let app = app();
+        let resp = post_meta_spec_assist(
+            &app,
+            "no-such-ws",
+            &serde_json::json!({
+                "instruction": "Make error handling more defensive",
+                "draft_content": "You are a backend developer…",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_requires_draft_or_meta_spec_id() {
+        let app = app();
+        let ws = create_workspace(&app, "ms-assist-req").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({ "instruction": "improve the prompt" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_unknown_meta_spec_returns_404() {
+        let app = app();
+        let ws = create_workspace(&app, "ms-assist-unknown-ms").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "no-such-ms",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_rejects_meta_spec_from_another_workspace() {
+        let (app, state) =
+            app_with_llm_response_and_state("{}");
+        let ws_a = create_workspace(&app, "ms-assist-ws-a").await;
+        let ws_b = create_workspace(&app, "ms-assist-ws-b").await;
+        seed_meta_spec(
+            &state,
+            "ms-foreign",
+            "foreign-persona",
+            gyre_domain::MetaSpecScope::Workspace,
+            Some(ws_a),
+            "You are a backend developer.",
+        )
+        .await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws_b,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "ms-foreign",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_with_draft_streams_sse_complete() {
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "add", "path": "## Error Handling", "content": "Handle all errors with Result<T, E>."}
+            ],
+            "explanation": "Added defensive error handling to the persona."
+        });
+        let (app, _state) =
+            app_with_llm_response_and_state(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-draft").await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "Make error handling more defensive",
+                "draft_content": "You are a backend developer…",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        let partial_events: Vec<_> = events.iter().filter(|(t, _)| t == "partial").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert!(
+            !partial_events.is_empty(),
+            "should have partial events for explanation"
+        );
+        assert_eq!(complete_events.len(), 1, "exactly one complete event");
+        let complete_data: serde_json::Value =
+            serde_json::from_str(&complete_events[0].1).unwrap();
+        let diff = complete_data["diff"].as_array().unwrap();
+        assert_eq!(diff[0]["op"], "add");
+        assert_eq!(
+            complete_data["explanation"].as_str().unwrap(),
+            "Added defensive error handling to the persona."
+        );
+    }
+
+    /// Test LLM factory that records every `stream_complete` system prompt
+    /// and returns a fixed valid `{diff, explanation}` response — lets tests
+    /// assert WHAT the LLM was actually given (stored prompt vs draft), not
+    /// just that the call succeeded.
+    struct RecordingLlmFactory {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        response: String,
+    }
+
+    struct RecordingLlmPort {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::LlmPort for RecordingLlmPort {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+        async fn predict_json(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            serde_json::from_str(&self.response)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
+        }
+        async fn stream_complete(
+            &self,
+            system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>,
+            >,
+        > {
+            self.prompts.lock().unwrap().push(system_prompt.to_string());
+            let text = self.response.clone();
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(text)])))
+        }
+        async fn complete_with_tools(
+            &self,
+            _system_prompt: &str,
+            _messages: &[gyre_ports::ConversationMessage],
+            _tools: &[gyre_ports::ToolDefinition],
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<gyre_ports::ToolCallingResponse> {
+            Ok(gyre_ports::ToolCallingResponse {
+                text: self.response.clone(),
+                tool_calls: vec![],
+                stop_reason: "end_turn".to_string(),
+            })
+        }
+    }
+
+    impl gyre_ports::LlmPortFactory for RecordingLlmFactory {
+        fn for_model(&self, _model_name: &str) -> Arc<dyn gyre_ports::LlmPort> {
+            Arc::new(RecordingLlmPort {
+                prompts: self.prompts.clone(),
+                response: self.response.clone(),
+            })
+        }
+    }
+
+    fn app_with_recording_llm(
+        response: &str,
+    ) -> (Router, std::sync::Arc<crate::AppState>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut s = (*crate::mem::test_state()).clone();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        s.llm = Some(Arc::new(RecordingLlmFactory {
+            prompts: prompts.clone(),
+            response: response.to_string(),
+        }));
+        let state = Arc::new(s);
+        (
+            crate::api::api_router().with_state(state.clone()),
+            state,
+            prompts,
+        )
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_loads_published_prompt_when_no_draft() {
+        // With only meta_spec_id, the LLM must receive the STORED registry
+        // prompt — asserted from the recorded system prompt, so a regression
+        // that drops the lookup (empty content) or swaps draft/published
+        // precedence fails here.
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "replace", "path": "## Overview", "content": "Tightened persona."}
+            ],
+            "explanation": "Tightened the persona."
+        });
+        let (app, state, prompts) =
+            app_with_recording_llm(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-published").await;
+        seed_meta_spec(
+            &state,
+            "ms-global-1",
+            "backend-dev",
+            gyre_domain::MetaSpecScope::Global,
+            None,
+            "You are a backend developer who writes defensive code.",
+        )
+        .await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "Tighten the persona",
+                "meta_spec_id": "ms-global-1",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        assert!(
+            events.iter().any(|(t, _)| t == "complete"),
+            "stored-prompt assist should stream a complete event"
+        );
+
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "exactly one LLM call");
+        let sys = &prompts[0];
+        assert!(
+            sys.contains("You are a backend developer who writes defensive code."),
+            "system prompt must carry the stored registry prompt"
+        );
+        assert!(
+            sys.contains("backend-dev"),
+            "system prompt must name the meta-spec"
+        );
+        assert!(
+            sys.contains("meta:persona"),
+            "system prompt must carry the meta-spec kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_draft_overrides_published_prompt() {
+        // draft_content must take precedence over the stored prompt — the
+        // human is editing a draft in the §9 State 1 editor.
+        let valid_response = serde_json::json!({
+            "diff": [],
+            "explanation": "no-op"
+        });
+        let (app, state, prompts) =
+            app_with_recording_llm(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-draft-override").await;
+        seed_meta_spec(
+            &state,
+            "ms-global-2",
+            "backend-dev",
+            gyre_domain::MetaSpecScope::Global,
+            None,
+            "STORED PROMPT MARKER",
+        )
+        .await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "ms-global-2",
+                "draft_content": "DRAFT PROMPT MARKER",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("DRAFT PROMPT MARKER"),
+            "draft_content must be the effective content"
+        );
+        assert!(
+            !prompts[0].contains("STORED PROMPT MARKER"),
+            "stored prompt must not leak into the prompt when a draft is given"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+        let ws = create_workspace(&app, "ms-assist-503").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "draft_content": "You are a backend developer.",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

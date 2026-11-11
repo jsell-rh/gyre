@@ -100,7 +100,7 @@ vi.mock('../lib/api.js', () => ({
     previewPersonaStatus: vi.fn().mockRejectedValue(new Error('Not implemented')),
     publishPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     specsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
-    specsAssistGlobal: vi.fn().mockRejectedValue(new Error('Not available')),
+    metaSpecsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ predictions: [] }),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 1 }),

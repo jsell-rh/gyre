@@ -660,10 +660,19 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
-  // Server does not have POST /specs/assist — only POST /repos/:id/specs/assist.
-  // Return a failed Response so callers fall through gracefully.
-  specsAssistGlobal: (_body) =>
-    Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
+  // Workspace-scoped meta-spec assist (ui-layout.md §9 State 1 chat): same
+  // SSE {diff, explanation} protocol as specsAssist, but no repo — the
+  // effective content is the in-editor draft (or the stored registry prompt
+  // when only meta_spec_id is given).
+  metaSpecsAssist: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/meta-specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Spec save with optimistic-concurrency conflict handling (HSI §7).
   // On 409 (stale base_sha), resolves to { conflict: <body> } instead of
   // throwing, so callers can render the conflict resolution dialog.

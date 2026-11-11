@@ -251,6 +251,16 @@
   );
 
   /**
+   * Whether the §3/§9 LLM chat is usable: the repo-scoped specs/assist in
+   * the spec context (needs a repo), or the workspace-scoped
+   * meta-specs/assist in the §9 meta-spec context (needs a workspace —
+   * the MetaSpecs workspace view always provides one).
+   */
+  const llmChatEnabled = $derived(
+    Boolean(repoId || (context === 'meta-spec' && workspaceId)),
+  );
+
+  /**
    * Start the thorough preview: the server commits the draft to a throwaway
    * branch, agents implement, and the resulting graph delta + code diff are
    * reported (ui-layout.md §2 Editor Split right panel).
@@ -477,7 +487,7 @@
 
   async function sendLlmInstruction() {
     if (!llmInstruction.trim() || llmStreaming) return;
-    if (!repoId) return;
+    if (!llmChatEnabled) return;
     const instruction = llmInstruction.trim();
     llmInstruction = '';
     llmStreaming = true;
@@ -485,11 +495,21 @@
     llmSuggestion = null;
 
     try {
-      const resp = await api.specsAssist(repoId, {
-        spec_path: specPath,
-        instruction,
-        draft_content: content || undefined,
-      });
+      // Repo context: repo-scoped specs/assist. §9 meta-spec context
+      // (no repo): workspace-scoped meta-specs/assist against the in-editor
+      // draft — same SSE {diff, explanation} wire protocol, so the shared
+      // parser and Accept/Edit/Dismiss suggestion blocks work unchanged.
+      const resp = repoId
+        ? await api.specsAssist(repoId, {
+            spec_path: specPath,
+            instruction,
+            draft_content: content || undefined,
+          })
+        : await api.metaSpecsAssist(workspaceId, {
+            instruction,
+            draft_content: content || undefined,
+            meta_spec_id: specPath || undefined,
+          });
       if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
 
       const reader = resp.body?.getReader();
@@ -901,7 +921,7 @@
             bind:value={llmInstruction}
             placeholder={$t('editor_split.llm_placeholder')}
             rows="2"
-            disabled={llmStreaming || !repoId}
+            disabled={llmStreaming || !llmChatEnabled}
             onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
             aria-label={$t('editor_split.llm_instruction')}
             data-testid="llm-input"
@@ -909,7 +929,7 @@
           <button
             class="llm-send"
             onclick={sendLlmInstruction}
-            disabled={!llmInstruction.trim() || llmStreaming || !repoId}
+            disabled={!llmInstruction.trim() || llmStreaming || !llmChatEnabled}
             aria-label={$t('editor_split.send_to_llm')}
             aria-busy={llmStreaming}
             data-testid="llm-send-btn"
@@ -926,7 +946,7 @@
             <span class="sr-only">{$t('editor_split.send')}</span>
           </button>
         </div>
-        {#if !repoId}
+        {#if !llmChatEnabled}
           <p class="llm-hint warn">{$t('editor_split.llm_requires_repo')}</p>
         {:else}
           <p class="llm-hint">{$t('editor_split.llm_hint')}</p>

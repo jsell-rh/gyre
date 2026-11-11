@@ -441,6 +441,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(specs_assist::assist_spec),
         )
         .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
+        )
+        .route(
             "/api/v1/repos/:id/specs/save",
             post(specs_assist::save_spec),
         )

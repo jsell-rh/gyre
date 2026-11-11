@@ -929,7 +929,7 @@
     "llm_instruction": "LLM instruction",
     "send_to_llm": "Send to LLM",
     "send": "Send",
-    "llm_requires_repo": "LLM editing requires repo context.",
+    "llm_requires_repo": "LLM editing requires repo or workspace context.",
     "llm_hint": "Ctrl+Enter · Produces draft suggestions — accept to apply",
     "architecture_preview": "Architecture Preview",
     "loading_graph": "Loading graph…",

@@ -14,6 +14,7 @@ vi.mock('../lib/api.js', () => ({
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsAssist: vi.fn(),
+    metaSpecsAssist: vi.fn(),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 42 }),
     workspacePresence: vi.fn().mockResolvedValue([]),
     thoroughPreview: vi.fn(),
@@ -129,12 +130,74 @@ describe('EditorSplit', () => {
 
   it('shows LLM hint warning when no repoId', () => {
     render(EditorSplit, { props: { content: '', repoId: null } });
-    expect(document.body.textContent).toContain('LLM editing requires repo context');
+    expect(document.body.textContent).toContain('LLM editing requires repo or workspace context');
   });
 
   it('shows ctrl+enter hint when repoId is set', () => {
     render(EditorSplit, { props: { content: '', repoId: 'repo-1' } });
     expect(document.body.textContent).toContain('Ctrl+Enter');
+  });
+
+  // ── §9 meta-spec context: workspace-scoped LLM chat ─────────────────────
+
+  it('enables the LLM chat in meta-spec context with a workspace and no repo', () => {
+    render(EditorSplit, {
+      props: { content: '', repoId: null, context: 'meta-spec', workspaceId: 'ws-1', specPath: 'ms-1' },
+    });
+    // Production §9 surface: MetaSpecs mounts EditorSplit with workspaceId
+    // and no repoId — the chat must be usable there (round-1 finding: it was
+    // permanently disabled when the repo-scoped assist was the only route).
+    expect(screen.getByTestId('llm-input').disabled).toBe(false);
+    const input = screen.getByTestId('llm-input');
+    fireEvent.input(input, { target: { value: 'make error handling more defensive' } });
+    expect(screen.getByTestId('llm-send-btn').disabled).toBe(false);
+    expect(document.body.textContent).toContain('Ctrl+Enter');
+  });
+
+  it('keeps the LLM chat disabled in meta-spec context without a workspace', () => {
+    render(EditorSplit, { props: { content: '', repoId: null, context: 'meta-spec' } });
+    expect(screen.getByTestId('llm-input').disabled).toBe(true);
+    expect(screen.getByTestId('llm-send-btn').disabled).toBe(true);
+    expect(document.body.textContent).toContain('LLM editing requires repo or workspace context');
+  });
+
+  it('sends meta-spec chat instructions to the workspace assist endpoint and renders the suggestion', async () => {
+    const { api } = await import('../lib/api.js');
+    api.metaSpecsAssist.mockResolvedValueOnce(
+      sseResponse([
+        ['partial', { text: 'Adding defensive error handling.' }],
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling\n\nUse Result<T, E> everywhere.' }],
+          explanation: 'Adding defensive error handling.',
+        }],
+      ]),
+    );
+    render(EditorSplit, {
+      props: {
+        content: 'You are a backend developer.\n\n## Existing\nWrite services.\n',
+        repoId: null,
+        context: 'meta-spec',
+        workspaceId: 'ws-9',
+        specPath: 'ms-backend-dev',
+      },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'make error handling more defensive' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+
+    // Routed to the workspace endpoint with the §9 draft, NOT specsAssist.
+    expect(api.metaSpecsAssist).toHaveBeenCalledWith('ws-9', {
+      instruction: 'make error handling more defensive',
+      draft_content: 'You are a backend developer.\n\n## Existing\nWrite services.\n',
+      meta_spec_id: 'ms-backend-dev',
+    });
+    expect(api.specsAssist).not.toHaveBeenCalled();
+
+    const block = await screen.findByTestId('llm-suggestion');
+    expect(block).toBeTruthy();
+    // §9 State 3: Accept applies the suggestion diff to the draft in-memory.
+    await fireEvent.click(screen.getByTestId('accept-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    expect(screen.getByTestId('editor-split-textarea').value).toContain('## Error Handling');
   });
 
   // ── Save button ────────────────────────────────────────────────────────────
