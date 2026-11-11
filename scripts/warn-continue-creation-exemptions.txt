@@ -12,3 +12,6 @@
 # See: specs/reviews/task-077.md F6 (the finding that created this check)
 #
 # --- unowned; fix opportunistically when touching these files ---
+# abac_middleware.rs seed_builtin_policies and spawn.rs interrogation-policy
+# warn-continue sites — FIXED on main (both now propagate creation errors);
+# entries removed at the task-107 base-merge onto 72ad2a128.

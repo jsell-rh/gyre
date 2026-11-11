@@ -31,6 +31,7 @@ def prompt(execution, task):
                         (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
+                        'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
                         'Durable findings:\n' + json.dumps(findings)))
 
@@ -41,6 +42,11 @@ def triage(execution, task):
         return recheck(execution, task)
     store = execution.store
     data = task['data']
+    if execution.claim['input'].get('binding_errors'):
+        from .execution import Attention
+        error = Attention('Spec input binding needs triage in specs/task-spec-inputs.json: ' + '; '.join(execution.claim['input']['binding_errors']))
+        error.category = 'requirements_binding'
+        raise error
     graph = {item['name']: item['data'].get('dependencies') or [] for item in store.tasks()}
     error = contract.graph_errors(graph).get(task['name']) or data.get('metadata_error')
     complete = data.get('dependencies') is not None and data.get('title') and data.get('spec_ref')
@@ -419,15 +425,18 @@ def baseline_repair(execution, observation):
     signature = observation.get('failure_signature')
     key = observation['base'] + ':' + (signature or observation['environment'])
     excerpt = Path(observation['baseline_log']).read_text()[-24000:]
-    body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
+    shared=observation.get('status')=='environment_failed'
+    title=('Repair shared CI environment ' + signature[:12]) if shared else ('Repair verified failure on main ' + observation['base'][:12])
+    body = ('---\ntitle: "' + title + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
             'depends_on: []\nprogress: not-started\ncommits: []\n---\n\n'
-            '## Required behavior\n\nReproduce and repair this verified upstream failure. '
+            '## Required behavior\n\n' + ('Repair this shared CI setup failure. The failed installer ran with the same workflow and dependency inputs as the upstream base; an older green run does not prove the current runner supports them. ' if shared else 'Reproduce and repair this verified upstream failure. ') +
             'Implement real production fixes or correct a genuinely broken test setup. '
             'Do not weaken checks, add skips or exemptions, or implement the blocked feature. '
             'Obtain independent review and pass full verification and GitHub checks.\n\n'
             'Base: `' + observation['base'] + '`\n'
             'Environment fingerprint: `' + observation['environment'] + '`\n\n'
+            + ('CI setup inputs: '+json.dumps(observation.get('environment_failure',{}),sort_keys=True)+'\n\n' if shared else '') +
             '## Baseline failure\n\n```text\n' + excerpt + '\n```\n')
     generation = generation_for(store, body)
     with store.transaction():
@@ -449,6 +458,7 @@ def baseline_repair(execution, observation):
         name = f'task-{number:03d}'
         data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
                                 'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
+        if shared:data.update(ci_environment=observation['environment_failure'],triaged=generation)
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?)', (name, generation, body, json.dumps(data), time.time()))
         store.event('baseline_prerequisite', {'base': observation['base'], 'evidence': observation['baseline_log']}, name)
         return name
@@ -622,7 +632,8 @@ for p in pairs:
     return {'deleted': resource}, updates, []
 
 
-HANDLERS = {'triage': triage, 'implement': implement, 'review': review,
+from .assessment import run as assess
+HANDLERS = {'triage': triage, 'assess': assess, 'implement': implement, 'review': review,
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
 from .ci import observe
 HANDLERS['observe'] = observe

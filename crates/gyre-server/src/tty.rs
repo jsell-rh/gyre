@@ -43,9 +43,23 @@ async fn handle_tty_socket(socket: WebSocket, agent_id: String, state: Arc<AppSt
     let authed = match receiver.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::Auth { token }) => {
-                let ok = crate::auth::authenticate_token(&token, &state)
-                    .await
-                    .is_ok();
+                let auth_result = crate::auth::authenticate_token(&token, &state).await;
+                // Identity-security.md §Impersonation: a TTY connection
+                // opened with an impersonation token is an action taken
+                // during impersonation — attribute it to the impersonator.
+                if let Ok(auth) = &auth_result {
+                    if let Some(imp) = &auth.impersonation {
+                        crate::impersonation::spawn_record_impersonated_action(
+                            &state,
+                            imp,
+                            "WS",
+                            "/ws/agents/{agent_id}/tty",
+                            true,
+                            "websocket",
+                        );
+                    }
+                }
+                let ok = auth_result.is_ok();
                 let result = if ok {
                     WsMessage::AuthResult {
                         success: true,

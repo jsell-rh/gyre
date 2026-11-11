@@ -895,6 +895,16 @@ pub async fn transition_mr_status(
     if matches!(new_status, MrStatus::Approved)
         && auth.roles.contains(&gyre_domain::UserRole::Agent)
     {
+        // task-104: this is a live role check (the code above calls it one),
+        // so the rejection must be audited as RbacDenied. The required
+        // subject is any non-Agent (human) role.
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "non-Agent",
+            "PUT /api/v1/merge-requests/:id/status",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "MR approval requires a human — agents may not set status 'approved' (supervised trust)"
                 .to_string(),
@@ -1000,9 +1010,10 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
@@ -1013,8 +1024,29 @@ pub async fn submit_review(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
+    // Reviewer identity binding (task-134): a caller authenticated with a
+    // scoped reviewer JWT (`review:submit`) must submit under its own token
+    // subject. Without this, a gate agent could forge reviews under any
+    // reviewer id. Exact-match capability (review F3); `validation:report`
+    // validators have no review-submission capability at all (F2) and are
+    // additionally blocked from this route by the ABAC allow-list.
+    let reviewer_agent_id = if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
+            auth.agent_id.clone()
+        } else {
+            req.reviewer_agent_id
+        }
+    } else {
+        req.reviewer_agent_id
+    };
+
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
@@ -1375,6 +1407,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "self-approving-agent",
                 "preferred_username": "self-approving-agent",
                 "realm_access": { "roles": ["agent"] }
@@ -1579,6 +1612,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    // submit_review extracts AuthenticatedAgent; the bare
+                    // api_router() used here has no require_auth layer, so
+                    // the test must present the test_state auth token itself.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1616,6 +1653,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1641,6 +1679,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1699,6 +1738,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

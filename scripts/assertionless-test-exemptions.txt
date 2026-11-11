@@ -7,13 +7,10 @@
 #
 # See: specs/reviews/task-019.md F4
 
-# jj_ops smoke tests — verify jujutsu CLI operations don't error
-jj_init_in_git_repo
-jj_describe_change
-jj_undo_last_op
-jj_bookmark_create
-jj_squash_into_parent
-
+# jj_ops smoke tests — FIXED in task-106 revision round: converted to
+# recorded-fixture tests with real assertions (jj_init_colocates…,
+# jj_describe_updates_named_change, jj_undo_restores…,
+# jj_bookmark_create_points_at_change, jj_squash_into_parent…).
 # LLM mock factory
 mock_factory_for_model_ignores_model_name
 
