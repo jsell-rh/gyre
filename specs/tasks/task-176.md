@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["91fe1e86da29a2c68cdb5cf32137da69b36e3132", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20", "91fe1e86da29a2c68cdb5cf32137da69b36e3132"]
 ---
 
 ## Spec Excerpt
@@ -99,15 +99,17 @@ never diffs against a stale pre-publish prompt.
 ### This round (contract restoration)
 
 The executor restored the assigned task document to its contract form
-(repair `58f1efcfece34880b5c8787dfac0e1a9`); this round changes no
+(repair `3ef92ac0e053413dab4e4980a7b920a5`); this round changes no
 production code — it re-verifies and re-records the existing fix.
 `git diff 91fe1e86d HEAD -- web/src` is empty (verified this round),
 confirming the Iterate results-visibility repair is intact at HEAD
-`671873eea` after the base merge; the only web/dist difference vs the
-assignment base is the executor's restoration of generated assets.
-Focused vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` (after
-`npm ci` from the lockfile): 2 files, **153/153 passed**, exit 0.
-Evidence: `/tmp/stage/review-evidence/task-176-focused-tests.log`.
+`3e9cd7780` after the base merge; the only task-doc changes restore the
+`commits:` attribution (the three product-surface task-176 commits:
+`eee86b3e6`, `6e3bb1a7a`, `91fe1e86d`), the acceptance boxes, and these
+notes. Focused vitest on `EditorSplit.test.js` + `MetaSpecs.test.js` +
+`lineDiff.test.js` (after `npm ci` from the lockfile): 3 files,
+**166/166 passed**, exit 0. Evidence:
+`/tmp/stage/review-evidence/task-176-focused-tests.log`.
 `web/dist` regeneration is executor-owned (restored from the assignment
 base; final integration rebuilds and publishes remotely), so no dist
 commit is made here.
@@ -121,13 +123,3 @@ Implementation-plan item 4 is reachable only in the repo-scoped spec
 context (covered by the §3 Accept/Edit/Dismiss tests). Unblocking it
 needs a workspace-scoped assist endpoint — follow-up work against the
 API surface, not this UI task.
-
-### Scope boundary
-
-The §9 backend gaps the wireframe alludes to — agents actually spawned
-on `preview/{preview_id}/*` throwaway branches, line-level code diffs,
-DELETE cleanup — belong to the preview endpoint itself and are tracked
-by task-206 against meta-spec-reconciliation.md coverage row 9
-("Hollow (code-verified 2026-09-29)"). The UI consumes exactly the real
-PreviewResponse/PreviewStatusResponse shapes the server sends today and
-never fabricates a completed State 3.
