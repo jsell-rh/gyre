@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §4 Scoped Inline Chat"
   - "human-system-interface.md §4 Hard Interrupt"
-commits: ["3e22e49085b3a488bfe9acc680dd940f873333e6", "a8d036f466482a9a00157a496d10000d0f36d25c", "58e4568219fd5324a2d2a2b30642602e36a47180"]
+commits: ["3e22e49085b3a488bfe9acc680dd940f873333e6", "a8d036f466482a9a00157a496d10000d0f36d25c", "58e4568219fd5324a2d2a2b30642602e36a47180", "76b3da22e99d4cf0724289376b17bf62db3eda01"]
 ---
 
 ## Spec Excerpt
@@ -101,7 +101,7 @@ Agent Detail Panel:
 
 ## Shipped
 
-Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient repair from review gap d382faa3. Verified at merge head b2419479a (assignment base 8b93f242 merged into the branch; `web/src` and `crates` are byte-identical to reviewed candidate 015340baf — `git diff 015340baf..HEAD -- crates web/src` is empty, so the verified source is exactly what ships).
+Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient repair from review gap d382faa3 and the verification repair at head 76b3da22e (rustfmt of the `orchestrator_type` test lines in `agents.rs` — the sole failing check in verification run 635d3a33; whitespace-only, no behavior change). Earlier rounds verified at merge head b2419479a with `web/src` and `crates` byte-identical to reviewed candidate 015340baf; this round's only source delta beyond that state is the rustfmt rewrap.
 
 ### Behavior
 
@@ -114,8 +114,9 @@ Scoped inline chat and hard interrupt per HSI §4, plus the role-based recipient
 
 - Frontend (this round, head b2419479a; `npm ci` then `npx vitest run`): `WorkspaceHomeSections` + `InlineChat` + `DetailPanelChat` + `Briefing` — 4 files, 97 passed / 41 skipped (skips are pre-existing `describe.skip` old-layout blocks). Includes both d382faa3 regression tests: a repo orchestrator or a name-matching worker is not selected as the workspace chat recipient, and a custom-named workspace orchestrator (`"coord"`) is selected alongside live repo orchestrators.
 - Server: `web/src` and `crates` at this head are byte-identical to candidate 015340baf, whose suites passed in the verified prior round (`api::agents` 11 incl. `agent_response_exposes_orchestrator_type`, `api::orchestrator` 12, `api::spawn` 52, `mcp::` 88, `cargo build -p gyre-cli -p gyre-server` clean). Verifier should re-run `cargo test -p gyre-server --lib api::agents api::orchestrator api::spawn` plus the mcp suites; no cold server build was attempted in this sandbox (stage 4 GiB budget — a local `cargo check` adds no information over the byte-identity proof).
-- `bash scripts/check-task-commit-attribution.sh` — OK at this head; all three frontmatter commits (3e22e490, a8d036f, 58e4568) are reachable from HEAD.
-- Evidence retained at `/tmp/stage/review-evidence/task-091-round3/evidence.md`.
+- `bash scripts/check-task-commit-attribution.sh` — OK at this head; all four frontmatter commits (3e22e490, a8d036f, 58e4568, 76b3da2) are reachable from HEAD.
+- `cargo fmt -p gyre-server --check` — clean at this head (the 635d3a33 verification failure, agents.rs lines 959-961/987-988, fixed by 76b3da22e). Workspace-wide `cargo fmt --check` still reports a pre-existing blank-line drift in `crates/gyre-ports/src/notification.rs` that exists on the assignment base and is untouched by this branch (changed-lines scope, not a task-091 finding).
+- Evidence retained at `/tmp/stage/review-evidence/task-091-round3/evidence.md` and `/tmp/stage/review-evidence/task-091-round4/evidence.md`.
 
 ### Review finding bfe34dfa (stale web/dist) disposition
 
