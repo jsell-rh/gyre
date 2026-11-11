@@ -1063,8 +1063,14 @@ mod tests {
             NotificationType::parse("ImpersonationAlert"),
             Some(NotificationType::ImpersonationAlert)
         );
-        assert_eq!(NotificationType::ImpersonationRequest.default_priority(), 2);
-        assert_eq!(NotificationType::ImpersonationAlert.default_priority(), 1);
+        assert_eq!(
+            NotificationType::ImpersonationRequest.default_priority_rank(),
+            2
+        );
+        assert_eq!(
+            NotificationType::ImpersonationAlert.default_priority_rank(),
+            1
+        );
     }
 
     // ── review repairs ──────────────────────────────────────────────────

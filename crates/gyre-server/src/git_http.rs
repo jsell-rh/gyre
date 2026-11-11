@@ -444,6 +444,35 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
+    // Task-134: scoped gate-agent tokens are read-only — a `review:submit`
+    // reviewer or `validation:report` validator may read MR context, never
+    // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
+    // Caller-scoped capability, exact-match (review F3): checked before
+    // workspace/repo resolution so the denial does not depend on (or leak
+    // the existence of) the target.
+    if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
+            || scope == crate::auth::VALIDATION_REPORT_SCOPE
+        {
+            warn!(
+                agent_id = %auth.agent_id,
+                workspace_slug = %workspace_slug,
+                repo_name = %repo_name,
+                "git-receive-pack 403: scoped gate-agent token cannot push"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                "push rejected: gate-agent scoped tokens are read-only".to_string(),
+            )
+                .into_response();
+        }
+    }
+
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -1981,14 +2010,17 @@ async fn verify_applied_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) 
 // Spec lifecycle: auto-create tasks on spec changes in the default branch
 // ---------------------------------------------------------------------------
 
-/// Spec path prefixes that trigger lifecycle task creation (per spec-lifecycle.md).
-const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
-
 /// Classify a spec file change and return (title, labels, priority).
+///
+/// Priorities come from the repo's `SpecLifecycleConfig`
+/// (spec-lifecycle.md §Configuration): new/rename -> `default_priority_new`,
+/// modified -> `default_priority_modified`, deleted ->
+/// `default_priority_deleted`.
 fn classify_spec_change(
     status_char: char,
     path: &str,
     old_path: Option<&str>,
+    config: &gyre_domain::SpecLifecycleConfig,
 ) -> Option<(String, Vec<String>, gyre_domain::TaskPriority)> {
     match status_char {
         'A' => Some((
@@ -1997,28 +2029,44 @@ fn classify_spec_change(
                 "spec-implementation".to_string(),
                 "auto-created".to_string(),
             ],
-            gyre_domain::TaskPriority::Medium,
+            config.default_priority_new.clone(),
         )),
         'M' => Some((
             format!("Review spec change: {path}"),
             vec!["spec-drift-review".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_modified.clone(),
         )),
         'D' => Some((
             format!("Handle spec removal: {path}"),
             vec!["spec-deprecated".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_deleted.clone(),
         )),
         'R' => {
             let old = old_path.unwrap_or(path);
             Some((
                 format!("Update spec references: {old} -> {path}"),
                 vec!["spec-housekeeping".to_string(), "auto-created".to_string()],
-                gyre_domain::TaskPriority::Medium,
+                config.default_priority_new.clone(),
             ))
         }
         _ => None,
     }
+}
+
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path)
+/// tuples, filtered by the repo's watched/ignored spec path prefixes.
+pub fn parse_spec_changes_with_config(
+    diff_output: &str,
+    config: &gyre_domain::SpecLifecycleConfig,
+) -> Vec<(char, String, Option<String>)> {
+    parse_name_status(diff_output)
+        .into_iter()
+        .filter(|(_, new_path, old_path)| {
+            let is_watched = config.is_watched(new_path);
+            let old_is_watched = old_path.as_ref().is_some_and(|p| config.is_watched(p));
+            is_watched || old_is_watched
+        })
+        .collect()
 }
 
 /// Parse `git diff --name-status` output into (status_char, new_path, old_path)
@@ -2058,25 +2106,6 @@ fn parse_name_status(diff_output: &str) -> Vec<(char, String, Option<String>)> {
     }
 
     changes
-}
-
-/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
-/// Only returns entries in watched spec paths.
-pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
-    parse_name_status(diff_output)
-        .into_iter()
-        .filter(|(_, new_path, old_path)| {
-            let is_watched = SPEC_WATCHED_PATHS
-                .iter()
-                .any(|prefix| new_path.starts_with(prefix));
-            let old_is_watched = old_path.as_ref().is_some_and(|p| {
-                SPEC_WATCHED_PATHS
-                    .iter()
-                    .any(|prefix| p.starts_with(prefix))
-            });
-            is_watched || old_is_watched
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2461,8 +2490,9 @@ async fn process_persona_changes(
                                  human review.",
                                 repo.name
                             ));
-                            notif.entity_ref = Some(format!("persona:{slug}"));
-                            notif.repo_id = Some(repo.id.to_string());
+                            notif.source.entity_type = "persona".to_string();
+                            notif.source.entity_id = slug.clone();
+                            notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.notifications.create(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
@@ -2482,6 +2512,17 @@ async fn process_spec_lifecycle(
     default_branch: &str,
     ref_updates: &[RefUpdate],
 ) {
+    // Per-repo config (spec-lifecycle.md §Configuration); defaults when unset.
+    let config = state
+        .spec_lifecycle_configs
+        .get_for_repo(repo_id)
+        .await
+        .unwrap_or_default();
+    if !config.enabled {
+        info!(repo_id, "spec-lifecycle: disabled for repo, skipping");
+        return;
+    }
+
     let default_ref = format!("refs/heads/{default_branch}");
     let relevant_updates: Vec<&RefUpdate> = ref_updates
         .iter()
@@ -2524,9 +2565,8 @@ async fn process_spec_lifecycle(
                 continue;
             }
         };
-
         let diff_text = String::from_utf8_lossy(&out.stdout);
-        let changes = parse_spec_changes(&diff_text);
+        let changes = parse_spec_changes_with_config(&diff_text, &config);
         if changes.is_empty() {
             continue;
         }
@@ -2559,8 +2599,8 @@ async fn process_spec_lifecycle(
 
         for (status_char, path, old_path) in changes {
             // Auto-invalidate active spec approvals when the spec file is modified,
-            // deleted, or renamed. An approval is stale once the spec content changes.
-            {
+            // deleted, or renamed (configurable, spec-lifecycle.md §Configuration).
+            if config.auto_invalidate_approvals {
                 // For renames, the old path is stale; for M/D, the current path is stale.
                 // Diff paths are git paths ("specs/system/foo.md"); approval rows are
                 // keyed by ledger paths ("system/foo.md" — spec_registry strips the
@@ -2612,7 +2652,7 @@ async fn process_spec_lifecycle(
             }
 
             let Some((title, labels, priority)) =
-                classify_spec_change(status_char, &path, old_path.as_deref())
+                classify_spec_change(status_char, &path, old_path.as_deref(), &config)
             else {
                 continue;
             };
@@ -2624,19 +2664,29 @@ async fn process_spec_lifecycle(
                 _ => "unknown",
             };
 
-            // Dedup: skip if a non-Done task with the same title already exists.
-            let exists = existing_tasks
-                .iter()
-                .any(|t| t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done));
-            if exists {
-                info!(title, "spec-lifecycle: task already exists, skipping");
-                // task-104: SpecChanged audit event — the spec file changed on
-                // the default branch regardless of task dedup; no new task id.
-                // Scope comes from the per-push ws_id resolution above
-                // (None when unresolvable — never a fabricated identity).
-                emit_spec_changed_audit(state, repo_id, ws_id.as_ref(), &path, change_kind, None)
+            // Dedup: skip if a non-Done task with the same title already exists
+            // (configurable, spec-lifecycle.md §Configuration).
+            if config.dedup_open_tasks {
+                let exists = existing_tasks.iter().any(|t| {
+                    t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
+                });
+                if exists {
+                    info!(title, "spec-lifecycle: task already exists, skipping");
+                    // task-104: SpecChanged audit event — the spec file changed on
+                    // the default branch regardless of task dedup; no new task id.
+                    // Scope comes from the per-push ws_id resolution above
+                    // (None when unresolvable — never a fabricated identity).
+                    emit_spec_changed_audit(
+                        state,
+                        repo_id,
+                        ws_id.as_ref(),
+                        &path,
+                        change_kind,
+                        None,
+                    )
                     .await;
-                continue;
+                    continue;
+                }
             }
 
             let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
@@ -2829,7 +2879,8 @@ async fn notify_cross_workspace_dependents(
                 now as i64,
             );
             notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.entity_id = changed_spec_path.to_string();
 
             if let Err(e) = state.notifications.create(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
@@ -4069,12 +4120,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
@@ -5054,14 +5110,14 @@ mod tests {
 
     #[test]
     fn parse_spec_changes_empty_input() {
-        let changes = super::parse_spec_changes("");
+        let changes = super::parse_spec_changes_with_config("", &Default::default());
         assert!(changes.is_empty());
     }
 
     #[test]
     fn parse_spec_changes_added_spec() {
         let input = "A\tspecs/system/new-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'A');
         assert_eq!(changes[0].1, "specs/system/new-spec.md");
@@ -5071,7 +5127,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_modified_spec() {
         let input = "M\tspecs/development/architecture.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'M');
         assert_eq!(changes[0].1, "specs/development/architecture.md");
@@ -5080,7 +5136,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_deleted_spec() {
         let input = "D\tspecs/system/old-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'D');
         assert_eq!(changes[0].1, "specs/system/old-spec.md");
@@ -5089,7 +5145,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_renamed_spec() {
         let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'R');
         assert_eq!(changes[0].1, "specs/system/new.md");
@@ -5100,7 +5156,7 @@ mod tests {
     fn parse_spec_changes_ignores_non_watched_paths() {
         // milestones and src changes should be ignored
         let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/system/real.md");
     }
@@ -5108,7 +5164,7 @@ mod tests {
     #[test]
     fn parse_spec_changes_development_path_watched() {
         let input = "A\tspecs/development/database-migrations.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/development/database-migrations.md");
     }
@@ -5116,7 +5172,8 @@ mod tests {
     #[test]
     fn classify_spec_change_added() {
         let (title, labels, priority) =
-            super::classify_spec_change('A', "specs/system/foo.md", None).unwrap();
+            super::classify_spec_change('A', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Implement spec: specs/system/foo.md");
         assert!(labels.contains(&"spec-implementation".to_string()));
         assert!(labels.contains(&"auto-created".to_string()));
@@ -5126,7 +5183,8 @@ mod tests {
     #[test]
     fn classify_spec_change_modified() {
         let (title, labels, priority) =
-            super::classify_spec_change('M', "specs/system/foo.md", None).unwrap();
+            super::classify_spec_change('M', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Review spec change: specs/system/foo.md");
         assert!(labels.contains(&"spec-drift-review".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -5135,7 +5193,8 @@ mod tests {
     #[test]
     fn classify_spec_change_deleted() {
         let (title, labels, priority) =
-            super::classify_spec_change('D', "specs/system/old.md", None).unwrap();
+            super::classify_spec_change('D', "specs/system/old.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Handle spec removal: specs/system/old.md");
         assert!(labels.contains(&"spec-deprecated".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -5143,9 +5202,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_renamed() {
-        let (title, labels, priority) =
-            super::classify_spec_change('R', "specs/system/new.md", Some("specs/system/old.md"))
-                .unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             title,
             "Update spec references: specs/system/old.md -> specs/system/new.md"
@@ -5156,7 +5219,328 @@ mod tests {
 
     #[test]
     fn classify_spec_change_unknown_returns_none() {
-        assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
+        assert!(
+            super::classify_spec_change('X', "specs/system/foo.md", None, &Default::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn classify_spec_change_respects_configured_priorities() {
+        // spec-lifecycle.md §Configuration: default_priority_* must override
+        // the built-in Medium/High/High for task creation.
+        let config = gyre_domain::SpecLifecycleConfig {
+            default_priority_new: gyre_domain::TaskPriority::Critical,
+            default_priority_modified: gyre_domain::TaskPriority::Low,
+            default_priority_deleted: gyre_domain::TaskPriority::Medium,
+            ..Default::default()
+        };
+        let (_, _, p_new) =
+            super::classify_spec_change('A', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_mod) =
+            super::classify_spec_change('M', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_del) =
+            super::classify_spec_change('D', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_ren) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(p_new, gyre_domain::TaskPriority::Critical);
+        assert_eq!(p_mod, gyre_domain::TaskPriority::Low);
+        assert_eq!(p_del, gyre_domain::TaskPriority::Medium);
+        assert_eq!(p_ren, gyre_domain::TaskPriority::Critical);
+    }
+
+    #[test]
+    fn parse_spec_changes_custom_watched_paths() {
+        // Custom watched paths replace the hardcoded prefixes entirely.
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["docs/specs/".to_string()],
+            ..Default::default()
+        };
+        let input = "A\tdocs/specs/new.md\nM\tspecs/system/foo.md\n";
+        let changes = super::parse_spec_changes_with_config(input, &config);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "docs/specs/new.md");
+    }
+
+    #[test]
+    fn parse_spec_changes_ignored_overrides_watched() {
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["specs/".to_string()],
+            ignored_paths: vec!["specs/milestones/".to_string()],
+            ..Default::default()
+        };
+        let input = "M\tspecs/system/a.md\nM\tspecs/milestones/b.md\n";
+        let changes = super::parse_spec_changes_with_config(input, &config);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "specs/system/a.md");
+    }
+
+    // ── process_spec_lifecycle: per-repo config end-to-end ────────────────
+
+    /// Set up a real bare repo with two pushed commits to main:
+    /// one adding `specs/system/a.md`, one adding `docs/guides/b.md`.
+    /// Returns (state, repo_id, tmp_dir, first_commit_sha, second_commit_sha).
+    async fn spec_lifecycle_fixture() -> (Arc<crate::AppState>, String, TempDir, String, String) {
+        let tmp = TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main", "-q"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init --bare failed");
+
+        // Clone to a work dir, commit the spec files, push to main.
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let bare_str = bare.to_str().unwrap().to_string();
+        let work_str = work.to_str().unwrap().to_string();
+        tokio::task::spawn_blocking(move || {
+            fn git(dir: &str, args: &[&str]) {
+                let out = std::process::Command::new("git")
+                    .args(["-C", dir])
+                    .args(args)
+                    .env("GIT_CONFIG_COUNT", "2")
+                    .env("GIT_CONFIG_KEY_0", "user.email")
+                    .env("GIT_CONFIG_VALUE_0", "t@t")
+                    .env("GIT_CONFIG_KEY_1", "user.name")
+                    .env("GIT_CONFIG_VALUE_1", "T")
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            // Local clone of the (empty) bare repo, then two commits.
+            let clone = std::process::Command::new("git")
+                .args(["clone", &bare_str, &work_str])
+                .output()
+                .unwrap();
+            assert!(
+                clone.status.success()
+                    || String::from_utf8_lossy(&clone.stderr).contains("empty repository"),
+                "clone of empty bare repo failed: {}",
+                String::from_utf8_lossy(&clone.stderr)
+            );
+            git(&work_str, &["checkout", "-q", "-b", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("specs/system")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("specs/system/a.md"),
+                "# A\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add spec a"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+            git(&work_str, &["pull", "-q", "origin", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("docs/guides")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("docs/guides/b.md"),
+                "# B\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add guide b"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        })
+        .await
+        .unwrap();
+
+        // Read the pushed SHAs from the bare repo.
+        let first = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main~1"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let second = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let state = test_state();
+        let repo = Repository::new(
+            Id::new("repo-slc"),
+            Id::new("ws-test"),
+            "slc-repo",
+            bare.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        (state, "repo-slc".to_string(), tmp, first, second)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_disabled_skips_task_creation() {
+        // spec-lifecycle.md §Configuration: `enabled = false` must skip
+        // processing entirely — no task, no approval invalidation.
+        // Zero old_sha models the initial push (hook substitutes the
+        // empty-tree SHA itself).
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        // Disable via the same port the PUT handler writes through.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| t.repo_id.to_string() != repo_id),
+            "no tasks must be created when spec lifecycle is disabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_per_repo_config_drives_filtering_and_priority() {
+        // Custom config: watch docs/guides instead, with a custom priority.
+        // This must replace the default watched prefixes entirely — the
+        // specs/system file in the same diff must NOT produce a task.
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    watched_paths: vec!["docs/guides/".to_string()],
+                    default_priority_new: gyre_domain::TaskPriority::Critical,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let created: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| t.repo_id.to_string() == repo_id)
+            .collect();
+        assert_eq!(
+            created.len(),
+            1,
+            "exactly one task for the watched docs/guides path, got: {created:?}"
+        );
+        let task = created[0];
+        assert_eq!(task.spec_path.as_deref(), Some("docs/guides/b.md"));
+        assert_eq!(task.priority, gyre_domain::TaskPriority::Critical);
+        assert!(
+            task.labels.contains(&"spec-implementation".to_string()),
+            "labels: {:?}",
+            task.labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_dedup_skip_still_records_spec_changed_audit() {
+        // Rebase union of task-109 (config-driven dedup gate) and task-104
+        // (SpecChanged audit): when dedup skips task creation, the audit
+        // event must still fire — with task_id null.
+        let (state, repo_id, _tmp, first, _second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros.clone(),
+            new_sha: first.clone(),
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+
+        // Same diff processed twice: the second pass hits the open-task
+        // dedup gate (default config: dedup_open_tasks = true).
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let created: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| t.repo_id.to_string() == repo_id)
+            .collect();
+        assert_eq!(
+            created.len(),
+            1,
+            "dedup must collapse the repeated change into one task"
+        );
+
+        let events = wait_for_audit_event(&state, "spec_changed").await;
+        let dedup_events: Vec<&gyre_domain::AuditEvent> = events
+            .iter()
+            .filter(|e| e.detail["task_id"].is_null())
+            .collect();
+        assert_eq!(
+            dedup_events.len(),
+            1,
+            "the dedup-skipped pass must record exactly one task_id-less SpecChanged event, got: {events:?}"
+        );
+        assert_eq!(dedup_events[0].detail["spec_path"], "specs/system/a.md");
+        // The first pass recorded its event referencing the auto-created task.
+        let with_task: Vec<&gyre_domain::AuditEvent> = events
+            .iter()
+            .filter(|e| e.detail["task_id"].as_str().is_some())
+            .collect();
+        assert_eq!(with_task.len(), 1, "events: {events:?}");
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
@@ -7752,8 +8136,9 @@ mod tests {
             })
             .expect("owner must be notified");
         assert_eq!(notif.title, title);
-        assert_eq!(notif.entity_ref.as_deref(), Some("persona:security"));
-        assert_eq!(notif.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(notif.source.entity_type, "persona");
+        assert_eq!(notif.source.entity_id, "security");
+        assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
     }

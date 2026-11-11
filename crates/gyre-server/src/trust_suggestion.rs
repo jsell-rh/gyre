@@ -164,7 +164,8 @@ async fn evaluate_workspace(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(ws.id.to_string());
+        notif.source.entity_type = "workspace".to_string();
+        notif.source.entity_id = ws.id.to_string();
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(
@@ -386,9 +387,12 @@ mod tests {
         assert_eq!(notifs.len(), 1, "expected exactly one TrustSuggestion");
 
         let n = &notifs[0];
-        assert_eq!(n.priority, 8);
+        assert_eq!(n.priority_rank, 8);
         assert_eq!(n.title, "Consider increasing trust level");
-        assert_eq!(n.repo_id, None, "workspace-level suggestion has no repo_id");
+        assert_eq!(
+            n.source.repo_id, None,
+            "workspace-level suggestion has no repo_id"
+        );
         assert!(n.is_active());
 
         let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
@@ -698,5 +702,34 @@ mod tests {
 
         let notifs = trust_suggestions_for(&state, "user8", "ws8").await;
         assert_eq!(notifs.len(), 1, "active suggestion must not be duplicated");
+    }
+
+    /// HSI §2 requires `trust_suggestion_check` to run daily per workspace.
+    /// The job was registered in the `JobRegistry` (jobs.rs) but never
+    /// spawned, so in a default deployment the handler never executed and
+    /// no TrustSuggestion notification was ever created automatically —
+    /// while the unit tests above stayed green because they call `run_once`
+    /// directly. The binary's `main` is not exercisable from lib tests, so
+    /// this regression test reads the shipped `main.rs` bytes (same
+    /// include_str! approach as spec_registry's starter-manifest test) and
+    /// fails when the `jobs::spawn_job` call for this job is removed —
+    /// audit-only registration cannot stand in for the specced daily
+    /// mechanism again.
+    #[test]
+    fn job_is_scheduled_in_main() {
+        let main_src = include_str!("main.rs");
+        let spawned = main_src.split("jobs::spawn_job(").skip(1).any(|call| {
+            // Confine the search to this call's argument list (up to
+            // the closing `);`) so a job name mentioned elsewhere in
+            // main.rs cannot satisfy the check.
+            let args = call.split(");").next().unwrap_or(call);
+            args.contains("\"trust_suggestion_check\"")
+        });
+        assert!(
+            spawned,
+            "trust_suggestion_check is registered in the JobRegistry but never spawned: \
+             add jobs::spawn_job(.., \"trust_suggestion_check\", ..) in main.rs — without \
+             it the daily HSI §2 mechanism does not run in a default deployment"
+        );
     }
 }
