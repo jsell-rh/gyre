@@ -67,6 +67,21 @@ class EfficiencyTests(unittest.TestCase):
         (self.repo/'code').write_text('actual repair');self.commit('real progress')
         check(self.execution,self.store.task('task-001'),self.repo,self.git('rev-parse','HEAD'),findings)
 
+    def test_operator_retry_resets_exhausted_budget_without_erasing_its_audit(self):
+        adapter=helper('dispatch-adapter');key='repair_budget:task-001:g:implement'
+        self.store.set_setting(key,{'count':3,'fingerprint':'stalled'})
+        self.store.retry(self.work,self.execution.claim['token'],{'category':'repair_stalled'},attention=True)
+        adapter.control(self.store,{'scope':adapter.scope(self.store),'key':self.work})
+        self.assertIsNone(self.store.setting(key))
+        self.assertIsNotNone(self.store.claim('implement','fresh-operator-retry',ident=self.work))
+        audit=self.store.db.execute("SELECT detail FROM events WHERE kind='operator_retry_budget_reset'").fetchone()
+        self.assertEqual(json.loads(audit['detail'])['previous']['count'],3)
+        from pipeline.repair_budget import reset
+        ci_key='ci_infra_retry:task-001:'+self.head
+        self.store.set_setting(ci_key,{'count':6})
+        with self.store.transaction():reset(self.store,'task-001','observe')
+        self.assertIsNone(self.store.setting(ci_key))
+
     def test_ci_reruns_have_backoff_deduplication_and_a_budget(self):
         task=self.store.task('task-001');receipt={'head':self.head};observation={'runs':[100]};calls=[]
         def command(*args,**kwargs):

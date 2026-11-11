@@ -703,7 +703,8 @@ bundle is created.
 
 Three repair rounds with identical findings and unchanged production source
 require attention, retaining source and findings. Notes and generated output
-cannot reset this budget. Explicit retry clears the stage hold; real source
+cannot reset this budget. Explicit retry resets the stage budget and hold, retaining its previous state
+in the audit log; real source
 progress or different findings starts a new budget. Main advancing does not
 clear a stage hold.
 

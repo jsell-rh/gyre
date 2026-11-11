@@ -64,3 +64,14 @@ def reconcile_generated(store):
             store.event('generated_only_review_rescheduled',{'candidate':data['candidate'],'deferred':deferred},task['name'])
             resolved.append(task['name'])
     return resolved
+
+
+def reset(store, task, stage):
+    """An explicit operator retry grants a fresh budget and retains its audit."""
+    prefixes=['repair_budget:'+task+':']
+    if stage in ('observe','publish'):prefixes.append('ci_infra_retry:'+task+':')
+    for prefix in prefixes:
+        for row in store.db.execute('SELECT key,value FROM settings WHERE key LIKE ?',(prefix+'%',)).fetchall():
+            if row['key'].startswith('repair_budget:') and not row['key'].endswith(':'+stage):continue
+            store.event('operator_retry_budget_reset',{'key':row['key'],'previous':json.loads(row['value'])},task)
+            store.db.execute('DELETE FROM settings WHERE key=?',(row['key'],))
