@@ -162,38 +162,36 @@ adapters, the REST handler, and the MCP `gyre_search` tool.
 - The three index-on-create sites (tasks/agents/MRs) pass the entity's
   real update time as `updated_at`.
 
-### CI repair (this round)
+### Rebase repair (this round)
 
-Durable finding `a9d572fb2408486490b71d2ac8bf0bcd`: the e2e job at PR head
-f061d0e02 (run 43036531271) failed at "Install mold linker" — apt could
-not resolve `azure.archive.ubuntu.com`, a transient GitHub-runner DNS
-failure, not a code defect. Because `.cargo/config.toml` hard-wires
-`-fuse-ld=mold`, the failed install bricked every later build step.
+Durable finding `653df32a478a43038b6ef5888b2f0bcc`: rebasing the candidate
+(236f8d71) onto the new base (7cf2f81c) conflicted in
+`.github/workflows/ci.yml` and `.github/workflows/e2e.yml` — both sides
+had independently fixed the e2e "Install mold linker" apt/DNS failure
+(durable finding `a9d572fb2408486490b71d2ac8bf0bcd`, run 43036531271).
 
-Fix: the four inline `sudo apt-get install -y mold` steps (e2e plus
-clippy/test/build-release in ci.yml) now use a composite action,
-`.github/actions/setup-linker`, which retries the install with growing
-backoff (20s/40s/60s) and, if apt remains unreachable, exports
-`RUSTFLAGS=-C link-arg=-fuse-ld=lld` so the job still builds with the
-runner image's preinstalled clang+lld (also a parallel low-memory
-linker, preserving the OOM rationale in `.cargo/config.toml`). The
-jobs' checks are unchanged — only the link step degrades, with a
-`::warning::`. Verified: the `RUSTFLAGS` env var replaces the config's
-target rustflags (only the env flags reach rustc — checked with
-`cargo build -v` on a scratch crate), clang+lld links working binaries,
-and stubbed-apt runs of the action cover persistent failure (4 attempts,
-fallback env written, exit 0), recovery on the 3rd attempt (mold used,
-no fallback), and immediate success. Evidence:
-`/tmp/stage/review-evidence/ci-mold-fallback/`.
-
-An earlier verification round's rustfmt repair (whitespace-only format
-of this task's changed lines) is preserved in commit fc0c24e8b.
+Resolution: the base's `scripts/ci-install-mold.sh` wins. It pins mold
+2.40.4 (sha256-verified) downloaded from GitHub releases with curl
+retries (`--retry 5 --retry-all-errors`, connect/max-time bounds) into
+`RUNNER_TEMP` — it avoids the apt mirror entirely, so the class of
+transient DNS failure that both fixes targeted cannot recur at that
+step, and the linker version is reproducible rather than whatever the
+distro mirror ships. The candidate's earlier composite action
+(`.github/actions/setup-linker`: apt retries + lld fallback via
+`RUSTFLAGS`) was removed as superseded; the four workflow install
+steps (e2e plus clippy/test/build-release in ci.yml) all invoke the
+script. The task's Rust implementation was untouched by the merge
+(verified: no files under crates/ changed between the candidate head
+and the merge result); a historical rustfmt repair of this task's
+changed lines is preserved in commit fc0c24e8b.
 
 ### Test evidence
 
-- Re-run at this round's head: `cargo test -p gyre-domain search_query`
-  25 passed; `cargo test -p gyre-adapters search` 30 passed
-  (sqlite + mem + postgres SQL-shape). Server-side suites remain
+- Re-run at this round's merge head (evidence:
+  `review-evidence/rebase-round/`): `cargo test -p gyre-domain
+  search_query` 25 passed; `cargo test -p gyre-adapters search`
+  30 passed (sqlite + mem + postgres SQL-shape);
+  `cargo check -p gyre-server` clean. Server-side suites remain
   deferred to the independent verifier per the 4 GiB budget.
 
 - `gyre-domain` `search_query` — 25 parser/time-bound tests.
