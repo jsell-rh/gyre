@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
+commits: ["894f7175715c63960f7b25dda9d2188b744c6ec0", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "371bed863d11d347ac239d99921ea2ef7bed1b37"]
 ---
 
 ## Spec Excerpt
@@ -30,34 +30,76 @@ Agent OIDC tokens encode the scope:
 
 A worker agent's token is scoped to its repo. The Workspace Orchestrator's token is scoped to the workspace. The MCP server validates scope on every tool call.
 
+## Implementation Plan
+
+1. **Extend `AgentJwtClaims` in `gyre-server/src/auth.rs`:**
+   - Add `tenant_id: String` (required)
+   - Add `workspace_id: String` (required)
+   - Add `repo_id: Option<String>` (None for workspace orchestrators)
+   - Add `persona: Option<String>` (persona slug)
+   - Add `attestation_level: Option<u32>` (workload attestation confidence)
+   - Change `scope: String` to `scope: Vec<String>` for fine-grained scopes (e.g., `["repo:gyre-server:write"]`)
+
+2. **Update token minting in `auth.rs` `mint_with_workload()`:**
+   - Accept tenant_id, workspace_id, repo_id, persona, attestation_level parameters
+   - Populate claims from spawn context
+
+3. **Update `spawn.rs` to provide hierarchy context at mint time:**
+   - Look up agent's task → repo → workspace → tenant to populate all claims
+   - Worker agents: scope = `["repo:{repo_name}:write"]`
+   - Workspace orchestrators: scope = `["workspace:{workspace_id}:read", "workspace:{workspace_id}:spawn"]`
+   - Repo orchestrators: scope = `["repo:{repo_name}:write", "repo:{repo_name}:spawn"]`
+
+4. **Extend `AuthenticatedAgent` with hierarchy fields:**
+   - Add workspace_id, repo_id fields derived from validated claims
+   - Available to all downstream handlers
+
+5. **MCP scope validation in `mcp.rs`:**
+   - On every tool call, validate `scope` claims permit the requested action
+   - `repo_id` claim must match the repo context for repo-scoped tools
+   - `workspace_id` claim must match workspace context for workspace-scoped tools
+   - Reject calls that exceed the token's scope with clear error
+
+6. **Update existing tests:**
+   - All test token creation must include new required fields
+   - Add scope validation tests for MCP tool calls
+
+## Acceptance Criteria
+
+- [ ] `AgentJwtClaims` includes `tenant_id`, `workspace_id`, `repo_id`, `persona`, `attestation_level`
+- [ ] `scope` field is `Vec<String>` with fine-grained permissions
+- [ ] Token minting populates hierarchy claims from spawn context
+- [ ] Worker agent tokens scoped to their repo
+- [ ] Workspace orchestrator tokens scoped to their workspace
+- [ ] MCP server validates scope on every tool call
+- [ ] Scope mismatch returns clear error (not silent allow)
+- [ ] `AuthenticatedAgent` exposes workspace_id and repo_id
+- [ ] All existing tests updated for new claim fields
+- [ ] `cargo test --all` passes
+
 ## Agent Instructions
 
 Read `specs/system/platform-model.md` §1 Token Scoping for the full spec. Current JWT implementation: `gyre-server/src/auth.rs` (AgentJwtClaims at line ~46, mint_with_workload at ~176). Token validation: `auth.rs` ~216. MCP server: `gyre-server/src/mcp.rs`. Agent spawn: `gyre-server/src/api/spawn.rs`. The `scope` field is currently a `String` hardcoded to `"agent"` — it needs to become `Vec<String>`. This is a breaking change to the JWT format, so update ALL token creation paths (search for `AgentJwtClaims` usage). Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
 
 ## Shipped
 
-`platform-model.md` §1 Token Scoping is implemented end-to-end. This round is the rebase repair of the merge conflicts from rebasing the branch onto base `65f71e657` (task-085 HSI Trust Suggestions); the §1 implementation is unchanged in substance, and every conflict was resolved to keep BOTH sides' behavior.
+`platform-model.md` §1 Token Scoping is implemented end-to-end in production code on this branch (head `afa2c174a`).
 
-### This round: rebase onto 65f71e657 (merge `f90151146`)
+### Implementation
 
-**auth.rs (4 conflict sites).** Base's `bearer_token` field (task-107 Fulcio signing boundary — the raw bearer token must survive to the CA flow) collided with task-130's §1 hierarchy fields at all four `AuthenticatedAgent` construction sites (agent-token middleware path, agent-token extractor path, Keycloak user path, federated JWT path). Merged: BOTH — every site sets `workspace_id`/`repo_id`/`scope` AND `bearer_token`; the §1 `with_hierarchy_from_claims` mirroring after each site is preserved.
+`AgentJwtClaims` (`gyre-server/src/auth.rs`) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, `jti`, `scope: Vec<String>`, and workload claims (`wl_image_hash`), minted with full hierarchy context via the single `mint_with_workload` call from `spawn.rs` / `orchestrator.rs` / `stale_agents.rs` / `signal_chain.rs`: worker agents get `["repo:{repo_name}:write"]`, workspace orchestrators get `["workspace:{ws}:read", "workspace:{ws}:spawn"]`, repo orchestrators get `["repo:{name}:write", "repo:{name}:spawn"]`. `with_hierarchy_from_claims` mirrors all hierarchy fields (including tenant) from signature-verified claims into `AuthenticatedAgent` on every JWT-resolved path (agent-token middleware and extractor, Keycloak user, federated JWT, impersonation). `validate_tool_scope` in `mcp.rs` runs before dispatch on every `tools/call` for scoped tokens: repo-scoped tools require a matching `repo:{name}` scope, workspace-scoped tools a matching `workspace:{ws}` scope, `gyre_list_mrs {}` clamps to the caller's signed repo via `list_by_repo`, worker-tool targets (`gyre_agent_heartbeat`/`gyre_record_activity`) are bound to the caller's repo scope via `check_agent_target_scope`, and every mismatch returns a `PERMISSION_DENIED` JSON-RPC error naming the target (no silent allow; unresolvable targets fail closed). Orchestrator spawn cores enforce tenant containment; persona resolution is fail-closed (`resolve_orchestrator_persona`). Known residual (documented in prior review rounds): worker mint passes `persona`/`attestation_level` as `None` — spawn takes no persona input and attestation is recorded post-spawn.
 
-**Auto-merge fallout in test code (commit `d500a34a8`).** Base's new task-107 tests were authored against the pre-§1 shapes: `api/jj.rs`'s Fulcio-fallback test called the 5-arg `.mint()` (updated to the 9-arg §1 form with the fixture's real repo context — tenant "default", workspace "test-ws", the actual repo_id, repo name "test-repo"), and `commit_signatures.rs`'s two attribution-test `AuthenticatedAgent` literals were missing the hierarchy fields (updated to `None`/`Vec::new()` — user/system principals are ABAC-gated, not token-scoped, the same convention as impersonation.rs).
+### This round: contract restoration (no code change)
 
-### Implementation (unchanged in substance)
+The executor restored the assigned task document to its contract form (progress `not-started`, `commits: []`, shipped notes stripped). This round re-records the truth without touching production code: progress set back to `ready-for-review`, the four product-surface commits restored to `commits:` frontmatter (verifying `scripts/check-task-commit-attribution.sh` passes), and this `## Shipped` section rewritten under the required heading. Verified the implementation is intact at head `afa2c174a`: `SKIP_WEB_BUILD=1 cargo check -p gyre-server` and `cargo check -p gyre-server --tests` both pass; `scripts/check-arch.sh` passes; the §1 test slice is present (ten `mcp_scope_*` tests in `mcp.rs`, hierarchy-claim tests in `auth.rs`).
 
-`AgentJwtClaims` (auth.rs) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, `jti`, `scope: Vec<String>`, and `wl_image_hash`/other workload claims, minted from real hierarchy context in spawn.rs / orchestrator.rs / stale_agents.rs; `with_hierarchy_from_claims` mirrors all hierarchy fields (including tenant) from signature-verified claims on every JWT-resolved path. `validate_tool_scope` runs before dispatch on every `tools/call` for scoped tokens (worker/spawn/workspace/task-tool tiers); mismatch returns a `PERMISSION_DENIED` JSON-RPC error naming the target; `gyre_list_mrs {}` clamps to the caller's signed repo via `list_by_repo`; worker-tool targets (`gyre_agent_heartbeat`/`gyre_record_activity`) are bound to the caller's repo scope via `check_agent_target_scope`, unresolvable targets fail closed. Orchestrator spawn cores enforce tenant containment; persona resolution is fail-closed (`resolve_orchestrator_persona`). Residual (unchanged): worker mint passes persona/attestation_level as None (no persona input on spawn; attestation recorded post-spawn).
+### Test evidence
 
-### Test evidence (this round, head `d500a34a8`)
+This sandbox follows the 4 GiB budget rule (no gyre-server test-binary execution here). The independent verifier must run `cargo test -p gyre-server --lib` — §1 slices: `mcp_scope_worker_cannot_create_mr_in_other_repo`, `mcp_scope_worker_create_mr_own_repo_passes_scope_gate`, `mcp_scope_worker_list_mrs_no_repo_clamped_to_own_repo`, `mcp_scope_workspace_orchestrator_list_mrs_requires_repo`, `mcp_scope_worker_cannot_heartbeat_foreign_agent`, `mcp_scope_worker_cannot_spawn_workers`, `mcp_scope_workspace_orchestrator_cannot_write_repo`, `mcp_scope_workspace_orchestrator_own_workspace_allowed`, `mcp_scope_workspace_orchestrator_other_workspace_rejected`, `mcp_scope_global_token_unaffected` (mcp.rs); `agent_jwt_tenant_mirrored_from_verified_claims`, `jwt_tenant_id_extracted_from_claim`, `mint_with_workload_roundtrips_wl_image_hash_claim`, `minted_jwt_carries_unique_jti` (auth.rs); plus the `jj.rs` Fulcio-fallback and `commit_signatures.rs` attribution tests updated to the §1 claims shape.
 
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server` and `cargo check -p gyre-server --tests` pass (the latter caught and fixed the 3 test-shape errors above); `rustfmt --check` on all touched files passes; `scripts/check-arch.sh` passes. gyre-server test binaries were not executed in this sandbox (4 GiB budget rule); the independent verifier must run `cargo test -p gyre-server --lib` — §1 slices: the ten `mcp_scope_*` tests in mcp.rs, `agent_jwt_tenant_mirrored_from_verified_claims`, `jwt_tenant_id_extracted_from_claim`, `mint_with_workload_roundtrips_wl_image_hash_claim`, `minted_jwt_carries_unique_jti`, plus the jj.rs Fulcio-fallback and commit_signatures.rs attribution tests updated this round. Full evidence and exact test names: `/tmp/stage/review-evidence/task-130-rebase-65f71e657.md`.
+### Prior repair rounds (condensed)
 
-### Prior repair rounds (retained, condensed)
-
+- **Rebase onto `65f71e657` (merge `f90151146`, tests `d500a34a8`)**: resolved task-107 Fulcio `bearer_token` vs §1 hierarchy-field conflicts at all four `AuthenticatedAgent` sites (both kept); updated base's new task-107 tests to the §1 claims shape.
 - **Verification repair (`371bed863`)**: rustfmt, one clippy borrow lint, inert-enforcement exemptions deleted.
-- **Rebase onto `fefde2946` (`149111bd2`)**: kept §1 `scope: Vec<String>` AND base's `jti`; task-103 tenant-claim schema-default; base's new tests updated to §1 claims shape.
-- **Rebase onto `c5deca801` (`afb1d86bd`)**: §1 array-based spec-approve detection; `register_e2e_agent` to 17-arg `mint_with_workload`.
-- **Review `92601fb6` (`78ac5caf`)**: F1 `gyre_list_mrs` no-arg fallback clamped to signed repo; F2 worker-tool target binding.
-- **Rebase onto `774737638` (`f6ea08e94`)**: task-177 rendering + task-140 fail-closed persona resolution + task-099 tenant fixes.
-- **Rebase onto `b5a872087` (`f69bd657a`)**: task-108 impersonation merged with §1 hierarchy mirroring at all four `AuthenticatedAgent` sites.
-- **Rebase onto `dbf9edaea` (`b326f2711`)**: task-117 compute target model — `wl_image_hash` and §1 hierarchy args both flow into the single `mint_with_workload` call; signal_chain.rs callers pass the target entity's real tenant, fail-closed.
+- **Review `92601fb6` (`78ac5cafc`)**: `gyre_list_mrs` no-arg fallback clamped to signed repo; worker-tool target binding.
+- **Earlier rebases** (`149111bd2`, `afb1d86bd`, `f6ea08e94`, `f69bd657a`, `b326f2711`): kept §1 `scope: Vec<String>` alongside base's `jti`, task-103 tenant-claim schema-default, task-140 fail-closed persona resolution, task-108 impersonation hierarchy mirroring, task-117 compute-target `wl_image_hash` — every conflict resolved to keep both sides' behavior.
