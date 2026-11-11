@@ -745,6 +745,7 @@ pub async fn sync_specs(
     crate::spec_registry::sync_spec_ledger(
         &state.spec_ledger,
         &state.spec_links_store,
+        &state.spec_link_repo,
         &repo.path,
         &head_sha,
         now,
