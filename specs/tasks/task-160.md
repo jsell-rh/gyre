@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "d162c56d01c9b742d17fc1626e2095adb0d64a47"]
 ---
 
 ## Spec Excerpt
@@ -66,15 +66,15 @@ comments, and are wired into `.pre-commit-config.yaml` and
 
 ### Scripts
 
-- `scripts/check-hierarchy.sh` — awk state machine over every domain `.rs`
+- `scripts/check-hierarchy.sh` - awk state machine over every domain `.rs`
   file; fails on `Option<...>` hierarchy fields and on deletion of a required
   field (spec §2). Env-gated via `GYRE_CHECK_HIERARCHY` (enabled by default,
   `=0` bypasses).
-- `scripts/check-tenant-filter.sh` — POSIX-awk scan of read query methods in
+- `scripts/check-tenant-filter.sh` - POSIX-awk scan of read query methods in
   `src/sqlite` + `src/postgres`; the tenant-column table set is derived from
   the migrations; documented `SKIP_LIST` for structurally-isolated adapters
   (spec §3); tenant-less tables reported as non-failing backlog.
-- `scripts/check-api-auth.sh` — ABAC middleware chain on the api router,
+- `scripts/check-api-auth.sh` - ABAC middleware chain on the api router,
   per-handler auth extractors on non-ABAC routes, and the
   route↔`RouteResourceMapping` cross-reference delegated to the frozen-baseline
   `check-abac-route-registry.sh` (spec §7).
@@ -87,10 +87,22 @@ the lint passes clean rather than by exemption; `tenant_isolation.rs`
 proves cross-tenant invisibility end-to-end. `b82af6b4b` binds both
 `evaluate_attestation_abac` results in `merge_processor.rs` and records them
 in the policy-decision audit trail. `c7ea6ab05` repaired the admin.rs
-merge-regression from review findings 2d69e0d8 R1/R2 (token/task-secret
-revocation, audit events, backend-aware kill, persona seeding, the three
-pinned tests) — HEAD admin.rs is assigned base + only the two legitimate
-test-helper additions, re-verified this round.
+merge-regression (token/task-secret revocation, audit events, backend-aware
+kill, persona seeding, the three pinned tests).
+
+### This round: verification repair
+
+The round-1 verification failure (attempt 027edf1d, exit 1) was three E0308
+mismatched-type errors in `crates/gyre-server/src/ralph_loop.rs` (lines 240,
+306, 521): the base merge `cba416b46` (task-118 ralph loop) introduced
+`ralph_loop.rs` calling `emit_event` with `Option<Id>` first args, while the
+task-160 branch had hardened `emit_event` to require a scoped workspace `Id`
+(tenant resolved from the workspace record - skip-and-log when unresolvable,
+per the fabricated-scope remediation). `d162c56d0` adapts the three call
+sites (TaskTransitioned, GateFailure, TaskBlocked) to pass the `Id`
+directly, matching every other caller. The merge resolution was otherwise
+sound: branch-side fixes (admin.rs, merge_processor.rs, tenant-filter
+adapters) are byte-identical to the pre-merge candidate.
 
 ### Verification evidence
 
@@ -99,5 +111,7 @@ test-helper additions, re-verified this round.
 - Negative test: injecting `workspace_id: Option<Id>` into `Task` makes
   `check-hierarchy.sh` exit 1 with a precise violation report
   (`check-hierarchy-negative.txt`); file restored afterward.
-- `cargo test --all` is verifier-owned; the source tree is byte-identical to
-  the checkpoint where `cargo check -p gyre-server --tests` was clean.
+- `cargo check -p gyre-server --tests` is clean after the repair (8m03s,
+  wrapper-serialized). Server test suites (`cargo test --all`, clippy,
+  rustfmt full run) are verifier-owned; the verifier should execute
+  `cargo test --all` plus the three scripts on this HEAD.
