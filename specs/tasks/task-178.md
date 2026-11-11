@@ -2,7 +2,7 @@
 title: "Navigable Architecture — canvas layout, interaction model, lens selector"
 spec_ref: "system-explorer.md §1"
 depends_on: [task-170, task-177]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "system-explorer.md §1. The Navigable Architecture"
   - "ui-navigation.md §Tab: Architecture (Moldable Development Surface)"
