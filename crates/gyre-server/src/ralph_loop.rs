@@ -962,6 +962,37 @@ mod tests {
             .await
             .unwrap();
         assert!(token.is_some(), "re-spawned agent has a fresh token");
+
+        // analytics.md §Auto-Emitted Events: a re-spawned session is an
+        // agent spawn — `agent.spawned` must record with the same shape as
+        // the first-spawn event (task_id, compute_target, persona), scoped
+        // to the workspace/repo, and marked as a re-spawn.
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.agent_id.as_deref() == Some("agent-1"))
+            .expect("re-spawn must record an agent.spawned event");
+        assert_eq!(ev.properties["task_id"], "task-1");
+        assert_eq!(ev.properties["respawn"], true);
+        assert_eq!(ev.properties["iteration"], 1);
+        assert!(
+            ev.properties["compute_target"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "compute_target must be a non-empty string"
+        );
+        assert!(
+            ev.properties["persona"]
+                .as_str()
+                .is_some_and(|p| !p.is_empty()),
+            "persona must be a non-empty string"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.repo_id.as_deref(), Some("r-1"));
     }
 
     /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,
