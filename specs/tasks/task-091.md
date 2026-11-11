@@ -2,7 +2,7 @@
 title: "HSI Scoped Inline Chat + Hard Interrupt"
 spec_ref: "human-system-interface.md §4 Scoped Inline Chat + Hard Interrupt"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §4 Scoped Inline Chat"
   - "human-system-interface.md §4 Hard Interrupt"
