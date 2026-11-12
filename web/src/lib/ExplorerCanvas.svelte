@@ -6260,6 +6260,7 @@
         {playbackRequest}
         {highlightedSpanId}
         {focusRequest}
+        visibleNodeIds={queryMatchedIds}
         onNodeDetail={onFlowNodeDetail}
         onScopeDrill={onScopeDrill}
       />

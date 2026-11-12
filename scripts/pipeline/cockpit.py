@@ -99,5 +99,6 @@ def snapshot(store):
                        'inference':{key:value for key,value in store.setting('inference_health',{}).items() if key in ('condition','expires','failures')},
                        'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
             'dispatch': {'only_task': store.setting('only_task'), 'integration':store.integration_lane(),
+                         'verification_active':sum(item['stage']=='verify' and item['state']=='claimed' for item in work),
                          'verification_reserved':store.verification_reserve(),'priority_classes':classes(store),
                          'integration_waiting':[task['name'] for task in records if not satisfied(task['data']) and store.integration_waiting(task['data'])]}}
