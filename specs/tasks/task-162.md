@@ -86,44 +86,41 @@ notifications carry the same structured `NotificationSource` and deep-link
 derivation as every other producer (one creation path end to end). All three
 send paths (`AppState::emit_event`, REST send handler, MCP `message.send`)
 clone into the channel via non-blocking `try_send`; a full channel drops with
-a warning log at all three call sites (review round-1 repair extended the
-warn match from `emit_event` to the REST and MCP handlers) and never blocks
-the send path, per spec.
+a warning log at all three call sites and never blocks the send path, per
+spec.
 
-### TTL expiry job (§Implementation Notes)
+### Event TTL expiry job (§Implementation Notes)
 
-`spawn_message_expiry()` runs the hourly job (3600s interval,
-`MissedTickBehavior::Delay`, job-registry-tracked as `message_expiry`,
-on-demand via `POST /admin/jobs/message_expiry/run`). Each cycle calls
-`expire_events(now − GYRE_EVENT_TTL_SECS·1000)` and
-`expire_acked_inboxes(now − GYRE_DEAD_INBOX_TTL_SECS·1000)` on the
-`MessageRepository`; both env vars default to 604800 (7 days) with
-warn-on-invalid fallback. The dead-inbox contract is enforced in both
-adapters: only `agent_completed`/`agent_orphaned` bulk-acks are cleaned;
-explicit acks and unacked Directed messages are retained.
+`spawn_message_expiry()` (message_dispatcher.rs) starts the hourly job
+(3600s interval, `MissedTickBehavior::Delay`). Each cycle runs
+`run_message_expiry`: `expire_events(now_ms − GYRE_EVENT_TTL_SECS·1000)` for
+Event-tier cleanup plus `expire_acked_inboxes(now_ms −
+GYRE_DEAD_INBOX_TTL_SECS·1000)` for completed/orphaned agent inbox cleanup.
+Both env vars default to 604800 (7 days); invalid values warn and fall back.
+Implemented by the SQLite, PostgreSQL, and mem `MessageRepository` adapters.
+Registered as `message_expiry` in the admin job registry
+(`POST /admin/jobs/message_expiry/run`) and wired in `main.rs` alongside the
+other background jobs.
 
 ### Tests
 
-Bridge unit tests for all four message kinds (recipient resolution,
-viewer-role exclusion, unknown-workspace skip), the Agent-directed
-GateFailure dedupe regression (Workspace event + identical Agent copy →
-exactly one rank-3 notification), dispatcher fan-out to multiple consumers,
-end-to-end `spawn_message_consumer` through the real send path, TTL retention
-boundaries (expired Event deleted, fresh Event / unacked Directed /
-explicit-ack retained), env-var TTL override, and
-`failed_gate_creates_gate_failure_notification_via_bridge` (run_gate →
-emit_event → dispatcher → bridge → exactly one rank-3 notification). The
-reconciliation wave-completion test drains the bus via the real dispatcher,
-proving the p6 path.
+- `spawn_message_consumer_end_to_end` — emits a `ReconciliationCompleted`
+  event through the real send path and asserts the rank-6 notification
+  arrives via the background dispatcher; also asserts the single-owner
+  receiver (second spawn is a no-op).
+- `notification_bridge_creates_*` — GateFailure (rank-3, MR-author chain),
+  BudgetWarning (rank-4, role fan-out), AgentError (rank-2, spawner),
+  MetaSpecDrift (rank-6, role fan-out; Viewer excluded), plus
+  unknown-workspace skip.
+- `notification_bridge_ignores_agent_directed_gate_failure_copy` — regression
+  for the two-emitter GateFailure dedupe.
+- `dispatcher_dispatches_to_all_consumers` — channel drain fan-out.
+- `message_expiry_deletes_old_events_and_dead_inboxes` — retention boundaries
+  (unacked Directed and explicit-ack retained) and
+  `message_expiry_env_ttl_respected` (1s TTL deletes only >1s-old events).
+- Adapter-level expiry tests in `gyre-adapters` (sqlite message.rs).
 
-### Verification status
-
-Fresh probes at dd716a986: `cargo check -p gyre-server` and
-`cargo check -p gyre-server --tests` clean, `cargo fmt -p gyre-server --
---check` clean, arch / dead-message-kinds / mcp-write-tools /
-abac-route-registry checks pass. Gyre-server test compilation is deferred
-to the independent verifier (4 GiB budget); the verifier must execute:
-`cargo test -p gyre-server --lib message_dispatcher` (includes the new
-`notification_bridge_ignores_agent_directed_gate_failure_copy` regression),
-`--lib gate_executor`, `--lib notifications`, `--lib ralph_loop`, `--lib
-reconciliation`, and the full `cargo test --all` gate.
+`cargo check -p gyre-server` passes on the rebased head (this sandbox
+cannot compile the gyre-server test binary within the memory budget). The
+verifier must run: `cargo test -p gyre-server --lib message_dispatcher` and
+`cargo test --all`.
