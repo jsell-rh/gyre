@@ -39,6 +39,7 @@
     playbackRequest = null, // { nonce } — start playback (generated flow views)
     highlightedSpanId = null, // span to highlight (evaluative tab click)
     focusRequest = null, // { nodeId, nonce } — pan camera to a node
+    visibleNodeIds = null, // Set of node ids the active view query matched (flow layout scoping)
     onNodeDetail = () => {},
     onScopeDrill = null, // repo-boundary scope drill (delegated to the host)
   } = $props();
@@ -104,10 +105,19 @@
   }
 
   let flowNodes = $derived.by(() => {
-    if (!scopeId) return nodes;
+    // Active view query scope: a concept/filter query resolves to a node
+    // set (ExplorerCanvas passes queryMatchedIds) — the flow layout shows
+    // that set, the same "the scope filters the node set" contract the
+    // registry renderers implement. Null/empty → full graph (unmatched
+    // scopes show everything, mirroring the other renderers).
+    let base = nodes;
+    if (visibleNodeIds && visibleNodeIds.size > 0) {
+      base = base.filter((n) => visibleNodeIds.has(n.id));
+    }
+    if (!scopeId) return base;
     const kids = childrenOf(scopeId);
-    if (kids.size === 0) return nodes;
-    return nodes.filter((n) => kids.has(n.id));
+    if (kids.size === 0) return base;
+    return base.filter((n) => kids.has(n.id));
   });
 
   // ── Layout (flow-layout.js: depth columns along directed edges) ──────
