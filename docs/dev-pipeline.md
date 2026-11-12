@@ -304,6 +304,13 @@ live output. The bordered pane shows follow state, active modes, and line/column
 ranges, including on short terminals. Full logs remain available rather than
 only the last 64 KiB.
 
+Delivery labels follow the current task and candidate, separately from each
+stage's saved outcome. Confirmed merges and upstream resolutions move into the
+completed list (`c`); history retains the original attempt result. Green CI on
+an older head cannot mark a replacement candidate ready. Integration refreshes
+show whether they are required, queued, running, or blocked for attention
+(including an out-of-memory failure), rather than remaining "awaiting merge".
+
 The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
 press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
 edit, Enter to save, and Escape to discard. It edits the same private SQLite

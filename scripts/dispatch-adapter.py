@@ -64,6 +64,51 @@ def job(store, row, tasks=None):
             'unmetered': row['stage'] not in COMPUTE}
 
 
+def code_readiness(store, row, data):
+    """Current delivery state, separate from the recorded stage outcome."""
+    from pipeline.repairs import satisfied
+    if satisfied(data):
+        return {'status':'merged' if data.get('delivered') else 'resolved'}
+    inputs = json.loads(row['input'])
+    candidate = data.get('candidate')
+    if not candidate or inputs.get('candidate') != candidate:
+        return None
+    ci = data.get('ci') or {}
+    bound = (inputs.get('published') or inputs.get('verified') or {}).get('head')
+    if row['stage'] == 'review':
+        published = data.get('published_verified') or {}
+        if published.get('candidate') == candidate:
+            bound = published.get('head')
+    if not ci.get('head') or bound != ci['head']:
+        return None
+    readiness = {key:ci.get(key) for key in ('status','merge_state')}
+    readiness['repair_queued'] = bool(data.get('repair'))
+    if data.get('repair'):
+        return readiness | {'status':'repair_pending'}
+    hold = store.setting(store.runtime_hold_key(row['task'],'verify',row['generation'])) or {}
+    if not hold:
+        blocked = store.db.execute("""SELECT result FROM work WHERE task=? AND generation=?
+            AND stage='verify' AND state='attention' AND json_extract(input,'$.candidate')=?
+            ORDER BY updated DESC LIMIT 1""", (row['task'],row['generation'],candidate)).fetchone()
+        if blocked:
+            hold = json.loads(blocked['result'] or '{}')
+    if hold:
+        return readiness | {'status':'verification_blocked','blocker':hold.get('category','verification')}
+    verified = data.get('verified') or {}
+    if (ci.get('checks') == 'green' or ci.get('status') in ('passed','policy_pending','artifact_refresh')) and (
+            not verified.get('passed') or verified.get('candidate') != candidate
+            or verified.get('head') != ci['head'] or verified.get('base') != store.setting('observed_main')):
+        refresh = store.db.execute("""SELECT state FROM work WHERE task=? AND generation=? AND stage='verify'
+            AND state IN ('claimed','ready','retry') AND json_extract(input,'$.candidate')=?
+            AND json_extract(input,'$.base')=? ORDER BY (state='claimed') DESC,updated DESC LIMIT 1""",
+            (row['task'],row['generation'],candidate,store.setting('observed_main'))).fetchone()
+        state = 'required' if not refresh else 'running' if refresh['state']=='claimed' else 'queued'
+        return readiness | {'status':'refresh_'+state}
+    if readiness['status'] == 'merged':
+        readiness['status'] = 'merge_confirmation'
+    return readiness
+
+
 def read_rows(store):
     tasks = {t['name']: t['data'] for t in store.tasks()}
     rows = store.db.execute('''SELECT * FROM (
@@ -82,17 +127,7 @@ def read_rows(store):
         if canceled and status != 'running':
             status = 'canceled'
         started = store.db.execute("SELECT at FROM events WHERE work=? AND kind='claimed' ORDER BY id DESC LIMIT 1", (r['id'],)).fetchone()
-        readiness = None
-        ci = tasks[r['task']].get('ci') or {}
-        inputs = json.loads(r['input'])
-        bound = (inputs.get('published') or inputs.get('verified') or {}).get('head')
-        if r['stage'] == 'review':
-            published = tasks[r['task']].get('published_verified') or {}
-            if published.get('candidate') == inputs.get('candidate'):
-                bound = published.get('head')
-        if ci.get('head') and bound == ci['head']:
-            readiness = {key:ci.get(key) for key in ('status','merge_state')}
-            readiness['repair_queued'] = bool(tasks[r['task']].get('repair'))
+        readiness = code_readiness(store, r, tasks[r['task']])
         result.append(job(store, r, tasks) | {'status': status, 'failures': r['failures'],
             'code_readiness':readiness,
             'next_at': r['retry_at'], 'started': started['at'] if started else r['created'],

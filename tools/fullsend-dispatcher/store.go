@@ -26,6 +26,7 @@ type CodeReadiness struct {
 	Status       string `json:"status"`
 	MergeState   string `json:"merge_state"`
 	RepairQueued bool   `json:"repair_queued"`
+	Blocker      string `json:"blocker,omitempty"`
 }
 
 type Job struct {

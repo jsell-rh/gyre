@@ -253,6 +253,29 @@ func readinessStatus(r Row) string {
 		return ""
 	}
 	switch r.CodeReadiness.Status {
+	case "merged":
+		return "Merged"
+	case "resolved":
+		return "Requirements satisfied upstream"
+	case "verification_blocked":
+		if r.CodeReadiness.Blocker == "sandbox_oom" {
+			return "Verification blocked · out of memory"
+		}
+		return "Verification blocked · needs attention"
+	case "refresh_required":
+		return "Integration refresh required"
+	case "refresh_queued":
+		return "Integration refresh queued"
+	case "refresh_running":
+		return "Integration refresh running"
+	case "repair_pending":
+		return "Implementation repair pending"
+	case "merge_conflict":
+		return "Merge conflict · needs repair"
+	case "artifact_refresh":
+		return "Generated artifacts need refresh"
+	case "merge_confirmation":
+		return "Confirming upstream merge"
 	case "pending", "infrastructure":
 		return "Waiting for CI"
 	case "candidate_failed", "baseline_failed":
@@ -271,6 +294,11 @@ func readinessStatus(r Row) string {
 	return ""
 }
 
+func completedDelivery(r Row) bool {
+	return r.Activity != "history" && r.CodeReadiness != nil &&
+		(r.CodeReadiness.Status == "merged" || r.CodeReadiness.Status == "resolved")
+}
+
 func (m Model) visibleRows() []Row {
 	if m.historyIssue != nil {
 		return m.orderRows(m.filterRows(append([]Row(nil), m.historyRows...)))
@@ -278,7 +306,7 @@ func (m Model) visibleRows() []Row {
 	rows := []Row{}
 	seen := map[string]bool{}
 	for _, r := range m.filterRows(m.scopedRows()) {
-		if r.Status == "succeeded" && readinessStatus(r) == "" && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
+		if r.Status == "succeeded" && (readinessStatus(r) == "" || completedDelivery(r)) && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
 			continue
 		}
 		group := r.Scope + "\x00" + r.Repo + "\x00" + r.Item
@@ -731,6 +759,12 @@ func statusColor(status string) string {
 
 func rowColor(row Row) string {
 	if readiness := readinessStatus(row); readiness != "" {
+		if completedDelivery(row) {
+			return "2"
+		}
+		if row.CodeReadiness.Status == "verification_blocked" {
+			return "1"
+		}
 		if strings.HasPrefix(readiness, "CI failed") {
 			return "1"
 		}
