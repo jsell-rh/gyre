@@ -3,10 +3,10 @@ title: "Implement budget enforcement actions: warn/graceful-stop with grace, kil
 spec_ref: "platform-model.md §Enforcement Behavior"
 depends_on:
   - task-190
-progress: not-started
+progress: complete
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: []
+commits: ["1f28b18839adaa0092f89b9167688768a0d0de16", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
 ---
 
 ## Spec Excerpt
@@ -71,3 +71,96 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 - This shares subject with task-119 (agent-runtime §4). Implement enforcement once here as the canonical path; task-119 should consume it, not fork it.
 - Verify the merge-queue pause mechanism (for `QueuePause`) and the kill path by reading the relevant handlers before editing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+Budget enforcement is real end-to-end (platform-model.md §5 Enforcement
+Behavior): the task-190 usage counters drive the specced actions on every
+usage recording. This round resolved the merge with base `d31906c5a`
+(merge commit `5b335ef7e`) and repaired the retained verification finding
+from round 8e5fb0fe (verification exit 1) in commit `1f28b1883`: the base
+brought task-150's `mcp_prompts_get_constraints_include_budget_and_scope`
+test whose `BudgetConfig` struct literal predates the task-191
+`enforcement_action` field, so the gyre-server lib test target no longer
+compiled (E0063 at `mcp.rs:6485`). The initializer now passes
+`enforcement_action: None` (spec default); `cargo check -p gyre-server
+--all-targets` and `cargo fmt --check` pass. No thresholds, de-dup
+markers, grace timer, kill path, or notifications changed this round.
+
+### Enum + persistence
+
+`BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause, serde
+snake_case) lives in `gyre-domain/src/budget.rs`, re-exported.
+`BudgetConfig.enforcement_action: Option<...>` (None = spec default: 80%
+Warn, 100% GracefulStop) is threaded through migration
+`2026-10-10-000058_budget_enforcement_action` (portable SQL; Diesel version
+prefix is date-unique so the base-owned `2026-11-08-000058_*` migration does
+not collide — `check-migration-versions.sh` passes), the SQLite and Postgres
+`budget_configs` row mappings, and the budget API (`SetBudgetRequest` /
+`BudgetResponse`, PUT/GET round-trip tested).
+
+### Enforcement path
+
+`check_and_enforce_budget` (single helper, invoked only from
+`record_llm_call_usage` after `record_budget_usage` — no per-call-site
+threshold logic):
+
+- Computes the higher utilization across `max_tokens_per_day` /
+  `max_cost_per_day` (None and zero limits guarded).
+- **≥ 80%, < 100%:** emits `MessageKind::BudgetWarning` per active agent —
+  both a workspace-feed copy and a Directed `Destination::Agent` copy so the
+  agent MCP poll channel (`messages.list_after`,
+  `GET /api/v1/agents/:id/messages`) actually receives it. No kill.
+- **≥ 100%:** default `GracefulStop` — emits `MessageKind::BudgetExhausted`
+  per active agent (feed + directed copies), then a `tokio::spawn` grace
+  timer (default 60s, injectable via `check_and_enforce_budget_with_grace`;
+  tests use 0). After the grace, still-`Active` agents are killed through
+  the shared `kill_agent` helper extracted from `admin_kill_agent` (admin
+  handler migrated to it — clean cutover): transition to `Dead`, process
+  kill, budget active-agent counter decremented (only when the agent held
+  an Active slot), **worktree/branch records preserved**, and a
+  reassignment task `"Agent hit budget limit on {task-id}, needs
+  reassignment or budget increase"` created (`parent_task_id`-linked, High
+  priority) plus an `AgentEscalation` notification to the spawner.
+- Overrides: `HardKill` kills inline (no timer); `QueuePause` pauses every
+  workspace repo's merge queue via the merge-processor pause mechanism (kv
+  `merge_queue_pause` + `MergeQueuePaused` event) without killing; `Warn`
+  at 100% warns only.
+- Emission is driven solely by computed utilization and de-duplicated per
+  daily period via a persisted kv marker (`budget_enforcement` namespace)
+  keyed to `period_start`; after the midnight reset the thresholds can fire
+  again.
+
+### Spawner/admin notifications (single path)
+
+Inbox notifications for the same threshold crossings route through
+`maybe_notify_budget_threshold` (user-management.md §Notification Entity):
+`AgentBudgetWarning` (the taxonomy's canonical name for the spec's
+BudgetWarning) to the agent's spawner plus workspace Admins, and
+`AgentBudgetExhausted` to the spawner plus the workspace Owner — per-user
+per-period de-duplicated via `has_active_notification`, with structured
+body and deep link. It runs in `record_llm_call_usage` right after
+`check_and_enforce_budget`, so message emission (agent channel) and inbox
+notification (human channel) both fire from the one usage-recording funnel
+and a spawner is never notified twice for one crossing.
+
+### Tests
+
+Server-side tests in `crates/gyre-server/src/api/budget.rs`
+(`warn_at_80pct_emits_message_and_notification_no_kill`,
+`below_threshold_emits_neither_message_nor_notification`,
+`exhausted_graceful_stop_kills_preserves_work_creates_reassignment`,
+`exhausted_hardkill_override_kills_immediately_without_timer`,
+`exhausted_queuepause_override_pauses_workspace_merge_queues`,
+`exhausted_crossing_cost_limit_also_fires`,
+`enforcement_action_persists_through_budget_api`,
+`budget_threshold_notifications_fire_once_per_period`) fail if the
+enforcement behavior is removed. The verifier should run
+`cargo test -p gyre-server --lib budget` (covers all of the above) and
+`cargo test -p gyre-server --lib mcp_prompts_get_constraints` (the
+repaired base test). Large gyre-server test compilation was deferred to
+the independent verifier per the 4 GiB budget constraint; this round ran
+`cargo check -p gyre-server --all-targets` (pass, exit 0),
+`cargo fmt -p gyre-server -- --check` (pass), and
+`bash scripts/check-arch.sh` (pass) — evidence saved under
+`/tmp/stage/review-evidence`.

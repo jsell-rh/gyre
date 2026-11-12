@@ -1,5 +1,22 @@
 use gyre_common::Id;
 
+/// Action taken when a budget threshold is crossed
+/// (platform-model.md §5 Resource Governance → Enforcement Behavior).
+/// Configurable per level via `BudgetConfig::enforcement_action`;
+/// `None` means the spec default (80% → Warn, 100% → GracefulStop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetEnforcementAction {
+    /// Log warning, continue.
+    Warn,
+    /// Send BudgetExhausted message, grace period, then kill.
+    GracefulStop,
+    /// Immediate termination.
+    HardKill,
+    /// Pause merge queue until budget is reviewed.
+    QueuePause,
+}
+
 /// Budget configuration for a workspace, tenant, or repo level.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BudgetConfig {
@@ -7,6 +24,11 @@ pub struct BudgetConfig {
     pub max_cost_per_day: Option<f64>,
     pub max_concurrent_agents: Option<u32>,
     pub max_agent_lifetime_secs: Option<u64>,
+    /// Per-level override for the action taken when utilization reaches
+    /// 100% of a limit. `None` = spec default (GracefulStop with a 60s
+    /// grace period). The 80% threshold is always `Warn`.
+    #[serde(default)]
+    pub enforcement_action: Option<BudgetEnforcementAction>,
 }
 
 /// Real-time budget usage snapshot for an entity (workspace or tenant).

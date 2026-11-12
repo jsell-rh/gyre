@@ -2738,6 +2738,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2763,6 +2764,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: None,
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2814,6 +2816,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2857,6 +2860,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: None,
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -3159,6 +3163,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -3210,6 +3215,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(10),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
