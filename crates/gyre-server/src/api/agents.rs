@@ -143,6 +143,8 @@ pub async fn create_agent(
             workspace_id: None,
             repo_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(now as i64),
         })
         .await;
     state
