@@ -385,3 +385,38 @@ describe('ExplorerCanvas flow — particle trail rendering', () => {
     }
   });
 });
+
+// ── View-query scoping of the flow layout (task-184, system-explorer.md
+//    §5 predefined flows): the active ViewQuery's concept scope filters the
+//    node set FlowCanvas renders — the same "scope filters the node set"
+//    contract the registry renderers implement.
+describe('ExplorerCanvas flow — view query scopes the flow layout', () => {
+  it('renders only the concept-scoped nodes in flow layout, with edges into unmatched nodes dropped', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: {
+        nodes: NODES,
+        edges: EDGES,
+        layout: 'flow',
+        activeQuery: {
+          scope: { type: 'concept', seed_nodes: ['fn1', 'fn2'], expand_edges: ['calls'], expand_depth: 0 },
+        },
+      },
+    });
+    const nodeIds = [...container.querySelectorAll('g[data-flow-node]')].map(
+      (g) => g.getAttribute('data-flow-node'));
+    // fn3 and the package node are outside the scoped path.
+    expect(nodeIds.sort()).toEqual(['fn1', 'fn2']);
+    // The fn1→fn3 edge is dropped with its unmatched endpoint; fn1→fn2
+    // (both endpoints scoped) still renders.
+    const edgeTargets = [...container.querySelectorAll('path[data-flow-edge]')]
+      .map((p) => `${p.dataset.src}->${p.dataset.tgt}`);
+    expect(edgeTargets).toEqual(['fn1->fn2']);
+  });
+
+  it('shows the full graph when no query is active (unscoped flow view)', () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, layout: 'flow' },
+    });
+    expect(container.querySelectorAll('g[data-flow-node]').length).toBe(4);
+  });
+});
