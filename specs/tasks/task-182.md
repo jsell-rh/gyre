@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "a44ad8886416bd9de4defed02be1ad35cf8eb11e"]
+commits: ["39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "362807160d14e186ac329eb185fab33754efc6f7", "188b9f9482edeeb0550990fc15761137eef9dc76", "a44ad8886416bd9de4defed02be1ad35cf8eb11e", "3257e9fb8"]
 ---
 
 ## Spec Excerpt
@@ -75,10 +75,10 @@ Read `system-explorer.md` §4 "Concept Views" for the full specification. The co
 ## Shipped
 
 Concept views (system-explorer.md §4) on the task-178 canvas substrate,
-covering all three interaction modes and both data-source mechanisms,
-with the round-1 review findings and the round-1 verification findings
-repaired, and the round-2 contract repair applied (task bookkeeping
-only — no product code changed this round).
+covering all three interaction modes and both data-source mechanisms.
+This round is the rebase repair against current main; no product code
+changed — the previously reviewed implementation was preserved through
+the merge and re-verified on the merged tree.
 
 ### Behavior
 
@@ -103,11 +103,10 @@ only — no product code changed this round).
   questions to `data.concept` with a worked example.
 - **Substring mechanism:** the ViewSpec `data.concept` field is a
   case-insensitive substring search on node name/qualified_name
-  (ui-layout.md §4 Data Layer), not an exact seed name.
-  `viewSpecToViewQuery` translates it to a concept scope with
-  `seed_match: 'substring'` — a ViewQuery grammar field (default
-  `'exact'`, documented in view-query-grammar.md, validated in
-  gyre-common, implemented in the server resolver) — and all three
+  (ui-layout.md §4 Data Layer), translated by `viewSpecToViewQuery` to a
+  concept scope with `seed_match: 'substring'` (ViewQuery grammar field,
+  default `'exact'`, documented in view-query-grammar.md, validated in
+  gyre-common, implemented in the server resolver) — all three
   concept-scope evaluation surfaces (ExplorerCanvas
   `queryMatchedWithDepth`, `view-query-scope.js` `resolveScopeNodes`,
   gyre-domain `view_query_resolver`) seed every node whose
@@ -116,49 +115,42 @@ only — no product code changed this round).
   explorer-view document by grammar via `viewDocumentToQuery` — a
   ViewQuery-shaped spec (the exact document the Create-concept dialog
   persists) is applied with its concept scope intact instead of being
-  flattened to `{scope:{type:'all'}}` by the ViewSpec translator.
-  Selecting a saved ad-hoc concept from the view selector re-applies the
-  grouping.
+  flattened to `{scope:{type:'all'}}`. Selecting a saved ad-hoc concept
+  from the view selector re-applies the grouping.
 
-### Round 2: contract repair
+### This round: rebase repair onto current main
 
-The round-1 checkpoint modified the protected task text (acceptance
-criteria checkboxes), flagged as a contract repair. This round restores
-the assigned task document's protected text verbatim (checkboxes left
-unchecked, matching the repo convention — see task-178), re-records the
-bookkeeping (progress, frontmatter commits), and rewrites these Shipped
-notes under the exact `## Shipped` heading with `###` subheadings. No
-product code changed. The candidate was re-merged onto the current
-assignment base `e402e1ed6` (task-121 repo-access work; clean merge, no
-conflicts with task-182 files) and the focused matrix was re-run green
-on the merged tree (see Test evidence).
-
-### Round 1: merge + verification repair (historical)
-
-The candidate was merged onto the then-assignment base (`d31906c5a`,
-task-181 Risk Map); two content conflicts resolved by union
-(ExplorerCanvas.svelte import block, docs/ui.md Architecture Tab).
-Round-1 verification failed on two changed-line findings, repaired in
-`188b9f948`: rustfmt in `crates/gyre-server/src/api/graph.rs`
-(manifest_concepts signature + concepts-listing test assert rewrapped),
-and clippy::useless_vec in `gyre-domain/src/view_query_resolver.rs`
-substring seed-match tests (`&vec![]` → `&[]`).
+The published PR conflicted with main (merge_state DIRTY, repair
+category rebase). Resolved by merging main `3b734b1af` (task-168 repo
+lifecycle) into this branch as merge commit `3257e9fb8`: all source
+files merged cleanly — the only conflicted paths were generated
+web/dist assets, resolved to the candidate's verified build (final
+integration rebuilds and publishes those remotely). Verified the
+staged tree against both parents: vs main, the full task-182
+implementation is retained; vs the candidate, only main-side task-168
+changes appear. Both ABAC route-registry and migration-version checks
+pass on the merged tree (the concepts routes resolve; migration 000062
+is not duplicated).
 
 ### Test evidence
 
-Focused matrix, re-run green on the round-2 merged tree (HEAD
-`2cd8c210c`), evidence: `/tmp/stage/review-evidence/focused-repair-round2.log`:
+Focused matrix, run green on the merged tree (HEAD `3257e9fb8`),
+evidence: `/tmp/stage/review-evidence/focused-repair-round3.log`:
 
-- `web` vitest: ExplorerConceptViews (8), generated-view (22),
-  view-query-scope (15) — 45 tests passed. ExplorerConceptViews pins
-  the manifest-concept fade against actual canvas draw output, the
+- `web` vitest: ExplorerConceptViews (8 tests) plus the five other
+  merge-affected suites (ExplorerViewNavigableArchitecture,
+  filter-categories, generated-view, view-query-scope, RepoSettings,
+  WorkspaceSettings) — 215 tests passed. ExplorerConceptViews pins the
+  manifest-concept fade against actual canvas draw output, the
   end-to-end Ask flow, the saved-ad-hoc-concept reload round trip, the
   multi-select → right-click → dialog → save persistence assert, and
   dialog validation/error paths.
-- `cargo test -p gyre-common view_query` — 5 pass.
-- `cargo test -p gyre-domain view_query_resolver` — 145 pass.
-- `cargo test -p gyre-domain concept` — 10 unit + 2 integration pass.
-- `cargo check -p gyre-server` — clean on the merged tree.
+- `cargo check -p gyre-server -p gyre-domain -p gyre-common` — clean.
+- `cargo test -p gyre-common` — 124 pass.
+- `cargo test -p gyre-domain` — 486 pass (478 lib + 8 integration).
+- Mechanical checks (exit 0): check-arch.sh, check-abac-route-registry.sh,
+  check-migration-versions.sh, check-in-memory-state-stores.sh,
+  check-fabricated-scope-defaults.sh.
 
 Full workspace suites, architecture checks, all-target Clippy, and
 GitHub CI are owned by the independent verifier. Server tests for the
