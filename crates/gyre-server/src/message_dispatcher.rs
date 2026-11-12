@@ -25,7 +25,7 @@
 //! are downstream observers (message-bus.md §Relationship to Notifications).
 
 use crate::AppState;
-use gyre_common::message::{Message, MessageKind};
+use gyre_common::message::{Destination, Message, MessageKind};
 use gyre_common::{Id, NotificationType};
 use gyre_domain::WorkspaceRole;
 use gyre_ports::MessageConsumer;
@@ -223,7 +223,22 @@ impl NotificationBridge {
     /// GateFailure → rank-3 GateFailure notification for the MR author's
     /// spawning user (HSI §8 p3). Payload per message-bus.md §Payload Schemas:
     /// `{mr_id, gate_name, gate_type, status, output, spec_ref, gate_agent_id}`.
+    ///
+    /// Two production emitters publish GateFailure for the same failed gate:
+    /// `gate_executor::run_gate` (Workspace-targeted event) and
+    /// `ralph_loop::on_gates_failed` (Agent-targeted copy for the agent's
+    /// next session). Only the Workspace/Broadcast-targeted event is the
+    /// human-notification trigger — the Agent-directed copy is the agent's
+    /// inbox record, so consuming it would duplicate the p3 notification
+    /// for the MR author's spawning user (HSI §8 p3 "single creation path").
     async fn on_gate_failure(&self, msg: &Message) {
+        if !matches!(msg.to, Destination::Workspace(_) | Destination::Broadcast) {
+            tracing::debug!(
+                "NotificationBridge: ignoring Agent-directed GateFailure copy \
+                 (agent inbox record, not a notification trigger)"
+            );
+            return;
+        }
         let Some(ws_id) = msg.workspace_id.clone() else {
             return;
         };
@@ -578,6 +593,62 @@ mod tests {
         assert_eq!(notifs[0].tenant_id, "tenant-1");
         assert_eq!(notifs[0].source.entity_type, "gate");
         assert_eq!(notifs[0].source.entity_id, "mr-1");
+    }
+
+    /// Review round-1 regression: two production emitters publish GateFailure
+    /// for the same failed gate — gate_executor::run_gate (Workspace-targeted
+    /// event) and ralph_loop::on_gates_failed (Agent-targeted copy for the
+    /// agent's next session). The bridge must consume only the
+    /// Workspace-targeted event; the Agent-directed copy is the agent's
+    /// inbox record, not a human-notification trigger. Otherwise the MR
+    /// author's spawning user receives two identical rank-3 notifications
+    /// per failed gate in the standard autonomous flow (enqueue_core runs
+    /// gates synchronously, then watch_mr_gates/on_gates_failed reacts to
+    /// the same failure).
+    #[tokio::test]
+    async fn notification_bridge_ignores_agent_directed_gate_failure_copy() {
+        let state = crate::mem::test_state();
+        seed_workspace(&state, "ws-1", "tenant-1").await;
+        seed_member(&state, "ws-1", "user-1", WorkspaceRole::Admin).await;
+        seed_agent(&state, "agent-1", "ws-1", Some("user-1")).await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-1".to_string()),
+            Id::new("repo-1".to_string()),
+            "Feature".to_string(),
+            "feature".to_string(),
+            "main".to_string(),
+            0,
+        );
+        mr.workspace_id = Id::new("ws-1".to_string());
+        mr.author_agent_id = Some(Id::new("agent-1".to_string()));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let bridge = NotificationBridge::new(state.clone());
+        let payload = serde_json::json!({
+            "mr_id": "mr-1",
+            "gate_name": "tests",
+        });
+
+        // 1. The Workspace-targeted event (gate_executor::run_gate) — the
+        //    human-notification trigger.
+        let mut workspace_event = test_message(MessageKind::GateFailure, "ws-1", payload.clone());
+        workspace_event.to = Destination::Workspace(Id::new("ws-1".to_string()));
+        bridge.on_message(&workspace_event).await;
+
+        // 2. The identical Agent-targeted copy (ralph_loop::on_gates_failed)
+        //    for the agent's next session — same mr_id/gate_name payload
+        //    and workspace_id.
+        let mut agent_copy = test_message(MessageKind::GateFailure, "ws-1", payload);
+        agent_copy.to = Destination::Agent(Id::new("agent-1".to_string()));
+        bridge.on_message(&agent_copy).await;
+
+        let notifs = list_notifications(&state, "user-1").await;
+        assert_eq!(
+            notifs.len(),
+            1,
+            "Agent-directed GateFailure copy must not duplicate the p3 notification"
+        );
     }
 
     #[tokio::test]
