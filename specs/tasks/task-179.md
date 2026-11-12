@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
-commits: ["9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524"]
+commits: ["9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524", "d655e87ae975d70c4515f120be5ada986aaefcf9"]
 ---
 
 ## Spec Excerpt
@@ -152,6 +152,14 @@ rewritten to the real extractor convention (qualified_name
 asserts the annotation is the TYPE, so it fails against the old
 field-name logic; a second test covers the no-edge doc_comment fallback
 (`Option<Agent>` → the Agent type node).
+
+### Verification repair (commit d655e87ae)
+
+The verification round's changed-lines lint failed on five
+whitespace-only lines left in NodeDetailPanel.svelte by the extraction
+(lines 1107/1108/1280/1355/1372). Stripped; `git diff --check` against
+the assignment base is now clean. No behavior change — the focused
+suites above still pass (83/83).
 
 ### Test evidence
 
