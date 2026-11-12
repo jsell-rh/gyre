@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+import { detectRiskAnomalies } from '../lib/risk-map.js';
 
 // Mock canvas context
 let mockCtx;
@@ -1302,62 +1303,72 @@ describe('ExplorerCanvas — evaluative lens', () => {
 });
 
 describe('ExplorerCanvas — anomaly detection (evaluative)', () => {
+  // task-181: the patterns live in risk-map.js detectRiskAnomalies — the
+  // production function the canvas renders. These call it directly so a
+  // regression in the real detection logic fails the test (the previous
+  // mirror-logic versions re-implemented the check beside it and proved
+  // nothing about the shipped code).
   it('detects high complexity + low test coverage anomaly', () => {
-    const nodesWithMetrics = [
-      { id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 20, test_coverage: 0.1, test_node: false },
-    ];
-    const anomalies = [];
-    for (const n of nodesWithMetrics) {
-      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
-        anomalies.push({ nodeId: n.id, severity: 'high' });
-      }
+    // 11 filler functions pin the distribution thresholds: p90(complexity)=10
+    // and p10(coverage)=0.4, so the target (42 / 0.23) is far outside both.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
     }
-    expect(anomalies).toHaveLength(1);
-    expect(anomalies[0].severity).toBe('high');
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 42, test_coverage: 0.23, test_node: false });
+
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    const hit = anomalies.find((a) => a.nodeId === 'fn1');
+    expect(hit).toBeTruthy();
+    expect(hit.severity).toBe('high');
+    expect(hit.message).toContain('High complexity (42');
+    expect(hit.message).toContain('23%');
   });
 
   it('detects orphan function (no callers) anomaly', () => {
-    const callCounts = new Map();
-    for (const e of EDGES) {
-      const et = (e.edge_type ?? '').toLowerCase();
-      if (et === 'calls') {
-        callCounts.set(e.target_id, (callCounts.get(e.target_id) ?? 0) + 1);
-      }
-    }
-
-    const orphans = [];
-    for (const n of NODES) {
-      if (n.node_type === 'function' && !n.test_node && (callCounts.get(n.id) ?? 0) === 0) {
-        orphans.push(n.id);
-      }
-    }
+    const anomalies = detectRiskAnomalies({ nodes: NODES, edges: EDGES });
+    const orphanIds = anomalies
+      .filter((a) => a.message.includes('possible dead code'))
+      .map((a) => a.nodeId);
 
     // fn2 (get_user) has no callers
-    expect(orphans).toContain('fn2');
+    expect(orphanIds).toContain('fn2');
     // fn1 is called by test1
-    expect(orphans).not.toContain('fn1');
+    expect(orphanIds).not.toContain('fn1');
   });
 
   it('detects heavily depended on node with no spec', () => {
-    const callCounts = new Map([['fn1', 8]]); // 8 callers
-    const node = { id: 'fn1', spec_path: undefined };
+    // 10 callers → hub has 10 calls, far above the p90-based call
+    // threshold; hub has no spec.
+    const nodes = [
+      { id: 'hub', node_type: 'function', name: 'hub', file_path: 'src/hub.rs', test_node: false },
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `caller${i}`, node_type: 'function', name: `caller${i}`, file_path: `src/c${i}.rs`, test_node: false })),
+    ];
+    const edges = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `c${i}`, source_id: `caller${i}`, target_id: 'hub', edge_type: 'calls' }));
 
-    const isHeavilyDepended = (callCounts.get(node.id) ?? 0) > 5 && !node.spec_path;
-    expect(isHeavilyDepended).toBe(true);
+    const anomalies = detectRiskAnomalies({ nodes, edges });
+    const hit = anomalies.find((a) => a.nodeId === 'hub');
+    expect(hit).toBeTruthy();
+    expect(hit.message).toContain('with no spec');
   });
 
   it('sorts anomalies by severity (high first)', () => {
-    const anomalies = [
-      { severity: 'low' },
-      { severity: 'high' },
-      { severity: 'medium' },
-    ];
-    const order = { high: 0, medium: 1, low: 2 };
-    anomalies.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-
+    // The high-severity target plus the low-severity orphans the same
+    // fixture produces — the real sort must order high before low.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
+    }
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', file_path: 'src/a.rs', complexity: 42, test_coverage: 0.23, test_node: false });
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    expect(anomalies.length).toBeGreaterThan(1);
     expect(anomalies[0].severity).toBe('high');
-    expect(anomalies[1].severity).toBe('medium');
-    expect(anomalies[2].severity).toBe('low');
+    const order = { high: 0, medium: 1, low: 2 };
+    for (let i = 1; i < anomalies.length; i++) {
+      expect(order[anomalies[i - 1].severity]).toBeLessThanOrEqual(order[anomalies[i].severity]);
+    }
   });
 });
 

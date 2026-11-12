@@ -42,6 +42,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
+pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
@@ -128,6 +129,20 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
         .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
+        // Repo access overrides (user-management.md §Repo Access)
+        .route(
+            "/api/v1/repos/:id/access-overrides",
+            get(repo_access::list_repo_access_overrides),
+        )
+        .route(
+            "/api/v1/repos/:id/access-overrides/:user_id",
+            put(repo_access::set_repo_access_override)
+                .delete(repo_access::delete_repo_access_override),
+        )
+        .route(
+            "/api/v1/repos/:id/access/:user_id",
+            get(repo_access::get_repo_access),
+        )
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -512,6 +527,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/orphaned-workspaces",
+            get(admin::admin_orphaned_workspaces),
+        )
         // Admin user impersonation (identity-security.md §Impersonation).
         // Approve/deny are called by the TARGET user (any role) and are
         // ABAC-exempt with per-handler authorization — see
@@ -919,6 +938,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Spec-named alias (user-management.md §Ownership Transfer &
+        // Reclamation and §API: `PUT .../members/{user_id}/role`) for the
+        // M22.8 member path above — same handler, same authorization.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
         )
         // Teams (M22.8)
         .route(
