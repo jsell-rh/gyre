@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{trust_policies_for_level, BudgetConfig, TrustLevel, UserRole, Workspace};
+use gyre_domain::{
+    trust_policies_for_level, BudgetConfig, TrustLevel, UserRole, Workspace, WorkspaceMembership,
+    WorkspaceRole,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -150,6 +153,38 @@ pub async fn create_workspace(
         .apply_trust_transition(&ws, false, &seed_policies)
         .await
         .map_err(ApiError::Internal)?;
+
+    // Seed the creator's Owner membership (user-management.md §Workspace
+    // Membership): a workspace created by a user principal is owned by its
+    // creator from birth, so it is never falsely flagged ownerless by the
+    // orphaned-workspace job (§Ownership Transfer & Reclamation frames the
+    // flag as "when a workspace Owner leaves"). Only seeded when the
+    // creator is a user of the workspace's tenant — cross-tenant
+    // memberships are not supported (Admin callers may create workspaces
+    // in other tenants via the tenant_id override; those are owned by the
+    // first invited Owner). System/agent principals have no user identity
+    // and seed nothing.
+    if let Some(user_id) = &auth.user_id {
+        let user = state.users.find_by_id(user_id).await?;
+        if user.as_ref().and_then(|u| u.tenant_id.as_ref()) == Some(&ws.tenant_id) {
+            let mut membership = WorkspaceMembership::new(
+                new_id(),
+                user_id.clone(),
+                ws.id.clone(),
+                WorkspaceRole::Owner,
+                user_id.clone(),
+                now,
+            );
+            // The creator accepts their own ownership immediately — the
+            // membership is active from creation, not a pending invite.
+            membership.accept(now);
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+    }
     Ok((StatusCode::CREATED, Json(WorkspaceResponse::from(ws))))
 }
 
@@ -431,6 +466,7 @@ pub async fn get_workspace_presence(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -485,6 +521,82 @@ mod tests {
         assert_eq!(list_resp.status(), StatusCode::OK);
         let list = body_json(list_resp).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_workspace_seeds_owner_membership_for_creator() {
+        // user-management.md §Workspace Membership + §Ownership Transfer &
+        // Reclamation: a workspace created by a user principal is owned by
+        // its creator from birth (active Owner membership), so the
+        // orphaned-workspace job never flags a freshly created workspace —
+        // the flag is for owner DEPARTURE ("when a workspace Owner
+        // leaves"), not for workspaces that simply haven't invited an
+        // Owner yet.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let mut creator = gyre_domain::User::new(
+            Id::new("creator-1"),
+            "ext-creator-1",
+            "creator-1",
+            1_700_000_000,
+        );
+        creator.tenant_id = Some(Id::new("t1"));
+        creator.global_role = gyre_domain::GlobalRole::Member;
+        creator.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&creator).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("creator-key-1"),
+                &creator.id,
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "name": "Creator Owned",
+            "slug": "creator-owned"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer creator-key-1")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = body_json(resp).await;
+        let ws_id = created["id"].as_str().unwrap().to_string();
+
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&creator.id, &Id::new(&ws_id))
+            .await
+            .unwrap()
+            .expect("the creator must hold a membership in the workspace they created");
+        assert_eq!(membership.role, gyre_domain::WorkspaceRole::Owner);
+        assert!(
+            membership.accepted && membership.accepted_at.is_some(),
+            "the creator's Owner membership is active immediately, not a pending invite"
+        );
+
+        // The orphaned-workspace job does not flag the creator-owned
+        // workspace (an active Owner exists).
+        crate::workspace_ownership::run_once(&state).await.unwrap();
+        let flagged = crate::workspace_ownership::orphaned_workspaces_with(&state, 0)
+            .await
+            .unwrap();
+        assert!(
+            flagged.iter().all(|w| w.workspace_id != ws_id),
+            "a workspace owned by its creator must never be flagged orphaned"
+        );
     }
 
     #[tokio::test]
