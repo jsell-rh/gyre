@@ -167,6 +167,7 @@ pub fn task_document(task: &Task) -> SearchDocument {
         body,
         workspace_id: Some(task.workspace_id.to_string()),
         repo_id: Some(task.repo_id.to_string()),
+        tenant_id: None,
         facets: facets(vec![
             ("status", task_status_str(&task.status).to_string()),
             ("priority", task_priority_str(&task.priority).to_string()),
@@ -201,6 +202,7 @@ pub fn mr_document(mr: &MergeRequest) -> SearchDocument {
         ),
         workspace_id: Some(mr.workspace_id.to_string()),
         repo_id: Some(mr.repository_id.to_string()),
+        tenant_id: None,
         facets: facets(vec![
             ("status", mr_status_str(&mr.status).to_string()),
             (
@@ -227,6 +229,7 @@ pub fn agent_document(agent: &Agent) -> SearchDocument {
         ),
         workspace_id: Some(agent.workspace_id.to_string()),
         repo_id: agent.repo_id.as_ref().map(|id| id.to_string()),
+        tenant_id: None,
         facets: facets(vec![
             ("status", agent_status_str(&agent.status).to_string()),
             ("workspace", agent.workspace_id.to_string()),
@@ -258,6 +261,7 @@ pub fn persona_document(persona: &Persona) -> SearchDocument {
             PersonaScope::Repo(r) => Some(r.to_string()),
             _ => None,
         },
+        tenant_id: None,
         facets: facets(vec![
             ("scope", persona_scope_str(&persona.scope).to_string()),
             ("slug", persona.slug.clone()),
@@ -274,6 +278,7 @@ pub fn review_document(review: &Review, mr: &MergeRequest) -> SearchDocument {
         body: review.body.clone().unwrap_or_default(),
         workspace_id: Some(mr.workspace_id.to_string()),
         repo_id: Some(mr.repository_id.to_string()),
+        tenant_id: None,
         facets: facets(vec![
             (
                 "decision",
@@ -330,6 +335,7 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
         } else {
             Some(repo.clone())
         },
+        tenant_id: None,
         facets: facets(vec![
             ("event_type", event.event_name.clone()),
             ("agent_id", event.agent_id.clone().unwrap_or_default()),
@@ -362,6 +368,7 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
         body,
         workspace_id: event.workspace_id.as_ref().map(|id| id.to_string()),
         repo_id: event.repo_id.as_ref().map(|id| id.to_string()),
+        tenant_id: None,
         facets: facets(vec![
             ("event_type", event.event_type.as_str()),
             (
@@ -427,6 +434,7 @@ pub fn commit_document(
         } else {
             Some(repo_id.to_string())
         },
+        tenant_id: None,
         facets: facets(vec![
             ("author", author.to_string()),
             ("branch", branch.to_string()),
@@ -481,6 +489,7 @@ pub fn spec_document(
         body,
         workspace_id: workspace_id.map(str::to_string),
         repo_id: repo_id.map(str::to_string),
+        tenant_id: None,
         facets: facets(vec![
             ("approval_status", approval_status.to_string()),
             ("owner", owner.to_string()),
@@ -515,6 +524,7 @@ pub fn file_document(
         } else {
             Some(repo_id.to_string())
         },
+        tenant_id: None,
         facets: facets(vec![
             ("language", language.to_string()),
             ("workspace", workspace_id.to_string()),
@@ -977,6 +987,10 @@ mod tests {
         q: &str,
         entity_type: Option<&str>,
     ) -> Vec<gyre_ports::search::SearchResult> {
+        // Unscoped-within-tenant query (Admin shape). The seeded entities'
+        // workspaces have no row in the test state's workspace repo, so their
+        // tenant resolves to the empty string (never a fabricated scope) —
+        // the query matches that boundary.
         state
             .search
             .search(SearchQuery {
@@ -984,6 +998,9 @@ mod tests {
                 entity_type: entity_type.map(str::to_string),
                 workspace_id: None,
                 limit: 50,
+                tenant_id: String::new(),
+                accessible_workspace_ids: None,
+                accessible_repo_ids: None,
             })
             .await
             .unwrap()
@@ -1129,6 +1146,7 @@ mod tests {
                 body: GHOST_TERM.to_string(),
                 workspace_id: None,
                 repo_id: None,
+                tenant_id: None,
                 facets: HashMap::new(),
             })
             .await

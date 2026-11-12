@@ -2412,6 +2412,80 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Repo access overrides (user-management.md §Repo Access)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::RepoAccessOverride;
+use gyre_ports::RepoAccessOverrideRepository;
+
+#[derive(Default)]
+pub struct MemRepoAccessOverrideRepository {
+    store: Arc<Mutex<HashMap<String, RepoAccessOverride>>>,
+}
+
+#[async_trait]
+impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
+    async fn create(&self, o: &RepoAccessOverride) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: create fails when an override for the same
+        // (repo_id, user_id) pair already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if store
+            .values()
+            .any(|e| e.repo_id == o.repo_id && e.user_id == o.user_id)
+        {
+            return Err(anyhow::anyhow!(
+                "repo access override for user {} on repo {} already exists",
+                o.user_id,
+                o.repo_id
+            ));
+        }
+        store.insert(o.id.to_string(), o.clone());
+        Ok(())
+    }
+
+    async fn find_by_repo_and_user(
+        &self,
+        repo_id: &Id,
+        user_id: &Id,
+    ) -> Result<Option<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.repo_id == *repo_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, repo_id: &Id, user_id: &Id) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        let key = store
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .map(|e| e.id.to_string());
+        match key {
+            Some(k) => {
+                store.remove(&k);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2783,14 +2857,21 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self
+        let mut gates: Vec<gyre_domain::QualityGate> = self
             .gates
             .lock()
             .await
             .values()
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
-            .collect())
+            .collect();
+        // Same ordering contract as the SQL adapters: (position, created_at).
+        gates.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
+        });
+        Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);
@@ -4185,10 +4266,14 @@ fn test_state_inner(
 
     // Mirror production wiring (lib.rs): entity repositories are wrapped in
     // search-sync decorators so tests exercise the same index-on-write
-    // behavior as every real write path.
-    let search = search.unwrap_or_else(|| {
-        Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>
-    });
+    // behavior as every real write path. The search port is wrapped in the
+    // tenant-resolution decorator (search_scope) exactly like production.
+    let search = crate::search_scope::with_tenant_resolution(
+        search.unwrap_or_else(|| {
+            Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>
+        }),
+        Arc::clone(&workspaces),
+    );
     let agents = crate::search_sync::wrap_agents(
         Arc::new(MemAgentRepository::default()),
         Arc::clone(&search),
@@ -4295,6 +4380,7 @@ fn test_state_inner(
         personas,
         policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),

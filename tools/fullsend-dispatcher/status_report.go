@@ -21,6 +21,9 @@ func writeStatusReport(out io.Writer, c Config, rows []Row) {
 	}
 	fmt.Fprintf(out, "FULLSEND / Status\n%s · %s\n\n", clean(c.Scope), clean(c.Repo))
 	fmt.Fprintf(out, "%d running · %d failed · %d unknown outcomes · %d completed jobs\n", counts["running"], counts["failed"], counts["uncertain"], counts["succeeded"])
+	if counts["attention"] > 0 {
+		fmt.Fprintf(out, "%d known failures need attention\n", counts["attention"])
+	}
 	if counts["canceled"] > 0 {
 		fmt.Fprintf(out, "%d canceled · manual retry required\n", counts["canceled"])
 	}
@@ -41,7 +44,9 @@ func writeStatusReport(out io.Writer, c Config, rows []Row) {
 			case "canceled":
 				label = "Canceled · manual retry"
 			case "uncertain":
-				label = "Outcome unknown"
+				label = rowStatus(r)
+			case "attention":
+				label = rowStatus(r)
 			}
 			fmt.Fprintln(out, cell(clean(title(r)), 44)+"  "+cell(clean(r.Agent), 24)+"  "+cell(label, 24)+"  "+durationLabel(r))
 		}
@@ -51,7 +56,7 @@ func writeStatusReport(out io.Writer, c Config, rows []Row) {
 		fmt.Fprintln(out, "\nNo running or failed jobs to inspect.")
 	}
 	for _, r := range visible {
-		if r.Status != "failed" && r.Status != "uncertain" && r.Status != "canceled" {
+		if r.Status != "failed" && r.Status != "uncertain" && r.Status != "attention" && r.Status != "canceled" {
 			continue
 		}
 		fmt.Fprintf(out, "\n%s · %s\n", clean(title(r)), clean(r.Agent))

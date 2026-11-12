@@ -43,12 +43,14 @@ pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
 pub mod search_indexer;
+pub mod search_scope;
 pub mod search_sync;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_lifecycle_patrol;
 pub mod spec_link_staleness;
 pub mod spec_patrol;
 pub mod spec_registry;
@@ -67,6 +69,7 @@ pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
+pub mod workspace_ownership;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -83,8 +86,8 @@ use gyre_ports::{
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    RepoAccessOverrideRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
+    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
     SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
     TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
     WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
@@ -378,6 +381,8 @@ pub struct AppState {
     pub policies: Arc<dyn PolicyRepository>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
+    /// Per-repo access override repository (user-management.md §Repo Access).
+    pub repo_access_overrides: Arc<dyn RepoAccessOverrideRepository>,
     /// Team repository (M22.8).
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
@@ -1165,10 +1170,22 @@ pub fn build_state(
     // search.md §Index Updates: entity repositories are wrapped in
     // search-sync decorators so every write path (REST, MCP, background
     // jobs) keeps the search index in sync. The search port must be resolved
-    // first because the decorators hold a clone of it.
-    let search: Arc<dyn gyre_ports::SearchPort> = store!(
-        dyn gyre_ports::SearchPort,
-        gyre_adapters::MemSearchAdapter::new()
+    // first because the decorators hold a clone of it. It is wrapped in the
+    // tenant-resolution decorator (search_scope) so every indexed document
+    // carries its tenant scope — the mem fallback has no workspace table to
+    // derive it from, so resolution happens server-side, uniformly for every
+    // index path (§Access Scoping step 1).
+    let workspaces: Arc<dyn WorkspaceRepository> = store!(
+        dyn WorkspaceRepository,
+        mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+            .with_workspace_store(Arc::clone(&mem_workspace_store))
+    );
+    let search: Arc<dyn gyre_ports::SearchPort> = search_scope::with_tenant_resolution(
+        store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
+        Arc::clone(&workspaces),
     );
     let agents: Arc<dyn AgentRepository> = search_sync::wrap_agents(
         store!(dyn AgentRepository, mem::MemAgentRepository::default()),
@@ -1372,17 +1389,24 @@ pub fn build_state(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
         ),
-        workspaces: store!(
-            dyn WorkspaceRepository,
-            mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
-                .with_workspace_store(Arc::clone(&mem_workspace_store))
-        ),
+        workspaces,
         personas,
         policies: store!(
             dyn PolicyRepository,
             mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
         ),
-        workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
+        // Workspace memberships are durable: SQLite/PostgreSQL adapters
+        // implement the port (M22.8 schema); mem mode keeps the in-code
+        // store. Before task-121 this was unconditionally the mem adapter,
+        // so a DB-backed server silently lost every membership on restart.
+        workspace_memberships: store!(
+            dyn WorkspaceMembershipRepository,
+            mem::MemWorkspaceMembershipRepository::default()
+        ),
+        repo_access_overrides: store!(
+            dyn RepoAccessOverrideRepository,
+            mem::MemRepoAccessOverrideRepository::default()
+        ),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: store!(
             dyn NotificationRepository,

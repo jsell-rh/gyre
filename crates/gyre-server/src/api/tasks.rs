@@ -594,6 +594,9 @@ mod tests {
                 entity_type: Some("activity_event".to_string()),
                 workspace_id: Some("ws-scope-1".to_string()),
                 limit: 10,
+                tenant_id: String::new(),
+                accessible_workspace_ids: None,
+                accessible_repo_ids: None,
             })
             .await
             .unwrap();
