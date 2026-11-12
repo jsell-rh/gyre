@@ -1016,7 +1016,11 @@ async fn resolve_new_approval_status(
         // same relative form (e.g. "system/design-principles.md") — the same
         // normalization `sync_spec_ledger` uses when keying the ledger.
         let spec_entry = manifest.specs.iter().find(|e| e.path == spec_path)?;
-        Some((spec_entry.clone(), manifest.defaults.clone(), repo.workspace_id.clone()))
+        Some((
+            spec_entry.clone(),
+            manifest.defaults.clone(),
+            repo.workspace_id.clone(),
+        ))
     }
     .await;
 
@@ -3109,7 +3113,11 @@ specs:
     {
         make_manifest_repo_with(
             E2E_APPROVAL_MANIFEST,
-            &["system/both.md", "system/agent-min.md", "system/agent-pinned.md"],
+            &[
+                "system/both.md",
+                "system/agent-min.md",
+                "system/agent-pinned.md",
+            ],
         )
         .await
     }
@@ -3397,9 +3405,11 @@ specs:
         - team:nonexistent
 "#;
         let state = test_state();
-        let (dir, shas) =
-            make_manifest_repo_with(manifest, &["system/team-owned.md", "system/team-missing.md"])
-                .await;
+        let (dir, shas) = make_manifest_repo_with(
+            manifest,
+            &["system/team-owned.md", "system/team-missing.md"],
+        )
+        .await;
         seed_e2e_specs(&state, &dir, &shas).await;
         let app = crate::api::api_router().with_state(state.clone());
 
@@ -3435,8 +3445,7 @@ specs:
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"name": "Platform", "lead": "user-jsell"})
-                            .to_string(),
+                        serde_json::json!({"name": "Platform", "lead": "user-jsell"}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -3444,7 +3453,9 @@ specs:
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let team = serde_json::from_slice::<serde_json::Value>(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(team["slug"], "platform");

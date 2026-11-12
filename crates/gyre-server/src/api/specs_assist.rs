@@ -2511,10 +2511,9 @@ specs:
             .await
             .unwrap();
         assert!(
-            viewer_notifs
-                .iter()
-                .any(|n| n.notification_type
-                    == gyre_common::NotificationType::SpecApprovalRequested),
+            viewer_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
             "the platform team's Viewer member must receive the SpecApprovalRequested card"
         );
 
@@ -2534,10 +2533,9 @@ specs:
             .await
             .unwrap();
         assert!(
-            owner_notifs
-                .iter()
-                .any(|n| n.notification_type
-                    == gyre_common::NotificationType::SpecApprovalRequested),
+            owner_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
             "the workspace Owner must still receive the SpecApprovalRequested card"
         );
     }
@@ -2545,7 +2543,13 @@ specs:
     /// Commit `specs/manifest.yaml` and `specs/system/<spec_file>` to the
     /// HEAD branch of a bare git repo (plumbing only — no worktree), so
     /// `read_manifest(repo_path, "HEAD")` resolves in tests.
-    fn commit_to_bare_repo_head(repo_path: &str, branch: &str, manifest: &str, spec_file: &str, spec_content: &str) {
+    fn commit_to_bare_repo_head(
+        repo_path: &str,
+        branch: &str,
+        manifest: &str,
+        spec_file: &str,
+        spec_content: &str,
+    ) {
         use std::io::Write;
 
         let hash_object_stdin = |content: &str| -> String {

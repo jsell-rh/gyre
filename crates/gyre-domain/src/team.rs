@@ -57,7 +57,9 @@ impl Team {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         {
-            return Err("team slug must be URL-safe: lowercase letters, digits, or '-'".to_string());
+            return Err(
+                "team slug must be URL-safe: lowercase letters, digits, or '-'".to_string(),
+            );
         }
         let edge = |c: char| c == '-';
         if edge(slug.chars().next().unwrap()) || edge(slug.chars().last().unwrap()) {
@@ -154,7 +156,10 @@ mod tests {
 
     #[test]
     fn slug_derivation_from_name() {
-        assert_eq!(Team::sanitize_slug("Platform Team").as_deref(), Some("platform-team"));
+        assert_eq!(
+            Team::sanitize_slug("Platform Team").as_deref(),
+            Some("platform-team")
+        );
         assert_eq!(Team::sanitize_slug("  dev  ").as_deref(), Some("dev"));
         assert_eq!(Team::sanitize_slug("A_B-c!d").as_deref(), Some("a-b-cd"));
         // Nothing URL-safe remains — caller must require an explicit slug.
@@ -165,7 +170,14 @@ mod tests {
     #[test]
     fn team_construction_carries_slug_and_lead() {
         let lead = Id::new("u-lead");
-        let team = Team::new(Id::new("t1"), Id::new("ws1"), "Platform", "platform", lead.clone(), 1000);
+        let team = Team::new(
+            Id::new("t1"),
+            Id::new("ws1"),
+            "Platform",
+            "platform",
+            lead.clone(),
+            1000,
+        );
         assert_eq!(team.slug, "platform");
         assert_eq!(team.lead, lead);
         assert_eq!(team.created_at, 1000);

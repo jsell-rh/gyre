@@ -2566,7 +2566,10 @@ impl TeamRepository for MemTeamRepository {
 
     async fn add_member(&self, membership: &TeamMembership) -> Result<()> {
         let mut members = self.members.lock().await;
-        let key = (membership.team_id.to_string(), membership.user_id.to_string());
+        let key = (
+            membership.team_id.to_string(),
+            membership.user_id.to_string(),
+        );
         // Port contract: duplicate membership fails.
         if members.contains_key(&key) {
             anyhow::bail!("user is already a member of the team");
@@ -6071,7 +6074,14 @@ mod team_contract_tests {
     use gyre_ports::TeamRepository;
 
     fn team(id: &str, ws: &str, slug: &str) -> Team {
-        Team::new(Id::new(id), Id::new(ws), "Platform", slug, Id::new("u-lead"), 1000)
+        Team::new(
+            Id::new(id),
+            Id::new(ws),
+            "Platform",
+            slug,
+            Id::new("u-lead"),
+            1000,
+        )
     }
 
     /// Mirrors sqlite's team contract tests: the mem adapter must enforce

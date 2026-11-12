@@ -613,7 +613,10 @@ mod tests {
             // Slug backfills from the id: stable, unique, URL-safe.
             assert_eq!(r.slug, r.id, "slug must backfill from the team id");
             // Lead backfills from the workspace Owner.
-            assert_eq!(r.lead, "u-owner", "lead must backfill from the workspace owner");
+            assert_eq!(
+                r.lead, "u-owner",
+                "lead must backfill from the workspace owner"
+            );
         }
 
         // The (workspace_id, slug) unique index rejects a duplicate slug in
@@ -642,7 +645,10 @@ mod tests {
              VALUES ('team-legacy-1', 'u-1', 2000)",
         )
         .execute(&mut conn);
-        assert!(dup_member.is_err(), "duplicate team membership must be rejected");
+        assert!(
+            dup_member.is_err(),
+            "duplicate team membership must be rejected"
+        );
     }
 
     /// Task-102 F1 regression: migration 000054 folds legacy path/pid

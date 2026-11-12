@@ -204,9 +204,11 @@ impl TeamRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             // Memberships go with the team — there is no team left to be a
             // member of.
-            diesel::delete(team_memberships::table.filter(team_memberships::team_id.eq(id.as_str())))
-                .execute(&mut *conn)
-                .context("delete team memberships")?;
+            diesel::delete(
+                team_memberships::table.filter(team_memberships::team_id.eq(id.as_str())),
+            )
+            .execute(&mut *conn)
+            .context("delete team memberships")?;
             diesel::delete(teams::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete team")?;
@@ -263,7 +265,10 @@ impl TeamRepository for SqliteStorage {
                 .order(team_memberships::added_at.asc())
                 .load::<TeamMembershipRow>(&mut *conn)
                 .context("list team members")?;
-            Ok(rows.into_iter().map(TeamMembershipRow::into_membership).collect())
+            Ok(rows
+                .into_iter()
+                .map(TeamMembershipRow::into_membership)
+                .collect())
         })
         .await?
     }
@@ -300,7 +305,14 @@ mod tests {
     }
 
     fn team(id: &str, ws: &str, slug: &str, lead: &str) -> Team {
-        Team::new(Id::new(id), Id::new(ws), "Platform", slug, Id::new(lead), 1000)
+        Team::new(
+            Id::new(id),
+            Id::new(ws),
+            "Platform",
+            slug,
+            Id::new(lead),
+            1000,
+        )
     }
 
     #[tokio::test]
@@ -323,13 +335,19 @@ mod tests {
 
         // find_by_slug is workspace-scoped: the same slug in another
         // workspace does not collide.
-        assert!(s.find_by_slug(&Id::new("ws-2"), "platform").await.unwrap().is_none());
+        assert!(s
+            .find_by_slug(&Id::new("ws-2"), "platform")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
     async fn create_rejects_duplicate_slug_within_workspace() {
         let (_tmp, s) = setup();
-        s.create(&team("t-1", "ws-1", "platform", "u-lead")).await.unwrap();
+        s.create(&team("t-1", "ws-1", "platform", "u-lead"))
+            .await
+            .unwrap();
         // Same slug, same workspace, different id — the port's duplicate
         // contract (the unique index is the race-safe backstop).
         let err = s
@@ -341,14 +359,20 @@ mod tests {
             "wrong error: {err:#}"
         );
         // The same slug in a different workspace is fine.
-        s.create(&team("t-3", "ws-2", "platform", "u-lead")).await.unwrap();
+        s.create(&team("t-3", "ws-2", "platform", "u-lead"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn update_rejects_slug_collision_with_other_team() {
         let (_tmp, s) = setup();
-        s.create(&team("t-1", "ws-1", "platform", "u-lead")).await.unwrap();
-        s.create(&team("t-2", "ws-1", "sre", "u-lead")).await.unwrap();
+        s.create(&team("t-1", "ws-1", "platform", "u-lead"))
+            .await
+            .unwrap();
+        s.create(&team("t-2", "ws-1", "sre", "u-lead"))
+            .await
+            .unwrap();
 
         let mut t2 = s.find_by_id(&Id::new("t-2")).await.unwrap().unwrap();
         t2.slug = "platform".to_string();
@@ -370,7 +394,9 @@ mod tests {
     #[tokio::test]
     async fn membership_add_list_remove_and_duplicate_rejection() {
         let (_tmp, s) = setup();
-        s.create(&team("t-1", "ws-1", "platform", "u-lead")).await.unwrap();
+        s.create(&team("t-1", "ws-1", "platform", "u-lead"))
+            .await
+            .unwrap();
 
         let m1 = TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 2000);
         let m2 = TeamMembership::new(Id::new("t-1"), Id::new("u-2"), 3000);
@@ -402,18 +428,28 @@ mod tests {
             .unwrap();
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].id.as_str(), "t-1");
-        assert!(s.list_for_user(&Id::new("ws-2"), &Id::new("u-1")).await.unwrap().is_empty());
+        assert!(s
+            .list_for_user(&Id::new("ws-2"), &Id::new("u-1"))
+            .await
+            .unwrap()
+            .is_empty());
 
-        s.remove_member(&Id::new("t-1"), &Id::new("u-1")).await.unwrap();
+        s.remove_member(&Id::new("t-1"), &Id::new("u-1"))
+            .await
+            .unwrap();
         // Idempotent remove.
-        s.remove_member(&Id::new("t-1"), &Id::new("u-1")).await.unwrap();
+        s.remove_member(&Id::new("t-1"), &Id::new("u-1"))
+            .await
+            .unwrap();
         assert_eq!(s.list_members(&Id::new("t-1")).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn delete_team_removes_its_memberships() {
         let (_tmp, s) = setup();
-        s.create(&team("t-1", "ws-1", "platform", "u-lead")).await.unwrap();
+        s.create(&team("t-1", "ws-1", "platform", "u-lead"))
+            .await
+            .unwrap();
         s.add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 2000))
             .await
             .unwrap();

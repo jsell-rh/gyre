@@ -204,9 +204,11 @@ impl TeamRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             // Memberships go with the team — there is no team left to be a
             // member of.
-            diesel::delete(team_memberships::table.filter(team_memberships::team_id.eq(id.as_str())))
-                .execute(&mut *conn)
-                .context("delete team memberships")?;
+            diesel::delete(
+                team_memberships::table.filter(team_memberships::team_id.eq(id.as_str())),
+            )
+            .execute(&mut *conn)
+            .context("delete team memberships")?;
             diesel::delete(teams::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete team")?;
@@ -263,7 +265,10 @@ impl TeamRepository for PgStorage {
                 .order(team_memberships::added_at.asc())
                 .load::<TeamMembershipRow>(&mut *conn)
                 .context("list team members")?;
-            Ok(rows.into_iter().map(TeamMembershipRow::into_membership).collect())
+            Ok(rows
+                .into_iter()
+                .map(TeamMembershipRow::into_membership)
+                .collect())
         })
         .await?
     }

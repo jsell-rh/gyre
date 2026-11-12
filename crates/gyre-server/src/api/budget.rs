@@ -299,7 +299,11 @@ pub async fn budget_by_team(
         ));
     }
 
-    let teams = state.teams.list_by_workspace(&ws.id).await.map_err(ApiError::Internal)?;
+    let teams = state
+        .teams
+        .list_by_workspace(&ws.id)
+        .await
+        .map_err(ApiError::Internal)?;
     let mut reports = Vec::with_capacity(teams.len());
     let mut member_sets = Vec::with_capacity(teams.len());
     for team in &teams {
@@ -778,27 +782,49 @@ mod tests {
         agent_loner.spawned_by = Some("u-loner".to_string());
         state.agents.create(&agent_loner).await.unwrap();
 
-        let call = |id: &str, agent: Option<&str>, input: u64, output: u64, cost: f64| BudgetCallRecord {
-            id: Id::new(id),
-            tenant_id: Id::new("tenant-1"),
-            workspace_id: Id::new("ws-bt"),
-            repo_id: None,
-            agent_id: agent.map(Id::new),
-            task_id: None,
-            usage_type: if agent.is_some() { "agent_run" } else { "llm_query" }.to_string(),
-            input_tokens: input,
-            output_tokens: output,
-            cost_usd: cost,
-            model: "test-model".to_string(),
-            timestamp: 1,
-        };
+        let call =
+            |id: &str, agent: Option<&str>, input: u64, output: u64, cost: f64| BudgetCallRecord {
+                id: Id::new(id),
+                tenant_id: Id::new("tenant-1"),
+                workspace_id: Id::new("ws-bt"),
+                repo_id: None,
+                agent_id: agent.map(Id::new),
+                task_id: None,
+                usage_type: if agent.is_some() {
+                    "agent_run"
+                } else {
+                    "llm_query"
+                }
+                .to_string(),
+                input_tokens: input,
+                output_tokens: output,
+                cost_usd: cost,
+                model: "test-model".to_string(),
+                timestamp: 1,
+            };
         // u-dev's agent: 2 calls, 300 tokens total, 0.03.
-        state.budget_calls.save(&call("c-1", Some("a-dev"), 100, 50, 0.01)).await.unwrap();
-        state.budget_calls.save(&call("c-2", Some("a-dev"), 100, 50, 0.02)).await.unwrap();
+        state
+            .budget_calls
+            .save(&call("c-1", Some("a-dev"), 100, 50, 0.01))
+            .await
+            .unwrap();
+        state
+            .budget_calls
+            .save(&call("c-2", Some("a-dev"), 100, 50, 0.02))
+            .await
+            .unwrap();
         // u-loner's agent: 1 call, unattributed to any team.
-        state.budget_calls.save(&call("c-3", Some("a-loner"), 10, 5, 0.001)).await.unwrap();
+        state
+            .budget_calls
+            .save(&call("c-3", Some("a-loner"), 10, 5, 0.001))
+            .await
+            .unwrap();
         // A user-initiated query with no agent: unattributed.
-        state.budget_calls.save(&call("c-4", None, 7, 3, 0.0005)).await.unwrap();
+        state
+            .budget_calls
+            .save(&call("c-4", None, 7, 3, 0.0005))
+            .await
+            .unwrap();
 
         let resp = app
             .oneshot(

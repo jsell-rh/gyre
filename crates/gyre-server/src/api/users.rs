@@ -966,7 +966,9 @@ pub async fn create_team(
 
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return Err(ApiError::InvalidInput("team name must not be empty".to_string()));
+        return Err(ApiError::InvalidInput(
+            "team name must not be empty".to_string(),
+        ));
     }
     let slug = resolve_team_slug(req.slug.as_deref(), &name)?;
     reject_duplicate_slug(&state, &ws.id, &slug, None).await?;
@@ -1031,7 +1033,9 @@ pub async fn update_team(
     if let Some(name) = req.name {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err(ApiError::InvalidInput("team name must not be empty".to_string()));
+            return Err(ApiError::InvalidInput(
+                "team name must not be empty".to_string(),
+            ));
         }
         team.name = name;
     }
@@ -1162,10 +1166,7 @@ pub async fn remove_team_member(
     if team.workspace_id != ws.id {
         return Err(ApiError::NotFound("Team not found".to_string()));
     }
-    state
-        .teams
-        .remove_member(&tid, &Id::new(user_id))
-        .await?;
+    state.teams.remove_member(&tid, &Id::new(user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2694,7 +2695,10 @@ mod tests {
     // ─── Teams (user-management.md §Team Management) ─────────────────────────
 
     /// Seed a Developer workspace member (tenant t-1) and return the user id.
-    async fn seed_workspace_developer(state: &std::sync::Arc<crate::AppState>, ws_id: &str) -> String {
+    async fn seed_workspace_developer(
+        state: &std::sync::Arc<crate::AppState>,
+        ws_id: &str,
+    ) -> String {
         let now = 1_700_000_000u64;
         let dev_id = uuid::Uuid::new_v4().to_string();
         let mut dev = User::new(
@@ -2713,7 +2717,11 @@ mod tests {
             Id::new("system"),
             now,
         );
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
         dev_id
     }
 
@@ -2782,7 +2790,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}/members"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
@@ -2807,7 +2817,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}/members"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
@@ -2896,7 +2908,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(state.teams.find_by_id(&Id::new(team_id)).await.unwrap().is_none());
+        assert!(state
+            .teams
+            .find_by_id(&Id::new(team_id))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2906,7 +2923,13 @@ mod tests {
         let app = crate::api::api_router().with_state(state.clone());
 
         // Explicit slugs must be URL-safe — never silently rewritten.
-        for bad_slug in ["Bad Slug!", "-platform", "platform-", "platform--team", "Platform"] {
+        for bad_slug in [
+            "Bad Slug!",
+            "-platform",
+            "platform-",
+            "platform--team",
+            "Platform",
+        ] {
             let resp = create_team_via_api(
                 &app,
                 &ws_id,
@@ -2998,7 +3021,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}/members"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
@@ -3014,7 +3039,15 @@ mod tests {
             "a team member who is not a workspace member must be rejected"
         );
         // Nothing was written.
-        assert_eq!(state.teams.list_members(&Id::new(team_id)).await.unwrap().len(), 0);
+        assert_eq!(
+            state
+                .teams
+                .list_members(&Id::new(team_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -3129,9 +3162,7 @@ mod tests {
                     .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"lead": loner}).to_string(),
-                    ))
+                    .body(Body::from(serde_json::json!({"lead": loner}).to_string()))
                     .unwrap(),
             )
             .await
@@ -3147,9 +3178,7 @@ mod tests {
                     .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"lead": dev_id}).to_string(),
-                    ))
+                    .body(Body::from(serde_json::json!({"lead": dev_id}).to_string()))
                     .unwrap(),
             )
             .await
@@ -3171,7 +3200,11 @@ mod tests {
         // API key for the Developer so auth resolves through the real path.
         state
             .api_keys
-            .create(&crate::auth::hash_api_key("dev-key-teams"), &Id::new(dev_id), "test")
+            .create(
+                &crate::auth::hash_api_key("dev-key-teams"),
+                &Id::new(dev_id),
+                "test",
+            )
             .await
             .unwrap();
 
@@ -3195,6 +3228,14 @@ mod tests {
             StatusCode::FORBIDDEN,
             "a Developer member must not be able to create teams"
         );
-        assert_eq!(state.teams.list_by_workspace(&Id::new(ws_id)).await.unwrap().len(), 0);
+        assert_eq!(
+            state
+                .teams
+                .list_by_workspace(&Id::new(ws_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }
