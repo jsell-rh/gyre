@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "bdbccb488378c3d8f9cf0a45ed1dd5e677273fae"]
 ---
 
 ## Spec Excerpt
@@ -126,33 +126,35 @@ graph queries, and the accountability patrol.
 - Link row ids are scoped by declaring repo (`spec_link_id`), so two repos
   carrying the same spec path never collide in the durable table.
 
-### Rebase repair (this round, finding 81c434f1, commit b14d3748c)
+### Verification-repair round (finding from attempt 3c2af0b8, commit bdbccb48)
 
-Rebased the task-198 branch onto the new base (3afece9d7, bringing task-163
-and task-204). The only textual conflict was
-`crates/gyre-adapters/src/sqlite/mod.rs` — both sides appended entries to
-the `migrations_create_tables` test table list (`spec_links` from task-198
-vs `breaking_changes`/`dependency_policies` from task-163); resolved by
-keeping both. The two migration directories map to distinct Diesel
-versions (20261108000061 vs 20261008000061), confirmed by
-`check-migration-versions.sh`. Auto-merges reviewed for semantic coherence:
-`gyre-server/src/lib.rs` carries both sides' `store!` wiring
-(`spec_link_repo` + `breaking_changes`), `schema.rs` and both adapter
-`mod.rs` files register both sides' tables/modules, and the task-204 changes
-to `spec_patrol.rs`/`api/specs.rs` compose correctly with the task-198
-`source_sha` test-literal additions. No production code changed this round
-beyond the conflict union.
+The prior candidate failed checks.sh with `new verification exemptions
+forbidden: scripts/unnamed-tuple-carrier-exemptions.txt` — it had re-pointed
+two stale exemption entries (git_http.rs, mem.rs) at moved line numbers.
+Root cause: base e402e1ed itself carries 4 unexempted tuple-carrier
+violations (stale exemption line numbers); the prior round fixed two in
+code but exempted the rest. This round:
+
+- `scripts/unnamed-tuple-carrier-exemptions.txt` restored byte-identical to
+  base e402e1ed — zero new entries; the check passes with zero violations
+  on this tree.
+- `mem.rs`: `ConvMap` value 4-tuple → `struct ConversationBlob { agent_id,
+  workspace_id, tenant_id, data }` (TASK-048 F1 remediation).
+- `git_http.rs`: `accumulate_chain_constraints` positional tuple return →
+  `struct ChainConstraints`; `root_input` is first-Signed-wins (root-first
+  chain ordering, matching the documented invariant and provenance's prior
+  root-find; the field was previously dead in production) and is now
+  consumed by `api/provenance.rs`, replacing its duplicate root-find walk.
 
 ### Test evidence
 
 - Restart-durability (the bug this task kills):
   `restart_rebuilds_spec_link_graph_from_persisted_table` and
-  `staleness_query_parity_after_restart` in `spec_registry.rs` — push a real
-  manifest through `sync_spec_ledger` against a real SQLite file, then build
-  a brand-new store from the same repo (fresh storage handle on the same
-  file) and assert the graph is identical and the staleness verdict
-  survives without any re-push. These fail against the pre-task empty-init
-  behavior.
+  `staleness_query_parity_after_restart` in `spec_registry.rs` (lines 2949,
+  3071) — push a real manifest through `sync_spec_ledger` against a real
+  SQLite file, then build a brand-new store from the same repo and assert
+  the graph is identical and the staleness verdict survives without any
+  re-push. These fail against the pre-task empty-init behavior.
 - Cross-repo scoping and removal: `sync_replaces_links_scoped_to_source_repo`
   and `sync_clears_durable_rows_when_links_removed_from_manifest`.
 - Adapter round-trips: `sqlite::spec_links` tests cover every
@@ -164,20 +166,23 @@ beyond the conflict union.
   convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Probe evidence (this round, source b14d3748c)
+### Probe evidence (this round, commit bdbccb48, via the build wrapper)
 
-Executed locally via the build wrapper (details and exit codes in the
-controller review-evidence artifact `rebase-repair-81c434f1.md`):
-`cargo check -p gyre-server -p gyre-adapters -p gyre-ports` PASS,
-`cargo check -p gyre-server --tests` PASS (lib + test cfg after the merge),
-`cargo test -p gyre-adapters spec_links` 4/4 PASS,
-`cargo test -p gyre-adapters migrations` 3/3 PASS, and mechanical gates
-`check-arch`, `check-migration-versions`, `check-migration-sql-portability`,
-`check-abac-route-registry`, `check-mcp-write-tools`, `check-mem-port-contracts`,
-`check-in-memory-state-stores`, `check-unnamed-tuple-carriers`,
-`check-inert-enforcement`, `check-lossy-secret-conversion` all PASS.
+- `cargo check -p gyre-server` PASS (zero warnings);
+  `cargo check -p gyre-server --tests` PASS.
+- `cargo clippy -p gyre-server --tests`: no warnings on changed lines.
+- `rustfmt --check` on the four changed files: clean.
+- `cargo test -p gyre-adapters spec_links` 4/4 PASS;
+  `cargo test -p gyre-adapters migrations` 4/4 PASS.
+- Mechanical gates PASS locally: check-unnamed-tuple-carriers (zero
+  violations, exemption file identical to base), check-in-memory-state-stores,
+  check-arch, check-mem-port-contracts, check-migration-versions,
+  check-migration-sql-portability, check-task-commit-attribution.
+
 The build wrapper defers gyre-server test binaries to the independent
-verifier (hard 4 GiB budget); the required probes are
-`cargo test --all`, plus focused `spec_registry` (restart-durability pair),
-`spec_link_staleness`, `spec_link`, and `mem::spec_link_contract_tests`
-runs, recorded in the review-evidence artifact.
+verifier (hard 4 GiB budget); the required probes are `cargo test --all`,
+plus focused `spec_registry` (restart-durability pair),
+`spec_link_staleness`, `mem::` (ConversationBlob refactor + spec-link
+contract tests), `git_http` (accumulate_chain_constraints),
+`constraint_check`, and `api::provenance` runs. Details and exit codes in
+the review-evidence artifact `exemption-repair.md`.
