@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["35f090dfac66db4afa8c4e2df562ad12667a521a", "19883086799ffc176645bed2f3831144f2701d05", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["35f090dfac66db4afa8c4e2df562ad12667a521a", "19883086799ffc176645bed2f3831144f2701d05", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2", "9e06a9d3dac428631eab2b69c13bdc5719eba0ac"]
 ---
 
 ## Spec Excerpt
@@ -127,9 +127,9 @@ Read `specs/system/abac-policy-engine.md` §Core Concepts through §Policy Examp
 
 ABAC policy engine core per `abac-policy-engine.md` §Core Concepts–§Policy
 Examples; coverage rows 2–7 of `specs/coverage/system/abac-policy-engine.md`
-are `implemented` with per-row evidence notes. This round repairs the rebase
-onto base e402e1ed (task-121: workspace membership, ownership transfer, repo
-access) without regressing either side.
+are `implemented` with per-row evidence notes. This round repairs the merge
+onto base 199c1bb78 (task-203 search access scoping + delivery-readiness)
+without regressing either side.
 
 ### Behavior (retained implementation)
 
@@ -155,45 +155,41 @@ access) without regressing either side.
 - **PolicyRepository port** (CRUD + list_by_scope + decision audit) with
   SQLite adapter (`policies` table; conditions/actions/resource_types as
   JSON) and mem adapter; built-in delete guard enforced in code in both.
+- **Scope-chain backfill** (prior rebase repair, retained): repo-addressed
+  routes complete `resource.workspace_id`/`resource.tenant_id` from the
+  addressed repo's own workspace (`set_workspace_and_tenant_from_repo`),
+  fail closed on unresolvable repo ids, so repo `admin` policies gated on
+  `subject.workspace_role` can match for workspace Admins.
 
-### This round (rebase repair, commits ef27e8b1f + 35f090df)
+### This round (merge repair onto 199c1bb78, commit 9e06a9d3d)
 
-- Resolved the three `abac_middleware.rs` conflicts: kept task-128's full
-  attribute-extraction pipeline over task-121's simpler workspace-role
-  block (including dropping the base's generic `merge_jwt_claims`, which
-  review round 2 removed as a claim-spoofing channel), and merged
-  task-121's three repo access-override route mappings into the registry
-  (PUT/DELETE `access-overrides/:user_id` evaluate as the repo `admin`
-  action). Removed the base's now-dead `extract_workspace_id` /
-  `extract_repo_id` helpers (superseded by `path_params`).
-- **Behavior repair**: a straight keep-ours resolution would have silently
-  regressed task-121 — task-128's pipeline never backfilled
-  `resource.workspace_id` on repo-addressed routes, so
-  `builtin-repo-access-override-management` (repo `admin` gated on
-  `subject.workspace_role`) could never match and workspace Admins would
-  get 403 on override management. `extract_entity_attributes` now
-  completes the scope chain from the addressed repo's own workspace
-  (`set_workspace_and_tenant_from_repo`), fail closed on unresolvable repo
-  ids, keeping task-128's extraction discipline intact.
+The merge kept this branch's 8-arg `mint_orchestrator` (which adds the
+`persona` claim) while taking the base's task-203 search test call sites
+(7 args), breaking compilation of `gyre-server` tests, plus one rustfmt
+collapse in `abac_middleware.rs`:
+
+- `crates/gyre-server/tests/search_wiring.rs` (2 sites) and
+  `crates/gyre-server/src/mcp.rs` lib tests (2 sites): pass `persona` using
+  the production mapping (`orchestrator_persona` in `api/orchestrator.rs`):
+  `repo_orchestrator` → `repo-orchestrator`, `workspace_orchestrator` →
+  `workspace-orchestrator`. Search scoping keys on `workspace_id`/`repo_id`
+  claims; persona only populates `subject.persona`, so test semantics are
+  unchanged.
+- `abac_middleware.rs`: rustfmt-only collapse of the
+  `state.repos.find_by_id(...)` match head; no semantic change.
 
 ### Test evidence
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  exit 0, no new warnings (wrapper-run).
-- `cargo test -p gyre-domain` (8 passed) and `cargo test -p gyre-adapters`
-  (466 passed, 6 ignored) — includes the merged task-121 repo-access
-  adapter and the task-128 policy adapter.
-- Mechanical gates re-run locally, all OK: `check-arch.sh`,
-  `check-migration-versions.sh`, `check-abac-route-registry.sh`,
-  `check-abac-exempt-handlers.sh`, `check-mem-port-contracts.sh`,
-  `check-inert-enforcement.sh`.
-- Server test execution is deferred to the independent verifier (build
-  wrapper blocks server test compilation in this stage — recorded in
-  `/tmp/stage/review-evidence/task-128-rebase-repair.md`). Required probes:
+- `cargo check -p gyre-server --tests` (build wrapper, SKIP_WEB_BUILD=1):
+  exit 0 — covers both previously failing test targets.
+- `rustfmt --check` on all 15 `.rs` files changed vs base 199c1bb78:
+  exit 0.
+- Server test execution is deferred to the independent verifier (4 GiB
+  budget; evidence in `/tmp/stage/review-evidence/task-128-merge-repair.md`).
+  Required probes:
+  - `cargo test -p gyre-server --test search_wiring`
+  - `cargo test -p gyre-server --lib mcp_search_is_access_scoped_to_the_agent_token`
   - `cargo test -p gyre-server --lib abac_middleware`
   - `cargo test -p gyre-server --lib policy_engine`
-  - `cargo test -p gyre-server --lib api::repo_access` (fails if the
-    repo→workspace scope-chain backfill regresses:
-    `workspace_admin_manages_overrides_through_production_abac`)
+  - `cargo test -p gyre-server --lib api::repo_access`
   - `cargo test -p gyre-server --lib git_http`
-  - `cargo test -p gyre-server --lib workspace_ownership`
