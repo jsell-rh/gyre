@@ -202,15 +202,11 @@ pub async fn facets_handler(
     let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let facets = state
         .search
-        .facet_counts(
-            SearchQuery::parse("")
-                .with_limit(0)
-                .with_scope(
-                    scope.tenant_id,
-                    scope.accessible_workspace_ids,
-                    scope.accessible_repo_ids,
-                ),
-        )
+        .facet_counts(SearchQuery::parse("").with_limit(0).with_scope(
+            scope.tenant_id,
+            scope.accessible_workspace_ids,
+            scope.accessible_repo_ids,
+        ))
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(FacetsResponse { facets }))

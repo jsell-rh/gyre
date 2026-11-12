@@ -328,8 +328,7 @@ fn build_scope(query: &SearchQuery, w: &mut WhereBuilder) {
         None => {}
         Some(ids) if ids.is_empty() => w.push_clause("0".to_string()),
         Some(ids) => {
-            let placeholders: Vec<String> =
-                ids.iter().map(|v| w.push_text(v.clone())).collect();
+            let placeholders: Vec<String> = ids.iter().map(|v| w.push_text(v.clone())).collect();
             w.push_clause(format!(
                 "(repo_id = '' OR repo_id IN ({}))",
                 placeholders.join(", ")

@@ -168,9 +168,11 @@ async fn sqlite_url_wires_fts5_search_port() {
     // Built via `SearchQuery::parse` so the raw query and its query-language
     // parse stay consistent, then scoped.
     let admin_query = |q: &str| {
-        SearchQuery::parse(q.to_string())
-            .with_limit(10)
-            .with_scope("default".to_string(), None, None)
+        SearchQuery::parse(q.to_string()).with_limit(10).with_scope(
+            "default".to_string(),
+            None,
+            None,
+        )
     };
 
     // Porter stemming: "running" stems to "run" and matches indexed "runs".
