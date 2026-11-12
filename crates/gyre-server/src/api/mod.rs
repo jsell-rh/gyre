@@ -688,6 +688,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
         )
+        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
+        .route(
+            "/api/v1/tenants/:id/meta-specs/set",
+            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
+        )
         // Workspaces (M22.1)
         .route(
             "/api/v1/workspaces",

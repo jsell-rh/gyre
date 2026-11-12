@@ -37,6 +37,7 @@ pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod prompt_assembly;
+pub mod ralph_loop;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
@@ -83,9 +84,9 @@ use gyre_ports::{
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
-    WorkspaceRepository, WorktreeRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -392,6 +393,9 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Tenant-level meta-spec sets (§8): tenant-wide default bindings that
+    /// workspaces inherit unless their own set overrides the pinned path.
+    pub tenant_meta_spec_sets: Arc<dyn TenantMetaSpecSetRepository>,
     /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
     pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
@@ -466,25 +470,51 @@ pub struct AppState {
     pub ws_tickets: auth::WsTicketStore,
 }
 
-/// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
+/// Compute the SHA-256 hash of a workspace's EFFECTIVE meta-spec set
+/// (meta-spec-reconciliation.md §8: tenant defaults merged with the
+/// workspace's own overrides — workspace pin wins on conflict).
 ///
-/// Returns the hex-encoded hash, or an empty string if no meta-spec set is
-/// configured for the workspace. Used at spec approval time (to populate
-/// `InputContent.meta_spec_set_sha`) and during constraint evaluation (to
-/// populate `AgentContext.meta_spec_set_sha`).
-pub(crate) async fn compute_meta_spec_set_sha(
-    meta_spec_sets: &dyn gyre_ports::MetaSpecSetRepository,
-    workspace_id: &Id,
-) -> String {
+/// Returns the hex-encoded hash of the canonical serialization of the merged
+/// set, or an empty string when the workspace binds nothing (no workspace set
+/// and no tenant set) or the workspace does not exist. Used at spec approval
+/// time (to populate `InputContent.meta_spec_set_sha`) and during constraint
+/// evaluation (to populate `AgentContext.meta_spec_set_sha`).
+///
+/// For a workspace without a tenant set the merged serialization is
+/// byte-identical to the stored workspace-set JSON, so SHAs recorded before
+/// tenant sets existed remain valid (no false drift on upgrade).
+pub(crate) async fn compute_meta_spec_set_sha(state: &AppState, workspace_id: &Id) -> String {
     use sha2::{Digest, Sha256};
-    match meta_spec_sets.get(workspace_id).await {
-        Ok(Some(json)) => {
-            let mut hasher = Sha256::new();
-            hasher.update(json.as_bytes());
-            hex::encode(hasher.finalize())
-        }
-        _ => String::new(),
+    let ws = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws,
+        _ => return String::new(),
+    };
+    let ws_set = state.meta_spec_sets.get(workspace_id).await.ok().flatten();
+    let tenant_set = state
+        .tenant_meta_spec_sets
+        .get(&ws.tenant_id)
+        .await
+        .ok()
+        .flatten();
+    if ws_set.is_none() && tenant_set.is_none() {
+        // Nothing is bound — no set to conform to.
+        return String::new();
     }
+    let effective = crate::reconciliation::resolve_effective_meta_spec_set(state, &ws)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "compute_meta_spec_set_sha: corrupt set JSON; treating as unbound"
+            );
+            e
+        })
+        .unwrap_or_default();
+    let json = serde_json::to_string(&effective).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -1341,6 +1371,10 @@ pub fn build_state(
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        tenant_meta_spec_sets: store!(
+            dyn TenantMetaSpecSetRepository,
+            mem::MemTenantMetaSpecSetRepository::default()
         ),
         rollout_policies: store!(
             dyn RolloutPolicyRepository,
