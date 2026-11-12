@@ -13,7 +13,7 @@
     computeRelationships,
     computeRisk,
     computeStory,
-    findFieldTypeNode,
+    resolveFieldType,
     timeAgo,
   } from './model.js';
 
@@ -97,24 +97,24 @@
       <summary class="detail-section-title">Fields ({relationships.fields.length})</summary>
       <ul class="detail-ref-list">
         {#each relationships.fields as f (f.id)}
-          {@const fieldTypeTarget = findFieldTypeNode(f, nodes)}
+          {@const fieldType = resolveFieldType(f, nodes, edges)}
           <li>
             <button class="detail-ref-link" onclick={() => onNavigate(f)} type="button">
               <span class="ref-type">{f.node_type}</span>
               <span class="field-name">{f.name}</span>
-              {#if f.qualified_name && f.qualified_name !== f.name}
-                {#if fieldTypeTarget}
+              {#if fieldType?.annotation}
+                {#if fieldType.typeNode}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <span
                     class="field-type-annotation field-type-clickable"
                     role="button"
                     tabindex="0"
-                    title="Navigate to type {f.qualified_name.split('::').pop()}"
-                    onclick={(e) => { e.stopPropagation(); onNavigate(fieldTypeTarget); }}
-                    onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onNavigate(fieldTypeTarget); } }}
-                  >: {f.qualified_name.split('::').pop()}</span>
+                    title="Navigate to type {fieldType.typeNode.name}"
+                    onclick={(e) => { e.stopPropagation(); onNavigate(fieldType.typeNode); }}
+                    onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onNavigate(fieldType.typeNode); } }}
+                  >: {fieldType.annotation}</span>
                 {:else}
-                  <span class="field-type-annotation">: {f.qualified_name.split('::').pop()}</span>
+                  <span class="field-type-annotation">: {fieldType.annotation}</span>
                 {/if}
               {/if}
             </button>

@@ -514,15 +514,90 @@ export function computeEndpointGates(node) {
   return gates;
 }
 
-/** Find the graph node for a field's type annotation (clickable field types). */
-export function findFieldTypeNode(field, nodes) {
-  if (!field?.qualified_name) return null;
-  const typeName = field.qualified_name.split('::').pop();
-  if (!typeName) return null;
-  return nodes.find(n =>
-    (n.node_type === 'type' || n.node_type === 'interface' || n.node_type === 'trait') &&
-    (n.name === typeName || n.qualified_name?.endsWith(`::${typeName}`))
+/** Type-annotation text for a field node. Every extractor stores the
+ * field's TYPE here, not a doc string (rust_extractor.rs make_node with
+ * `Some(type_str)`, go_extractor.rs / typescript_extractor.rs /
+ * python_extractor.rs set `doc_comment = type annotation`). The
+ * qualified_name's last segment is the FIELD NAME
+ * (`Parent::field_name` / `Parent.field_name`), never the type.
+ */
+function fieldAnnotation(field) {
+  const doc = field?.doc_comment?.trim();
+  return doc || null;
+}
+
+const TYPE_WRAPPER_NAMES = new Set([
+  'Option', 'Optional', 'Vec', 'Result', 'Box', 'Rc', 'Arc', 'RefCell', 'Cow',
+  'HashMap', 'BTreeMap', 'HashSet', 'BTreeSet', 'Map', 'Array', 'List', 'Set', 'Promise',
+]);
+
+const PRIMITIVE_TYPE_NAMES = new Set([
+  'String', 'str', 'char', 'bool', 'boolean', 'byte', 'rune', 'number', 'int',
+  'float', 'i8', 'i16', 'i32', 'i64', 'i128', 'isize', 'u8', 'u16', 'u32',
+  'u64', 'u128', 'usize', 'f32', 'f64', 'int8', 'int16', 'int32', 'int64',
+  'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'float32', 'float64',
+  'complex64', 'complex128', 'any', 'unknown', 'never', 'void', 'object',
+  'null', 'undefined', 'true', 'false', 'self', 'interface', 'type',
+]);
+
+/** Candidate user type identifiers in a type annotation, outermost first.
+ * `Option<Id>` → ['Id'], `Vec<Task>` → ['Task'], `[]Bar` / `*Foo` → ['Bar'],
+ * `TaskStatus | null` → ['TaskStatus']. Wrappers and language primitives
+ * are skipped — they are never the navigable type.
+ */
+function annotationTypeIdentifiers(annotation) {
+  const ids = annotation.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  return ids.filter((id) => !TYPE_WRAPPER_NAMES.has(id) && !PRIMITIVE_TYPE_NAMES.has(id));
+}
+
+function isTypeLike(n) {
+  return n && (n.node_type === 'type' || n.node_type === 'interface' || n.node_type === 'trait');
+}
+
+function findTypeNodeByName(nodes, typeName) {
+  return nodes.find((n) =>
+    isTypeLike(n) &&
+    (n.name === typeName ||
+      n.qualified_name?.endsWith(`::${typeName}`) ||
+      n.qualified_name?.endsWith(`.${typeName}`))
   ) ?? null;
+}
+
+/** Resolve a field's type for the clickable field-type link (spec §2:
+ * "Every field type is clickable → navigates to that type").
+ *
+ * Primary source: the DependsOn edge every extractor emits from the field
+ * node to the EXACT type node when the field's type is in the graph
+ * (rust_extractor.rs / go_extractor.rs / typescript_extractor.rs /
+ * python_extractor.rs). Fallback: match a type node by the identifiers in
+ * the type annotation (doc_comment). Returns { typeNode, annotation } —
+ * typeNode is null when the type is not in the graph (primitives, external
+ * types) and the annotation renders as plain text.
+ */
+export function resolveFieldType(field, nodes, edges) {
+  if (!field || !nodes) return null;
+  const annotation = fieldAnnotation(field);
+
+  // 1. DependsOn edge: the extractor already resolved the exact type node.
+  for (const e of edges ?? []) {
+    if (edgeType(e) !== 'depends_on') continue;
+    if (edgeSource(e) !== field.id) continue;
+    const target = nodes.find((n) => n.id === edgeTarget(e));
+    if (isTypeLike(target)) {
+      return { typeNode: target, annotation: annotation ?? target.name };
+    }
+  }
+
+  // 2. Match a type node by the annotation's identifiers.
+  if (annotation) {
+    for (const typeName of annotationTypeIdentifiers(annotation)) {
+      const typeNode = findTypeNodeByName(nodes, typeName);
+      if (typeNode) return { typeNode, annotation };
+    }
+    return { typeNode: null, annotation };
+  }
+
+  return null;
 }
 
 /** Resolve the spec path for a spec node (extractor convention: spec nodes

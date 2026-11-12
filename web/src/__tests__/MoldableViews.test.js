@@ -51,8 +51,10 @@ const TYPE_NODE = {
   test_coverage: 0.94, complexity: 8, test_node: false,
 };
 const STATUS_FIELD = {
-  id: 'f1', node_type: 'field', name: 'status', qualified_name: 'domain::TaskStatus',
-  visibility: 'public', test_node: false,
+  // Real extractor convention (rust_extractor.rs): field qualified_name is
+  // `Parent::field_name` and the TYPE annotation lives in doc_comment.
+  id: 'f1', node_type: 'field', name: 'status', qualified_name: 'domain::User::status',
+  doc_comment: 'TaskStatus', visibility: 'public', test_node: false,
 };
 const TASK_STATUS_TYPE = {
   id: 'n5', node_type: 'type', name: 'TaskStatus', qualified_name: 'domain::TaskStatus',
@@ -78,6 +80,8 @@ const TYPE_EDGES = [
   { id: 'e2', source_id: 'n3', target_id: 'n1', edge_type: 'calls' },
   { id: 'e3', source_id: 'n1', target_id: 'n2', edge_type: 'implements' },
   { id: 'e4', source_id: 'n4', target_id: 'n1', edge_type: 'calls' },
+  // Extractor convention: field → its type node (DependsOn)
+  { id: 'e5', source_id: 'f1', target_id: 'n5', edge_type: 'depends_on' },
 ];
 
 const TRAIT_VIEW_NODE = {
@@ -251,9 +255,41 @@ describe('MoldableTypeView', () => {
     });
     const clickableType = container.querySelector('.field-type-clickable');
     expect(clickableType).toBeTruthy();
-    expect(clickableType.textContent).toContain('TaskStatus');
+    // The annotation shows the TYPE (doc_comment), not the field name that
+    // qualified_name's last segment carries ('domain::User::status' → 'status').
+    expect(clickableType.textContent).toBe(': TaskStatus');
     await fireEvent.click(clickableType);
     expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ id: 'n5', name: 'TaskStatus' }));
+  });
+
+  it('resolves a field type from the doc_comment annotation when no DependsOn edge exists', async () => {
+    // Real extractor shape (python/typescript_extractor.rs): qualified_name
+    // `Parent.field_name`, type annotation in doc_comment, no DependsOn edge
+    // when the type was not yet extracted at field-creation time.
+    const agentType = {
+      id: 'n6', node_type: 'type', name: 'Agent', qualified_name: 'domain::Agent',
+      visibility: 'public', test_node: false,
+    };
+    const ownerField = {
+      id: 'f2', node_type: 'field', name: 'owner', qualified_name: 'domain::User::owner',
+      doc_comment: 'Option<Agent>', visibility: 'public', test_node: false,
+    };
+    const onNavigate = vi.fn();
+    const { container } = render(MoldableTypeView, {
+      props: {
+        node: TYPE_NODE,
+        nodes: [...TYPE_NODES, agentType, ownerField],
+        edges: [...TYPE_EDGES, { id: 'e6', source_id: 'f2', target_id: 'n1', edge_type: 'field_of' }],
+        onNavigate,
+      },
+    });
+    const annotations = Array.from(container.querySelectorAll('.field-type-annotation'));
+    const ownerAnnotation = annotations.find((a) => a.textContent.includes('Option<Agent>'));
+    expect(ownerAnnotation).toBeTruthy();
+    expect(ownerAnnotation.classList.contains('field-type-clickable')).toBe(true);
+    await fireEvent.click(ownerAnnotation);
+    // `Option<Agent>` → the Agent type node (wrapper skipped)
+    expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ id: 'n6', name: 'Agent' }));
   });
 
   it('makes the last-modified agent reference clickable → provenance', async () => {
