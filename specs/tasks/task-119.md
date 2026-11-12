@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5", "dc09d6950d1df2d7498448e66642908a747c4b0a"]
 ---
 
 ## Spec Excerpt
@@ -110,61 +110,70 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
 Structure) implemented in production code — no stubs, no audit-only
 paths. The cascade, enforcement levels, tracking, reset, and prompt
-structure shipped in commit 4bfdf85b8; review-round repairs in 7bdc60603
-(BudgetExhausted inbox delivery, repo concurrent/lifetime override
-enforcement, priority-7 spec reconciliation, persona-only
-`system://persona`) and bfb2dc3d (repo lifetime override bounded by the
-effective tenant/workspace ceiling).
+structure shipped in commit 4bfdf85b8; review-round repairs in
+7bdc60603 (BudgetExhausted inbox delivery, repo concurrent/lifetime
+override enforcement, priority-7 spec reconciliation, persona-only
+`system://persona`), bfb2dc3d (repo lifetime override bounded by the
+effective tenant/workspace ceiling), and 29d1a961 (verification-gate
+repairs: rustfmt, clippy double_must_use allow on the sibling port
+trait).
 
-This round (29d1a961) repaired the verification-gate findings from the
-failed checks run on candidate 08235796 — no behavior changes, gate
-hygiene only:
+This round (dc09d695) repaired the two review findings from round
+d3607aac in `crates/gyre-server/src/api/budget.rs`:
 
-### Repairs
+### F1 — overshooting exhaustion now gets the 60s graceful stop
 
-- **rustfmt:** the task-touched files were reformatted (`cargo fmt`
-  touched only files inside the task diff, verified via git status);
-  `cargo fmt --check` is now clean.
-- **clippy::double_must_use** (gyre-ports/budget_usage.rs): the trait
-  carries the sibling-port `#[allow(clippy::double_must_use)]` above
-  `#[async_trait]` (same pattern as compute.rs, storage.rs,
-  budget_call.rs).
-- **clippy::too_many_arguments** (api/budget.rs `notify_budget_level`,
-  8/7): the config/usage/pct/exhausted/agent_id/repo_id arguments are
-  bundled into a `BudgetLevelNotice<'a>` struct; the signature is now
-  `(state, workspace_id, &BudgetLevelNotice)` and all three call sites
-  (beyond-limit, 100%, 80% branches) construct it.
-- **clippy::needless_borrow** (api/spawn.rs): `state` is passed directly
-  (deref coercion from `&Arc<AppState>`) to `check_spawn_budget` /
-  `check_repo_spawn_budget` instead of `&state`.
-- **enforcement-marker placement:** rustfmt's reflow moved the
-  `// enforcement:ok` exemption off the `enforce_workspace_budget(`
-  statement line, tripping check-inert-enforcement; the call now fits on
-  one line (hoisted `ws`/`agent`/`repo` locals) with the marker riding
-  the statement line, so `cargo fmt --check` and
-  `check-inert-enforcement.sh` pass simultaneously.
+"Beyond limit" is exclusively the budget-reduced-below-usage case
+(external budget changes). `enforce_workspace_budget` now takes a
+`BudgetEnforcementCause` (`UsageReport` | `BudgetChanged`): only a
+`BudgetChanged` pass (workspace budget PUT) with usage strictly past
+the limit hard-kills immediately with grace_secs 0. Every usage report
+at ≥ 100% — including the common overshoot crossing (950 → 1150
+against a 1000-token limit) — routes to the 100% branch:
+`BudgetExhausted` to every active agent's inbox, 60s grace timer, kill
+of agents still Active afterwards. Reports made during a started
+grace period no longer fall into the immediate-kill branch. The PUT
+path (budget reduced below usage) still hard-kills synchronously.
+
+### F2 — llm_query charges the workspace only
+
+`record_llm_call_usage` no longer charges the repo budget when
+`usage_type` is `llm_query`, even when the calling route scoped the
+query to a repo (REST specs/assist, explorer/generate, MCP
+spec_assist). User queries charge the workspace and tenant counters
+directly; the per-call `BudgetCallRecord` still records the repo for
+the audit trail. User queries can no longer exhaust a repo budget and
+block agent spawns.
 
 ### Test evidence
 
-No new tests this round (no behavior changed — the task's regression
-tests from the prior rounds stand: effective-ceiling validation,
-lifetime-override bounding/rebinding, 80%/100%/beyond-limit enforcement,
-grace kill, compute minutes, rolling reset). Sandbox probes, all exit 0:
-`cargo fmt --check`, `cargo check -p gyre-ports -p gyre-domain`,
-`cargo check -p gyre-server`, `cargo clippy -p gyre-ports`,
-`cargo clippy -p gyre-server --lib`, and the full gate-script set the
-failed verification ran (arch, ABAC registry/exempt handlers, MCP write
-tools, migrations, dead message kinds, byte-slice, relative-path,
-fail-open-ref, mem-port contracts, fabricated-scope, lossy-secret,
-scope-literal, inert-enforcement, forged-scope, forwarded-header,
-in-memory stores, unbounded HTTP). Evidence:
-/tmp/stage/review-evidence/task119-verification-repair.md.
+New regression tests in `api/budget.rs` (type-checked via
+`cargo check -p gyre-server --lib --tests`; the sandbox build wrapper
+blocks gyre-server test codegen, so the independent verifier must run
+them):
 
-gyre-server test compilation exceeds this sandbox's 4 GiB budget (build
-wrapper refuses), so the independent verifier must run:
+- `overshooting_report_gets_graceful_stop_not_hard_kill` — the exact
+  F1 repro (950 seeded, one 200-token report vs a 1000-token limit):
+  agent stays Active, BudgetExhausted in the inbox with grace_secs 60,
+  worktree preserved. Fails on the pre-fix code (immediate Stopped).
+- `overshoot_exhaustion_kills_after_grace_expiry` — overshoot routes
+  through the grace timer: killed (Stopped) after grace, worktree
+  preserved, task remains InProgress.
+- `llm_query_with_repo_context_charges_workspace_only` — llm_query
+  with a repo_id: workspace + tenant counters incremented, no repo
+  usage entry, audit record keeps the repo. Fails on the pre-fix code.
+- Updated `beyond_limit_kills_immediately_without_grace` to pass
+  `BudgetChanged` (the only path to beyond-limit) and
+  `exhaustion_emits_messages_and_kills_after_grace` to pass
+  `UsageReport`.
 
-```
-cargo test -p gyre-server --lib lifetime
-cargo test -p gyre-server --lib repo_budget
-cargo test --all
-```
+Verifier probes required (blocked in-sandbox by the build wrapper's
+4 GiB budget):
+
+- `cargo test -p gyre-server --lib api::budget`
+- `cargo test --all`
+
+Local probes run here: `cargo check -p gyre-server` (clean),
+`cargo check -p gyre-server --lib --tests` (clean),
+`cargo clippy -p gyre-server --lib` (no new warnings in
+api/budget.rs), `cargo fmt --all -- --check` (clean).
