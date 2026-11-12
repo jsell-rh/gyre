@@ -35,6 +35,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;

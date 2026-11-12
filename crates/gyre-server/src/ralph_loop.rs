@@ -653,6 +653,34 @@ pub(crate) async fn relaunch_agent_session(
         .unwrap_or_else(|| repo.workspace_id.to_string());
     let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
 
+    // Same persona (agent-runtime.md §1 Phase 7 / AgentLaunchCtx contract):
+    // the re-spawned session is styled by the persona bound to the agent
+    // row at first spawn. Fail closed when the binding no longer resolves
+    // to an Approved persona — silently dropping or substituting the
+    // persona prompt would drift the session's behavioral context.
+    let persona = match &agent.persona_id {
+        Some(persona_id) => {
+            let p = state
+                .personas
+                .find_by_id(persona_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("persona {persona_id} bound to agent {} not found", agent.id)
+                })?;
+            if p.approval_status != gyre_domain::PersonaApprovalStatus::Approved {
+                anyhow::bail!(
+                    "persona '{}' bound to agent {} is {:?}; a human must approve \
+                     it before the agent can be re-spawned",
+                    p.slug,
+                    agent.id,
+                    p.approval_status
+                );
+            }
+            Some(p)
+        }
+        None => None,
+    };
+
     let launch = crate::api::spawn::launch_agent_process(
         state,
         &crate::api::spawn::AgentLaunchCtx {
@@ -670,6 +698,10 @@ pub(crate) async fn relaunch_agent_session(
             // picks it whenever it exists on disk.
             jj_workspace_path: work_dir.clone(),
             plain_worktree_path: work_dir,
+            persona,
+            // Workers only: this path requires a worktree (asserted above),
+            // and interrogation agents have none.
+            is_interrogation: false,
         },
     )
     .await;
