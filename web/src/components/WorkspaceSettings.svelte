@@ -2,10 +2,12 @@
   /**
    * WorkspaceSettings — full-page workspace settings (§2 Workspace Settings of ui-navigation.md)
    *
-   * Tabs: General | Trust & Policies | Teams | Budget | Compute | Audit
+   * Tabs: General | Trust & Policies | Teams | Budget | Compute | LLM Config | Audit | Repos
+   * The Repos tab is the workspace-scope repo management surface
+   * (repo-lifecycle.md §1 Admin → Workspace Scope → Repos Tab).
    * Accessed via gear icon ⚙ in workspace header or /workspaces/:slug/settings URL.
    */
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
@@ -157,6 +159,106 @@
     }
   }
 
+  // ── Repos (repo-lifecycle.md §1 Admin → Workspace Scope → Repos Tab) ──
+  let repos = $state([]);
+  let reposLoading = $state(false);
+  let reposError = $state(null);
+  let newRepoOpen = $state(false);
+  let newRepoName = $state('');
+  let newRepoDescription = $state('');
+  let newRepoLoading = $state(false);
+  let newRepoError = $state(null);
+  let importRepoOpen = $state(false);
+  let importRepoUrl = $state('');
+  let importRepoName = $state('');
+  let importRepoLoading = $state(false);
+  let importRepoError = $state(null);
+
+  const goToRepo = getContext('goToRepo') ?? null;
+
+  /** Active agent count per repo, keyed by repo id. */
+  let repoAgentCounts = $state({});
+  /** Last activity timestamp per repo, keyed by repo id. */
+  let repoLastActivity = $state({});
+
+  async function loadReposTab(wsId) {
+    reposLoading = true;
+    reposError = null;
+    try {
+      const [repoList, agents, mrs] = await Promise.all([
+        api.workspaceRepos(wsId),
+        api.agents({ workspaceId: wsId }).catch(() => []),
+        api.mergeRequests({ workspace_id: wsId }).catch(() => []),
+      ]);
+      repos = Array.isArray(repoList) ? repoList : [];
+      const agentCounts = {};
+      const lastActivity = {};
+      for (const repo of repos) {
+        const repoAgents = agents.filter(a => a.repo_id === repo.id);
+        agentCounts[repo.id] = repoAgents.filter(a => a.status === 'active').length;
+        const times = [
+          repo.updated_at,
+          ...repoAgents.map(a => a.created_at ?? a.spawned_at),
+          ...mrs
+            .filter(m => (m.repository_id ?? m.repo_id) === repo.id)
+            .map(m => m.merged_at ?? m.updated_at ?? m.created_at),
+        ].filter(Boolean);
+        lastActivity[repo.id] = times.length ? Math.max(...times) : null;
+      }
+      repoAgentCounts = agentCounts;
+      repoLastActivity = lastActivity;
+    } catch (e) {
+      reposError = e.message;
+      repos = [];
+    } finally {
+      reposLoading = false;
+    }
+  }
+
+  async function handleCreateRepo() {
+    const wsId = workspace?.id;
+    const name = newRepoName.trim();
+    if (!wsId || !name) return;
+    newRepoLoading = true;
+    newRepoError = null;
+    try {
+      await api.createRepo({ name, description: newRepoDescription.trim() || undefined, workspace_id: wsId });
+      newRepoOpen = false;
+      newRepoName = '';
+      newRepoDescription = '';
+      await loadReposTab(wsId);
+    } catch (e) {
+      newRepoError = e.message;
+    } finally {
+      newRepoLoading = false;
+    }
+  }
+
+  async function handleImportRepo() {
+    const wsId = workspace?.id;
+    const url = importRepoUrl.trim();
+    if (!wsId || !url) return;
+    // Derive name from URL if not provided (strip .git suffix, last path segment).
+    const name = importRepoName.trim() || url.split('/').pop()?.replace(/\.git$/, '') || '';
+    importRepoLoading = true;
+    importRepoError = null;
+    try {
+      await api.createMirrorRepo({ url, workspace_id: wsId, name });
+      importRepoOpen = false;
+      importRepoUrl = '';
+      importRepoName = '';
+      await loadReposTab(wsId);
+    } catch (e) {
+      importRepoError = e.message;
+    } finally {
+      importRepoLoading = false;
+    }
+  }
+
+  function repoStatusBadge(repo) {
+    return repo?.status === 'Archived' || repo?.is_archived === true ? 'Archived' : 'Active';
+  }
+
   function membersSortArrow(col) {
     if (membersSortCol !== col) return '↕';
     return membersSortDir === 'asc' ? '↑' : '↓';
@@ -185,73 +287,6 @@
   let budgetSaving = $state(false);
   let budgetSaved = $state(false);
   let budgetSaveError = $state(null);
-
-  // ── Repos (HSI §1.5 Admin workspace-scope row: list, create, import) ──
-  let repos = $state([]);
-  let reposLoading = $state(false);
-  let reposError = $state(null);
-  let newRepoOpen = $state(false);
-  let newRepoName = $state('');
-  let newRepoDescription = $state('');
-  let newRepoLoading = $state(false);
-  let newRepoError = $state(null);
-  let importOpen = $state(false);
-  let importUrl = $state('');
-  let importName = $state('');
-  let importLoading = $state(false);
-  let importError = $state(null);
-
-  async function loadRepos(wsId) {
-    reposLoading = true;
-    try {
-      repos = await api.workspaceRepos(wsId) ?? [];
-    } catch (e) {
-      reposError = e?.message ?? String(e);
-      repos = [];
-    } finally {
-      reposLoading = false;
-    }
-  }
-
-  async function handleCreateRepo() {
-    const wsId = workspace?.id;
-    const name = newRepoName.trim();
-    if (!wsId || !name) return;
-    newRepoLoading = true;
-    newRepoError = null;
-    try {
-      await api.createRepo({ name, description: newRepoDescription.trim() || undefined, workspace_id: wsId });
-      newRepoOpen = false;
-      newRepoName = '';
-      newRepoDescription = '';
-      await loadRepos(wsId);
-    } catch (e) {
-      newRepoError = e?.message ?? String(e);
-    } finally {
-      newRepoLoading = false;
-    }
-  }
-
-  async function handleImportRepo() {
-    const wsId = workspace?.id;
-    const url = importUrl.trim();
-    if (!wsId || !url) return;
-    // Derive name from URL if not provided (strip .git suffix, last segment)
-    const name = importName.trim() || url.split('/').pop()?.replace(/\.git$/, '') || '';
-    importLoading = true;
-    importError = null;
-    try {
-      await api.createMirrorRepo({ url, workspace_id: wsId, name });
-      importOpen = false;
-      importUrl = '';
-      importName = '';
-      await loadRepos(wsId);
-    } catch (e) {
-      importError = e?.message ?? String(e);
-    } finally {
-      importLoading = false;
-    }
-  }
 
   // ── Compute ───────────────────────────────────────────────────────────
   let allCompute = $state([]);
@@ -404,9 +439,6 @@
     if (activeTab === 'budget') {
       if (untrack(() => !budget && !budgetLoading)) loadBudget(wsId);
     }
-    if (activeTab === 'repos') {
-      if (untrack(() => repos.length === 0 && !reposLoading)) loadRepos(wsId);
-    }
     if (activeTab === 'compute') {
       if (untrack(() => allCompute.length === 0 && !allComputeLoading)) loadAllCompute();
     }
@@ -415,6 +447,9 @@
     }
     if (activeTab === 'audit') {
       loadAudit(wsId);
+    }
+    if (activeTab === 'repos') {
+      if (untrack(() => repos.length === 0 && !reposLoading)) loadReposTab(wsId);
     }
   });
 
@@ -1094,141 +1129,6 @@
         {/if}
       </div>
 
-    <!-- Repos tab (HSI §1.5 Admin workspace scope: list, create, import) -->
-    {:else if activeTab === 'repos'}
-      <div class="settings-section" data-testid="repos-tab">
-        <h2 class="section-title">{$t('workspace_settings.tabs.repos')}</h2>
-        <p class="section-desc">{$t('workspace_settings.repos.desc')}</p>
-
-        <div class="audit-filter-bar">
-          <button
-            class="btn-secondary"
-            onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
-            data-testid="repos-new-btn"
-          >
-            {$t('workspace_settings.repos.new_btn')}
-          </button>
-          <button
-            class="btn-secondary"
-            onclick={() => { importOpen = !importOpen; newRepoOpen = false; }}
-            data-testid="repos-import-btn"
-          >
-            {$t('workspace_settings.repos.import_btn')}
-          </button>
-        </div>
-
-        {#if newRepoOpen}
-          <form
-            class="budget-edit"
-            data-testid="repos-new-form"
-            onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
-          >
-            <div class="budget-edit-row">
-              <input
-                class="field-input"
-                type="text"
-                placeholder={$t('workspace_settings.repos.name_placeholder')}
-                bind:value={newRepoName}
-                required
-                disabled={newRepoLoading}
-                data-testid="repos-new-name"
-                aria-label={$t('workspace_settings.repos.name_placeholder')}
-              />
-              <input
-                class="field-input"
-                type="text"
-                placeholder={$t('workspace_settings.repos.desc_placeholder')}
-                bind:value={newRepoDescription}
-                disabled={newRepoLoading}
-                data-testid="repos-new-description"
-                aria-label={$t('workspace_settings.repos.desc_placeholder')}
-              />
-              <button
-                class="btn-primary"
-                type="submit"
-                disabled={newRepoLoading}
-                data-testid="repos-new-submit"
-              >
-                {newRepoLoading ? $t('workspace_settings.repos.creating') : $t('workspace_settings.repos.create_btn')}
-              </button>
-            </div>
-            {#if newRepoError}
-              <p class="error-text" role="alert" data-testid="repos-new-error">{newRepoError}</p>
-            {/if}
-          </form>
-        {/if}
-
-        {#if importOpen}
-          <form
-            class="budget-edit"
-            data-testid="repos-import-form"
-            onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
-          >
-            <div class="budget-edit-row">
-              <input
-                class="field-input"
-                type="text"
-                placeholder={$t('workspace_settings.repos.url_placeholder')}
-                bind:value={importUrl}
-                required
-                disabled={importLoading}
-                data-testid="repos-import-url"
-                aria-label={$t('workspace_settings.repos.url_placeholder')}
-              />
-              <input
-                class="field-input"
-                type="text"
-                placeholder={$t('workspace_settings.repos.name_placeholder')}
-                bind:value={importName}
-                disabled={importLoading}
-                data-testid="repos-import-name"
-                aria-label={$t('workspace_settings.repos.name_placeholder')}
-              />
-              <button
-                class="btn-primary"
-                type="submit"
-                disabled={importLoading}
-                data-testid="repos-import-submit"
-              >
-                {importLoading ? $t('workspace_settings.repos.importing') : $t('workspace_settings.repos.import_go_btn')}
-              </button>
-            </div>
-            {#if importError}
-              <p class="error-text" role="alert" data-testid="repos-import-error">{importError}</p>
-            {/if}
-          </form>
-        {/if}
-
-        {#if reposLoading}
-          <p class="loading-text" data-testid="repos-loading">{$t('workspace_settings.repos.loading')}</p>
-        {:else if reposError}
-          <p class="error-text" role="alert" data-testid="repos-error">{reposError}</p>
-        {:else if repos.length === 0}
-          <p class="empty-text">{$t('workspace_settings.repos.empty')}</p>
-        {:else}
-          <table class="settings-table" data-testid="repos-table">
-            <thead>
-              <tr>
-                <th scope="col">{$t('workspace_settings.repos.col_name')}</th>
-                <th scope="col">{$t('workspace_settings.repos.col_status')}</th>
-                <th scope="col">{$t('workspace_settings.repos.col_default_branch')}</th>
-                <th scope="col">{$t('workspace_settings.repos.col_mirror')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each repos as repo (repo.id)}
-                <tr class="settings-row" data-testid="repos-row">
-                  <td class="cell-mono">{repo.name}</td>
-                  <td>{repo.status ?? '—'}</td>
-                  <td>{repo.default_branch ?? '—'}</td>
-                  <td>{repo.is_mirror ? (repo.mirror_url ?? '—') : '—'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
-
     <!-- Compute tab -->
     {:else if activeTab === 'compute'}
       <div class="settings-section" data-testid="compute-tab">
@@ -1414,6 +1314,118 @@
               </div>
             {/each}
           </div>
+        {/if}
+      </div>
+
+    <!-- Repos tab (repo-lifecycle.md §1 Admin → Workspace Scope → Repos Tab) -->
+    {:else if activeTab === 'repos'}
+      <div class="settings-section" data-testid="ws-repos-tab">
+        <h2 class="section-title">{$t('workspace_settings.repos.title')}</h2>
+
+        <div class="audit-filter-bar">
+          <button
+            class="btn-secondary"
+            onclick={() => { newRepoOpen = !newRepoOpen; importRepoOpen = false; }}
+            data-testid="ws-repos-new-btn"
+          >
+            {$t('workspace_settings.repos.new_repo')}
+          </button>
+          <button
+            class="btn-secondary"
+            onclick={() => { importRepoOpen = !importRepoOpen; newRepoOpen = false; }}
+            data-testid="ws-repos-import-btn"
+          >
+            {$t('workspace_settings.repos.import_repo')}
+          </button>
+          <button
+            class="btn-secondary"
+            onclick={() => loadReposTab(workspace?.id)}
+            disabled={reposLoading}
+            data-testid="ws-repos-refresh-btn"
+          >
+            {reposLoading ? $t('workspace_settings.repos.loading') : $t('workspace_settings.repos.refresh')}
+          </button>
+        </div>
+
+        {#if newRepoOpen}
+          <form class="field-card" data-testid="ws-new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+            <div class="field">
+              <label class="field-label" for="ws-new-repo-name">{$t('workspace_settings.repos.name_label')}</label>
+              <input id="ws-new-repo-name" class="field-input" type="text" bind:value={newRepoName} required disabled={newRepoLoading} data-testid="ws-new-repo-name-input" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="ws-new-repo-desc">{$t('workspace_settings.repos.description_label')}</label>
+              <input id="ws-new-repo-desc" class="field-input" type="text" bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="ws-new-repo-desc-input" />
+            </div>
+            {#if newRepoError}<p class="error-text" role="alert">{newRepoError}</p>{/if}
+            <div class="confirm-actions">
+              <button type="button" class="btn-secondary" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+              <button type="submit" class="btn-primary" disabled={newRepoLoading || !newRepoName.trim()} data-testid="ws-new-repo-submit">
+                {newRepoLoading ? $t('workspace_settings.repos.creating') : $t('workspace_settings.repos.create')}
+              </button>
+            </div>
+          </form>
+        {/if}
+
+        {#if importRepoOpen}
+          <form class="field-card" data-testid="ws-import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+            <div class="field">
+              <label class="field-label" for="ws-import-url">{$t('workspace_settings.repos.clone_url_label')}</label>
+              <input id="ws-import-url" class="field-input" type="url" bind:value={importRepoUrl} required disabled={importRepoLoading} data-testid="ws-import-url-input" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="ws-import-name">{$t('workspace_settings.repos.name_label')}</label>
+              <input id="ws-import-name" class="field-input" type="text" bind:value={importRepoName} disabled={importRepoLoading} data-testid="ws-import-name-input" />
+            </div>
+            {#if importRepoError}<p class="error-text" role="alert">{importRepoError}</p>{/if}
+            <div class="confirm-actions">
+              <button type="button" class="btn-secondary" onclick={() => { importRepoOpen = false; importRepoError = null; }}>{$t('common.cancel')}</button>
+              <button type="submit" class="btn-primary" disabled={importRepoLoading || !importRepoUrl.trim()} data-testid="ws-import-repo-submit">
+                {importRepoLoading ? $t('workspace_settings.repos.importing') : $t('workspace_settings.repos.import_repo')}
+              </button>
+            </div>
+          </form>
+        {/if}
+
+        {#if reposLoading}
+          <p class="loading-text">{$t('workspace_settings.repos.loading')}</p>
+        {:else if reposError}
+          <p class="error-text" role="alert">{reposError}</p>
+        {:else if repos.length === 0}
+          <p class="empty-text">{$t('workspace_settings.repos.empty')}</p>
+        {:else}
+          <table class="members-table" data-testid="ws-repos-table">
+            <thead>
+              <tr>
+                <th>{$t('workspace_settings.repos.col_name')}</th>
+                <th>{$t('workspace_settings.repos.col_status')}</th>
+                <th>{$t('workspace_settings.repos.col_agents')}</th>
+                <th>{$t('workspace_settings.repos.col_last_activity')}</th>
+                <th>{$t('workspace_settings.repos.col_default_branch')}</th>
+                <th>{$t('workspace_settings.repos.col_mirror')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each repos as repo (repo.id)}
+                <tr data-testid="ws-repo-row" class:repo-row-archived={repoStatusBadge(repo) === 'Archived'}>
+                  <td>
+                    <button class="repo-link-btn" onclick={() => goToRepo?.(repo)} data-testid="ws-repo-link">
+                      {repo.name}
+                    </button>
+                  </td>
+                  <td>
+                    <span class="repo-status-badge" class:archived={repoStatusBadge(repo) === 'Archived'} data-testid="ws-repo-status">
+                      {repoStatusBadge(repo)}
+                    </span>
+                  </td>
+                  <td>{repoAgentCounts[repo.id] ?? 0}</td>
+                  <td>{repoLastActivity[repo.id] ? fmtDate(repoLastActivity[repo.id]) : '—'}</td>
+                  <td class="cell-mono">{repo.default_branch ?? '—'}</td>
+                  <td class="cell-mono">{repo.is_mirror ? (repo.mirror_url ?? '—') : '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
         {/if}
       </div>
     {/if}
@@ -2377,6 +2389,42 @@
   .form-heading { font-size: var(--text-sm); font-weight: 600; margin: 0 0 var(--space-3); text-transform: capitalize; }
   .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-3); }
 
+  /* ── Repos tab ─────────────────────────────────────────────────────── */
+  .field-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    margin: var(--space-3) 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface-elevated);
+  }
+  .confirm-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+  .repo-link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--color-primary);
+    cursor: pointer;
+    text-align: left;
+  }
+  .repo-link-btn:hover { text-decoration: underline; }
+  .repo-link-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
+  .repo-status-badge {
+    display: inline-block;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  }
+  .repo-status-badge.archived {
+    color: var(--color-text-muted);
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+  }
+  .repo-row-archived td { opacity: 0.6; }
   @media (prefers-reduced-motion: reduce) {
     .settings-tab-btn,
     .back-btn,

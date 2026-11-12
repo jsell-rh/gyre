@@ -108,7 +108,7 @@ func rank(status string) int {
 	switch status {
 	case "running":
 		return 0
-	case "uncertain":
+	case "uncertain", "attention":
 		return 1
 	case "failed", "canceled":
 		return 2
@@ -492,7 +492,7 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 				return 1
 			}
 			for _, row := range rows {
-				if row.Scope == e.c.Scope && (row.Status == "failed" || row.Status == "uncertain" || row.Status == "canceled") {
+				if row.Scope == e.c.Scope && (row.Status == "failed" || row.Status == "uncertain" || row.Status == "attention" || row.Status == "canceled") {
 					return 1
 				}
 			}
