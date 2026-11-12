@@ -5,7 +5,7 @@ depends_on: [task-140, task-141]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §4.3 MCP Prompts (Injected at Agent Startup)"
-commits: ["deb37efde99905cae57e1655dec663b1142ac52b", "b3b97d79e47705e77bda31294fd7cbd4a4814440", "894fe8b736994bc00ce6a0f8a016cdf0816d6525", "010dad798e075a8557f543bffc89b252b279da63", "12c5fe5e5d14feed60150756091094f4d9a0f576", "727befd94d89718cc3fe45b45a4c307da3277875", "30fba783f1fb1ab90a52cb7ce658970eb32d3780"]
+commits: ["30fba783f1fb1ab90a52cb7ce658970eb32d3780", "727befd94d89718cc3fe45b45a4c307da3277875", "12c5fe5e5d14feed60150756091094f4d9a0f576", "010dad798e075a8557f543bffc89b252b279da63", "894fe8b736994bc00ce6a0f8a016cdf0816d6525", "b3b97d79e47705e77bda31294fd7cbd4a4814440", "deb37efde99905cae57e1655dec663b1142ac52b", "ac91266fc53cf9a13e3f01a94d1a55916b64aa09"]
 ---
 
 ## Spec Excerpt
@@ -111,52 +111,36 @@ The four prompts are injected into the container env as `GYRE_PROMPT_PERSONA`
 `GYRE_PROMPT_CONTEXT`, and `GYRE_PROMPT_CONSTRAINTS` — content identical
 to what `prompts/get` serves. Orchestrator launches
 (`launch_orchestrator_process`) inject the same set from the bound
-persona. `meta_spec_set_sha` on the spawn response is the SHA-256 of the
+persona and fail closed when the bound persona is no longer `Approved`
+(a persona-file push resets it to Pending; regression test
+`orchestrator_launch_fails_closed_on_unapproved_persona`). The
+launch-ctx refactor (task-118) is reconciled: `AgentLaunchCtx` carries
+the resolved persona, and the Ralph-loop re-spawn resolves the persona
+bound to the agent row (fail-closed when it no longer resolves).
+`meta_spec_set_sha` on the spawn response is the SHA-256 of the
 assembled meta-spec prompt set — exactly the set delivered as
 `GYRE_META_SPEC_SET_SHA`/`GYRE_META_SPEC_PROMPT` — null when the assembled
 set is empty; no value is fabricated.
 
-### Merge repair: launch-ctx refactor drift (b3b97d79e)
+### Verification repair: clippy useless_format (this round)
 
-Assignment base `cba416b46` (task-118) extracted
-`launch_agent_process(state, ctx)` behind an `AgentLaunchCtx` shared by
-first spawn and the Ralph-loop re-spawn. The merge kept task-150's
-prompt-building block inside the extracted function but left it
-referencing `spawn_agent_core` locals — E0425 x4 — and `signal_chain`'s
-`try_spawn_worker` initializer lost `persona_slug` (E0063). Repaired
-within the base's shared-context design: `AgentLaunchCtx` carries the
-resolved `persona` and `is_interrogation`; the prompt scope/builders read
-from `ctx`; the Ralph-loop re-spawn resolves the persona bound to the
-agent row at first spawn (fail-closed when the binding no longer resolves
-to an Approved persona); `try_spawn_worker` sets `persona_slug: None`.
-
-### Review repair: orchestrator persona approval fail-closed (this round, review F1)
-
-`launch_orchestrator_process` (api/orchestrator.rs) previously injected
-the bound persona's `system_prompt` as `GYRE_PROMPT_PERSONA` with no
-`approval_status` check — the one persona-injection site that failed
-open. Reachable in production: a persona-file push (git_http.rs) resets
-an Approved persona to Pending while swapping its `system_prompt`, and
-the stale-agent detector restarts a dead orchestrator with the preserved
-`persona_id` by calling `launch_orchestrator_process` directly, so the
-replacement would have run under the new, human-unapproved prompt
-content. The launch now fails closed: a bound persona that is not
-`Approved` returns `launch_status: "launch_failed"` with a detail naming
-the persona and approval state plus an error-level log — consistent with
-`relaunch_agent_session` (workers) and `resolve_orchestrator_persona`
-(first spawn). Regression test
-`orchestrator_launch_fails_closed_on_unapproved_persona` simulates the
-push (system_prompt swap + Pending reset), invokes the launch exactly as
-`restart_orchestrator` does, and asserts both the failed outcome and that
-no process was spawned (the prompt-dump script never ran).
+Independent verification of the prior candidate failed on exactly one
+diff-scoped Clippy lint: `mcp.rs:6476` `useless_format` in the
+`mcp_prompts_get_constraints_include_budget_and_scope` test
+(`format!("workspace:ws-mcp-prompt")` with no arguments). Replaced with
+`"workspace:ws-mcp-prompt".to_string()`. `cargo clippy -p gyre-server
+--all-targets` now reports zero warnings on any line this branch adds;
+the crate's remaining default-level warnings are all on pre-existing
+upstream lines outside the diff scope (evidence retained in
+/tmp/stage/review-evidence).
 
 ### Test evidence
 
-`cargo check -p gyre-server` and `cargo check -p gyre-server --lib
---tests` clean (production and test code type-checked in this sandbox);
-`cargo fmt --check` passes. gyre-server test compilation exceeds this
-sandbox's 4 GiB budget (build-wrapper blocked), so the verifier must run
-the focused suites (also recorded in /tmp/stage/review-evidence):
+`cargo clippy -p gyre-server --all-targets` clean on all changed lines
+(production and test code check-compiled in this sandbox); `cargo fmt
+--check` passes. gyre-server test compilation exceeds this sandbox's
+4 GiB budget, so the verifier must run the focused suites (also
+recorded in /tmp/stage/review-evidence):
 
 - `cargo test -p gyre-server --lib mcp_prompts` — 11 tests: list
   shape+order+args, initialize capability, unknown/missing-name errors,
@@ -164,12 +148,12 @@ the focused suites (also recorded in /tmp/stage/review-evidence):
   rejection, context task+spec+worktree + cross-scope task rejection,
   constraints budget+scope, protocol content, agent-identity requirement.
 - `cargo test -p gyre-server --lib api::orchestrator::tests` — includes
-  `orchestrator_launch_fails_closed_on_unapproved_persona` (F1 repair)
-  and `orchestrator_launch_injects_system_prompts` (approved-persona
-  injection still works), plus the spawn/restart/JWT regressions.
+  `orchestrator_launch_fails_closed_on_unapproved_persona` and
+  `orchestrator_launch_injects_system_prompts`, plus the
+  spawn/restart/JWT regressions.
 - `cargo test -p gyre-server --lib
-  spawn_injects_all_four_system_prompts_with_persona` and
-  `spawn_without_persona_injects_prompts_but_no_persona` and
+  spawn_injects_all_four_system_prompts_with_persona`,
+  `spawn_without_persona_injects_prompts_but_no_persona`, and
   `spawn_persona_slug_fails_closed` — spawn env-dump through a real child
   process.
 - `cargo test -p gyre-server --lib
