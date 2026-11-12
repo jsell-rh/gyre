@@ -37,6 +37,7 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
@@ -396,6 +397,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
         .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
+        // task-204: spec-lifecycle accountability patrol (spec-lifecycle.md
+        // §Accountability Integration) — findings escalate to the orchestrator.
+        .route(
+            "/api/v1/patrol/spec-lifecycle",
+            post(specs::patrol_spec_lifecycle),
+        )
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -439,6 +446,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/specs/assist",
             post(specs_assist::assist_spec),
+        )
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
         )
         .route(
             "/api/v1/repos/:id/specs/save",
@@ -681,6 +692,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(trust_anchors::get_trust_anchor)
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
+        )
+        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
+        .route(
+            "/api/v1/tenants/:id/meta-specs/set",
+            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
         )
         // Workspaces (M22.1)
         .route(

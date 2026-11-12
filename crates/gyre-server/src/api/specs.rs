@@ -717,11 +717,9 @@ pub async fn approve_spec(
                 // Populate meta_spec_set_sha from the workspace's current
                 // meta-spec set (§2.2). When no set is configured, remains
                 // empty string (graceful fallback).
-                let meta_spec_set_sha = crate::compute_meta_spec_set_sha(
-                    state.meta_spec_sets.as_ref(),
-                    &gyre_common::Id::new(&workspace_id),
-                )
-                .await;
+                let meta_spec_set_sha =
+                    crate::compute_meta_spec_set_sha(&state, &gyre_common::Id::new(&workspace_id))
+                        .await;
 
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
@@ -1675,6 +1673,45 @@ pub async fn patrol_spec_links(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/patrol/spec-lifecycle — spec-lifecycle accountability patrol
+// spec-lifecycle.md §Accountability Integration (task-204)
+// ---------------------------------------------------------------------------
+
+/// Run the three spec-lifecycle accountability checks and escalate every
+/// finding to the workspace orchestrator.
+///
+/// Checks: `spec-drift-review` tasks older than one loop cycle,
+/// `spec-implementation` tasks parked in Backlog beyond N days, and watched
+/// specs modified with no corresponding task. Thresholds come from the request
+/// body so per-repo configuration (task-109) can drive them; omitted fields use
+/// the documented defaults.
+///
+/// A storage failure is a 500, never an empty finding list: a patrol that
+/// cannot read tasks/specs must not report "no accountability gaps".
+pub async fn patrol_spec_lifecycle(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::spec_lifecycle_patrol::SpecLifecyclePatrolRequest>,
+) -> Result<Json<crate::spec_patrol::PatrolResponse>, ApiError> {
+    let now = now_secs();
+    let drift_review_max_age = req
+        .drift_review_max_age_secs
+        .unwrap_or(crate::spec_lifecycle_patrol::DEFAULT_DRIFT_REVIEW_MAX_AGE_SECS);
+    let implementation_backlog_max_age = req
+        .implementation_backlog_max_age_secs
+        .unwrap_or(crate::spec_lifecycle_patrol::DEFAULT_IMPLEMENTATION_BACKLOG_MAX_AGE_SECS);
+
+    crate::spec_lifecycle_patrol::run_and_escalate(
+        &state,
+        now,
+        drift_review_max_age,
+        implementation_backlog_max_age,
+    )
+    .await
+    .map(Json)
+    .map_err(ApiError::Internal)
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/specs/:path/progress — tasks and MRs linked to a spec
 // ---------------------------------------------------------------------------
 
@@ -2012,8 +2049,7 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha =
-        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),
@@ -4677,11 +4713,44 @@ specs:
             .await
             .unwrap();
 
-        // Seed a meta-spec set for the workspace.
-        let meta_set_json = r#"{"workspace_id":"ws-meta-test","personas":{"security":{}}}"#;
+        // Seed the workspace (the effective-set resolution reads the workspace
+        // record to find its tenant for §8 inheritance) and a canonical
+        // meta-spec set for it.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new(ws_id),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "meta-test".to_string(),
+                slug: "meta-test".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Autonomous,
+                llm_model: None,
+                created_at: 1_700_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        let meta_set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: ws_id.to_string(),
+            personas: [(
+                "security".to_string(),
+                crate::api::meta_specs::MetaSpecPinnedEntry {
+                    path: "meta/security.md".to_string(),
+                    sha: "a1b2c3".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
         state
             .meta_spec_sets
-            .upsert(&gyre_common::Id::new(ws_id), meta_set_json)
+            .upsert(&gyre_common::Id::new(ws_id), &meta_set_json)
             .await
             .unwrap();
 
@@ -6263,5 +6332,138 @@ specs:
         let json = body_json(resp).await;
         let findings = json["findings"].as_array().unwrap();
         assert!(findings.is_empty(), "no links → no findings");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-204: POST /api/v1/patrol/spec-lifecycle — accountability patrol
+    // spec-lifecycle.md §Accountability Integration
+    // -----------------------------------------------------------------------
+
+    /// Seed a `spec-drift-review` task of the given age (all other patrol
+    /// inputs left empty, so the finding count is attributable).
+    async fn seed_drift_review_task(state: &crate::AppState, age_secs: u64) {
+        let mut task = gyre_domain::Task::new(
+            gyre_common::Id::new("drift-stale"),
+            "spec change drift review",
+            crate::api::now_secs() - age_secs,
+        );
+        task.labels = vec!["spec-drift-review".to_string(), "auto-created".to_string()];
+        task.workspace_id = gyre_common::Id::new("ws1");
+        task.repo_id = gyre_common::Id::new("repo1");
+        task.spec_path = Some("specs/system/agent-runtime.md".to_string());
+        state.tasks.create(&task).await.unwrap();
+    }
+
+    async fn post_spec_lifecycle_patrol(
+        state: std::sync::Arc<crate::AppState>,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-lifecycle")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A stale drift-review task is reported AND escalated to the workspace
+    /// orchestrator as a persisted message (not merely returned/logged).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_patrol_endpoint_flags_and_escalates() {
+        let state = test_state();
+        // `emit_event` resolves the tenant scope from the workspace record
+        // and skips persisting when it is missing; seed "ws1" so the
+        // persisted-escalation assert below proves real emission.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new("ws1"),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "ws-ws1".to_string(),
+                slug: "ws-ws1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Guided,
+                llm_model: None,
+                created_at: 1_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        // 2 days: past the 24h default drift threshold, inside the 7d backlog one.
+        seed_drift_review_task(&state, 2 * 86_400).await;
+
+        let (status, json) = post_spec_lifecycle_patrol(state.clone(), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let findings = json["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "exactly the stale task: {json}");
+        let stale = &findings[0];
+        assert_eq!(stale["type"], "stale_drift_review_task");
+        assert_eq!(stale["severity"], "warning");
+        assert_eq!(stale["task_id"], "drift-stale");
+        assert_eq!(stale["workspace_id"], "ws1");
+        assert_eq!(stale["spec_path"], "specs/system/agent-runtime.md");
+
+        let escalated = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("ws1"),
+                Some("escalation"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            escalated.len(),
+            1,
+            "one escalation per finding: {escalated:?}"
+        );
+        let payload = escalated[0].payload.as_ref().expect("payload");
+        assert_eq!(payload["finding_type"], "stale_drift_review_task");
+        assert_eq!(payload["task_id"], "drift-stale");
+        assert_eq!(payload["source"], "spec_lifecycle_patrol");
+    }
+
+    /// Request-body thresholds reach the checks (a serde field-name drift would
+    /// silently fall back to defaults, so assert both directions).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_patrol_endpoint_honours_thresholds() {
+        let state = test_state();
+        seed_drift_review_task(&state, 2 * 86_400).await;
+
+        // 30-day limit: the 2-day-old task is not a gap.
+        let (status, json) = post_spec_lifecycle_patrol(
+            state.clone(),
+            r#"{"drift_review_max_age_secs":2592000,"implementation_backlog_max_age_secs":2592000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["findings"].as_array().unwrap().is_empty(),
+            "2 days is inside a 30-day limit: {json}"
+        );
+
+        // 1-hour limit: the same task is a gap.
+        let (_, json) =
+            post_spec_lifecycle_patrol(state.clone(), r#"{"drift_review_max_age_secs":3600}"#)
+                .await;
+        let findings = json["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "2 days exceeds a 1h limit: {json}");
+        assert_eq!(findings[0]["type"], "stale_drift_review_task");
     }
 }
