@@ -338,7 +338,7 @@ fn tool_definitions() -> Value {
                             "enum": ["task", "agent", "mr", "spec"],
                             "description": "Filter by entity type (optional)"
                         },
-                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional)" },
+                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional — can only narrow within the caller's accessible scope)" },
                         "limit": { "type": "number", "description": "Max results to return (default 10)" }
                     },
                     "required": ["q"]
@@ -1960,7 +1960,7 @@ async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_search(state: &AppState, args: &Value) -> Value {
+async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let q = match get_str(args, "q") {
         Some(q) => q.to_string(),
         None => return tool_error("missing required field: q"),
@@ -1969,6 +1969,11 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
     let workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
+    // §Access Scoping: scope comes from the agent's authenticated token
+    // context, never from client args. The client's `workspace_id` remains a
+    // narrowing filter the adapter intersects with the accessible set — it
+    // can only narrow, never widen.
+    let scope = crate::search_scope::derive_search_scope(state, auth).await;
     match state
         .search
         .search(gyre_ports::search::SearchQuery {
@@ -1976,6 +1981,9 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
             entity_type,
             workspace_id,
             limit,
+            tenant_id: scope.tenant_id,
+            accessible_workspace_ids: scope.accessible_workspace_ids,
+            accessible_repo_ids: scope.accessible_repo_ids,
         })
         .await
     {
@@ -3802,7 +3810,7 @@ pub async fn mcp_handler(
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
-                "gyre_search" => handle_search(&state, &args).await,
+                "gyre_search" => handle_search(&state, &args, &auth).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
                 "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
@@ -3946,6 +3954,135 @@ mod tests {
         assert!(names.contains(&"graph_edges"));
         assert!(names.contains(&"search"));
         assert!(names.contains(&"node_provenance"));
+    }
+
+    #[tokio::test]
+    async fn mcp_search_is_access_scoped_to_the_agent_token() {
+        // §Access Scoping: gyre_search derives tenant/workspace/repo scope
+        // from the authenticated agent's token context, never from client
+        // args. Seeded documents span two workspaces and two repos; the
+        // result text (and its "Found N result(s)" count) must exclude
+        // everything outside the caller's scope, and a client-supplied
+        // workspace_id must never widen access.
+        let state = test_state();
+        let mk =
+            |entity_id: &str, ws: &str, repo: Option<&str>| gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: entity_id.to_string(),
+                title: "needle".to_string(),
+                body: format!("needle {entity_id}"),
+                workspace_id: Some(ws.to_string()),
+                repo_id: repo.map(|r| r.to_string()),
+                tenant_id: Some("default".to_string()),
+                facets: std::collections::HashMap::new(),
+            };
+        state
+            .search
+            .index(mk("a-repo1", "ws-a", Some("repo-1")))
+            .await
+            .unwrap();
+        state
+            .search
+            .index(mk("a-repo2", "ws-a", Some("repo-2")))
+            .await
+            .unwrap();
+        state
+            .search
+            .index(mk("b-doc", "ws-b", Some("repo-1")))
+            .await
+            .unwrap();
+
+        let app = crate::build_router(Arc::clone(&state));
+        let search_call = |args: serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": { "name": "gyre_search", "arguments": args }
+            })
+        };
+
+        // Admin (global token): unscoped within the tenant — all three docs.
+        let (_status, json) = mcp_post(app.clone(), search_call(json!({ "q": "needle" }))).await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 3 result(s)"),
+            "admin count wrong: {text}"
+        );
+
+        // Repo orchestrator scoped to (ws-a, repo-1): only its repo's doc.
+        let repo_jwt = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "mcp-repo-agent",
+                "system",
+                &state.base_url,
+                3600,
+                "ws-a",
+                Some("repo-1"),
+                "repo_orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "mcp-repo-agent", repo_jwt.clone())
+            .await
+            .unwrap();
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            search_call(json!({ "q": "needle" })),
+            &repo_jwt,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 1 result(s)"),
+            "repo scope wrong: {text}"
+        );
+        assert!(text.contains("a-repo1"), "repo doc missing: {text}");
+        assert!(!text.contains("a-repo2"), "other repo leaked: {text}");
+        assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
+
+        // Client-supplied workspace_id cannot widen the agent's scope.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            search_call(json!({ "q": "needle", "workspace_id": "ws-b" })),
+            &repo_jwt,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("No results"),
+            "client workspace_id widened agent scope: {text}"
+        );
+
+        // Workspace orchestrator for ws-a: all repos in its workspace,
+        // nothing outside it.
+        let ws_jwt = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "mcp-ws-agent",
+                "system",
+                &state.base_url,
+                3600,
+                "ws-a",
+                None,
+                "workspace_orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "mcp-ws-agent", ws_jwt.clone())
+            .await
+            .unwrap();
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), search_call(json!({ "q": "needle" })), &ws_jwt).await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 2 result(s)"),
+            "workspace scope wrong: {text}"
+        );
+        assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
     }
 
     #[tokio::test]

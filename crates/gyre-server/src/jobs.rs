@@ -494,6 +494,24 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register orphaned workspace check job (runs daily,
+    // user-management.md §Ownership Transfer & Reclamation)
+    registry
+        .register(
+            JobDefinition {
+                name: "orphaned_workspace_check".to_string(),
+                description: "Tracks workspaces with no active Owner: notifies TenantAdmins \
+             on the transition and flags workspaces ownerless beyond the configured period \
+             (default 30 days) in the admin dashboard"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::workspace_ownership::run_once(&state).await },
+        )
+        .await;
+
     // Register trust_suggestion_check job (runs daily, HSI §2)
     registry
         .register(
