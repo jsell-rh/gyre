@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["33e30ac96"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
 ---
 
 ## Spec Excerpt
