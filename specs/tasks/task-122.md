@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: ["bbd72bc37ffd0bd4b286171ad73d236fca06c64b", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "a2b86d834da6710c12e34301c96434d2bd4a414f"]
+commits: ["a2b86d834da6710c12e34301c96434d2bd4a414f", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
 ---
 
 ## Spec Excerpt
