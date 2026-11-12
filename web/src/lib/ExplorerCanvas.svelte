@@ -49,6 +49,12 @@
     trailSegments,
   } from './flow-particles.js';
   import { WEBGL_PARTICLE_THRESHOLD, drawParticles2D, ParticleLayer } from './particle-layer.js';
+  // Filter-panel classification (task-178): tree-group containers are
+  // synthetic nodes whose ids never appear in the parent-computed
+  // hiddenNodeIds set, so the draw loop classifies them directly — the
+  // synthetic package/module groups ARE the boundary boxes the default
+  // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
+  import { nodeCategory, nodeMatchesConcept } from './filter-categories.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -92,7 +98,27 @@
     // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
     // parent (ExplorerView); only rendered in the Evaluative lens.
     gateRecords = [],
+    // Risk metrics per node id from GET /repos/:id/graph/risks (task-178:
+    // Evaluative lens overlays risk data — churn × complexity heat).
+    riskByNode = {},
+    // Node ids hidden by the in-view filter panel (filter-categories.js
+    // hiddenNodeIds) — category checkboxes and concept selection toggle
+    // node visibility on the canvas.
+    hiddenNodeIds = null,
+    // The same panel state BEFORE reduction to node ids: unchecked category
+    // ids and selected concepts. Tree-group containers are synthetic (ids
+    // like '__tree__src.api' are built during layout), so the id set cannot
+    // express them — the draw loop classifies the group's own node
+    // (package/module → Boundaries) and matches its name against the
+    // selected concepts to decide whether the container box is filtered.
+    hiddenCategories = null,
+    filterConcepts = null,
   } = $props();
+
+  // Filter-panel state for tree-group containers (see hiddenCategories
+  // above): derived once so every draw-frame read is cheap.
+  let hiddenFilterCategories = $derived(new Set(hiddenCategories ?? []));
+  let activeFilterConcepts = $derived(Array.isArray(filterConcepts) ? filterConcepts : []);
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
@@ -458,8 +484,15 @@
       if (hasTraces && !TRACE_METRICS.has(evaluativeMetric)) {
         evaluativeMetric = 'span_duration';
       }
+      // No trace data but risk metrics are available (GET /repos/:id/graph/risks,
+      // task-178): default the heat to the risk overlay instead of a dead metric.
+      if (!hasTraces && riskEntryCount > 0 && evaluativeMetric !== 'risk') {
+        evaluativeMetric = 'risk';
+      }
     }
   });
+  // Risk entries present in the riskByNode prop (task-178 Evaluative lens).
+  let riskEntryCount = $derived(Object.keys(riskByNode ?? {}).length);
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
@@ -500,6 +533,14 @@
     void activeAgentNodeIds.size;
     void recentChanges.size;
     void nodeGateStatus.size;
+    // In-view filter panel (task-178): category/concept visibility changes
+    // and Evaluative-lens risk data arrival must redraw without waiting for
+    // the next user interaction. Tracked by identity, not size — swapping
+    // one unchecked category for another keeps the hidden set's size.
+    void hiddenNodeIds;
+    void hiddenFilterCategories;
+    void activeFilterConcepts;
+    void Object.keys(riskByNode ?? {}).length;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
   });
@@ -949,12 +990,16 @@
     return m;
   });
 
-  // Centralized metric value accessor for evaluative lens (trace-based metrics only)
+  // Centralized metric value accessor for evaluative lens (trace metrics +
+  // the risk overlay from GET /repos/:id/graph/risks).
   function getNodeMetricValue(metric, node) {
     if (!node) return 0;
-    // Evaluative lens only supports behavioral/trace metrics per spec.
-    // Structural metrics (complexity, churn, incoming_calls, test_coverage)
-    // belong in the structural lens heat map.
+    // Risk overlay (task-178): risk score per node from the server's
+    // /graph/risks endpoint — churn × complexity. Structural metrics
+    // (complexity, churn alone) belong in the structural lens heat map.
+    if (metric === 'risk') {
+      return riskByNode?.[node.id] ?? 0;
+    }
     if (metric === 'span_duration') {
       const stats = nodeSpanStats.get(node.id);
       return stats ? stats.meanDuration : 0;
@@ -2702,6 +2747,23 @@
   let lastCanvasW = 0;
   let lastCanvasH = 0;
 
+  // Is a tree-group container filtered out by the in-view filter panel?
+  // Containers follow the panel through their OWN node: synthetic groups
+  // carry node_type package/module (→ Boundaries), and real nodes drawn as
+  // containers carry their real node_type. Concept focus hides containers
+  // whose name matches no selected concept — the same matching semantics
+  // as the leaf rules in filter-categories.js.
+  function treeGroupFilterHidden(ln) {
+    if (!ln.node) return false;
+    if (hiddenFilterCategories.size > 0 && hiddenFilterCategories.has(nodeCategory(ln.node))) {
+      return true;
+    }
+    if (activeFilterConcepts.length > 0 && !activeFilterConcepts.some((c) => nodeMatchesConcept(ln.node, c))) {
+      return true;
+    }
+    return false;
+  }
+
   function drawFrame() {
     const canvas = canvasEl;
     if (!canvas) return;
@@ -2813,6 +2875,22 @@
       // Too small to see at all — skip this node and all children
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
+
+      // In-view filter panel (ui-navigation.md §3): category checkboxes and
+      // concept selection toggle node visibility — hidden nodes are skipped
+      // entirely. Tree-group containers are filtered through their own node
+      // (the synthetic package/module groups are the boundary boxes the
+      // default zoom shows): a filtered group skips its box but keeps
+      // drawing children, so zoomed-in content of other categories stays
+      // visible when only the container's category is unchecked.
+      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0 || activeFilterConcepts.length > 0) {
+        if (!isTreeGroup) {
+          const filterNid = ln.node?.id ?? ln.id;
+          if (hiddenNodeIds?.has(filterNid)) return;
+        } else if (treeGroupFilterHidden(ln)) {
+          op = 0;
+        }
+      }
 
       // Semantic zoom: deliberate information hierarchy per zoom level
       // The spec's core abstraction: "default zoom shows boundaries and interfaces"
@@ -4043,6 +4121,8 @@
 
       const srcId = edgeSrc(e);
       const tgtId = edgeTgt(e);
+      // In-view filter panel: edges touching a hidden node are hidden too.
+      if (hiddenNodeIds?.size > 0 && (hiddenNodeIds.has(srcId) || hiddenNodeIds.has(tgtId))) continue;
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -4351,6 +4431,9 @@
 
     for (const ln of layoutNodes) {
       if (ln.treeDepth > 1) continue;
+      // In-view filter panel: containers hidden on the main canvas stay
+      // hidden on the minimap (same treeGroupFilterHidden rule).
+      if (ln.kind === 'tree-group' && treeGroupFilterHidden(ln)) continue;
       const depth = ln.treeDepth || 0;
       const colors = treeGroupColor(depth, 0);
       ctx.globalAlpha = ln.kind === 'tree-group' ? 0.5 : 0.2;
@@ -6027,12 +6110,53 @@
     </div>
   {/if}
 
-  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
+  <!-- Toolbar — lens checkbox group + filter presets (explorer-implementation.md §25 Phase 1;
+       ui-navigation.md §3: "Checkbox group (not a dropdown — checkboxes allow multi-select
+       for composition). Structural (always on) + Evaluative (toggle) + Observable (toggle, future).") -->
   <div class="treemap-toolbar">
-    <div class="lens-group" role="group" aria-label="Lens toggle">
-      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
-      <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
+    <div class="lens-group" role="group" aria-label="Lens selector" data-testid="lens-checkbox-group">
+      <!-- Structural is always the base layer — checked and locked. -->
+      <label class="lens-check" data-testid="lens-checkbox-structural" title="Structural lens — boundaries and dependencies (always on)">
+        <input type="checkbox" checked disabled aria-disabled="true" />
+        <span>Structural</span>
+      </label>
+      <!-- Evaluative is an additive overlay on the structural base. -->
+      <label class="lens-check" data-testid="lens-checkbox-evaluative" title="Overlay test results, gate outcomes, spec coverage, and risk metrics on the structural topology">
+        <input
+          type="checkbox"
+          checked={lens === 'evaluative'}
+          onchange={(e) => {
+            const next = e.currentTarget.checked ? 'evaluative' : 'structural';
+            lens = next;
+            onLensChange(next);
+          }}
+        />
+        <span>Evaluative</span>
+      </label>
+      <!-- Observable is a future toggle — grayed out until production telemetry
+           integration exists (system-explorer.md §1 "Observable (future)"). Clicking
+           it surfaces the notice banner instead of activating. The disabled input
+           is the visual checkbox; the wrapper carries the interaction (a disabled
+           input cannot receive events) as a keyboard-operable role=checkbox. -->
+      <div
+        class="lens-check lens-check-observable"
+        data-testid="lens-checkbox-observable"
+        role="checkbox"
+        aria-checked="false"
+        aria-disabled="true"
+        tabindex="0"
+        title="Observable lens is disabled — requires production telemetry integration"
+        onclick={() => { observableBannerVisible = true; }}
+        onkeydown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            observableBannerVisible = true;
+          }
+        }}
+      >
+        <input type="checkbox" disabled aria-disabled="true" />
+        <span>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></span>
+      </div>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
@@ -6052,6 +6176,7 @@
       <EvaluativeOverlay
         {evaluativeMetric}
         {traceData}
+        hasRiskData={riskEntryCount > 0}
         onMetricChange={(key) => { evaluativeMetric = key; userExplicitlySelectedMetric = true; onLensChange('evaluative'); }}
       />
       <div class="tb-sep"></div>
@@ -6648,6 +6773,25 @@
   }
 
   .filter-group, .lens-group { display: flex; gap: 2px; }
+  /* Lens checkbox group (ui-navigation.md §3: checkbox group, not a dropdown) */
+  .lens-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }
+  .lens-check:hover { background: rgba(51, 65, 85, 0.5); color: #e2e8f0; }
+  .lens-check input { accent-color: #3b82f6; margin: 0; cursor: pointer; }
+  .lens-check input:disabled { cursor: not-allowed; }
+  .lens-check:has(input:checked) { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
+  .lens-check-observable { opacity: 0.45; font-style: italic; cursor: not-allowed; }
+  .lens-check-observable:hover { background: transparent; color: #94a3b8; opacity: 0.6; }
 
   .tb-btn {
     padding: 5px 14px; border: none; border-radius: 7px; font-size: 13px; font-weight: 500;
@@ -6659,9 +6803,6 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; }
-  .tb-btn-observable:hover { opacity: 0.5; }
-  .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
   .observable-coming-soon { font-size: 9px; opacity: 0.7; font-style: italic; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 

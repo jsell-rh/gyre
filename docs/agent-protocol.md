@@ -133,12 +133,13 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 | `GYRE_DIFF_URL` | URL to fetch the MR diff |
 | `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
 | `GYRE_PERSONA` | Persona file path for the gate |
+| `GYRE_VALIDATION_TYPE` | AgentValidation only: domain-specific check identifier from the gate config (empty string when unset) |
 
 **`AgentReview` protocol:** exit with any code; server checks for an Approved/ChangesRequested review submitted by `GYRE_GATE_AGENT_ID` after the process exits.
 
 **`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
 
-**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents. Review tokens carry OIDC scope `review:submit` (read MR context, submit verdict, read-only -- push denied); validation tokens carry `validation:report` (read MR context only -- no review submission, push denied). Scope checks are exact-match on the capability string.
 
 **Manifest-declared gates (spec-registry.md §16, task-195):** when an MR's `spec_ref` names a spec whose `specs/manifest.yaml` entry declares `gates:` (e.g. `[security, accountability]`), the forge spawns a gate agent per persona at enqueue time instead of running a subprocess — no command is involved. For each manifest gate:
 

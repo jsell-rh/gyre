@@ -79,6 +79,11 @@ pub struct Task {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Vec<Id>,
+    /// Monotonic deployment (assignment) generation — incremented each time the
+    /// task is reassigned to a different agent (authorization-provenance.md §2.4).
+    /// `SignedInput.expected_generation` binds an authorization root to a specific
+    /// generation so stale authorizations cannot be replayed after reassignment.
+    pub generation: u32,
 }
 
 impl Task {
@@ -103,6 +108,7 @@ impl Task {
             task_type: None,
             order: None,
             depends_on: Vec::new(),
+            generation: 1,
             created_at,
             updated_at: created_at,
         }
@@ -117,12 +123,34 @@ impl Task {
         Ok(())
     }
 
+    /// Release a scheduler's InProgress claim back to Backlog
+    /// (agent-runtime.md §1 Phase 4 step 3: a task whose worker spawn was
+    /// blocked by a mid-flight precondition — e.g. workspace budget
+    /// exhaustion detected after the claim was taken — stays Backlog so a
+    /// later scheduler cycle re-spawns it). This is the ONLY edge into
+    /// Backlog: the general `transition_status` table deliberately has
+    /// none, so API-driven transitions can never requeue a task.
+    pub fn release_claim(&mut self, now: u64) -> Result<(), TaskError> {
+        if self.status != TaskStatus::InProgress {
+            return Err(TaskError::InvalidTransition {
+                from: self.status.clone(),
+                to: TaskStatus::Backlog,
+            });
+        }
+        self.status = TaskStatus::Backlog;
+        self.updated_at = now;
+        Ok(())
+    }
+
     /// Enforce valid status transitions:
     /// Backlog → InProgress | Cancelled
     /// InProgress → Review | Blocked | Cancelled
     /// Review → Done | InProgress | Cancelled
     /// Blocked → InProgress | Cancelled
     /// Done and Cancelled are terminal
+    ///
+    /// (The system-side claim release InProgress → Backlog is
+    /// `release_claim`, not this table.)
     pub fn transition_status(&mut self, new_status: TaskStatus) -> Result<(), TaskError> {
         let valid = matches!(
             (&self.status, &new_status),
@@ -183,6 +211,40 @@ mod tests {
         let mut task = make_task();
         task.transition_status(TaskStatus::InProgress).unwrap();
         assert!(task.transition_status(TaskStatus::Blocked).is_ok());
+    }
+
+    // The system-side claim release is the only edge into Backlog: it
+    // works from InProgress (a scheduler releasing a claim whose spawn
+    // was blocked mid-flight) and from nowhere else, and the general
+    // transition table still rejects InProgress→Backlog so API-driven
+    // transitions can never requeue a task.
+    #[test]
+    fn test_release_claim_from_in_progress() {
+        let mut task = make_task();
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        task.updated_at = 0;
+        task.release_claim(999).unwrap();
+        assert_eq!(task.status, TaskStatus::Backlog);
+        assert_eq!(task.updated_at, 999, "release bumps updated_at");
+    }
+
+    #[test]
+    fn test_release_claim_rejects_other_statuses() {
+        let mut task = make_task();
+        assert!(task.release_claim(999).is_err(), "Backlog is not a claim");
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        task.transition_status(TaskStatus::Review).unwrap();
+        assert!(
+            task.release_claim(999).is_err(),
+            "Review is not a scheduler claim"
+        );
+    }
+
+    #[test]
+    fn test_transition_table_has_no_edge_into_backlog() {
+        let mut task = make_task();
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        assert!(task.transition_status(TaskStatus::Backlog).is_err());
     }
 
     #[test]
