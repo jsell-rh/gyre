@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170", "1bb3c01bce54dda1ac5146c59aab3ce9c2a9c7e2"]
 ---
 
 ## Spec Excerpt
@@ -107,12 +107,26 @@ shortcuts. Parser and integration tests live in `gyre-domain`
 (`search_query`), `gyre-server` (`mcp_search_query_language`, REST
 search tests), and `tests/search_wiring.rs`.
 
-### Repair round (2c3eff661)
+### Repair round (1bb3c01b)
 
-The verification round flagged changed-line rustfmt violations in the
-SQLite search filter builder, the facets handler, and the search wiring
-test. Commit `2c3eff661` applies rustfmt's layout — formatting only,
-no behavior change. Evidence: `python3 scripts/check-rustfmt-diff.py
-199c1bb78f53f27088c54a0929b5605e7302e874` now reports "changed lines
-clean (13 Rust files checked)"; `cargo test -p gyre-domain search_query`
-passes 25/25; `cargo check -p gyre-server --tests` finishes clean.
+The verification round failed `mcp::tests::mcp_search_query_language`
+with "No results for '"merge queue" ordering'" — a test-seeding bug,
+not an implementation bug. The test indexed its documents with
+`tenant_id: None`, but the MCP caller is the global test token
+(Admin, tenant "default"), and the task-203 access scope makes the
+tenant boundary fail-closed: untenant-ed documents are invisible to
+every scoped query, in the mem adapter (`scope_visible`) exactly as in
+SQLite (a doc with no resolvable tenant is stored under the empty
+tenant, which never matches a caller's tenant). Commit `1bb3c01b`
+seeds both documents with the caller's tenant, matching the sibling
+access-scoping test.
+
+Evidence in this sandbox: `cargo check -p gyre-server --lib --tests`
+clean (covers the edited test module); `cargo test -p gyre-adapters
+--lib mem_search` 11/11 passed, including `query_language_phrases_and_facets`
+(the identical phrase/facet matching scenario with tenant-scoped docs)
+and `access_scoping_filters_inside_the_query_filter` (the tenant
+boundary the fix relies on). The end-to-end MCP test itself must run
+in the independent verifier: `cargo test -p gyre-server --lib
+mcp::tests::mcp_search_query_language` (gyre-server test builds are
+blocked in this sandbox by the 4 GiB build wrapper).
