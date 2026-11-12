@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "b14d3748c146333590bbfb189f7c51d079fb3620"]
 ---
 
 ## Spec Excerpt
@@ -126,25 +126,22 @@ graph queries, and the accountability patrol.
 - Link row ids are scoped by declaring repo (`spec_link_id`), so two repos
   carrying the same spec path never collide in the durable table.
 
-### Verification-gate repair (this round, commit 1bb43f454)
+### Rebase repair (this round, finding 81c434f1, commit b14d3748c)
 
-The prior verification round failed `check-in-memory-state-stores.sh`: the
-move of `SpecLinkType`/`SpecLinkEntry` into gyre-domain shifted the legacy
-`SpecLedger`/`SpecApprovalHistory` aliases (spec_registry.rs:218/220 →
-196/198) and the renumbered exemption entries were rejected as new
-forbidden exemptions. Fixed by removing both aliases from production code —
-the ledger and approval history are already port-backed
-(`SpecLedgerRepository` / `SpecApprovalEventRepository` via `store!`);
-`SpecLedger` survives only as a test-module fixture, `SpecApprovalHistory`
-was dead code. Their exemption entries were deleted (pure removal) and
-`FROZEN_EXEMPTION_COUNT` lowered 5 → 2 per the script's documented
-remediation flow. The production 4-tuple carrier in `sync_spec_ledger` was
-also replaced with a named `StaleInboundLink` struct (deleting three stale
-spec_registry tuple-carrier exemption entries), and the mem.rs/git_http.rs
-tuple-carrier entries staled by the base merge were renumbered to their
-current lines so `check-unnamed-tuple-carriers.sh` passes on this branch
-(that check fails on the assignment base itself — pre-existing upstream
-drift, not introduced here).
+Rebased the task-198 branch onto the new base (3afece9d7, bringing task-163
+and task-204). The only textual conflict was
+`crates/gyre-adapters/src/sqlite/mod.rs` — both sides appended entries to
+the `migrations_create_tables` test table list (`spec_links` from task-198
+vs `breaking_changes`/`dependency_policies` from task-163); resolved by
+keeping both. The two migration directories map to distinct Diesel
+versions (20261108000061 vs 20261008000061), confirmed by
+`check-migration-versions.sh`. Auto-merges reviewed for semantic coherence:
+`gyre-server/src/lib.rs` carries both sides' `store!` wiring
+(`spec_link_repo` + `breaking_changes`), `schema.rs` and both adapter
+`mod.rs` files register both sides' tables/modules, and the task-204 changes
+to `spec_patrol.rs`/`api/specs.rs` compose correctly with the task-198
+`source_sha` test-literal additions. No production code changed this round
+beyond the conflict union.
 
 ### Test evidence
 
@@ -167,15 +164,20 @@ drift, not introduced here).
   convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Probe evidence (this round)
+### Probe evidence (this round, source b14d3748c)
 
-Executed locally (see controller review-evidence artifacts):
-`check-in-memory-state-stores.sh` PASS (the previously failing gate),
-`check-unnamed-tuple-carriers.sh` PASS, `check-arch.sh` PASS,
-`cargo check -p gyre-server --tests` PASS (lib + test cfg),
-`cargo test -p gyre-adapters spec_link` 5/5 PASS,
-`cargo test -p gyre-adapters migrations` 3/3 PASS. The build wrapper defers
-`cargo test -p gyre-server` to the independent verifier; the required
-probes are recorded in review-evidence/deferred-verifier-tests.txt
-(`cargo test --all`, plus focused `spec_registry`, `spec_link_staleness`,
-`spec_link`, and `mem::spec_link_contract_tests` runs).
+Executed locally via the build wrapper (details and exit codes in the
+controller review-evidence artifact `rebase-repair-81c434f1.md`):
+`cargo check -p gyre-server -p gyre-adapters -p gyre-ports` PASS,
+`cargo check -p gyre-server --tests` PASS (lib + test cfg after the merge),
+`cargo test -p gyre-adapters spec_links` 4/4 PASS,
+`cargo test -p gyre-adapters migrations` 3/3 PASS, and mechanical gates
+`check-arch`, `check-migration-versions`, `check-migration-sql-portability`,
+`check-abac-route-registry`, `check-mcp-write-tools`, `check-mem-port-contracts`,
+`check-in-memory-state-stores`, `check-unnamed-tuple-carriers`,
+`check-inert-enforcement`, `check-lossy-secret-conversion` all PASS.
+The build wrapper defers gyre-server test binaries to the independent
+verifier (hard 4 GiB budget); the required probes are
+`cargo test --all`, plus focused `spec_registry` (restart-durability pair),
+`spec_link_staleness`, `spec_link`, and `mem::spec_link_contract_tests`
+runs, recorded in the review-evidence artifact.
