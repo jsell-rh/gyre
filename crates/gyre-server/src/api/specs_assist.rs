@@ -572,7 +572,11 @@ pub async fn assist_meta_spec(
                     "meta-spec {id} does not belong to workspace {workspace_id}"
                 )));
             }
-            (ms.kind.as_str().to_string(), ms.name.clone(), Some(ms.prompt))
+            (
+                ms.kind.as_str().to_string(),
+                ms.name.clone(),
+                Some(ms.prompt),
+            )
         }
         None => ("meta-spec".to_string(), "draft".to_string(), None),
     };
@@ -2393,7 +2397,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{workspace_id}/meta-specs/assist"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace_id}/meta-specs/assist"
+                    ))
                     .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(body).unwrap()))
@@ -2449,8 +2455,7 @@ mod tests {
 
     #[tokio::test]
     async fn assist_meta_spec_rejects_meta_spec_from_another_workspace() {
-        let (app, state) =
-            app_with_llm_response_and_state("{}");
+        let (app, state) = app_with_llm_response_and_state("{}");
         let ws_a = create_workspace(&app, "ms-assist-ws-a").await;
         let ws_b = create_workspace(&app, "ms-assist-ws-b").await;
         seed_meta_spec(
@@ -2482,8 +2487,7 @@ mod tests {
             ],
             "explanation": "Added defensive error handling to the persona."
         });
-        let (app, _state) =
-            app_with_llm_response_and_state(&valid_response.to_string());
+        let (app, _state) = app_with_llm_response_and_state(&valid_response.to_string());
         let ws = create_workspace(&app, "ms-assist-draft").await;
 
         let resp = post_meta_spec_assist(
@@ -2508,8 +2512,7 @@ mod tests {
             "should have partial events for explanation"
         );
         assert_eq!(complete_events.len(), 1, "exactly one complete event");
-        let complete_data: serde_json::Value =
-            serde_json::from_str(&complete_events[0].1).unwrap();
+        let complete_data: serde_json::Value = serde_json::from_str(&complete_events[0].1).unwrap();
         let diff = complete_data["diff"].as_array().unwrap();
         assert_eq!(diff[0]["op"], "add");
         assert_eq!(
@@ -2547,8 +2550,7 @@ mod tests {
             _system_prompt: &str,
             _user_prompt: &str,
         ) -> anyhow::Result<serde_json::Value> {
-            serde_json::from_str(&self.response)
-                .map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
+            serde_json::from_str(&self.response).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
         }
         async fn stream_complete(
             &self,
@@ -2556,9 +2558,7 @@ mod tests {
             _user_prompt: &str,
             _max_tokens: Option<u32>,
         ) -> anyhow::Result<
-            std::pin::Pin<
-                Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>,
-            >,
+            std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>,
         > {
             self.prompts.lock().unwrap().push(system_prompt.to_string());
             let text = self.response.clone();
@@ -2590,7 +2590,11 @@ mod tests {
 
     fn app_with_recording_llm(
         response: &str,
-    ) -> (Router, std::sync::Arc<crate::AppState>, Arc<std::sync::Mutex<Vec<String>>>) {
+    ) -> (
+        Router,
+        std::sync::Arc<crate::AppState>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         let mut s = (*crate::mem::test_state()).clone();
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         s.llm = Some(Arc::new(RecordingLlmFactory {
@@ -2617,8 +2621,7 @@ mod tests {
             ],
             "explanation": "Tightened the persona."
         });
-        let (app, state, prompts) =
-            app_with_recording_llm(&valid_response.to_string());
+        let (app, state, prompts) = app_with_recording_llm(&valid_response.to_string());
         let ws = create_workspace(&app, "ms-assist-published").await;
         seed_meta_spec(
             &state,
@@ -2672,8 +2675,7 @@ mod tests {
             "diff": [],
             "explanation": "no-op"
         });
-        let (app, state, prompts) =
-            app_with_recording_llm(&valid_response.to_string());
+        let (app, state, prompts) = app_with_recording_llm(&valid_response.to_string());
         let ws = create_workspace(&app, "ms-assist-draft-override").await;
         seed_meta_spec(
             &state,
