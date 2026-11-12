@@ -209,12 +209,19 @@ impl SearchPort for SqliteStorage {
             let repo_id = doc.repo_id.clone().unwrap_or_default();
 
             // Upsert: FTS5 has no ON CONFLICT — delete then insert, atomically.
+            // The delete is scoped by (entity_type, entity_id, workspace_id,
+            // repo_id): a spec/file path is only unique within its repo, so
+            // same-path documents in different repos must coexist rather than
+            // clobber each other.
             conn.transaction::<_, diesel::result::Error, _>(|tx| {
                 diesel::sql_query(
-                    "DELETE FROM search_index WHERE entity_type = ?1 AND entity_id = ?2",
+                    "DELETE FROM search_index WHERE entity_type = ?1 AND entity_id = ?2 \
+                     AND workspace_id = ?3 AND repo_id = ?4",
                 )
                 .bind::<Text, _>(&doc.entity_type)
                 .bind::<Text, _>(&doc.entity_id)
+                .bind::<Text, _>(&workspace_id)
+                .bind::<Text, _>(&repo_id)
                 .execute(&mut *tx)?;
                 diesel::sql_query(INSERT_SQL)
                     .bind::<Text, _>(&doc.entity_type)

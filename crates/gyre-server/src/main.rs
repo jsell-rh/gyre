@@ -79,6 +79,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly code-search file reindex (search.md §Index Updates — file
+    // content is eventually consistent; pushes also trigger the job on
+    // demand via the job registry).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "search_code_index".to_string(),
+        Arc::clone(&state),
+    );
+
     // Hourly stale-pin detection: specs pinning old meta-spec versions get
     // priority-6 MetaSpecDrift notifications (agent-runtime.md §2).
     jobs::spawn_job(
