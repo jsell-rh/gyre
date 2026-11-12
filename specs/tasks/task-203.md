@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["2cab4181f49133b4a6171045de3dbb9b31057708", "ccf715b8cde79d9bfedebb0302fb9cb806c1e70a", "6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "790b031dde07c45674902680b69ca91e59133b8f", "6bf73593a5b686b16f0b4d8229ad830019874f1b", "ccf715b8cde79d9bfedebb0302fb9cb806c1e70a", "2cab4181f49133b4a6171045de3dbb9b31057708", "dedfeb4fff806a40c611b09af7214ddd1bd5574f"]
 ---
 
 ## Spec Excerpt
@@ -72,7 +72,7 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is access-scoped end to end (search.md §Access Scoping). The history carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the PG suggest alias review repair (`ccf715b8`), and this attempt's verification repair `2cab4181f` (rustfmt drift, below).
+Search is access-scoped end to end (search.md §Access Scoping). The history carries the original implementation (`a18e6e25`, `f888d61d`), review/verification repairs (`790b031d`, `6bf73593`, `ccf715b8`, `2cab4181f`), and this attempt's review repair `dedfeb4ff` (test-only tenant binding, below).
 
 ### Behavior
 
@@ -83,30 +83,24 @@ Search is access-scoped end to end (search.md §Access Scoping). The history car
 - **Indexing**: task/agent/MR creation routes documents through `search_scope::index_doc`, which stamps `workspace_id`/`repo_id` from the entity and resolves `tenant_id` from the workspace's scope row (unresolvable → doc visible to no tenant-scoped query, never mis-attributed).
 - **Docs**: `docs/api-reference.md` search/suggest/facets rows state the access scoping and that `workspace_id` only narrows.
 
-### Review repair `ccf715b8` (prior attempt)
+### Review repair `dedfeb4ff` (this attempt)
 
-Reviewer finding: `PgStorage::suggest`'s base SQL was `FROM search_index` with no `s` alias while the §Access Scoping fragments are `s.`-qualified, so PostgreSQL rejected every suggest call with 42P01 "missing FROM-clause entry for table \"s\"" — `GET /api/v1/search/suggest` 500'd for every caller (incl. Admin) on Postgres deployments; `cargo check` passed, making it runtime-only. Fixed by extracting all four PG base SQLs into consts (`SEARCH_BASE_SQL`, `SUGGEST_BASE_SQL`, `FACET_TEXT_BASE_SQL`, `FACET_BLANK_BASE_SQL`) and aliasing the suggest base `FROM search_index s` with `s.`-qualified columns and ORDER BY.
+Reviewer finding: the acceptance-criterion test `search_is_access_scoped_to_the_authenticated_caller` failed at runtime — the seeded API-key user `alice` was created without a tenant binding, and API-key auth fail-closes those users with 403 (task-099 F1), so alice's first scoped search panicked the test's status assertion. Fixed by binding alice to tenant `"default"` (the tenant the seeded workspaces live in), mirroring `auth_integration.rs`. Test-only change; no production code touched.
 
-- Added the first test module to `postgres/search.rs`: each base SQL is composed with the production `scope_filter_sql` fragments and asserted to define the `s` alias the fragments reference, keep the tenant boundary inside the index query, keep placeholder numbering contiguous, and compile an empty accessible set to `AND FALSE`. Verified the new `suggest_base_sql_defines_the_scope_alias` test FAILS on the pre-fix SQL (reproducing the finding) and passes after the fix — the regression is now mechanically pinned even without a live PG in CI.
-- No local Postgres exists in this sandbox (no binary, no network to install one), so a live PG execution probe is deferred to remote verification; the defect class (alias/reference mismatch in composed SQL) is now covered by the unit tests on the real composed artifact.
-
-### Verification repair `2cab4181f` (this attempt)
-
-Verification finding: `check-rustfmt-diff.py` against base `7e9b3cfee` flagged changed-line formatting drift in the four files this task touched (`crates/gyre-adapters/src/mem_search.rs`, `crates/gyre-adapters/src/postgres/search.rs`, `crates/gyre-adapters/src/sqlite/search.rs`, `crates/gyre-server/tests/search_wiring.rs`) — the sole failing gate; clippy, architecture, ABAC, and all other check scripts passed. Fixed by applying the gate's exact rustfmt invocation (`rustfmt --edition 2021 --config skip_children=true`) to the four files. Whitespace only, no semantic change; `cargo check -p gyre-adapters` and `cargo check -p gyre-server --tests` clean and `cargo test -p gyre-adapters search` still passes 25/25 after the reformat.
+Because the stage build wrapper still blocks gyre-server test execution in this sandbox (infrastructure restriction, recorded below), every other leg of that test was statically traced against the implementation to preclude further runtime-only failures: the global dev token's tenant is `system_principal_tenant() == "default"` (matches the seeded workspaces' tenant); agent JWTs authenticate via the `agent_tokens` KV lookup without requiring an agent record (so the record-less orchestrators and the ghost agent reach the handler, and the ghost fails closed at scope derivation with zero results, not a 403); `mint_orchestrator` claims (`scope: "agent"`, `orchestrator_type`, `workspace_id`, `repo_id`) match what `derive_search_scope` reads; ABAC builtin policies allow Admin (900) / Developer (800) / Agent (700) read on the `search` resource; the SQLite adapter's `count_facet_row` synthesizes the `workspace` facet from the row's `workspace_id`, so the asserted `facet_counts["workspace"]` values materialize from docs seeded with empty facet maps; rate limit (100 req/s per state) cannot trip at the test's request count.
 
 ### Test evidence
 
-Logs retained under `/tmp/stage/review-evidence/task-203-rustfmt-2cab4181f/` (this attempt), `/tmp/stage/review-evidence/task-203-repair-ccf715b8/` and `/tmp/stage/review-evidence/task-203-rebase-7cf2f81c/` (prior attempts, retained by controller):
+Evidence for this attempt under `/tmp/stage/review-evidence/task-203-repair-891273691d/` (controller artifact path):
 
-- This attempt (`2cab4181f`, rustfmt-only): `scripts/check-rustfmt-diff.py 7e9b3cfee` — changed lines clean (12 files); `cargo check -p gyre-adapters` — clean; `cargo check -p gyre-server --tests` — clean; `cargo test -p gyre-adapters search` — 25 passed, 0 failed.
-- `cargo test -p gyre-adapters postgres::search::tests` — pre-fix run: `suggest_base_sql_defines_the_scope_alias` FAILED on the unaliased base SQL; post-fix run: 4 passed.
-- `cargo test -p gyre-adapters search` — 25 passed (mem + SQLite FTS5 scoping/behavior + the 4 new PG composed-SQL tests).
-- Prior attempt: `cargo check -p gyre-ports -p gyre-adapters --tests`, `cargo check -p gyre-server --tests` (incl. `search_wiring`) — clean; `bash scripts/check-arch.sh` — passed. This attempt touches formatting only (no port/server surface change).
-- `crates/gyre-server/tests/search_wiring.rs` `search_is_access_scoped_to_the_authenticated_caller` asserts alice's search, `facet_counts`, `/search/suggest`, and `/search/facets` exclude workspace B (type-checked here; execution deferred — see below).
+- `cargo check -p gyre-server --tests` — clean (includes `search_wiring` with the tenant-binding fix; log `cargo-check-gyre-server-tests.txt`).
+- `python3 scripts/check-rustfmt-diff.py d31906c5a16ab8045ab435dfad2bd7dc1ce3f616` — changed lines clean, 12 Rust files (log `rustfmt-diff-gate.txt`).
+- `cargo test -p gyre-adapters search` — 25 passed (mem + SQLite FTS5 scoping/behavior + PG composed-SQL tests; prior attempts, unchanged by this repair — this attempt touches only a gyre-server test file).
+- `crates/gyre-server/tests/search_wiring.rs` `sqlite_url_wires_fts5_search_port` — 1 passed (verified at task-201 time; proves the sqlite wiring, middleware stack, FTS5 behavior, and admin HTTP search path this attempt's fix relies on).
 
-### Verifier-required probes (server test binaries exceed this sandbox's build budget)
+### Verifier-required probes (gyre-server test execution exceeds this sandbox's build budget; blocked by the stage build wrapper at implement stage, exit 64 — infrastructure restriction, not a code defect)
 
-- `cargo test -p gyre-server --test search_wiring`
+- `cargo test -p gyre-server --test search_wiring` — must pass both tests, including the repaired `search_is_access_scoped_to_the_authenticated_caller`.
 - `cargo test -p gyre-server --lib mcp_search`
 - `cargo test --all` and `bash scripts/check-arch.sh` (repo-wide gates)
-- If a Postgres instance is available to the verifier: `GYRE_DATABASE_URL=postgres://... cargo run -p gyre-server`, then `curl -H 'Authorization: Bearer gyre-dev-token' 'http://localhost:3000/api/v1/search/suggest?q=a'` — must return 200 (was 500 with 42P01 before `ccf715b8`)
+- If a Postgres instance is available: `GYRE_DATABASE_URL=postgres://... cargo run -p gyre-server`, then `curl -H 'Authorization: Bearer gyre-dev-token' 'http://localhost:3000/api/v1/search/suggest?q=a'` — must return 200 (was 500 with 42P01 before `ccf715b8`)
