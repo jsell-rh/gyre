@@ -474,8 +474,8 @@ impl MessageConsumer for NotificationBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gyre_common::Notification;
     use gyre_common::message::{Destination, MessageOrigin};
+    use gyre_common::Notification;
 
     /// Serializes tests that mutate process-global env vars
     /// (`GYRE_EVENT_TTL_SECS` / `GYRE_DEAD_INBOX_TTL_SECS`). `#[tokio::test]`
@@ -598,7 +598,10 @@ mod tests {
 
         let admin_notifs = list_notifications(&state, "user-admin").await;
         assert_eq!(admin_notifs.len(), 1);
-        assert_eq!(admin_notifs[0].notification_type, NotificationType::MetaSpecDrift);
+        assert_eq!(
+            admin_notifs[0].notification_type,
+            NotificationType::MetaSpecDrift
+        );
         assert_eq!(admin_notifs[0].priority_rank, 6);
 
         let dev_notifs = list_notifications(&state, "user-dev").await;

@@ -2,8 +2,7 @@ use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
     merge_processor, message_dispatcher, procfs_monitor, register_default_compute_target,
-    seed_builtin_meta_specs, seed_builtin_personas, siem, signal_chain,
-    spawn_budget_daily_reset,
+    seed_builtin_meta_specs, seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
     spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
     spawn_stale_peer_detector, telemetry, JwtConfig,
 };
