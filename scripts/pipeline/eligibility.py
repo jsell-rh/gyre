@@ -90,5 +90,6 @@ def eligible(store, work):
         verified = data.get('verified') or {}
         return verified.get('candidate') != candidate or verified.get('passed') is not True
     if stage == 'publish':
+        verified = data.get('verified') or {}
         return data.get('verified') == inputs['verified'] and verified.get('passed') is True and store.integration_available(work)
     return False
