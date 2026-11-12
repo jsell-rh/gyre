@@ -503,6 +503,36 @@ pub async fn find_session_by_request(
         .find(|s| s.request_id == request_id))
 }
 
+/// End every active impersonation session the given user participates in
+/// (as impersonator OR target). Part of the deactivation cascade
+/// (user-management.md §API > User Management): a deactivated account
+/// fails authentication on every path, and an unexpired impersonation JWT
+/// is no exception — ending the session revokes the token before `exp`
+/// and closes the audit trail with an `ImpersonationEnded` event.
+/// `resolve_impersonation_auth` additionally re-checks both accounts'
+/// deactivation state on every call, so this is belt-and-suspenders with
+/// the resolver, not the sole gate. Returns the number of sessions ended.
+pub async fn end_active_sessions_for_user(state: &AppState, user_id: &str, reason: &str) -> u64 {
+    let mut ended = 0u64;
+    for session in list_sessions(state).await.unwrap_or_default() {
+        if session.ended {
+            continue;
+        }
+        if session.impersonator_id == user_id || session.target_user_id == user_id {
+            match end_session(state, &session.session_id, reason).await {
+                Ok(_) => ended += 1,
+                Err(e) => tracing::warn!(
+                    session_id = %session.session_id,
+                    user_id = user_id,
+                    error = %e,
+                    "deactivation cascade: failed to end impersonation session"
+                ),
+            }
+        }
+    }
+    ended
+}
+
 /// TTL-expiry sweep (background job `impersonation_expiry`).
 ///
 /// Ends every active session past its `expires_at` (emitting
@@ -683,6 +713,28 @@ pub async fn resolve_impersonation_auth(
     if session.target_user_id != claims.target_user_id
         || session.impersonator_id != claims.impersonator_id
     {
+        return None;
+    }
+
+    // Deactivation cascade (user-management.md §API > User Management:
+    // the deactivated account "fails authentication on every path").
+    // This is the impersonation path: a deactivated target loses the
+    // mandate outright, and a deactivated impersonator loses it too — a
+    // rogue TenantAdmin's unexpired impersonation JWT must not keep full
+    // API access as the target user until `exp`. The impersonator's
+    // account record must also still exist: a deleted account is in no
+    // position to hold a mandate. `deactivate_user` ends the affected
+    // sessions inline, but this check is the enforcement that stands even
+    // if the session record outlives the account state change.
+    if target.is_deactivated() {
+        return None;
+    }
+    let impersonator = state
+        .users
+        .find_by_id(&Id::new(session.impersonator_id.clone()))
+        .await
+        .ok()??;
+    if impersonator.is_deactivated() {
         return None;
     }
 

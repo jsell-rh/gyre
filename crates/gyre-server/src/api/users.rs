@@ -341,6 +341,10 @@ pub struct DeactivateUserRequest {
 /// Cascade (the deactivation is effective immediately, not cosmetic):
 /// - the account fails authentication on every path (API-key extractor,
 ///   WebSocket auth, SSO login) — see auth.rs;
+/// - active impersonation sessions the user participates in (as
+///   impersonator or target) are ended immediately, revoking the
+///   unexpired impersonation JWTs — see impersonation.rs (the resolver
+///   also re-checks account deactivation on every call);
 /// - workspaces the user owned stop having an active Owner: the ownerless
 ///   flow records the transition and notifies the tenant's TenantAdmins
 ///   inline (workspace_ownership), so ownership can be reassigned via
@@ -432,6 +436,18 @@ pub async fn deactivate_user(
     if let Err(e) = state.audit.record(&event).await {
         tracing::warn!(user_id = %user.id, "user_deactivated audit event recording failed: {e}");
     }
+
+    // Impersonation cascade: end every active impersonation session the
+    // deactivated user participates in (as impersonator or target). The
+    // resolver rejects deactivated accounts on its own, but ending the
+    // sessions here also closes the audit trail (ImpersonationEnded with
+    // a reason) and frees the impersonator's active-session slot.
+    crate::impersonation::end_active_sessions_for_user(
+        &state,
+        user.id.as_str(),
+        "user_deactivated",
+    )
+    .await;
 
     // Ownerless cascade: re-track every workspace the user belongs to. With
     // the account now deactivated, `has_active_owner` no longer counts the
