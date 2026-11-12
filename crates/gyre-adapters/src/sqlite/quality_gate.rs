@@ -360,8 +360,9 @@ mod tests {
     /// EVERY mutable config column. The checkpoint that added
     /// `validation_type` accidentally dropped `required` from the set list —
     /// re-saving a gate silently kept the old blocking flag (PG kept it;
-    /// SQLite drifted). This test fails on that class of drift: flip both
-    /// columns, re-save, and assert the persisted row carries the new values.
+    /// SQLite drifted). This test fails on that class of drift: flip every
+    /// mutable column, re-save, and assert the persisted row carries the new
+    /// values.
     #[tokio::test]
     async fn save_upsert_updates_all_config_columns() {
         let (_tmp, storage) = tmp_storage();
