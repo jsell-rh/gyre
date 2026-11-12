@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "f301cff2c388a93a12566692550cd4420f69e9db"]
 ---
 
 ## Spec Excerpt
@@ -137,14 +137,31 @@ pub struct AnalyticsEvent {
   analytics tests authenticate via `build_router` + Bearer token now that
   the handler verifies the caller.
 
+### Verification repair: rustfmt + clippy on changed lines
+
+- Verification of candidate c5e9ffd failed `checks.sh` on two mechanical
+  findings only (behavioral checks and the web build passed):
+  `clippy::needless_borrow` at `spawn.rs:2128` (`&state` where `state` is
+  already `&Arc<AppState>` — now passes `state` directly) and rustfmt
+  drift on the seed closures of the analytics scope-filter/daily tests
+  (now `cargo fmt`-clean).
+- Re-verified in-sandbox with the verifier's own diff scripts:
+  `check-rustfmt-diff.py` and `check-clippy-diff.py` clean against both
+  the immediate parent (2 Rust files) and the assignment base 4a203a06
+  (full 30-file task surface).
+
 ### Test evidence
 
-- Type-checked in-sandbox: `cargo check -p gyre-server --lib --tests`
-  (exit 0, no warnings); mechanical gates `check-forged-scope-fields`,
-  `check-abac-exempt-handlers`, `check-arch` all pass.
+- In-sandbox (this round, shared target dir via the build wrapper):
+  `cargo clippy -p gyre-server --all-targets` finished clean on changed
+  lines (full compile proof of lib + tests); `cargo fmt -- --check` clean;
+  `check-rustfmt-diff.py` and `check-clippy-diff.py` clean against both
+  HEAD^1 and assignment base 4a203a06; `cargo test -p gyre-domain
+  analytics` (3 passed); `cargo test -p gyre-adapters analytics`
+  (13 passed); all 18 scripts/check-*.sh mechanical gates pass.
 - Server test binaries exceed this sandbox's 4 GiB build budget — the
   independent verifier must run:
   `cargo test -p gyre-server --lib api::analytics`,
   `cargo test -p gyre-server --lib api::audit`, and
   `cargo test -p gyre-server --test api_integration analytics`
-  (evidence: /tmp/stage/review-evidence/task-146-f1-repair.md).
+  (evidence: /tmp/stage/review-evidence/task-146-verification-repair.md).
