@@ -6,6 +6,7 @@
   import { api } from './api.js';
   import { toastError, toastSuccess, toastInfo } from './toast.svelte.js';
   import { t } from 'svelte-i18n';
+  import { lineDiff, diffSummary } from './lineDiff.js';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout
@@ -36,6 +37,11 @@
    *                   When provided (meta-spec context) the right panel shows the
    *                   target spec selector in the editing state.
    *   onpublish     — () => void — Publish hook (meta-spec approval flow, §9 State 3)
+   *   baselineContent — string | null — the published baseline of the content
+   *                   (e.g. the meta-spec registry's stored prompt). While a
+   *                   preview runs, the locked left pane renders the diff of
+   *                   pending changes against this baseline (§9 State 2
+   *                   "shows diff of changes"); null → verbatim draft.
    *   onPreviewStateChange — (state: 'editing' | 'preview_running' | 'preview_complete') => void
    *                   — notified on every preview state transition so the embedding
    *                   page (e.g. MetaSpecs) can lock its own controls while a preview
@@ -55,6 +61,7 @@
     baseSha = null,
     targetSpecs = [],
     onpublish = undefined,
+    baselineContent = null,
     onPreviewStateChange = undefined,
   } = $props();
 
@@ -94,6 +101,19 @@
   // Last meta-spec preview result (real PreviewResponse shape: preview_id,
   // state, specs, blast_radius, structural_impact) rendered in the right pane.
   let metaPreviewResult = $state(null);
+
+  // Pending-changes diff for the locked editor (§9 State 2 "shows diff of
+  // changes"): the draft against the published baseline. Only meaningful
+  // while locked; null when no baseline is available (verbatim fallback).
+  let lockedDiffRows = $derived.by(() => {
+    if (previewState !== 'preview_running') return null;
+    // No baseline (null/undefined/empty) or an unchanged draft → verbatim.
+    if (!baselineContent || baselineContent === content) return null;
+    return lineDiff(baselineContent, content);
+  });
+  let lockedDiffStats = $derived(
+    lockedDiffRows ? diffSummary(lockedDiffRows) : null,
+  );
 
   const selectableSpecs = $derived(
     Array.isArray(targetSpecs) ? targetSpecs.filter((s) => s?.path) : [],
@@ -218,6 +238,27 @@
     // Spec context: needs a repo + spec path.
     return Boolean(repoId && specPath);
   });
+
+  /**
+   * Whether the right pane renders the Architecture/Code Diff tabs.
+   * Always true in the spec context and in §9 State 3; in the meta-spec
+   * editing state only when §9 Iterate retained the last preview result —
+   * "Iterate: returns to State 1 with the preview results still visible"
+   * (ui-layout.md §9) — so the tabs stack below the target-spec selector.
+   */
+  const showResultTabs = $derived(
+    context !== 'meta-spec' || previewState !== 'editing' || Boolean(metaPreviewResult),
+  );
+
+  /**
+   * Whether the §3/§9 LLM chat is usable: the repo-scoped specs/assist in
+   * the spec context (needs a repo), or the workspace-scoped
+   * meta-specs/assist in the §9 meta-spec context (needs a workspace —
+   * the MetaSpecs workspace view always provides one).
+   */
+  const llmChatEnabled = $derived(
+    Boolean(repoId || (context === 'meta-spec' && workspaceId)),
+  );
 
   /**
    * Start the thorough preview: the server commits the draft to a throwaway
@@ -446,7 +487,7 @@
 
   async function sendLlmInstruction() {
     if (!llmInstruction.trim() || llmStreaming) return;
-    if (!repoId) return;
+    if (!llmChatEnabled) return;
     const instruction = llmInstruction.trim();
     llmInstruction = '';
     llmStreaming = true;
@@ -454,11 +495,21 @@
     llmSuggestion = null;
 
     try {
-      const resp = await api.specsAssist(repoId, {
-        spec_path: specPath,
-        instruction,
-        draft_content: content || undefined,
-      });
+      // Repo context: repo-scoped specs/assist. §9 meta-spec context
+      // (no repo): workspace-scoped meta-specs/assist against the in-editor
+      // draft — same SSE {diff, explanation} wire protocol, so the shared
+      // parser and Accept/Edit/Dismiss suggestion blocks work unchanged.
+      const resp = repoId
+        ? await api.specsAssist(repoId, {
+            spec_path: specPath,
+            instruction,
+            draft_content: content || undefined,
+          })
+        : await api.metaSpecsAssist(workspaceId, {
+            instruction,
+            draft_content: content || undefined,
+            meta_spec_id: specPath || undefined,
+          });
       if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
 
       const reader = resp.body?.getReader();
@@ -771,13 +822,30 @@
         <ConcurrentEditBanner {specPath} {workspaceId} {wsStore} {selfUserId} />
       {/if}
       {#if previewState === 'preview_running'}
-        <!-- Editor locked during preview (§9 State 2): the draft is shown
-             read-only — verbatim, no diff styling (the draft is markdown,
-             not a diff). -->
+        <!-- Editor locked during preview (§9 State 2). With a baseline
+             available the pane shows the diff of pending changes (draft vs.
+             published); without one, the draft verbatim. -->
         <div class="locked-editor" role="region" aria-label={$t('editor_split.editor_locked_aria')} data-testid="editor-locked">
-          {#each content.split('\n') as line}
-            <div class="locked-line">{line}</div>
-          {/each}
+          {#if lockedDiffRows}
+            <div class="locked-diff" data-testid="locked-diff">
+              <div class="locked-diff-header">
+                <span class="locked-diff-title">{$t('editor_split.pending_changes')}</span>
+                <span class="locked-diff-summary" data-testid="locked-diff-summary" aria-live="polite">
+                  +{lockedDiffStats.added} -{lockedDiffStats.removed}
+                </span>
+              </div>
+              {#each lockedDiffRows as row}
+                <div class="locked-line locked-diff-line locked-diff-{row.op}">
+                  <span class="locked-diff-marker" aria-hidden="true">{row.op === 'add' ? '+' : row.op === 'remove' ? '-' : ' '}</span>
+                  <span class="locked-diff-text">{row.text}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            {#each content.split('\n') as line}
+              <div class="locked-line">{line}</div>
+            {/each}
+          {/if}
         </div>
       {:else}
         <div class="md-toolbar" role="toolbar" aria-label={$t('editor_split.md_toolbar_aria')} data-testid="md-toolbar">
@@ -853,7 +921,7 @@
             bind:value={llmInstruction}
             placeholder={$t('editor_split.llm_placeholder')}
             rows="2"
-            disabled={llmStreaming || !repoId}
+            disabled={llmStreaming || !llmChatEnabled}
             onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
             aria-label={$t('editor_split.llm_instruction')}
             data-testid="llm-input"
@@ -861,7 +929,7 @@
           <button
             class="llm-send"
             onclick={sendLlmInstruction}
-            disabled={!llmInstruction.trim() || llmStreaming || !repoId}
+            disabled={!llmInstruction.trim() || llmStreaming || !llmChatEnabled}
             aria-label={$t('editor_split.send_to_llm')}
             aria-busy={llmStreaming}
             data-testid="llm-send-btn"
@@ -878,7 +946,7 @@
             <span class="sr-only">{$t('editor_split.send')}</span>
           </button>
         </div>
-        {#if !repoId}
+        {#if !llmChatEnabled}
           <p class="llm-hint warn">{$t('editor_split.llm_requires_repo')}</p>
         {:else}
           <p class="llm-hint">{$t('editor_split.llm_hint')}</p>
@@ -899,11 +967,30 @@
           <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
         </div>
       {/if}
-      {#if context === 'meta-spec' && previewState === 'editing'}
+      {#if previewState === 'preview_running'}
+        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
+        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
+          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
+          <div class="progress-list">
+            {#each previewProgress as item (item.path)}
+              <div class="progress-item">
+                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
+                <span class="progress-path">{item.path}</span>
+                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
+              </div>
+            {/each}
+          </div>
+          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
+          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
+        </div>
+      {:else}
+        {#if context === 'meta-spec' && previewState === 'editing'}
         <!-- Target spec selector (§9 State 1) — always shown in the meta-spec
              editing state, with an empty-state message when the workspace
-             has no non-meta specs. -->
-        <div class="spec-selector" data-testid="spec-selector">
+             has no non-meta specs. After §9 Iterate the last preview result
+             is retained, so the selector stacks above the Architecture /
+             Code Diff tabs (showResultTabs) instead of replacing them. -->
+        <div class="spec-selector" class:stacked={Boolean(metaPreviewResult)} data-testid="spec-selector">
           <div class="spec-selector-header">
             <span class="pane-title">{$t('editor_split.preview_against')}</span>
             <div class="spec-selector-shortcuts">
@@ -926,24 +1013,10 @@
             {/each}
           </div>
         </div>
-      {:else if previewState === 'preview_running'}
-        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
-        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
-          <div class="progress-list">
-            {#each previewProgress as item (item.path)}
-              <div class="progress-item">
-                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
-                <span class="progress-path">{item.path}</span>
-                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
-              </div>
-            {/each}
-          </div>
-          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
-          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
-        </div>
-      {:else}
-        <!-- Preview Complete / spec context: Architecture (default) + Code Diff tabs -->
+        {/if}
+        {#if showResultTabs}
+        <!-- Preview Complete / spec context, or the retained results after
+             §9 Iterate: Architecture (default) + Code Diff tabs -->
         <div class="pane-header">
           <div class="impact-tabs" role="tablist" aria-label={$t('editor_split.impact_view_aria')}>
             <button
@@ -1035,9 +1108,11 @@
                   <SpecDiffView diff={file.diff} />
                 </div>
               {/each}
-            {:else if context === 'meta-spec' && previewState === 'preview_complete'}
+            {:else if context === 'meta-spec' && metaPreviewResult}
               <!-- Meta-spec previews report per-spec completion; the endpoint
-                   produces no line-level diff, so list the spec statuses. -->
+                   produces no line-level diff, so list the spec statuses.
+                   Bound to metaPreviewResult (not previewState) so the list
+                   survives §9 Iterate back into the editing state. -->
               {#if metaPreviewResult?.specs?.length}
                 <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
                   {#each metaPreviewResult.specs as s (s.path)}
@@ -1057,6 +1132,7 @@
               <p class="code-diff-empty">{$t('editor_split.run_preview_for_diff')}</p>
             {/if}
           </div>
+        {/if}
         {/if}
       {/if}
     </div>
@@ -1237,6 +1313,33 @@
   }
 
   .locked-line { white-space: pre-wrap; color: var(--color-text-secondary); }
+
+  /* Pending-changes diff in the locked editor (§9 State 2) */
+  .locked-diff { display: flex; flex-direction: column; min-height: 100%; }
+  .locked-diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .locked-diff-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .locked-diff-summary { font-family: var(--font-mono, monospace); font-size: var(--text-xs); color: var(--color-text-muted); }
+  .locked-diff-line { display: flex; gap: var(--space-2); }
+  .locked-diff-marker { flex-shrink: 0; width: 1ch; font-family: var(--font-mono, monospace); }
+  .locked-diff-text { min-width: 0; }
+  .locked-diff-add .locked-diff-marker { color: var(--color-success, #2e9e5b); font-weight: 600; }
+  .locked-diff-add .locked-diff-text { color: var(--color-success, #2e9e5b); }
+  .locked-diff-remove .locked-diff-marker { color: var(--color-danger, #cc3340); font-weight: 600; }
+  .locked-diff-remove .locked-diff-text { color: var(--color-danger, #cc3340); text-decoration: line-through; }
 
   /* Markdown toolbar (ui-layout.md §2) */
   .md-toolbar {
@@ -1665,6 +1768,14 @@
   }
 
   .spec-check-item:hover { background: var(--color-surface-elevated); }
+
+  /* §9 Iterate: with a retained preview result the selector stacks above
+     the Architecture/Code Diff tabs instead of taking the whole pane. */
+  .spec-selector.stacked {
+    flex: 0 1 auto;
+    max-height: 40%;
+    border-bottom: 1px solid var(--color-border);
+  }
 
   .empty-specs {
     margin: 0;
