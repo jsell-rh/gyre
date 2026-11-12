@@ -127,18 +127,6 @@ async fn resolve_repo_by_slug(
         })
 }
 
-/// Resolve to just the filesystem path (convenience wrapper).
-async fn resolve_repo_path_by_slug(
-    state: &Arc<AppState>,
-    auth: &crate::auth::AuthenticatedAgent,
-    workspace_slug: &str,
-    repo_name: &str,
-) -> Result<String, Response> {
-    resolve_repo_by_slug(state, auth, workspace_slug, repo_name)
-        .await
-        .map(|r| r.path)
-}
-
 // ---------------------------------------------------------------------------
 // Path params
 // ---------------------------------------------------------------------------
@@ -176,11 +164,36 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    let repo = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+
+    // repo-lifecycle.md §4 step 5: archived repos are read-only. Reject the
+    // push at the service-advertisement stage with an `ERR` pkt-line — the
+    // git-smart-HTTP convention for service-level errors — so the client
+    // actually displays the reason ("fatal: remote error: ... "). A plain
+    // HTTP 403 here would hide the body from `git push` output entirely.
+    // The receive-pack POST handler keeps its own archived 403 as
+    // defense-in-depth for clients that skip the advertisement.
+    if subcommand == "receive-pack" && repo.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "info/refs receive-pack advertisement rejected: repository is archived"
+        );
+        let mut body = service_header(&service);
+        body.extend(pkt_line("ERR push rejected: repository is archived\n"));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", "no-cache")
+            .body(Body::from(body))
+            .unwrap();
+    }
+
+    let repo_path = repo.path;
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -487,6 +500,21 @@ pub async fn git_receive_pack(
         return (
             StatusCode::FORBIDDEN,
             "push rejected: repository is a read-only mirror".to_string(),
+        )
+            .into_response();
+    }
+    // repo-lifecycle.md §4 Archive step 5: archived repos are read-only —
+    // reject the push before the packfile is processed.
+    if resolved.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: repository is archived"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is archived".to_string(),
         )
             .into_response();
     }
@@ -4765,6 +4793,133 @@ mod tests {
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/x-git-receive-pack-advertisement"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_receive_pack_archived_repo_returns_err_pkt_line() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The advertisement is a valid 200 response whose pkt-line stream
+        // carries an ERR line — the git-smart-HTTP convention that makes
+        // `git push` print "fatal: remote error: push rejected: repository is
+        // archived" instead of a bare HTTP 403 whose body git never shows.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/x-git-receive-pack-advertisement"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        // Exact pkt-line framing: the service header pkt-line (001f = 4 + 27
+        // bytes of "# service=git-receive-pack\n"), a flush-pkt, then the
+        // ERR pkt-line. Hardcoded so a framing regression in pkt_line()/
+        // service_header() fails here rather than being mirrored in.
+        assert!(
+            text.starts_with("001f# service=git-receive-pack\n0000"),
+            "advertisement must start with the service header pkt-line + flush-pkt, got: {text}"
+        );
+        assert!(
+            text.contains("ERR push rejected: repository is archived"),
+            "archived repo advertisement must carry the ERR pkt-line, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_upload_pack_archived_repo_still_serves_clone_advertisement() {
+        // Archived repos are read-only, not invisible: clone/fetch
+        // (git-upload-pack) must keep working (repo-lifecycle.md §4 step 5).
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.contains("ERR "),
+            "upload-pack advertisement must not be rejected for archived repo, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_pack_archived_repo_returns_403() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("archived"),
+            "rejection must explain the repo is archived, got: {text}"
         );
     }
 

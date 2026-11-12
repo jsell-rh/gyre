@@ -501,6 +501,7 @@ diesel::table! {
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
         created_at -> BigInt,
+        position -> Integer,
     }
 }
 
