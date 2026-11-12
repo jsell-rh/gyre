@@ -57,3 +57,75 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+---
+
+## Independent review — checkpoint candidate 927d4c830 (base 3af80bd2) — verdict: NOT approved (1 blocking finding)
+
+Fresh review of the final assigned tree (`927d4c830cb9e33577c6f0e633cb9df9ef49141c`,
+diff vs base `3af80bd21a8a3452420e014e645eefdfd137f9be`). Evidence:
+`/tmp/stage/review-evidence/` (README.md indexes every probe with command,
+exit code, and output).
+
+### Independently confirmed working
+
+- All three scripts pass on the clean candidate tree (exit 0): check-hierarchy,
+  check-tenant-filter (118 read methods on tenant-column tables, 0 violations,
+  visible non-failing backlog), check-api-auth (incl. delegated
+  check-abac-route-registry.sh with frozen baselines intact).
+- Mutation kills, re-probed independently in /tmp mirrors (checkout untouched):
+  `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60;
+  `Task.repo_id` deleted → hierarchy exit 1 "missing from the struct";
+  tenant predicate stripped from `sqlite/agent.rs::find_by_name` →
+  tenant-filter exit 1 with file:line; rogue `/api/v1/rogue_probe` route →
+  registry exit 1, check-api-auth Check 3 folds FAIL=1 → exit 1.
+- `cargo test -p gyre-adapters --test tenant_isolation`: 2 passed / 0 failed;
+  kill-proven — removing the tenant filter from `sqlite/workspace.rs::find_by_id`
+  makes `tenant_reads_never_see_another_tenants_rows` FAIL ("find_by_id leaked
+  tenant B's workspace id to tenant A"). Source restored; re-run green.
+- `cargo test -p gyre-adapters --lib`: 450 passed / 0 failed.
+- `cargo check -p gyre-cli`: clean.
+- check-scope-literal-defaults.sh passes with FROZEN_EXEMPTION_COUNT=0
+  (exemption file honestly emptied; the bootstrap_workspace() centralization in
+  gyre-domain lib.rs is behavior-preserving).
+- CI wiring: `|| true` removed from check-api-auth/check-tenant-filter steps
+  (now blocking); hierarchy hook added to .pre-commit-config.yaml.
+
+### Blocking finding (category: code)
+
+**F-A — gyre-server does not compile (E0308), live production path.**
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server` fails:
+
+```
+error[E0308]: mismatched types
+  --> crates/gyre-server/src/reconciliation.rs:1369:13
+     .emit_event(
+     None,          // expected `Id`, found `Option<_>`
+  method defined at crates/gyre-server/src/lib.rs:604 — emit_event(workspace_id: Id, ...)
+```
+
+Cause: the branch's scoped `emit_event` (candidate commit 2698b9b63 changed
+`workspace_id: Option<Id>` → `workspace_id: Id`) was not reconciled with
+`emit_tenant_meta_spec_set_updated` (reconciliation.rs:1360), which arrived via
+the FINAL base merge 82415ce90 (task-158, commit 3c22bfa8) and still passes
+`None`. The earlier adaptation commit d162c56d0 fixed ralph_loop call sites
+only. The function is called from the tenant set-update PUT handler
+(api/meta_specs.rs:474), so a live route's event emission is uncompilable as
+shipped. This violates the task's acceptance criterion "cargo test --all
+still passes" — the server crate fails at check time. The final two commits
+after the last base merge (8458f699d, 4be14c38e) were never compile-verified.
+
+Fix direction: adapt the call site to the scoped contract — the event is
+tenant-scoped by design (unscoped Broadcast whose audience is the tenant's
+workspaces), so the repair needs an emit path that resolves the tenant's real
+scope (e.g. an emit variant taking a tenant Id, or resolving the tenant's
+scope from a real record), NOT a reversion to a fabricated "default"
+workspace identity. Also sweep every `emit_event` call site introduced by the
+final merge for the same signature drift.
+
+### Deferred to verifier
+
+- Full `cargo test --all` after the E0308 repair (review ran focused
+  gyre-adapters suites + gyre-cli check only, per budget).
+- Full dev-check script battery and web build/vitest (generated web/dist is
+  verifier-owned).
