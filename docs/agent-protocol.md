@@ -131,6 +131,7 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 | `GYRE_GATE_AGENT_ID` | Identity to use when submitting reviews via API |
 | `GYRE_DIFF_URL` | URL to fetch the MR diff |
 | `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
+| `GYRE_SPEC_URL` | URL to fetch the spec content at the MR's **pinned** spec_ref SHA (not HEAD) — `GET /api/v1/merge-requests/{id}/spec`. Empty when the MR has no spec_ref. Spec-alignment review (agent-gates.md §Integration with Agent Gates) must compare the diff against this pinned version |
 | `GYRE_PERSONA` | Persona file path for the gate |
 | `GYRE_VALIDATION_TYPE` | AgentValidation only: domain-specific check identifier from the gate config (empty string when unset) |
 

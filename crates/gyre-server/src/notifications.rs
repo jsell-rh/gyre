@@ -224,6 +224,73 @@ pub async fn notify_gate_failure(
     .await;
 }
 
+/// Notify the MR author's spawning user that a spec enforcement policy
+/// blocked the merge (agent-gates.md §Forge Enforcement Policies —
+/// enforcement errors are reported clearly to the author, not just logged
+/// on the queue entry).
+pub async fn notify_spec_policy_violation(
+    state: &AppState,
+    author_agent_id: &Id,
+    workspace_id: &Id,
+    mr_id: &str,
+    reason: &str,
+    tenant_id: &str,
+) {
+    let spawned_by = state
+        .agents
+        .find_by_id(author_agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.spawned_by);
+
+    let user_id = if let Some(ref sb) = spawned_by {
+        Id::new(sb.clone())
+    } else {
+        author_agent_id.clone()
+    };
+
+    // Resolve MR title for human-friendly notification
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
+    let mr_label = mr
+        .as_ref()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| {
+            // Char-boundary truncation: a fixed byte index can split a
+            // multibyte UTF-8 id and panic (byte-slice truncation check).
+            mr_id.chars().take(8).collect::<String>()
+        });
+    let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
+
+    let body_json = serde_json::json!({
+        "mr_id": mr_id,
+        "agent_id": author_agent_id.as_str(),
+        "policy": "spec_enforcement",
+        "reason": reason,
+    })
+    .to_string();
+
+    notify_rich(
+        state,
+        workspace_id.clone(),
+        user_id,
+        NotificationType::GateFailure,
+        format!("Spec policy blocked merge on MR {mr_label}: {reason}"),
+        tenant_id,
+        Some(body_json),
+        Some(mr_id.to_string()),
+        repo_id,
+        "gate",
+        None,
+    )
+    .await;
+}
+
 /// Notify the spawning user that all gates passed on their MR
 /// (user-management.md §Notification Entity: GatePassed, Low — informational).
 ///

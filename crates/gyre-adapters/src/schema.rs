@@ -530,6 +530,7 @@ diesel::table! {
         require_approved_spec -> Integer,
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
+        require_signed_approval -> Integer,
         enforce_manifest -> Integer,
     }
 }

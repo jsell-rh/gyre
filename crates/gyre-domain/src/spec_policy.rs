@@ -16,6 +16,11 @@ pub struct SpecPolicy {
     /// If true, block merging when an MR's spec_ref SHA is not the current HEAD blob SHA.
     #[serde(default)]
     pub require_current_spec: bool,
+    /// If true, the active approval for the referenced spec SHA must carry a
+    /// Sigstore signature (agent-gates.md §Forge Enforcement Policies:
+    /// "Spec approvals must include Sigstore signature").
+    #[serde(default)]
+    pub require_signed_approval: bool,
     /// If true, reject pushes that add spec files under `specs/` without a
     /// corresponding entry in `specs/manifest.yaml`.
     /// spec-registry.md §Manifest Rules rule 1 + §Ledger Sync on Push step 4.
