@@ -55,8 +55,8 @@ pub struct SearchResponse {
 }
 
 pub async fn search_handler(
-    State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let q = params.q.unwrap_or_default();
@@ -84,11 +84,24 @@ pub async fn search_handler(
     };
     let limit = params.limit.min(100);
     let started = std::time::Instant::now();
+    // §Access Scoping: tenant/workspace/repo scope is derived from the
+    // authenticated caller — never from client-supplied params. The
+    // client's `workspace_id` stays a narrowing filter that the adapter
+    // intersects with the accessible set: requesting an inaccessible
+    // (but same-tenant) workspace yields zero results, not an error that
+    // leaks its existence. Cross-tenant or unknown ids are rejected up
+    // front (task-146 review round 2) because the param also attributes
+    // the auto-emitted `search.query` analytics event — a forged scope
+    // is Forbidden instead of polluting the victim scope's analytics.
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let port_query = SearchQuery {
         query: q.clone(),
         entity_type: params.entity_type.clone(),
         workspace_id: workspace_scope.as_ref().map(|id| id.to_string()),
         limit,
+        tenant_id: scope.tenant_id,
+        accessible_workspace_ids: scope.accessible_workspace_ids,
+        accessible_repo_ids: scope.accessible_repo_ids,
     };
     let results = state
         .search
@@ -97,11 +110,12 @@ pub async fn search_handler(
         .map_err(ApiError::Internal)?;
 
     // §Response Format: facet_counts aggregate the query's filtered match set
-    // (same terms + filters), not the truncated result page and not the whole
-    // index — hence a second aggregation call with the limit ignored.
+    // (same terms + filters + the caller's scope), not the truncated result
+    // page and not the whole index — hence a second aggregation call with the
+    // limit ignored.
     let facet_counts = state
         .search
-        .facet_counts(Some(port_query))
+        .facet_counts(port_query)
         .await
         .map_err(ApiError::Internal)?;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -182,6 +196,7 @@ pub struct SuggestResponse {
 }
 
 pub async fn suggest_handler(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Query(params): Query<SuggestParams>,
 ) -> Result<Json<SuggestResponse>, ApiError> {
@@ -193,9 +208,21 @@ pub async fn suggest_handler(
         }));
     }
     let limit = params.limit.min(50);
+    // §Access Scoping: suggestions are scoped exactly like search results —
+    // the caller never sees titles of entities outside their accessible
+    // workspaces/repos.
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let suggestions = state
         .search
-        .suggest(&q, limit)
+        .suggest(SearchQuery {
+            query: q,
+            entity_type: None,
+            workspace_id: None,
+            limit,
+            tenant_id: scope.tenant_id,
+            accessible_workspace_ids: scope.accessible_workspace_ids,
+            accessible_repo_ids: scope.accessible_repo_ids,
+        })
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(SuggestResponse { suggestions }))
@@ -208,12 +235,25 @@ pub struct FacetsResponse {
 }
 
 pub async fn facets_handler(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<FacetsResponse>, ApiError> {
-    // No filter: aggregate the entire index.
+    // No text filter: aggregate the caller's entire accessible set — for an
+    // Admin that is the whole tenant index, for everyone else their scoped
+    // slice. Counts never include documents the caller cannot access
+    // (§Access Scoping: counts must not leak).
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let facets = state
         .search
-        .facet_counts(None)
+        .facet_counts(SearchQuery {
+            query: String::new(),
+            entity_type: None,
+            workspace_id: None,
+            limit: 0,
+            tenant_id: scope.tenant_id,
+            accessible_workspace_ids: scope.accessible_workspace_ids,
+            accessible_repo_ids: scope.accessible_repo_ids,
+        })
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(FacetsResponse { facets }))

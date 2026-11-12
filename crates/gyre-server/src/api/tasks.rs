@@ -214,22 +214,30 @@ pub async fn create_task(
         task.repo_id = Id::new(repo_id);
     }
     state.tasks.create(&task).await?;
-    // Index for search.
+    // Index for search. Scope fields come from the entity itself (§Access
+    // Scoping): the workspace/repo the task lives in, and the tenant resolved
+    // from the workspace's scope row.
     let mut facets = HashMap::new();
     facets.insert("status".to_string(), "backlog".to_string());
     facets.insert("priority".to_string(), task_priority_str(&task.priority));
-    let _ = state
-        .search
-        .index(SearchDocument {
+    crate::search_scope::index_doc(
+        &state,
+        SearchDocument {
             entity_type: "task".to_string(),
             entity_id: task.id.to_string(),
             title: task.title.clone(),
             body: task.description.clone().unwrap_or_default(),
-            workspace_id: None,
-            repo_id: None,
+            workspace_id: Some(task.workspace_id.to_string()),
+            repo_id: if task.repo_id.as_str().is_empty() {
+                None
+            } else {
+                Some(task.repo_id.to_string())
+            },
+            tenant_id: None,
             facets,
-        })
-        .await;
+        },
+    )
+    .await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
