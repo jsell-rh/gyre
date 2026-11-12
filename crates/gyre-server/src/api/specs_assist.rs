@@ -2899,6 +2899,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             serde_json::from_str(&self.response).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
         }
