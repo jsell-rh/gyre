@@ -77,47 +77,32 @@ comments, and are wired into `.pre-commit-config.yaml` and
   route↔`RouteResourceMapping` cross-reference delegated to the
   frozen-baseline `check-abac-route-registry.sh` (spec §7).
 
-### Compile repairs after base merges
+Scoped-emit compile repairs after earlier base merges (commit 55a6c1f2b:
+`AppState::emit_tenant_event` for `emit_tenant_meta_spec_set_updated`;
+commit 1724c6a3d: patrol escalation emits through the scoped
+`emit_event(ws, ...)` and skips-and-logs workspaceless findings) are part
+of the commit list above; no production code changed this round.
 
-The scoped `emit_event` contract (commit 2698b9b63: workspace `Id`
-required, tenant resolved from the workspace record, never a fabricated
-`"default"`) repeatedly collided with main-side call sites arriving via
-base merges. Each was adapted at the call site, per the review direction:
+### Contract-restoration round verification (head b58f4003a)
 
-- `AppState::emit_tenant_event(tenant_id, ...)` (commit 55a6c1f2b) —
-  Event-tier emit path for tenant-level domain events whose tenant scope
-  the caller holds directly; used by `emit_tenant_meta_spec_set_updated`
-  (live path: `api/meta_specs.rs` `put_tenant_meta_spec_set`).
-- Patrol escalation (commit 1724c6a3d) — base merge 3afece9d (task-204)
-  reintroduced `spec_lifecycle_patrol.rs` calling `emit_event` with
-  `Option<Id>` (E0308 at spec_lifecycle_patrol.rs:371). `escalate_findings`
-  now emits through the scoped `emit_event(ws,
-  Destination::Workspace(ws), ...)` for findings with a resolvable
-  workspace, and skips-and-logs findings without one — the same contract
-  as `api/specs.rs`' SpecApproved/deprecation emissions the patrol was
-  patterned on; there is no scope-less broadcast path, and the finding
-  still reaches the caller through the patrol response. Tests adapted:
-  the workspaceless finding must emit nothing (quiet broadcast channel)
-  and nothing may persist under fabricated scopes.
+This round restored the assigned task document after the executor
+reverted the protected task text (diff was frontmatter/checkboxes only —
+the production fix was untouched) and re-verified the shipped behavior on
+the head that merges base d31906c5a (task-181/task-150):
 
-### Test evidence
-
-Evidence saved under `/tmp/stage/review-evidence/` (current round, head
-1724c6a3d):
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exits 0
-  (`server-check-pass.txt`); `--tests` type-check also exits 0
-  (`server-tests-check.txt`); `cargo fmt -p gyre-server -- --check` clean.
-- All three task scripts pass on this head (`check-hierarchy.txt`,
-  `check-tenant-filter.txt`, `check-api-auth.txt`), plus
-  fabricated-scope-defaults / scope-literal-defaults / inert-enforcement
-  lints.
-- Negative test (`check-hierarchy-negative.txt`): injecting
-  `workspace_id: Option<Id>` into the domain `Task` struct makes
-  `check-hierarchy.sh` exit 1 with the §2 message; restored, it exits 0.
-- Earlier rounds' evidence (per-script negative tests on injected
-  violations, domain/adapter test runs) is recorded in the prior attempt
-  artifacts.
+- All three scripts pass on this head: `check-hierarchy.sh` exit 0,
+  `check-tenant-filter.sh` exit 0 (118 read methods on tenant-column
+  tables checked), `check-api-auth.sh` exit 0
+  (`/tmp/stage/review-evidence/check-*.txt`).
+- Negative test re-run: injecting `workspace_id: Option<Id>` into the
+  domain `Task` struct makes `check-hierarchy.sh` exit 1 with the §2
+  message; restored, exit 0
+  (`check-hierarchy-negative.txt`/`check-hierarchy-restored.txt`).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exits 0 on this head —
+  the earlier E0308 review finding (reconciliation.rs scoped-emit
+  collision) stays fixed through the new base merge
+  (`server-check-merged-head.txt`).
+- `cargo test -p gyre-domain`: 474 passed, 0 failed.
 
 Server suites the verifier must run on this head (per the sandbox build
 budget): `cargo test --all`, all-target clippy, and the frozen-baseline
