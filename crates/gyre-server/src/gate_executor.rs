@@ -184,6 +184,11 @@ fn materialize_manifest_gate(repo_id: &Id, mg: &ManifestGateSpec) -> gyre_domain
         validation_type: None,
         required: true,
         gate_phase: Default::default(),
+        // Manifest gates are a per-MR selection, not part of the repo's
+        // stored gate chain — no chain position to occupy. `0` matches the
+        // convention for gates outside the ordered repo chain (ties broken
+        // by created_at).
+        position: 0,
         timeout_secs: None,
         created_at: now_secs(),
     }
@@ -3878,6 +3883,7 @@ specs:
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
+            position: 0,
             timeout_secs: Some(timeout_secs),
             created_at: now_secs(),
         }
@@ -4342,6 +4348,7 @@ specs:
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
+            position: 0,
             timeout_secs: None,
             created_at: now_secs(),
         };
@@ -4815,6 +4822,7 @@ specs:
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
+            position: 0,
             timeout_secs: None,
             created_at: now_secs(),
         };
@@ -4888,6 +4896,7 @@ specs:
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
+            position: 0,
             timeout_secs: None,
             created_at: now_secs(),
         };
