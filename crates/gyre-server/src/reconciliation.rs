@@ -1356,17 +1356,19 @@ pub fn diff_tenant_meta_spec_set(old: &TenantMetaSpecSet, new: &TenantMetaSpecSe
 
 /// Emit the `tenant_meta_spec_set_updated` domain event (§11): a tenant's
 /// meta-spec set binding changed. Fired by the tenant set-update handler on
-/// every successful PUT that changes the binding. Unscoped broadcast (the
-/// audience — the tenant's workspaces — is enumerated by the propagation
-/// run that follows; per-workspace events come from `run_reconciliation`).
+/// every successful PUT that changes the binding. Tenant-scoped (the scope
+/// is the authenticated caller's tenant, carried directly — no fabricated
+/// workspace identity): the audience — the tenant's workspaces — is
+/// enumerated by the propagation run that follows; per-workspace events
+/// come from `run_reconciliation`.
 pub async fn emit_tenant_meta_spec_set_updated(
     state: &Arc<AppState>,
     tenant_id: &Id,
     changed_paths: &[String],
 ) {
     state
-        .emit_event(
-            None,
+        .emit_tenant_event(
+            tenant_id.clone(),
             gyre_common::message::Destination::Broadcast,
             gyre_common::message::MessageKind::Custom("tenant_meta_spec_set_updated".to_string()),
             Some(serde_json::json!({
