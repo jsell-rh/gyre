@@ -3,7 +3,7 @@ title: "Implement forge enforcement policies for spec-to-code binding at merge"
 spec_ref: "agent-gates.md §Forge Enforcement Policies"
 depends_on:
   - task-138
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
@@ -86,13 +86,15 @@ Read `specs/system/agent-gates.md` §Forge Enforcement Policies and §Integratio
 
 ## Shipped
 
-The retained task-139 implementation (published PR head `a637e4a`) is
-rebased onto current main (`1e61f66`, merge commit `38e3372d`) with all
-conflicts confined to generated `web/dist` assets and resolved in favor
-of the staged merge resolution; the only overlapping source file
-(`gyre-adapters/src/schema.rs`) merged additively and `cargo check -p
-gyre-server -p gyre-adapters -p gyre-domain` passes clean on the merged
-tree.
+The published PR head (`7d74ce9`) conflicted with current main
+(`d31906c`, task-181 Risk Map). The DIRTY merge state is resolved: main
+is merged into this branch as `ae76f2763` with all conflicts confined
+to generated `web/dist` assets (resolved in favor of the staged merge
+resolution; main's `web/src` Risk Map sources and `task-181.md` merge
+cleanly and are taken wholesale). No `crates/` source overlapped, so
+the retained task-139 implementation is byte-identical to the reviewed
+PR head; `cargo check -p gyre-server -p gyre-adapters -p gyre-domain`
+passes clean on the merged tree.
 
 ### Five per-repo enforcement policies
 
@@ -131,12 +133,10 @@ tree.
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` on the merged tree: 466 passed, 0 failed.
-- All repo mechanical checks pass post-merge (arch, ABAC route registry,
-  exempt handlers, MCP write gates, migration versions and portability,
-  mem port contracts, dead message kinds, and the byte-slice/scope/secret
-  lint families), including `check-task-commit-attribution.sh` with the
-  restored `commits:` frontmatter.
+- `cargo test -p gyre-domain` on the merged tree: 466 passed, 0 failed
+  (evidence retained under `/tmp/stage/review-evidence`).
+- `cargo check -p gyre-server -p gyre-adapters -p gyre-domain` on the
+  merged tree: clean.
 - Server-side tests for the verifier to execute (large test compilation
   owned by verification per the 4 GiB budget):
   `cargo test -p gyre-server --lib merge_processor::` (in particular
@@ -148,3 +148,5 @@ tree.
   verification cases), `cargo test -p gyre-server --lib
   api::spec_policy::tests::`, and `cargo test -p gyre-server --test
   task134_review_probe` (pinned-spec delivery to gate agents).
+- `scripts/check-task-commit-attribution.sh` passes on the merged tree
+  with the restored `commits:` frontmatter.
