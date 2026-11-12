@@ -627,11 +627,25 @@ pub async fn approve_spec(
     // Approval Ledger): create the entry for this spec version (Pending),
     // then transition it to Approved. A fresh entry per (path, sha, approver)
     // approval; re-approving the same SHA records another ledger row.
+    //
+    // HSI §12 Judgment Ledger: the ledger row's human-attribution key is the
+    // authenticated user's canonical user Id — the same key
+    // GET /users/me/judgments resolves for the caller. The `user:<display
+    // name>` label stays on the approval-history event above, where the
+    // KeyBinding contract requires it; storing it here too made every
+    // human approval invisible to the judgment ledger (identity-key
+    // mismatch between writer and reader). Agents and the system token
+    // have no user Id and keep their `agent:<id>` / `user:<name>` labels.
+    let ledger_approver = auth
+        .user_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| approver_id.clone());
     let ledger_entry = gyre_domain::SpecApproval {
         id: new_id(),
         spec_path: spec_path.clone(),
         spec_sha: req.sha.clone(),
-        approver_id,
+        approver_id: ledger_approver,
         signature: req.signature.clone(),
         approved_at: None,
         revoked_at: None,
@@ -1049,13 +1063,20 @@ pub async fn revoke_spec_approval(
 
     // Only the original approver or an Admin can revoke.
     let is_admin = auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
+    // Caller label must be derived the SAME way approve_spec derives the
+    // event's approver_id: "agent:" only for Gyre agent JWTs (scope=agent);
+    // Keycloak user JWTs are "user:<display name>". Treating every JWT as
+    // an agent made the original human approver's caller_id never match
+    // their own approval event, locking them out of revocation (403).
+    let caller_is_agent = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+        == Some("agent");
     let caller_id = format!(
         "{}:{}",
-        if auth.jwt_claims.is_some() {
-            "agent"
-        } else {
-            "user"
-        },
+        if caller_is_agent { "agent" } else { "user" },
         auth.agent_id
     );
     if ev.approver_id != caller_id && !is_admin {
@@ -1067,11 +1088,20 @@ pub async fn revoke_spec_approval(
     // Revoke in the durable spec-approvals ledger: the most recent active
     // approval row for this path transitions Approved → Revoked. The domain
     // enforces the transition and mutual exclusivity (clears approved_at).
-    let caller_label = if auth.jwt_claims.is_some() {
-        format!("agent:{}", auth.agent_id)
-    } else {
-        format!("user:{}", auth.agent_id)
-    };
+    // The ledger's `revoked_by` carries the canonical user Id (HSI §12
+    // judgment-ledger attribution — the withdrawal is the acting human's
+    // judgment, so it must surface in THEIR ledger); the `user:<name>` label
+    // is kept for the history event and the audit detail above.
+    let caller_label = format!(
+        "{}:{}",
+        if caller_is_agent { "agent" } else { "user" },
+        auth.agent_id
+    );
+    let ledger_revoker = auth
+        .user_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| caller_label.clone());
     let mut ledger_revoked_id = None;
     {
         let active_ledger = state
@@ -1082,7 +1112,7 @@ pub async fn revoke_spec_approval(
         if let Some(latest) = active_ledger.first() {
             match state
                 .spec_approvals
-                .revoke(&latest.id, &caller_label, &reason, now)
+                .revoke(&latest.id, &ledger_revoker, &reason, now)
                 .await
             {
                 Ok(Some(())) => ledger_revoked_id = Some(latest.id.clone()),
@@ -1209,7 +1239,13 @@ pub async fn reject_spec(
     // for the current SHA are transitioned; already-approved rows whose
     // spec version was later superseded keep their own lifecycle.
     {
-        let caller_label = format!("user:{}", auth.agent_id);
+        // HSI §12: `rejected_by` carries the canonical user Id so the
+        // rejection surfaces in the declining human's judgment ledger.
+        let ledger_rejecter = auth
+            .user_id
+            .as_ref()
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_else(|| format!("user:{}", auth.agent_id));
         let pending = state
             .spec_approvals
             .list_by_path(&spec_path)
@@ -1219,7 +1255,7 @@ pub async fn reject_spec(
             if approval.status() == gyre_domain::spec_approval::ApprovalStatus::Pending {
                 if let Err(e) = state
                     .spec_approvals
-                    .reject(&approval.id, &caller_label, &req.reason, now)
+                    .reject(&approval.id, &ledger_rejecter, &req.reason, now)
                     .await
                 {
                     tracing::warn!(
@@ -3007,6 +3043,293 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // HSI §12 Judgment Ledger end-to-end: the approve/reject/revoke
+    // endpoints' ledger rows must surface in the acting human's
+    // /users/me/judgments — the writer's attribution key (canonical user
+    // Id) and the reader's must be the SAME string. These tests exist
+    // because a writer/reader key mismatch once shipped green behind
+    // adapter tests that seeded their own key shape.
+    // -----------------------------------------------------------------------
+
+    async fn seed_judgment_spec(state: &std::sync::Arc<crate::AppState>, path: &str, sha: &str) {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: path.to_string(),
+                        title: format!("Spec {path}"),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: sha.to_string(),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: None,
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_via_jwt_surfaces_in_judgment_ledger() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let spec_path = "system/judgment-probe.md";
+        let sha = "d".repeat(40);
+        seed_judgment_spec(&state, spec_path, &sha).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A human (OIDC JWT, developer role) approves the current version.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-approval-sub",
+                "preferred_username": "judg-approver",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-probe.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "sha": sha })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-approval-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+
+        // Writer side: the ledger row carries the canonical user Id — NOT
+        // the "user:<display name>" KeyBinding label (which lives on the
+        // approval-history event, where the KeyBinding contract needs it).
+        let rows = state.spec_approvals.list_by_path(spec_path).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].approver_id,
+            acting_user.id.as_str(),
+            "ledger approver_id must be the canonical user Id, got {}",
+            rows[0].approver_id
+        );
+        assert_eq!(
+            rows[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Approved
+        );
+
+        // Reader side: the approval surfaces in the approver's ledger.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=approval")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let judgments = json["judgments"].as_array().unwrap();
+        assert_eq!(judgments.len(), 1, "got {judgments:?}");
+        assert_eq!(judgments[0]["judgment_type"], "approval");
+        assert_eq!(judgments[0]["entity_ref"], spec_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoke_via_jwt_surfaces_rejection_in_judgment_ledger() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let spec_path = "system/judgment-revoke.md";
+        let sha = "e".repeat(40);
+        seed_judgment_spec(&state, spec_path, &sha).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-revoke-sub",
+                "preferred_username": "judg-revoker",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        // Approve, then revoke with the same human (the original approver
+        // may revoke their own approval).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-revoke.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "sha": sha })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-revoke.md/revoke")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "reason": "outdated" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Writer side: revoked_by carries the canonical user Id.
+        let rows = state.spec_approvals.list_by_path(spec_path).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-revoke-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(rows[0].revoked_by.as_deref(), Some(acting_user.id.as_str()));
+
+        // Reader side: the withdrawal surfaces as a rejection attributed to
+        // the withdrawing human.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=rejection")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let judgments = json["judgments"].as_array().unwrap();
+        assert_eq!(judgments.len(), 1, "got {judgments:?}");
+        assert_eq!(judgments[0]["judgment_type"], "rejection");
+        assert_eq!(judgments[0]["entity_ref"], spec_path);
+        assert_eq!(judgments[0]["detail"], "outdated");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_via_jwt_surfaces_rejection_in_judgment_ledger() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let spec_path = "system/judgment-reject.md";
+        let sha = "f".repeat(40);
+        seed_judgment_spec(&state, spec_path, &sha).await;
+        // A Pending ledger row submitted by a different human — reject_spec
+        // declines pending submissions.
+        state
+            .spec_approvals
+            .create(&gyre_domain::SpecApproval::new(
+                gyre_common::Id::new("judg-pending-1"),
+                spec_path,
+                sha,
+                "user:someone-else",
+            ))
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-reject-sub",
+                "preferred_username": "judg-rejecter",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-reject.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "reason": "not coherent" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Writer side: rejected_by carries the canonical user Id of the
+        // declining human — not the submitting approver's key.
+        let rows = state.spec_approvals.list_by_path(spec_path).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-reject-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(
+            rows[0].rejected_by.as_deref(),
+            Some(acting_user.id.as_str())
+        );
+        assert_eq!(
+            rows[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected
+        );
+
+        // Reader side: the rejection surfaces in the rejecter's ledger
+        // (NOT in the submitter's — "user:someone-else" has no user Id key).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=rejection")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let judgments = json["judgments"].as_array().unwrap();
+        assert_eq!(judgments.len(), 1, "got {judgments:?}");
+        assert_eq!(judgments[0]["judgment_type"], "rejection");
+        assert_eq!(judgments[0]["entity_ref"], spec_path);
+        assert_eq!(judgments[0]["detail"], "not coherent");
+    }
+
+    // -----------------------------------------------------------------------
     // §9 mode-based approval resolution — end-to-end API tests.
     // Real git repo + manifest, real minted agent JWT with workload claims,
     // real KV-stored workload attestation, assertions on the ledger status
@@ -4455,6 +4778,7 @@ specs:
                 None,
                 None,
                 None,
+                &[],
                 10,
                 0,
             )

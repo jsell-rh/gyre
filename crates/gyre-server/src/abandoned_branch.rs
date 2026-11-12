@@ -124,6 +124,7 @@ async fn evaluate_workspace(
                     Some(9),
                     Some(9),
                     Some(NotificationType::AbandonedBranch.as_str()),
+                    &[],
                     100,
                     0,
                 )
@@ -305,6 +306,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -356,6 +358,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -377,6 +380,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -398,6 +402,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -446,6 +451,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -495,6 +501,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -543,6 +550,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -592,6 +600,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -668,6 +677,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -746,6 +756,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                &[],
                 100,
                 0,
             )

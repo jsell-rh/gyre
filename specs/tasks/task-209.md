@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,82 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+HSI §12 profile gaps (notification filtering, judgment ledger, auth
+provider info) are implemented in production code on this branch across
+the commits listed in the frontmatter. This round repairs the
+verification failure on candidate c83549396 (checks.sh exit 1: the
+changed-lines clippy gate reported 11 warnings, all on lines this branch
+added).
+
+### This round: clippy repair (verification finding)
+
+Commit 541853144 clears all 11 warnings with no behavior change:
+
+- **meta_specs.rs `authorize_meta_spec_delete`** (8x
+  `clippy::needless_borrow`): `state`/`auth` are already
+  `&AppState`/`&AuthenticatedAgent` parameters, so the four
+  `record_rbac_denied` call sites passed `&&`-references the compiler
+  immediately dereferenced; the redundant `&` is removed.
+- **workspaces.rs PUT trust transition**
+  (`clippy::unnecessary_lazy_evaluations`): `changed.then(|| (from,
+  new_trust))` became `changed.then_some((from, new_trust))` — the
+  closure had no side effects and both values were already computed and
+  owned, so lazy vs eager construction is unobservable.
+- **mem.rs `MemJudgmentLedgerRepository`**
+  (`clippy::derivable_impls`): the manual `Default` impl (three
+  `Arc::default()` fields) is replaced by `#[derive(Default)]`.
+- **sqlite/user_profile.rs test** (`clippy::clone_on_copy`): `.clone()`
+  dropped on the `Copy` type `JudgmentType`.
+
+### Evidence (/tmp/stage/review-evidence/)
+
+- `clippy-diff-pass.log` — `python3 scripts/check-clippy-diff.py
+  199c1bb78` (the exact CI/pre-commit gate that failed): "clippy:
+  changed lines clean (42 Rust files, 906 existing warnings outside
+  changes)", exit 0. The 906 pre-existing warnings are outside this
+  branch's changed lines (e.g. gyre-common view_query.rs, untouched by
+  task-209) and are out of scope per the gate's changed-lines contract.
+- `rustfmt-diff-pass.log` — changed-lines rustfmt gate: clean, exit 0.
+- `cargo-check-alltargets.log` — `cargo check -p gyre-server -p
+  gyre-adapters --all-targets` (SKIP_WEB_BUILD=1): exit 0, all lib and
+  test targets type-check.
+- `adapters-user-profile-tests.log` — focused gyre-adapters
+  `user_profile` test run (judgment-ledger aggregation suite).
+- `toggle-coverage-pass.log`, `arch-lint.log`, `abac-registry.log`,
+  `mem-port-contracts.log` — prior-round mechanical gates re-run on this
+  tree, all exit 0.
+
+### Prior rounds (intact on this branch)
+
+- Notification filtering: inbox queries (`get_my_notifications`/`_count`)
+  compute the user's disabled types from `user_notification_preferences`
+  and pass them as `exclude_types` to `list_for_user`, applied by the
+  query before limit/offset; preferences stored under canonical
+  `as_str()` names; profile UI toggles for all 41 canonical variants,
+  guarded by `scripts/check-notification-toggle-coverage.sh` in
+  pre-commit and CI.
+- Judgment ledger: `JudgmentLedgerRepository::list_for_user` (sqlite +
+  postgres) aggregates spec approvals/rejections, gate overrides, trust
+  changes, and meta-spec publishes from real tables with
+  `?workspace_id=` filtering, per-source type filters, reverse-
+  chronological sort, limit/offset after union+sort; write paths emit
+  `gate_override`, `trust_change`, and meta-spec publish attribution
+  audit events; zstd-compressed audit details decompressed on read.
+- Auth provider info: `GET /api/v1/users/me` returns read-only
+  `oidc_issuer` and `last_login_at`.
+- HSI §12 spec amendment: judgment-source tables and `?type=` values
+  (`approval|rejection|gate|trust|meta-spec`) documented in the spec.
+
+### Verifier scope
+
+The four clippy repairs are mechanically warning-removing with no
+behavior change (borrow removal, then_some on already-computed owned
+values, derived Default, Copy clone). Full `cargo test --all` (large
+server build compilation belongs in the verifier per the 4 GiB budget)
+and `cd web && npm test`; `scripts/check-notification-toggle-coverage.sh`;
+`scripts/check-clippy-diff.py` and `scripts/check-rustfmt-diff.py`
+against the assignment base; the gawk-dependent JS lint hooks on a
+gawk-equipped runner.
