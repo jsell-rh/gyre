@@ -1104,8 +1104,8 @@
     text-decoration-style: solid;
   }
 
-  
-  
+
+
   /* Risk summary grid for type view */
   .risk-summary-grid {
     display: grid;
@@ -1277,7 +1277,7 @@
     opacity: 0.4;
   }
 
-  
+
   /* ── Causal Flow Trace ─────────────────────────────────────── */
   .trace-step-list {
     display: flex;
@@ -1352,7 +1352,7 @@
     flex-shrink: 0;
   }
 
-  
+
   /* Produced by persona */
   .detail-persona {
     font-size: var(--text-sm);
@@ -1369,7 +1369,7 @@
     color: var(--color-primary);
   }
 
-  
+
   /* Common flows */
   .common-flows-list {
     display: flex;
