@@ -3841,8 +3841,18 @@ impl LlmConfigRepository for MemLlmConfigRepository {
     }
 }
 
-/// sha -> (agent_id, workspace_id, tenant_id, blob)
-type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
+/// Stored conversation blob with its scope identity. Named carrier
+/// (TASK-048 F1): the previous positional 4-tuple
+/// `(agent_id, workspace_id, tenant_id, blob)` was a field-swap hazard.
+struct ConversationBlob {
+    agent_id: String,
+    workspace_id: String,
+    tenant_id: String,
+    data: Vec<u8>,
+}
+
+/// sha -> stored conversation blob
+type ConvMap = Arc<Mutex<HashMap<String, ConversationBlob>>>;
 
 /// In-memory ConversationRepository for development and tests.
 pub struct MemConversationRepository {
@@ -3875,27 +3885,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
             .lock()
             .await
             .entry(sha.clone())
-            .or_insert_with(|| {
-                (
-                    agent_id.as_str().to_string(),
-                    workspace_id.as_str().to_string(),
-                    tenant_id.as_str().to_string(),
-                    conversation.to_vec(),
-                )
+            .or_insert_with(|| ConversationBlob {
+                agent_id: agent_id.as_str().to_string(),
+                workspace_id: workspace_id.as_str().to_string(),
+                tenant_id: tenant_id.as_str().to_string(),
+                data: conversation.to_vec(),
             });
         Ok(sha)
     }
 
     async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>> {
         let guard = self.convs.lock().await;
-        let Some((_, _, tid, blob)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
         // Decompress.
-        let decompressed = zstd::decode_all(blob.as_slice())
+        let decompressed = zstd::decode_all(record.data.as_slice())
             .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
         Ok(Some(decompressed))
     }
@@ -3927,20 +3935,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
         tenant_id: &Id,
     ) -> Result<Option<(Id, Id)>> {
         let guard = self.convs.lock().await;
-        let Some((aid, wid, tid, _)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
-        Ok(Some((Id::new(aid), Id::new(wid))))
+        Ok(Some((
+            Id::new(&record.agent_id),
+            Id::new(&record.workspace_id),
+        )))
     }
 
     async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>> {
         let guard = self.convs.lock().await;
         Ok(guard
             .iter()
-            .filter(|(_, (aid, _, tid, _))| aid == agent_id.as_str() && tid == tenant_id.as_str())
+            .filter(|(_, rec)| {
+                rec.agent_id == agent_id.as_str() && rec.tenant_id == tenant_id.as_str()
+            })
             .map(|(sha, _)| sha.clone())
             .collect())
     }
