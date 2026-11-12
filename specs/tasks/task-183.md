@@ -2,10 +2,10 @@
 title: "Architectural Timeline — time scrubber for historical architecture views"
 spec_ref: "system-explorer.md §6"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f"]
+commits: ["f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f", "a50b041a3"]
 ---
 
 ## Spec Excerpt
@@ -82,72 +82,66 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 
 ## Shipped
 
-The Architectural Timeline (system-explorer.md §6) runs on a real
-point-in-time graph API. Four commits: 6b9fb4e2b (implementation),
-cf8069ea8 (review round-1 repairs), 8405c8e47 (review round-2 rustfmt
-repair), f5a45295b (verification repair: clippy gate).
+The Architectural Timeline (system-explorer.md §6) is implemented on a
+real point-in-time graph API. Implementation commits: 6b9fb4e2b,
+cf8069ea8 (review repairs: fetcher race, reconciliation narrative from
+real payload), 8405c8e47 (rustfmt repair), f5a45295b (clippy gate
+repair), c8e33c3c3 (verified asset build). This round (a50b041a3,
+rebase repair) merged current main (44a01390c, task-171 LLM Endpoint
+Contract) into the branch — see "Rebase repair" below.
 
-### Point-in-time graph API (6b9fb4e2b)
+### Behavior
 
-- `GraphPort` gains `list_nodes_at`/`list_edges_at` with an explicit
-  existed-at contract (`first_seen_at <= at` AND (`deleted_at` is None OR
-  `deleted_at > at`)), implemented in BOTH adapters (SQL filters in SQLite,
-  the same guard in code in `MemGraphStore`).
-- `GET /repos/{id}/graph?at=<epoch-seconds|RFC3339>` reconstructs the graph
-  at that instant, including nodes soft-deleted since; invalid `at` returns
-  400. Documented in `docs/api-reference.md`.
-
-### Scrubber, ghosts, delta panel, key moments (6b9fb4e2b)
-
-- `TimelineScrubber.svelte` at the bottom of the canvas: time axis, date
-  label, key-moment markers (spec approvals, milestones, structural
-  changes, reconciliations) with click-through narrative popover, per-type
-  delta stats ("+2 types, -1 trait, 3 types modified").
-- Scrubbing fetches the server `?at=` graph through
-  `createTimelineHistoryFetcher` (200 ms debounce; superseded positions
-  resolve null). Ghost overlays: forward ghosts (added since, green
+- **Point-in-time graph API:** `GraphPort` gains
+  `list_nodes_at`/`list_edges_at` with an explicit existed-at contract
+  (`first_seen_at <= at` AND not soft-deleted at or before `at`),
+  enforced in BOTH adapters (SQL filters in SQLite, the same guard in
+  code in `MemGraphStore`). `GET /repos/{id}/graph?at=<epoch-seconds|
+  RFC3339>` reconstructs the graph at that instant, including nodes
+  soft-deleted since; invalid `at` returns 400. Documented in
+  `docs/api-reference.md`.
+- **Scrubber, ghosts, delta panel, key moments:**
+  `TimelineScrubber.svelte` at the bottom of the canvas (time axis,
+  date label, key-moment markers with click-through narrative popover,
+  per-type delta stats). Scrubbing fetches the server `?at=` graph
+  through `createTimelineHistoryFetcher` (200 ms debounce; superseded
+  positions resolve null; late out-of-order responses are refused by
+  ExplorerView). Ghost overlays: forward ghosts (added since, green
   dotted), backward ghosts (removed since, red dotted, recovered from
-  ArchitecturalDelta records), modified highlights (yellow).
+  ArchitecturalDelta records), modified highlights (yellow). Key
+  moments derive from real payloads: spec approvals, milestone
+  completions, structural changes, and reconciliation events (the
+  `reconciliation_completed` payload carries `specs: [{name, version}]`
+  provenance labels for the narrative).
 
-### Review repairs (cf8069ea8, 8405c8e47)
+### Rebase repair (a50b041a3)
 
-- **Fetcher race fixed** (cf8069ea8): a fetch now settles only the waiters
-  for its own target, and ExplorerView refuses to pin a late out-of-order
-  response; regression test reproduces the interleaving and fails on the
-  old logic.
-- **Reconciliation narrative grounded in the real payload** (cf8069ea8):
-  the production `reconciliation_completed` payload is enriched with
-  `specs: [{name, version}]` (wave-scoped provenance labels); the frontend
-  narrative derives only from production fields.
-- **rustfmt drift** (8405c8e47): the point-in-time tests in
-  `crates/gyre-adapters/src/sqlite/graph.rs` formatted; `cargo fmt --check`
-  clean on gyre-adapters and gyre-server.
-
-### Verification repair (f5a45295b)
-
-- Verification round de578256a9b2458a97ef8c182bb9173a (base d31906c5)
-  failed the changed-lines clippy gate: 26 `clippy::double_must_use`
-  findings at `crates/gyre-ports/src/graph.rs:16`. Root cause: async-trait
-  0.1.89 injects `#[must_use]` into every expanded trait method while the
-  boxed-future return type is already `#[must_use]`, and the lint span
-  covers the whole GraphPort trait that task-183's new methods fall
-  inside. Fixed with the same targeted
-  `#[allow(clippy::double_must_use)]` already established on
-  `SpecApprovalRepository` (spec_approval.rs) — attribute only, no
-  behavior change. Evidence:
-  /tmp/stage/review-evidence/clippy-double-must-use-fix.txt (focused
-  `cargo clippy -p gyre-ports --all-targets` exit 0, zero findings in
-  src/graph.rs; `cargo fmt --check -p gyre-ports` exit 0).
+The published PR conflicted with current main (merge conflict
+  category). Resolved by merging main 44a01390c into the branch:
+  conflicts were confined to generated `web/dist` assets (resolved to
+  main's build; final integration rebuilds and publishes those
+  remotely). The three source files touched by both sides
+  (`crates/gyre-server/src/api/graph.rs`, `web/src/lib/api.js`,
+  `docs/api-reference.md`) auto-merged; verified both sides' work
+  coexists (task-183 `?at=` point-in-time handling + task-171
+  llm_helpers/rate-limit changes). All other task-183 implementation
+  files are byte-identical to the retained approved candidate.
 
 ### Test evidence
 
-- Frontend (focused, run in round 1): `vitest run timeline-utils.test.js
-  TimelineScrubber.test.js ExplorerViewNavigableArchitecture.test.js`
-  32/32 passed; fetcher-race regression fails on old logic (mutation
-  verified).
-- Rust (focused, run in round 2): `cargo test -p gyre-adapters
-  sqlite::graph::tests::list_` 3/3 passed, including both point-in-time
-  tests.
-- Round 3 (f5a45295b) is a lint-attribute-only change: focused clippy +
-  fmt probes above; the verifier should re-run the full changed-lines
-  clippy gate and the listed suites.
+Focused probes on the merged tree (this round; logs in
+/tmp/stage/review-evidence/):
+
+- `cargo check -p gyre-server -p gyre-ports -p gyre-adapters` — clean
+  (cargo-check-merged.txt).
+- `cargo test -p gyre-adapters sqlite::graph::tests::list_` — 3/3
+  passed, including both point-in-time reconstruction tests
+  (merged-sqlite-graph-tests.txt).
+- `npx vitest run timeline-utils.test.js TimelineScrubber.test.js` —
+  60/60 passed (merged-frontend-timeline-tests.txt);
+  `ExplorerViewNavigableArchitecture.test.js` — 12/12 passed
+  (merged-explorerview-tests.txt).
+
+The verifier should run the full workspace suites, architecture
+  checks, all-target Clippy, and GitHub CI, plus the focused suites
+  above on the merge commit.
