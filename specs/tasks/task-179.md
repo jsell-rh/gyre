@@ -62,15 +62,15 @@ Every field type is clickable → navigates to that type. Every spec reference �
 
 ## Acceptance Criteria
 
-- [x] Type View shows fields, implements, used-by, story, risk metrics
-- [x] Trait View shows methods, implementations, dependents with counts
-- [x] Endpoint View shows request/response shapes and flow diagram
-- [x] Spec View shows content alongside implementation realization
-- [x] All type references are clickable (navigate to that type's view)
-- [x] All spec references open spec inline
-- [x] All agent references show provenance
-- [x] Detail panel routes to correct Moldable View by entity type
-- [x] Tests pass
+- [ ] Type View shows fields, implements, used-by, story, risk metrics
+- [ ] Trait View shows methods, implementations, dependents with counts
+- [ ] Endpoint View shows request/response shapes and flow diagram
+- [ ] Spec View shows content alongside implementation realization
+- [ ] All type references are clickable (navigate to that type's view)
+- [ ] All spec references open spec inline
+- [ ] All agent references show provenance
+- [ ] Detail panel routes to correct Moldable View by entity type
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -78,7 +78,7 @@ Read `system-explorer.md` §2 "Moldable Views" for the exact wireframes and data
 
 ## Shipped
 
-The four moldable views of system-explorer.md §2 now ship as dedicated
+The four moldable views of system-explorer.md §2 ship as dedicated
 components routed by entity type, with one shared computation layer and
 tests that exercise the real implementation.
 
@@ -130,21 +130,26 @@ Progressive preview itself is §3 (task-186) territory.
 
 ### Test evidence
 
-Focused web probes only (locked `npm ci`; repo's locked vitest). Full logs
-and exit codes retained in the controller's review-evidence directory
-(batches 1–5, 566 tests, all passing):
+Focused web probes only (locked `npm ci`; repo's locked vitest).
 
-- Batch 1 — `MoldableViews.test.js` (new, 22 tests: model unit tests on the
-  real functions, per-view rendering with mock graph data, clickable
-  reference navigation, agent-provenance callback, spec content/history/
-  assertions against a mocked api, NodeDetailPanel routing by node type) +
-  `NodeDetailPanel.test.js` (60, unchanged behavior after the extraction).
-- Batches 2–5 — every ExplorerView/NodeDetailPanel-adjacent suite
-  (NavigableArchitecture, Scope, WorkspaceGraph, DrillUrl, LensUrl,
+- Initial round (batches 1–5, 566 tests, all passing; logs retained in the
+  controller's review-evidence directory): `MoldableViews.test.js` (new,
+  22 tests — model unit tests on the real functions, per-view rendering
+  with mock graph data, clickable reference navigation, agent-provenance
+  callback, spec content/history/assertions against a mocked api,
+  NodeDetailPanel routing by node type) plus `NodeDetailPanel.test.js`
+  (60), and every ExplorerView/NodeDetailPanel-adjacent suite (484 more:
+  NavigableArchitecture, Scope, WorkspaceGraph, DrillUrl, LensUrl,
   DefaultViews, responsive, ViewEvents, Shortcuts, LayoutRenderers,
   LivenessWiring, GeneratedViews, LargeGraph, AppShell, RepoMode,
-  WorkspaceHome*, DetailPanel, ExplorerCanvas*, ExplorerChat, canvas-state):
-  484 tests passing. No Svelte compile warnings from the new components.
+  WorkspaceHome*, DetailPanel, ExplorerCanvas*, ExplorerChat, canvas-state).
+  No Svelte compile warnings from the new components.
+- Repair round (contract restore only; no product change): re-ran the
+  focused probe at the repaired head — `npx vitest run
+  src/__tests__/MoldableViews.test.js src/__tests__/NodeDetailPanel.test.js`
+  → 2 files, 82/82 tests passed, exit 0. Confirmed `git diff
+  f3e7ed8af..HEAD -- web/src web/tests docs/ui.md` is empty, i.e. the
+  shipped code is unchanged since the reviewed feature commit.
 
 No Rust changes: the knowledge-graph API (`GET /repos/:id/graph`) already
 exposes every field the views consume (GraphNode/GraphEdge in
