@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
 ---
 
 ## Spec Excerpt
@@ -108,72 +108,59 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 ## Shipped
 
 agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) implemented in production code — no stubs, no audit-only
-paths. The cascade, enforcement levels, tracking, reset, and prompt
-structure shipped in commit 4bfdf85b8; review-round repairs in
-7bdc60603 (BudgetExhausted inbox delivery, repo concurrent/lifetime
-override enforcement, priority-7 spec reconciliation, persona-only
-`system://persona`), bfb2dc3d (repo lifetime override bounded by the
-effective tenant/workspace ceiling), and 29d1a961 (verification-gate
-repairs: rustfmt, clippy double_must_use allow on the sibling port
-trait).
+Structure) implemented in production code across commits 4bfdf85b8,
+7bdc60603, bfb2dc3de, 29d1a9618, dc09d6950 (prior rounds — cascade
+validation, enforcement levels incl. 60s grace vs beyond-limit hard
+kill, tracking incl. llm_query workspace-only charging, rolling-24h
+reset job, three-section prompt assembly + MCP prompt delivery), and
+d00113b22 (this round's review repairs).
 
-This round (dc09d695) repaired the two review findings from round
-d3607aac in `crates/gyre-server/src/api/budget.rs`:
+### This round — repairs for review cf0145abb (commit d00113b22)
 
-### F1 — overshooting exhaustion now gets the 60s graceful stop
+**F1 — rolling-window resync keeps llm_query off the repo budget**
+(`crates/gyre-server/src/api/budget.rs`): `apply_rolling_24h_window`
+recomputed repo usage entries from `BudgetCallRecords` with no
+`usage_type` filter, while `record_llm_call_usage` (correctly) excludes
+`llm_query` from the incremental repo charge. specs/assist, explorer,
+and MCP spec_assist persist llm_query records WITH `repo_id`, so after
+the first hourly cycle user queries were re-charged into the repo
+budget entry — letting them exhaust a repo budget and block agent
+spawns (`check_repo_spawn_budget`), exactly what the spec forbids
+("Charged to workspace budget directly (no repo-level tracking)").
+The resync now excludes `usage_type == "llm_query"` from `repo_sums`
+(kept in ws_sums/tenant total), mirroring the incremental path. New
+mixed-sequence regression test
+`rolling_window_keeps_llm_query_out_of_repo_budget`: 900 agent_run +
+500 llm_query tokens against one repo → after `apply_rolling_24h_window`
+the repo entry stays 900 and the workspace total is 1400.
 
-"Beyond limit" is exclusively the budget-reduced-below-usage case
-(external budget changes). `enforce_workspace_budget` now takes a
-`BudgetEnforcementCause` (`UsageReport` | `BudgetChanged`): only a
-`BudgetChanged` pass (workspace budget PUT) with usage strictly past
-the limit hard-kills immediately with grace_secs 0. Every usage report
-at ≥ 100% — including the common overshoot crossing (950 → 1150
-against a 1000-token limit) — routes to the 100% branch:
-`BudgetExhausted` to every active agent's inbox, 60s grace timer, kill
-of agents still Active afterwards. Reports made during a started
-grace period no longer fall into the immediate-kill branch. The PUT
-path (budget reduced below usage) still hard-kills synchronously.
-
-### F2 — llm_query charges the workspace only
-
-`record_llm_call_usage` no longer charges the repo budget when
-`usage_type` is `llm_query`, even when the calling route scoped the
-query to a repo (REST specs/assist, explorer/generate, MCP
-spec_assist). User queries charge the workspace and tenant counters
-directly; the per-call `BudgetCallRecord` still records the repo for
-the audit trail. User queries can no longer exhaust a repo budget and
-block agent spawns.
+**F2 — `list_since` is deployment-wide in every adapter**
+(`crates/gyre-adapters/src/sqlite/budget_call.rs`,
+`crates/gyre-adapters/src/postgres/budget_call.rs`,
+`crates/gyre-ports/src/budget_call.rs`): the SQL adapters filtered
+`list_since` by the storage handle's tenant scope, but the hourly
+resync runs on the BASE handle (tenant scope "default") and recomputes
+usage entries for every workspace plus the storage-wide
+`tenant:global` ceiling. In any DB-backed deployment with a workspace
+whose tenant != "default", the job zeroed that workspace's
+`tokens_used_today`/`cost_today` hourly — daily budgets reset hourly,
+80%/100% enforcement stopped binding (fail-open). Both SQL adapters
+now implement `list_since` unscoped, matching the mem adapter; the
+port contract documents the deployment-wide scope. New SQL-adapter
+test `list_since_spans_tenants_inside_the_window` saves a record
+under a tenant different from the handle's scope and requires it
+returned.
 
 ### Test evidence
 
-New regression tests in `api/budget.rs` (type-checked via
-`cargo check -p gyre-server --lib --tests`; the sandbox build wrapper
-blocks gyre-server test codegen, so the independent verifier must run
-them):
-
-- `overshooting_report_gets_graceful_stop_not_hard_kill` — the exact
-  F1 repro (950 seeded, one 200-token report vs a 1000-token limit):
-  agent stays Active, BudgetExhausted in the inbox with grace_secs 60,
-  worktree preserved. Fails on the pre-fix code (immediate Stopped).
-- `overshoot_exhaustion_kills_after_grace_expiry` — overshoot routes
-  through the grace timer: killed (Stopped) after grace, worktree
-  preserved, task remains InProgress.
-- `llm_query_with_repo_context_charges_workspace_only` — llm_query
-  with a repo_id: workspace + tenant counters incremented, no repo
-  usage entry, audit record keeps the repo. Fails on the pre-fix code.
-- Updated `beyond_limit_kills_immediately_without_grace` to pass
-  `BudgetChanged` (the only path to beyond-limit) and
-  `exhaustion_emits_messages_and_kills_after_grace` to pass
-  `UsageReport`.
-
-Verifier probes required (blocked in-sandbox by the build wrapper's
-4 GiB budget):
-
-- `cargo test -p gyre-server --lib api::budget`
-- `cargo test --all`
-
-Local probes run here: `cargo check -p gyre-server` (clean),
-`cargo check -p gyre-server --lib --tests` (clean),
-`cargo clippy -p gyre-server --lib` (no new warnings in
-api/budget.rs), `cargo fmt --all -- --check` (clean).
+- `cargo test -p gyre-adapters budget_call` — 5 passed (incl. the new
+  mismatched-tenant test); output in
+  `/tmp/stage/review-evidence/task119-adapters-budget-call-tests.txt`.
+- `cargo check -p gyre-server --tests` — the new server-side
+  regression test type-checks; the build wrapper blocks gyre-server
+  test compilation in this sandbox (4 GiB budget), so the verifier
+  must run `cargo test -p gyre-server --lib api::budget` (see
+  `/tmp/stage/review-evidence/task119-README.txt`).
+- rustfmt clean on all changed files; `scripts/check-arch.sh` and
+  `scripts/check-mem-port-contracts.sh` pass; clippy reports no
+  warnings in changed files.
