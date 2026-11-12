@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48"]
 ---
 
 ## Spec Excerpt
@@ -122,61 +122,67 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 ## Shipped
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code on this branch and
-shipped in earlier rounds; the tree is intact after the merge of base
-e402e1ed (1d1be681c). This round repairs the two findings from the last
-verification run of candidate 498a9bdc (exit 1: rustfmt-diff + E0061).
+provider info) are implemented in production code on this branch across
+the commits listed in the frontmatter. This round repairs the two
+findings from the review of candidate 60c4eb9af (toggle-coverage gate
+exit 1: a 41st canonical `NotificationType` variant had no toggle).
 
-### This round: base-e402e1ed merge repair
+### This round: WorkspaceOwnerless toggle repair (review F1/F2)
 
-- **E0061 (compile)**: base task-121 plus this task's earlier rounds both
-  extended `NotificationRepository::list_for_user`; the merged signature
-  carries `exclude_types` (HSI §12 disabled-type filtering) as the 6th
-  parameter (8 total), but two call sites in
-  `crates/gyre-server/src/workspace_ownership.rs` (ownerless-workspace
-  dedup probe at :173 and its test helper at :457) still passed the old
-  7-argument form, so `gyre-server` failed to compile. Both now pass
-  `&[]`, which the port contract specifies for background
-  de-duplication/verification surfaces that must observe notifications
-  regardless of the recipient's toggles — correct for both sites.
-- **rustfmt-diff**: applied rustfmt to the changed lines flagged in the
-  failing verification round (`sqlite/user_profile.rs`,
-  `postgres/user_profile.rs`, `api/meta_specs.rs`, `api/specs_assist.rs`,
-  `api/users.rs`).
-- **Evidence** (`/tmp/stage/review-evidence/`):
-  `task-209-merge-repair.log` — `cargo check -p gyre-server` (lib) exit 0
-  in 6m48s; `cargo check -p gyre-server --tests` exit 0 in 3m07s (all
-  test targets type-check after the merge); repo-wide arity scan of every
-  `list_for_user` call site (no other 7-argument notification-repo call
-  remains); `check-rustfmt-diff.py` clean against both e402e1ed and
-  HEAD^1.
+- **F1 (missing toggle)**: `WorkspaceOwnerless` (Priority-2, emitted by
+  the ownerless-workspace job in `workspace_ownership.rs:196` to every
+  TenantAdmin; task-121 lineage) was absent from `NOTIF_TYPE_IDS`
+  (`web/src/lib/notification-types.js`) and from the
+  `user_profile.notif_types` labels (`web/src/locales/en.json`), so a
+  tenant admin could not disable it in their inbox and the task's own
+  mechanical gate failed on this tree. Both are added
+  ("Ownerless Workspaces"); `check-notification-toggle-coverage.sh`
+  now passes: 41 enum variants, 41 toggles, labels in lockstep.
+- **F2 (mirrored-count test)**: `UserProfile.test.js` hardcoded
+  `expect(NOTIF_TYPE_IDS.length).toBe(40)`, which passed while the
+  variant was missing. The assertion now derives the expected set from
+  the Rust enum source itself (`crates/gyre-common/src/notification.rs`,
+  extracted at test time) and asserts `NOTIF_TYPE_IDS` equals it exactly,
+  so any future variant without a toggle fails the web suite.
+  Mutation-checked: removing the id from the list fails the test
+  (1 failed | 26 passed); restored, it passes (27 passed).
 
-### Prior rounds (unchanged, intact after merge)
+### Evidence (/tmp/stage/review-evidence/)
 
-- Notification filtering: inbox queries
-  (`get_my_notifications`/`_count`, users.rs) compute the user's disabled
-  types from `user_notification_preferences` and pass them as
-  `exclude_types` to `list_for_user`, applied by the query before
-  limit/offset; preferences are stored under canonical `as_str()` names;
-  the profile UI offers toggles for all 40 canonical `NotificationType`
-  variants (shared `web/src/lib/notification-types.js`), guarded by
-  `scripts/check-notification-toggle-coverage.sh` in pre-commit and CI.
-- Judgment ledger: `JudgmentLedgerRepository::list_for_user`
-  (sqlite + postgres adapters) aggregates spec approvals/rejections,
-  gate overrides, trust changes, and meta-spec publishes from real
-  tables, with `?workspace_id=` filtering (not stamping), per-source type
-  filters, reverse-chronological sort, limit/offset after union+sort;
-  write paths emit `gate_override` (human approval review on a
-  failed-gate MR), `trust_change` (workspace trust transition), and
-  meta-spec publish attribution audit events; zstd-compressed audit
-  details are decompressed on read.
+- `toggle-coverage-pass.log` — the gate that failed review now exits 0.
+- `userprofile-focused-test.log` — focused suite, 27/27 passed.
+- `full-web-suite.log` — `cd web && npm test`: 110 files,
+  2210 passed | 41 skipped, exit 0 (after `npm ci` with locked deps).
+- `mutation-check.log` — proof the repaired test kills the bug class.
+- `js-lint-hooks-mawk.log` — three JS lint hooks exit 2 on the CLEAN
+  baseline in this sandbox (gawk-only `match($0, /re/, arr)` vs mawk
+  1.3.4); identical before/after this round's edits, so an environment
+  restriction for remote verification, not a code defect.
+
+### Prior rounds (intact on this branch)
+
+- Notification filtering: inbox queries (`get_my_notifications`/`_count`)
+  compute the user's disabled types from `user_notification_preferences`
+  and pass them as `exclude_types` to `list_for_user`, applied by the
+  query before limit/offset; preferences stored under canonical
+  `as_str()` names; profile UI toggles for all 41 canonical variants,
+  guarded by `scripts/check-notification-toggle-coverage.sh` in
+  pre-commit and CI.
+- Judgment ledger: `JudgmentLedgerRepository::list_for_user` (sqlite +
+  postgres) aggregates spec approvals/rejections, gate overrides, trust
+  changes, and meta-spec publishes from real tables with
+  `?workspace_id=` filtering, per-source type filters, reverse-
+  chronological sort, limit/offset after union+sort; write paths emit
+  `gate_override`, `trust_change`, and meta-spec publish attribution
+  audit events; zstd-compressed audit details decompressed on read.
 - Auth provider info: `GET /api/v1/users/me` returns read-only
   `oidc_issuer` and `last_login_at`.
+- HSI §12 spec amendment: judgment-source tables and `?type=` values
+  (`approval|rejection|gate|trust|meta-spec`) documented in the spec.
 
 ### Verifier scope
 
-Full `cargo test --all` and `cd web && npm test` (no Rust or web changes
-this round beyond the two call sites, formatting, and this task file);
-the focused suites covering this task's behavior are the
-`user_profile`/judgment-ledger adapter tests and the
-`workspace_ownership` tests whose helper signature this round repaired.
+Full `cargo test --all` (no Rust changes this round; large server build
+compilation belongs in the verifier per the 4 GiB budget) and
+`cd web && npm test`; `scripts/check-notification-toggle-coverage.sh`;
+the gawk-dependent JS lint hooks on a gawk-equipped runner.
