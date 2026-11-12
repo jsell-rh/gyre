@@ -930,6 +930,35 @@ async fn set_tenant_from_repo(state: &AppState, ctx: &mut AttributeContext, repo
     }
 }
 
+/// Complete the scope chain for a repo-addressed route: set
+/// `resource.workspace_id` from the addressed repo's own workspace (the
+/// path names none), then `resource.tenant_id` from that workspace.
+/// Absent when the repo does not exist — no scope is fabricated.
+async fn set_workspace_and_tenant_from_repo(
+    state: &AppState,
+    ctx: &mut AttributeContext,
+    repo_id: &str,
+) {
+    match state
+        .repos
+        .find_by_id(&gyre_common::Id::new(repo_id))
+        .await
+    {
+        Ok(Some(repo)) => {
+            if !ctx.has("resource.workspace_id") {
+                ctx.set("resource.workspace_id", repo.workspace_id.to_string());
+            }
+            set_tenant_from_workspace(state, ctx, &repo.workspace_id.to_string()).await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            repo_id = %repo_id,
+            err = %e,
+            "repo lookup for scope-chain resolution failed; attributes unset"
+        ),
+    }
+}
+
 /// Extract resource attributes sourced from entity lookup / entity fields
 /// (§Attributes: `resource.tenant_id`, `resource.owner`, `resource.team`,
 /// `resource.approval_status`, `resource.visibility`).
@@ -959,10 +988,19 @@ async fn extract_entity_attributes(
     // tenant. Runs for every resource type: repo/workspace-parented routes
     // name their parent directly; entity lookups below backfill via the
     // entity's own workspace.
+    //
+    // A repo-addressed route names no workspace in the path, so the repo's
+    // own workspace completes the chain (user-management.md §Repo Access:
+    // repo access is inherited from workspace membership, so
+    // membership-keyed attributes like `subject.workspace_role` must
+    // resolve against the repo's workspace for the builtin
+    // repo-access-override-management policy to govern the repo `admin`
+    // action). An unresolvable repo id leaves the attributes unset —
+    // conditions on them fail closed, never the reverse.
     let path_repo_id = attr_str(ctx, "resource.repo_id").map(|s| s.to_string());
     let path_workspace_id = attr_str(ctx, "resource.workspace_id").map(|s| s.to_string());
     if let Some(repo_id) = path_repo_id {
-        set_tenant_from_repo(state, ctx, &repo_id).await;
+        set_workspace_and_tenant_from_repo(state, ctx, &repo_id).await;
     } else if let Some(ws_id) = path_workspace_id {
         set_tenant_from_workspace(state, ctx, &ws_id).await;
     }
