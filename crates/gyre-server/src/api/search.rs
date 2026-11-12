@@ -12,6 +12,7 @@ use gyre_ports::search::{FacetCounts, SearchQuery};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -55,6 +56,7 @@ pub struct SearchResponse {
 
 pub async fn search_handler(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let q = params.q.unwrap_or_default();
@@ -66,12 +68,26 @@ pub async fn search_handler(
             facet_counts: FacetCounts::new(),
         }));
     }
+    // Caller-scope validation (task-146 review round 2, same rule as the
+    // analytics record handler): the workspace_id filter doubles as the
+    // search.query event's workspace attribution — persisting it
+    // unvalidated would let any authenticated caller attribute events to
+    // an arbitrary workspace and pollute that scope's filtered analytics.
+    // Mismatch or unknown id rejects the request.
+    let workspace_scope = match params.workspace_id.as_deref() {
+        Some(w) => {
+            let id = Id::new(w);
+            super::audit::validate_workspace_scope(&state, &id, &auth).await?;
+            Some(id)
+        }
+        None => None,
+    };
     let limit = params.limit.min(100);
     let started = std::time::Instant::now();
     let port_query = SearchQuery {
         query: q.clone(),
         entity_type: params.entity_type.clone(),
-        workspace_id: params.workspace_id.clone(),
+        workspace_id: workspace_scope.as_ref().map(|id| id.to_string()),
         limit,
     };
     let results = state
@@ -91,7 +107,21 @@ pub async fn search_handler(
     let duration_ms = started.elapsed().as_millis() as u64;
 
     // Auto-track search execution (analytics.md §Auto-Emitted Events).
+    // Identity is bound to the verified caller and the workspace scope was
+    // validated above (task-146 review round 2) — the event reflects who
+    // actually searched and a scope they may legitimately attribute to,
+    // never caller-forged values.
     {
+        let agent_id = if auth.agent_id.is_empty() {
+            None
+        } else {
+            Some(auth.agent_id.clone())
+        };
+        let user_id = auth
+            .impersonation
+            .as_ref()
+            .map(|imp| imp.impersonator_id.clone())
+            .or_else(|| auth.user_id.clone());
         let entity_types: Vec<String> = {
             let mut types: Vec<String> = results.iter().map(|r| r.entity_type.clone()).collect();
             types.sort();
@@ -101,7 +131,7 @@ pub async fn search_handler(
         let ev = gyre_domain::AnalyticsEvent::new(
             gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
             "search.query",
-            None,
+            agent_id,
             serde_json::json!({
                 "query_length": q.chars().count(),
                 "entity_types": entity_types,
@@ -113,12 +143,7 @@ pub async fn search_handler(
                 .unwrap_or_default()
                 .as_secs(),
         )
-        .with_scope(
-            None,
-            None,
-            params.workspace_id.as_deref().map(Id::new).as_ref(),
-            None,
-        );
+        .with_scope(user_id.as_ref(), None, workspace_scope.as_ref(), None);
         let _ = state.analytics.record(&ev).await;
     }
 
@@ -228,7 +253,7 @@ mod tests {
         // analytics.md §Auto-Emitted Events: search.query carries
         // query_length, entity_types, result_count, duration_ms.
         let state = test_state();
-        let app = crate::api::api_router().with_state(state.clone());
+        let app = crate::build_router(state.clone());
 
         // Index a searchable task through the public API so the search port
         // has a real document (create_task indexes for search).
@@ -242,6 +267,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&task_body).unwrap()))
                     .unwrap(),
@@ -255,6 +281,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/search?q=reconciliation")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -271,6 +298,9 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1, "one search.query event expected");
         let ev = &events[0];
+        // Identity is bound to the verified caller (global test token →
+        // the system principal), not a caller-forged value.
+        assert_eq!(ev.agent_id.as_deref(), Some("system"));
         assert_eq!(
             ev.properties["query_length"], 14,
             "\"reconciliation\" has 14 chars"
@@ -291,12 +321,13 @@ mod tests {
     async fn empty_query_emits_no_analytics_event() {
         // Blank queries short-circuit before search — no event is recorded.
         let state = test_state();
-        let app = crate::api::api_router().with_state(state.clone());
+        let app = crate::build_router(state.clone());
 
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/search?q=")
+                    .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -310,5 +341,103 @@ mod tests {
             .await
             .unwrap();
         assert!(events.is_empty(), "no event for empty query");
+    }
+
+    #[tokio::test]
+    async fn search_workspace_scope_validated_against_caller_tenant() {
+        // Task-146 review round 2 regression: the workspace_id Query param
+        // is the search.query event's workspace attribution — a forged
+        // cross-tenant attribution is rejected and never lands in the
+        // victim scope's filtered analytics.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own"),
+                gyre_common::Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let app = crate::build_router(state.clone());
+
+        // Own-tenant workspace filter: accepted and attributed.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=anything&workspace_id=ws-own")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].workspace_id.as_deref(), Some("ws-own"));
+
+        // Cross-tenant workspace: Forbidden — no forged attribution.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=anything&workspace_id=ws-victim")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Unknown workspace: NotFound, not a silent attribution.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=anything&workspace_id=ws-nope")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The rejected searches never polluted the victim scope's filtered
+        // results — the exact repro from the review finding.
+        let events = state
+            .analytics
+            .query_filtered(&gyre_ports::AnalyticsQueryFilter {
+                event_name: Some("search.query".into()),
+                workspace_id: Some("ws-victim".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            0,
+            "forged search event must not appear in the victim workspace's filtered results"
+        );
     }
 }

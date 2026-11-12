@@ -476,6 +476,16 @@ pub(crate) async fn launch_orchestrator_process(
                                 // stale detector spawns a replacement.
                                 let _ = a.transition_status(AgentStatus::Dead);
                                 let _ = state_mon.agents.update(&a).await;
+                                // Auto-track agent.failed (analytics.md
+                                // §Auto-Emitted Events: "Agent fails or is
+                                // killed") — the process death is the kill,
+                                // same event the endpoint death paths emit.
+                                crate::api::analytics::record_agent_failed(
+                                    &state_mon,
+                                    &a,
+                                    "orchestrator process died",
+                                )
+                                .await;
                             }
                         }
                         break;

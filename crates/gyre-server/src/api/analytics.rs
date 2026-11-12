@@ -87,6 +87,43 @@ pub(crate) async fn record_task_status_changed(
     let _ = state.analytics.record(&ev).await;
 }
 
+/// Record the spec-required `agent.failed` analytics event (analytics.md
+/// §Auto-Emitted Events: trigger "Agent fails or is killed", properties
+/// `agent_id`, `task_id`, `reason`).
+///
+/// Every production path that persists an agent death must call this:
+/// the API fail/stop endpoints and MCP tools, the ralph-loop iteration
+/// ceiling and terminal re-spawn failure, the worker scheduler's
+/// failed-launch teardown, the orchestrator process-death monitor, and
+/// the agent status endpoint (operator/orchestrator kill path).
+/// `reason` names the concrete cause; `duration_secs` is derived from the
+/// agent's spawn time (extra context, same shape as the endpoint paths).
+pub(crate) async fn record_agent_failed(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    reason: &str,
+) {
+    let now = now_secs();
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": reason,
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
+    let _ = state.analytics.record(&ev).await;
+}
+
 #[derive(Deserialize)]
 pub struct CountEventsParams {
     pub event_name: String,
