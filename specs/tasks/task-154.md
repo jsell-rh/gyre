@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170", "dbe51021272cc9d68fbde82476cdcde45cc4b04e"]
 ---
 
 ## Spec Excerpt
@@ -94,124 +94,75 @@ From `search.md` §Query Language:
 ## Shipped
 
 The §Query Language grammar (simple terms, quoted phrases, faceted
-filtering, `since:`/`until:` time bounds) is implemented as real production
-code across the domain parser, the port protocol, all three SearchPort
-adapters, the REST handler, and the MCP `gyre_search` tool.
+filtering, `since:`/`until:` time bounds) ships as real production code
+across the domain parser, the port protocol, all three SearchPort
+adapters, the REST handler, and the MCP `gyre_search` tool — and this
+round rebases that work onto main's task-203 access scoping so both
+features hold simultaneously: every query-language query is executed
+inside the caller's access scope, never beside it.
 
-### Parser — `crates/gyre-domain/src/search_query.rs` (new)
+### This round — rebase onto task-203 (merge commit `dbe510212`)
 
-- `parse_query(&str) -> ParsedQuery` extracts free-text terms (split on
-  non-alphanumeric boundaries, mirroring the FTS `unicode61` tokenizer),
-  `"quoted phrases"`, and `key:value` facets. Facet keys are whitelisted to
-  the spec's table (type/workspace/repo/status/priority/assigned/author/
-  label/approval/scope/since/until); malformed facets (`type:` with no value)
-  are dropped, unknown `key:value` tokens fall back to plain terms — the
-  parser is forgiving and never errors, and no unvetted key reaches a
-  storage backend's facet-filter path.
-- `ParsedQuery::facet_filters()` maps facets to typed filters (entity type /
-  workspace / repo columns vs. metadata keys); `ParsedQuery::time_bounds(now)`
-  resolves `since:`/`until:` — relative (`7d`/`24h`/`2w`) and absolute
-  (`YYYY-MM-DD`, leap-year-aware, since = start-of-day, until = end-of-day) —
-  to epoch-second bounds via a dependency-free `days_from_civil`.
-- 25 unit tests cover every pattern in the plan plus malformed input,
-  unterminated quotes, first-value-wins time facets, and leap days.
+Main's task-203 (access scoping) and this branch's task-154 (query
+language) both rewrote the same SearchPort surface, so the rebase
+conflicts were resolved by combining the semantics, not picking a side:
 
-### Port — `crates/gyre-ports/src/search.rs`
+- `SearchQuery` (crates/gyre-ports/src/search.rs) carries both the
+  query-language parse (`parsed`) and the caller's resolved scope
+  (`tenant_id`, `accessible_workspace_ids`, `accessible_repo_ids`).
+  `SearchQuery::parse` starts fail-closed — no tenant, empty accessible
+  sets — and the REST/MCP handlers attach the auth-derived scope via the
+  new `with_scope` builder. Scope is never taken from the query string;
+  the `entity_type`/`workspace_id` params/facets remain narrowing
+  filters that can only intersect the accessible set.
+- `facet_counts` keeps task-203's non-`Option` signature: a blank query
+  aggregates the caller's whole accessible set (the `/search/facets`
+  contract), while any text/facet/shortcut filter restricts the
+  aggregation to the same filtered match set `search()` uses (task-154's
+  semantics). The `Option<SearchQuery>` whole-index shape from the
+  pre-rebase branch was dropped — `None`-means-whole-index would leak
+  cross-tenant counts.
+- All three adapters compose scope AND query-language filters as WHERE
+  clauses of the index query itself, never post-filtered: the mem
+  adapter folds both into one `scope_visible` predicate; the SQLite
+  adapter pushes a new `build_scope` into the existing `WhereBuilder`
+  next to `build_filters`; the PG adapter does the same with
+  `PgWhereBuilder` (the boxed-query `scope_filter_sql` machinery was
+  removed in favor of the single builder, with `s.*`-aliased SQL kept so
+  PG accepts the scope clauses). Entity indexing keeps task-154's
+  `updated_at` timestamp inside task-203's tenant-deriving `index_doc`
+  wrapper.
 
-- `SearchQuery` carries `parsed: ParsedQuery` alongside the raw `query`
-  text (built via `SearchQuery::parse`, so the two stay consistent);
-  `entity_type`/`workspace_id` remain as documented fallback shortcuts.
-- `SearchDocument` gained `updated_at: Option<i64>` — the document timestamp
-  the time facets filter on; `None` stamps index time in the adapter.
+### Test evidence (focused probes, logs in /tmp/stage/review-evidence)
 
-### Adapters — all three, filters as real index-query WHERE clauses
+- `cargo test -p gyre-adapters --lib search` — 33 passed: both the
+  task-154 query-language suite (phrases vs scattered terms, facet
+  AND-across/OR-within, `since:`/`until:` relative + absolute,
+  facet-only browse, malformed queries, facet_counts honoring query
+  filters) and the task-203 access-scoping suite (tenant boundary,
+  accessible workspace/repo sets, empty-set fail-closed,
+  client-workspace_id-cannot-widen, facet-count and suggest leak
+  guards).
+- `cargo test -p gyre-adapters --lib postgres::search` — 6 passed: the
+  four `s.tsv @@ q` SQL-shape regression tests plus the two adapted
+  scope-shape tests (`scope_clauses_are_s_prefixed_index_query_filters`,
+  `empty_accessible_set_compiles_to_no_rows`).
+- `cargo test -p gyre-adapters --lib` (full suite) — 479 passed, 0
+  failed; `cargo test -p gyre-domain --lib` — 499 passed (parser tests
+  included).
+- `cargo check -p gyre-server --test search_wiring` — compiles clean.
 
-- **SQLite FTS5**: MATCH expression built from quoted terms + phrases;
-  facets filter `entity_type`/`workspace_id`/`repo_id` columns and metadata
-  JSON keys via bound-parameter `json_extract` paths; `since:`/`until:`
-  filter on the timestamp persisted under the reserved metadata key
-  (`gyre_ports::search::UPDATED_AT_KEY`) because the specced FTS5 schema has
-  no timestamp column and SQLite forbids ALTER on virtual tables (verified:
-  `virtual tables may not be altered`). Facet-only queries browse without a
-  MATCH clause (constant rank, body-prefix snippet). Filters apply BEFORE
-  the result limit — not post-filtered.
-- **PostgreSQL**: terms + quoted phrases flow through
-  `websearch_to_tsquery` (implicit AND, real phrase semantics) and are
-  applied as the `s.tsv @@ q` row filter — restored by the review repair
-  (round 2): a `build_filters()` rewrite had reserved the tsquery for
-  ranking but dropped the match predicate, so every text query returned all
-  facet-passing rows. Four SQL-shape regression tests in
-  `postgres/search.rs` pin the predicate (and the facet-only / bind-order
-  shapes); a mutation check confirmed they fail when the predicate is
-  removed. Facet filters use `IN` lists on columns / `metadata->>key`;
-  `updated_at` is a real BIGINT column (`ADD COLUMN IF NOT EXISTS` covers
-  pre-existing deployments).
-- **Mem**: same contract in code — phrase = exact case-insensitive
-  substring, facet AND/OR composition, time bounds on `updated_at`.
-- `facet_counts(Some(q))` in all three adapters aggregates the same
-  text + facet filtered match set (limit ignored), and the reserved
-  timestamp key never leaks into result facets or facet-count aggregations.
+### Verifier must run (blocked here by the 4 GiB server-build guard)
 
-### Server — REST + MCP
+- `cargo test -p gyre-server --test search_wiring` — the HTTP
+  integration leg: phrase adjacency (`q=%22count quokkas%22`),
+  facet narrowing, facet-vs-param precedence, `since:` bounds, and
+  (from task-203) scope-filtered search/suggest/facets over the real
+  middleware stack.
 
-- `GET /api/v1/search?q=` (api/search.rs) parses `q` first; a `type:` /
-  `workspace:` facet in the query string takes precedence over the
-  `entity_type` / `workspace_id` params (they remain as fallback shortcuts).
-- MCP `gyre_search` (mcp.rs) parses `q` with the same grammar and the same
-  precedence; the tool description and input schema document the language.
-- The three index-on-create sites (tasks/agents/MRs) pass the entity's
-  real update time as `updated_at`.
+### Standing caveats (unchanged by this round)
 
-### Rebase repair (this round)
-
-Durable finding `653df32a478a43038b6ef5888b2f0bcc`: rebasing the candidate
-(236f8d71) onto the new base (7cf2f81c) conflicted in
-`.github/workflows/ci.yml` and `.github/workflows/e2e.yml` — both sides
-had independently fixed the e2e "Install mold linker" apt/DNS failure
-(durable finding `a9d572fb2408486490b71d2ac8bf0bcd`, run 43036531271).
-
-Resolution: the base's `scripts/ci-install-mold.sh` wins. It pins mold
-2.40.4 (sha256-verified) downloaded from GitHub releases with curl
-retries (`--retry 5 --retry-all-errors`, connect/max-time bounds) into
-`RUNNER_TEMP` — it avoids the apt mirror entirely, so the class of
-transient DNS failure that both fixes targeted cannot recur at that
-step, and the linker version is reproducible rather than whatever the
-distro mirror ships. The candidate's earlier composite action
-(`.github/actions/setup-linker`: apt retries + lld fallback via
-`RUSTFLAGS`) was removed as superseded; the four workflow install
-steps (e2e plus clippy/test/build-release in ci.yml) all invoke the
-script. The task's Rust implementation was untouched by the merge
-(verified: no files under crates/ changed between the candidate head
-and the merge result); a historical rustfmt repair of this task's
-changed lines is preserved in commit fc0c24e8b.
-
-### Test evidence
-
-- Re-run at this round's merge head (evidence:
-  `review-evidence/rebase-round/`): `cargo test -p gyre-domain
-  search_query` 25 passed; `cargo test -p gyre-adapters search`
-  30 passed (sqlite + mem + postgres SQL-shape);
-  `cargo check -p gyre-server` clean. Server-side suites remain
-  deferred to the independent verifier per the 4 GiB budget.
-
-- `gyre-domain` `search_query` — 25 parser/time-bound tests.
-- `gyre-adapters` SQLite — `quoted_phrases_match_exactly_not_individual_terms`,
-  `facet_filters_and_or_within_compose`,
-  `time_facets_since_and_until_relative_and_absolute`,
-  `facet_only_query_browses_without_text`,
-  `facet_counts_honor_query_language_filters`, plus all pre-existing search
-  tests unchanged in intent (constructions migrated to `SearchQuery::parse`).
-- `gyre-adapters` mem — `query_language_phrases_and_facets`,
-  `query_language_time_bounds`, `query_language_facet_counts_and_malformed_queries`.
-- `gyre-server` — `tests/search_wiring.rs` drives phrases, facet narrowing,
-  facet-only browse, facet-over-param precedence, and since/until bounds
-  through the real middleware router against the SQLite FTS5 backend;
-  `mcp.rs` `mcp_search_query_language` exercises the same grammar over MCP
-  (mem-backed state). Server test compilation is deferred to the
-  independent verifier per the 4 GiB budget; `cargo check -p gyre-server`
-  is clean.
-- Known limit: the PostgreSQL leg compiles and mirrors the SQLite contract
-  but has no runtime test — the repo has no PG test harness. The restored
-  `s.tsv @@ q` predicate is pinned by SQL-shape regression tests
-  (mutation-verified); execution against a live PG instance is recorded
-  for remote verification.
+- The PG runtime leg has no in-repo test harness; SQL-shape tests plus
+  remote verification against live PG remain the evidence path.
+- `specs/coverage/system/search.md` rows 3–8 and 16 describe tasks
+  201/202/203/155 and were not touched by this task's scope.
