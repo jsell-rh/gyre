@@ -2,7 +2,7 @@
 title: "Repo lifecycle — archive push rejection, admin repos tab, gate config UI"
 spec_ref: "repo-lifecycle.md §API Summary"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
