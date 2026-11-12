@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §CLI"
   - "dependency-graph.md §UI"
-commits: ["f06e04b7db064c2e302d0dd8e7461433bf723d1e", "73928811cafb9f46adc65689ac75291ae815022b"]
+commits: ["73928811cafb9f46adc65689ac75291ae815022b", "f06e04b7db064c2e302d0dd8e7461433bf723d1e", "cfdd16ce35648a1d19c48fb03d38ec68d51bd1f1"]
 ---
 
 ## Spec Excerpt
@@ -62,100 +62,80 @@ Read `specs/system/dependency-graph.md` §CLI and §UI. For CLI: follow the exis
 
 ## Shipped
 
-Dependency-graph §CLI and §UI, on top of the `gyre deps` command tree and the
-`DependencyGraph.svelte` DAG that already existed on this task's base. The base
-already satisfied most of §CLI (Show/Impact/Stale/Breaking/Add/Acknowledge/
-Graph) and rendered the workspace DAG in WorkspaceHome + ExplorerView; this
-branch closes the remaining gaps rather than re-implementing what worked.
-Acceptance-criteria boxes above are left exactly as assigned — satisfaction is
-reported here.
-
-### Repair round 2 (verification finding 92fd8ef9)
-
-The prior candidate failed `checks.sh` on rustfmt only: the four
-`DepsCommands::Show` match arms in the gyre-cli test module and the
-`gyre_domain` import wrap in the task-164 server integration test. Fixed by
-`cargo fmt` under the workspace edition (2021); formatting-only, no semantic
-change (commit `f06e04b7`). Note for future rounds: bare `rustfmt --edition
-2024` produces different output than this repo's `cargo fmt` and would itself
-fail the changed-lines check. Everything else in the failing run had passed
-(clippy changed-lines, all static gates, web build).
+Dependency-graph §CLI and §UI, building on the `gyre deps` command tree and
+the `DependencyGraph.svelte` DAG that already existed on this task's base;
+this branch closes the remaining gaps rather than re-implementing what
+worked. Acceptance-criteria boxes above are left exactly as assigned —
+satisfaction is reported here.
 
 ### Behavior
 
-- **`gyre deps show [repo]` (positional repo)**: `DepsCommands::Show` now takes
-  an optional positional repository name; without it the repo is inferred from
-  the git remote as before. The show table now reports the columns the plan
-  specifies — target/source repo **names** (resolved via
-  `list_workspace_repos`, falling back to IDs), type, version pinned, version
-  current, drift, status, and detection method — for both dependencies and
-  dependents.
+- **`gyre deps show [repo]` (positional repo)**: `DepsCommands::Show` takes an
+  optional positional repository name; without it the repo is inferred from
+  the git remote as before. The show table reports target/source repo names
+  (resolved via `list_workspace_repos`, falling back to IDs), type, version
+  pinned, version current, drift, status, and detection method, for both
+  dependencies and dependents. `deps impact`, `deps stale`, `deps breaking`,
+  `deps add`, `deps acknowledge`, and `deps graph [--format dot]` were already
+  present on the base and are unchanged.
 - **Graph edge enrichment (server)**: `GET /api/v1/dependencies/graph` and
-  `GET /api/v1/workspaces/:id/dependency-graph` now return each edge with
+  `GET /api/v1/workspaces/:id/dependency-graph` return each edge with
   `source_artifact`, `target_artifact`, `version_pinned`,
   `target_version_current`, `version_drift`, and `breaking_changes[]`
   (id, commit_sha, description, detected_at, acknowledged, acknowledged_by,
   acknowledged_at). Both handlers share one `build_graph_response` builder.
   Breaking changes are joined through the real `BreakingChangeRepository`
-  via `list_by_source_repo` on each edge's **target** repo — the repo that
-  introduced the change (`BreakingChange.source_repo_id` is the pushed repo,
-  i.e. the dependency target, per `process_breaking_changes`) — and matched to
-  edges via `dependency_edge_id`. A wrong-side join (edge source) yields empty
-  lists; the new integration test pins the correct side.
+  via `list_by_source_repo` on each edge's target repo — the repo that
+  introduced the change — and matched to edges via `dependency_edge_id`.
+  A wrong-side join yields empty lists; the task-164 server integration test
+  pins the correct side.
 - **Orphaned status color-coding (§UI)**: orphaned edges render gray dashed
-  (`#9ca3af`) with an `orphaned` legend entry; nodes whose edges are all
-  orphaned get gray health coloring. Stale-yellow / breaking-red / type-based
-  active coloring was already present and is unchanged.
-- **DependencyDetail panel (§UI)**: clicking a dependency edge (mouse or Enter;
-  edges are focusable `role=button`) opens a `DependencyDetail.svelte` panel
-  showing source→target names, type, status, source/target artifacts, version
-  pinned/current, drift, and the edge's breaking changes with acknowledgment
-  status — plus an **Acknowledge** button that calls the real
-  `POST /api/v1/dependencies/breaking/:id/acknowledge` and then refreshes the
-  parent's graph data (`onRefresh` wired in WorkspaceHome and ExplorerView),
-  since the server reverts the edge to Active once all its breaking changes
-  are acknowledged. Selection is id-derived, so a refresh rebinds the panel to
-  the fresh edge state and a removed edge deselects.
-- **web/dist**: no committed changes; generated assets are restored/rebuilt by
-  the executor.
+  with an `orphaned` legend entry; nodes whose edges are all orphaned get
+  gray health coloring. Stale-yellow / breaking-red / type-based active
+  coloring was already present and is unchanged.
+- **DependencyDetail panel (§UI)**: clicking a dependency edge (mouse or
+  Enter; edges are focusable `role=button`) opens a `DependencyDetail.svelte`
+  panel showing source→target names, type, status, source/target artifacts,
+  version pinned/current, drift, and the edge's breaking changes with
+  acknowledgment status — plus an Acknowledge button calling the real
+  `POST /api/v1/dependencies/breaking/:id/acknowledge`, then refreshing the
+  parent's graph data (`onRefresh` wired in WorkspaceHome and ExplorerView).
+  Selection is id-derived, so a refresh rebinds the panel to fresh edge state
+  and a removed edge deselects.
+
+### Repair round 3 (verification finding 98521e24)
+
+`cargo test --all` on the prior candidate failed
+`api::agents::tests::heartbeat_audit_reports_attested_pid_liveness`
+(assertion left `Number(62362)`, right `62477` at agents.rs:886). Root
+cause: `AuditRepository::query` returns newest-first in all three adapters
+(mem, SQLite `timestamp.desc()`, Postgres `timestamp.desc()`), but the test's
+second lookup used `.iter().rev().find(...)`, which selects the **oldest**
+event whenever the two heartbeat events get different second-granularity
+timestamps; equal timestamps tie under the mem adapter's stable sort and
+accidentally preserved the intended selection, masking the bug until a run
+straddled a second boundary (62362 was the first event's live test-process
+pid; 62477 the expected dead child). Fix (commit `cfdd16ce3`): the test now
+filters the agent's heartbeat events, asserts exactly two were recorded,
+and identifies the second by content (dead pid) — order-independent, with
+the first heartbeat still pinned to (live_pid, true) by the earlier block,
+so stale-attestation reads and hardcoded liveness still fail. The
+newest-first contract is now documented on the `AuditRepository::query`
+trait method. No production behavior changed.
 
 ### Test evidence
 
-Focused suites (full `cargo test --all` + whole-file `npm test` deferred to the
-independent verifier per the 4 GiB budget rule; raw logs and exit codes under
-`/tmp/stage/review-evidence/task-164/`):
-
-- Round 1 (`73928811c`):
-  - `cargo check -p gyre-server` and `cargo check -p gyre-server --test
-    task164_dependency_graph_detail` — exit 0.
-  - `cargo test -p gyre-cli` — 150 passed / 0 failed, including
-    `cli_deps_show_named_repo_parses`.
-  - `vitest run src/__tests__/DependencyGraph.test.js` — 30 passed / 0 failed
-    (8 new cases: orphaned edge/node styling + legend, edge click/Enter → detail
-    panel, version + drift + artifact rendering, breaking-change ack status,
-    acknowledge → API + onRefresh, close).
-  - `vitest run` on the six suites covering the touched parent components —
-    89 passed / 0 failed.
-- Round 2 (`f06e04b7`, formatting-only repair):
-  - `cargo fmt -p gyre-cli -- --check` and `cargo fmt -p gyre-server
-    -- --check` — exit 0 (the failing gate).
-  - `cargo check -p gyre-cli --tests` — exit 0.
-  - `cargo test -p gyre-cli deps` — 11 passed / 0 failed. No web or server
-    source changed this round.
-
-### Verifier must execute
-
-- `cargo test -p gyre-server --test task164_dependency_graph_detail` — the
-  graph-enrichment integration test (SQLite-backed `build_state`; fails on a
-  wrong-side breaking-change join). Not run in this sandbox per the
-  large-server-build rule; type-checked only.
-- `cargo test -p gyre-server --test task163_dependency_persistence` and
-  `--test dependency_persistence` — the graph handler refactor touched
-  `api/dependencies.rs`; these must stay green.
-- Full `cargo test --all`, `cd web && npm test`, and remaining static gates.
-
-### Remaining work
-
-None for §CLI/§UI on this task. Adjacent gaps already tracked elsewhere:
-coverage rows 4 (`task-199`, dependency persistence wiring) and 8 (coarse
-openapi/mcp detection) are not part of this assignment.
+- `cargo test -p gyre-cli` — 150 unit + 1 integration test pass, including
+  the 11 `cli_deps_*` parse/render tests (show bare/named/workspace/tenant,
+  impact, stale, breaking, add, acknowledge, graph, graph --format dot).
+- `cd web && npx vitest run src/__tests__/DependencyGraph.test.js` — 30
+  tests pass (DAG render, edge status colors incl. orphaned gray, detail
+  panel contents, acknowledge flow, refresh rebinding).
+- `cargo check -p gyre-server --all-targets` — clean (type-checks the
+  server integration test `task164_dependency_graph_detail.rs` and the
+  repaired heartbeat test).
+- Verifier must run (blocked in this sandbox by the 4 GiB build wrapper,
+  which routes gyre-server test compilation to the independent verifier):
+  `cargo test -p gyre-server --lib api::agents::tests::heartbeat` and
+  `cargo test -p gyre-server --test task164_dependency_graph_detail`, then
+  the full `cargo test --all` gate.
