@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
+commits: ["6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "8405c8e4727a1f4a934ef24c54df39b1a5d0cf53"]
 ---
 
 ## Spec Excerpt
@@ -83,9 +83,11 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 ## Shipped
 
 The Architectural Timeline (system-explorer.md §6) runs on a real
-point-in-time graph API, and the two defects from review round
-1dd7441246b74416b1bc06d19d55520e are repaired. Commits:
-6b9fb4e2b (original implementation) and cf8069ea8 (review repairs).
+point-in-time graph API. Both defects from review round
+1dd7441246b74416b1bc06d19d55520e and the rustfmt finding from review
+round ee39d9c979e1495d981921b0fc97cfe6 are repaired. Commits:
+6b9fb4e2b (original implementation), cf8069ea8 (review round-1 repairs),
+8405c8e47 (review round-2 repair).
 
 ### Point-in-time graph API (6b9fb4e2b)
 
@@ -111,7 +113,7 @@ point-in-time graph API, and the two defects from review round
   ArchitecturalDelta records because removed nodes are absent from the
   current graph), modified highlights (yellow).
 
-### Review repairs (cf8069ea8)
+### Review repairs, round 1 (cf8069ea8)
 
 - **Fetcher race fixed**: a fetch completion used to settle waiters matched
   against `latestAt`, so scrubbing again while a fetch was in flight
@@ -133,19 +135,38 @@ point-in-time graph API, and the two defects from review round
   (task_count/duration_secs/specs), with a true fallback for pre-label
   waves. Tests pin the exact production payload shape (frontend fixture +
   server payload assertions incl. wave-2-scoped specs).
-- cargo-fmt drift in `graph.rs` from the original candidate commit fixed
-  (would fail the CI rustfmt job).
+
+### Review repair, round 2 (8405c8e47)
+
+- **rustfmt drift in the SQLite adapter fixed for real**: round 1
+  formatted `crates/gyre-server/src/api/graph.rs` but left the identical
+  drift in the two point-in-time tests this task adds in
+  `crates/gyre-adapters/src/sqlite/graph.rs` (six single-line assert!
+  macros rustfmt wants split). `cargo fmt -p gyre-adapters` applied;
+  verified: `cargo fmt --check -p gyre-adapters` and `-p gyre-server` both
+  exit 0, and `python3 scripts/check-rustfmt-diff.py
+  3afece9d73e0d76baf53c9983dede637f15449e8` (task base) reports
+  "changed lines clean". Evidence:
+  /tmp/stage/review-evidence/fmt-diff-fix.txt, fmt-crate-checks.txt.
+  The formatting change is behavior-preserving;
+  `cargo test -p gyre-adapters sqlite::graph::tests::list_` still passes
+  (3/3, incl. both point-in-time tests) — evidence:
+  /tmp/stage/review-evidence/adapters-point-in-time-tests.txt.
 
 ### Test evidence
 
-- Frontend (focused, run here): `vitest run timeline-utils.test.js
-  TimelineScrubber.test.js ExplorerViewNavigableArchitecture.test.js
+- Frontend (focused, run in the round-1 repair): `vitest run
+  timeline-utils.test.js TimelineScrubber.test.js
+  ExplorerViewNavigableArchitecture.test.js
   ExplorerViewLivenessWiring.test.js canvas-state.test.js` — 97/97 pass;
-  both repaired defects have mutation-verified regression tests (each
+  both round-1 defects have mutation-verified regression tests (each
   fails on the pre-fix code).
-- Server (type-checked here via `cargo check -p gyre-server --tests`, fmt
-  and diff-scoped clippy clean): the verifier must run
+- Server (type-checked via `cargo check -p gyre-server --tests`, fmt and
+  diff-scoped clippy clean at the time): the verifier must run
   `cargo test -p gyre-server --lib reconciliation` — covers the label
   round-trips, provenance-label assertions on created tasks, the payload
-  specs assertions in `reconciliation_completed_fires_when_all_tasks_terminal`,
-  and wave scoping in `second_wave_emits_its_own_completion`.
+  specs assertions in
+  `reconciliation_completed_fires_when_all_tasks_terminal`, and wave
+  scoping in `second_wave_emits_its_own_completion`.
+- Adapter (run in this round, this sandbox): `cargo test -p gyre-adapters
+  sqlite::graph::tests::list_` — 3/3 pass after the fmt repair.
