@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["19883086799ffc176645bed2f3831144f2701d05", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: ["35f090dfac66db4afa8c4e2df562ad12667a521a", "19883086799ffc176645bed2f3831144f2701d05", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
 ---
 
 ## Spec Excerpt
@@ -127,11 +127,11 @@ Read `specs/system/abac-policy-engine.md` §Core Concepts through §Policy Examp
 
 ABAC policy engine core per `abac-policy-engine.md` §Core Concepts–§Policy
 Examples; coverage rows 2–7 of `specs/coverage/system/abac-policy-engine.md`
-are `implemented` with per-row evidence notes. This round repairs the latest
-review finding on the retained implementation (round 5: no-target spawn
-attestation).
+are `implemented` with per-row evidence notes. This round repairs the rebase
+onto base e402e1ed (task-121: workspace membership, ownership transfer, repo
+access) without regressing either side.
 
-### Behavior
+### Behavior (retained implementation)
 
 - **Domain types** (`gyre-domain/src/policy.rs`): `Policy` carries every spec
   field (`id`, `name`, `description`, `scope`, `scope_id: Option<Id>`,
@@ -145,44 +145,55 @@ attestation).
   `abac_middleware.rs` extraction): typed attribute bag covering all four
   spec categories. Subject facts come from the auth context and the
   membership/team stores and are never claim-definable (JWT-claim merging is
-  allowlisted to the four agent-claim names — persona, stack_hash,
-  attestation_level, repo_scope — and gated on `subject.type == agent`).
-  Resource identity from the request path, entity-lookup attributes from
-  real store lookups; env attributes from real systems (budget, forge pause
-  state, socket peer per CWE-348, clock).
+  allowlisted to the four agent-claim names and gated on
+  `subject.type == agent`). Resource identity from the request path,
+  entity-lookup attributes from real store lookups; env attributes from
+  real systems (budget, forge pause state, socket peer per CWE-348, clock).
 - **Dynamic references**: `$resource.*`/`$subject.*` resolve at evaluation
   time preserving the referenced attribute's type; unresolvable references
   fail the condition (fail closed).
 - **PolicyRepository port** (CRUD + list_by_scope + decision audit) with
   SQLite adapter (`policies` table; conditions/actions/resource_types as
   JSON) and mem adapter; built-in delete guard enforced in code in both.
-- **This round (review repair, commit 198830867)**: `POST
-  /api/v1/agents/spawn` with no compute target resolved — the default
-  local-subprocess path — minted a worker JWT with no `attestation_level`
-  claim (the `Option::map` on the resolved target dropped the no-target
-  case to `None`), contradicting the adjacent comment and
-  identity-security.md §Task-Scoped JWT Claims (every spawn-minted JWT
-  carries attestation_level; no target = raw subprocess = level 1). The
-  missing claim left `subject.attestation_level` unset at ABAC evaluation,
-  so Deny policies keyed on the least-attested class (e.g. the spec's own
-  gate-approved-persona deny on attestation_level < 3) silently missed
-  raw-subprocess agents. The no-target case now mints `Some(1)` via
-  `map_or`.
+
+### This round (rebase repair, commits ef27e8b1f + 35f090df)
+
+- Resolved the three `abac_middleware.rs` conflicts: kept task-128's full
+  attribute-extraction pipeline over task-121's simpler workspace-role
+  block (including dropping the base's generic `merge_jwt_claims`, which
+  review round 2 removed as a claim-spoofing channel), and merged
+  task-121's three repo access-override route mappings into the registry
+  (PUT/DELETE `access-overrides/:user_id` evaluate as the repo `admin`
+  action). Removed the base's now-dead `extract_workspace_id` /
+  `extract_repo_id` helpers (superseded by `path_params`).
+- **Behavior repair**: a straight keep-ours resolution would have silently
+  regressed task-121 — task-128's pipeline never backfilled
+  `resource.workspace_id` on repo-addressed routes, so
+  `builtin-repo-access-override-management` (repo `admin` gated on
+  `subject.workspace_role`) could never match and workspace Admins would
+  get 403 on override management. `extract_entity_attributes` now
+  completes the scope chain from the addressed repo's own workspace
+  (`set_workspace_and_tenant_from_repo`), fail closed on unresolvable repo
+  ids, keeping task-128's extraction discipline intact.
 
 ### Test evidence
 
-- New regression test `spawn_without_compute_target_mints_attestation_level_one`
-  (`crates/gyre-server/src/api/spawn.rs`): full `POST /api/v1/agents/spawn`
-  through the router on the mem state with no compute target configured;
-  decodes the returned worker JWT with the signing key's own `validate()`
-  (real EdDSA verification) and asserts `attestation_level == Some(1)`.
-- `cargo check -p gyre-server --tests` passes (exit 0, 7m32s, wrapper-run,
-  `SKIP_WEB_BUILD=1`); no new warnings from the changed files.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
+  exit 0, no new warnings (wrapper-run).
+- `cargo test -p gyre-domain` (8 passed) and `cargo test -p gyre-adapters`
+  (466 passed, 6 ignored) — includes the merged task-121 repo-access
+  adapter and the task-128 policy adapter.
+- Mechanical gates re-run locally, all OK: `check-arch.sh`,
+  `check-migration-versions.sh`, `check-abac-route-registry.sh`,
+  `check-abac-exempt-handlers.sh`, `check-mem-port-contracts.sh`,
+  `check-inert-enforcement.sh`.
 - Server test execution is deferred to the independent verifier (build
-  wrapper blocks server test compilation in this stage). Required probes:
-  - `cargo test -p gyre-server spawn_without_compute_target_mints_attestation_level_one`
-  - `cargo test -p gyre-server agent_jwt` (claim-merge and live-evaluation
-    suite around the minted claims, including
-    `agent_jwt_persona_and_attestation_level_reach_live_evaluation`)
-- Evidence saved under `/tmp/stage/review-evidence/` (check log + probe
-  commands).
+  wrapper blocks server test compilation in this stage — recorded in
+  `/tmp/stage/review-evidence/task-128-rebase-repair.md`). Required probes:
+  - `cargo test -p gyre-server --lib abac_middleware`
+  - `cargo test -p gyre-server --lib policy_engine`
+  - `cargo test -p gyre-server --lib api::repo_access` (fails if the
+    repo→workspace scope-chain backfill regresses:
+    `workspace_admin_manages_overrides_through_production_abac`)
+  - `cargo test -p gyre-server --lib git_http`
+  - `cargo test -p gyre-server --lib workspace_ownership`
