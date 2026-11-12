@@ -2,14 +2,14 @@
 title: "LLM Endpoint Contract — SSE streaming, prompt templates, rate limiting"
 spec_ref: "ui-layout.md §2 LLM Endpoint Contract"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "ui-layout.md §LLM Endpoint Contract"
   - "ui-layout.md §Role"
   - "ui-layout.md §Available Data"
   - "ui-layout.md §Output Format"
   - "ui-layout.md §Constraints"
-commits: ["d712b608880a4c617d30e886b6832e6dd47be7a5", "5e9e678024a2b3bf88cf8ea514ef09a27491bd3c", "3025f256e61a9198cd7f060c2b4d5907585cdd8f", "c5eb3911b4d66871de7b3541667565a63272fa6d", "f7219be28b55cfce7a28a913d6a9538f0fdff116", "7fcbf2723c67e4ee7f289965bfa4a1e55f0fc9be", "ed457c45c87bc569a6aabcfd2e1b11d26b33abfa", "8c5468225eda8d28476bb8ff824a23c2c52de23b", "8da4333aaf3c17fd0d8e5068815efc647a16559f", "932ef894d0dfbfd7952d2a2c9babbe9857e13ebd", "93d0f4b995f15a0c00878228dfc080ba54b425fa", "daf00443522544ff1c56bed4ae092fadcd6a8f0b", "046663dbd9f4dc1f45fbbfb792cecdbf2b54f026", "8259c9413c9862d0a49bc6e920a63fadea24d3ba", "dd322e125c3fff0a964387467ee90d8059ea1ce3", "c2d61905b9eebd2bedee4664cf34f3b261d1f0c3", "cd206b555cbf5053060b92c862b3824241e2d011", "4489f0f44e7375d8ce2c0f5fe7e84f6a24636796", "33ead7c1309bfef123974a7135c189931c1d3b31", "f7bf82e9dd77b992d2138e95592b2cd6efc58bf1"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -75,30 +75,3 @@ Prompt template format uses `{{variable}}` substitution. Templates are committed
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check existing endpoint registration in `crates/gyre-server/src/api/mod.rs`. The `explorer-views/generate` endpoint already has a route registered — verify at `mod.rs`. Use the existing budget and ABAC infrastructure. For SSE, use axum's `Sse` response type. The rate limiter should be a simple `HashMap<(UserId, WorkspaceId), VecDeque<Instant>>` behind a `Mutex`, not a complex middleware.
-
-## Shipped
-
-All eight acceptance criteria are implemented and previously independently approved (see commit history): SSE helper emitting `partial`/`complete`/`error` events, git-tree prompt templates with `{{...}}` substitution, per-(user, workspace) sliding-window rate limiter (10 req/min, 429 + `Retry-After`, 60s eviction), `llm_query` budget cost entries with prompt-template git-SHA audit, three registered SSE endpoints with ABAC mappings, and `prompts/save` direct-to-default-branch commits.
-
-### This round: merge semantic-conflict repair (d712b608)
-
-The merge of base 3afece9d into this branch brought main's task-176/task-209 `assist_meta_spec` handler (workspace-scoped meta-specs/assist) into `specs_assist.rs`, whose shared LLM-assist infrastructure had evolved in later task-171 rounds — the merged file did not compile (3 errors) and regressed the SSE error contract on the new handler. Repaired in `crates/gyre-server/src/api/specs_assist.rs`:
-
-- `assist_sse_response` returns the concrete iterator-backed `Sse` type matching `sse_error_stream`, so all return paths of both assist handlers unify under one `impl Trait` slot (E0308).
-- `assist_meta_spec` consumes the LLM stream with the error-surfacing while-let loop — mid-stream chunk failures and `stream_complete` connection failures emit `event: error` SSE streams instead of a truncated `complete` or an HTTP 500 (E0599 + ui-layout.md §2 contract).
-- Template resolution via `llm_helpers::resolve_prompt_template` (DB override → workspace git tree `specs/prompts/meta-specs-assist.md` → hardcoded fallback) with `substitute_template` covering all four declared variables; `prompt_template_sha` recorded on the `llm_query` budget entry (E0063).
-- Rate-limit key switched to `rate_limit_principal` (user_id with agent fallback) — per-user semantics matching the repo-scoped assist.
-
-The prior verification round's ABAC duplicate finding (22 vs 17) was against the pre-merge candidate still carrying the whole-file-grep script; the merged HEAD's production-region scan (baseline 2) passes unchanged — no verifier was weakened this round.
-
-### Evidence (this round)
-
-- `cargo check -p gyre-server` (SKIP_WEB_BUILD=1) — exit 0, zero warnings.
-- `cargo fmt --check` — exit 0.
-- All 20 mechanical gate scripts exit 0 (arch, ABAC registry + exempt handlers, MCP write tools, migrations ×2, dead message kinds, byte-slice, relative paths, fail-open refs, scope/fabrication/lossy/inert/forged/forwarded/in-memory/unbounded checks, mem port contracts, template substitution).
-- Logs under `/tmp/stage/review-evidence/task-171-merge-repair/`.
-
-### Deferred to the independent verifier
-
-- `cargo test -p gyre-server specs_assist` (covers both assist handlers' SSE protocol, rate limiting, template resolution, cross-workspace scope rejection), `cargo test -p gyre-server explorer_views`, `cargo test -p gyre-server llm_helpers llm_rate_limit` — test compilation exceeds this sandbox's 4 GiB build budget.
-- Full workspace clippy/fmt/test suites and web build (verification-owned).
