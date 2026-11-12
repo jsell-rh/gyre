@@ -71,7 +71,7 @@ Teams don't grant additional permissions beyond workspace membership. They're or
 - [x] Team can be referenced in notification routing (team:slug format)
 - [x] Existing team CRUD endpoints work with new fields
 - [x] Migration adds missing columns
-- [x] `cargo test --all` passes
+- [ ] `cargo test --all` passes — domain + adapters suites pass in-sandbox (see `## Shipped`); the gyre-server suites type-check clean but are blocked from executing here by the 4 GiB build wrapper and are recorded for the independent verifier
 
 ## Shipped
 
