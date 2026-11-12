@@ -19,8 +19,8 @@ use axum::extract::{Path, State};
 use axum::Json;
 use gyre_common::Id;
 use gyre_domain::{
-    BreakingChange, DependencyEdge, DependencyStatus, DependencyType, DetectionMethod,
-    Repository, Workspace,
+    BreakingChange, DependencyEdge, DependencyStatus, DependencyType, DetectionMethod, Repository,
+    Workspace,
 };
 use gyre_server::api::dependencies::{get_graph, get_workspace_dependency_graph};
 use gyre_server::build_state;

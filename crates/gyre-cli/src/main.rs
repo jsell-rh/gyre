@@ -4764,7 +4764,12 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { repo, workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
             assert_eq!(repo.as_deref(), None);
@@ -4780,7 +4785,12 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show", "--workspace"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { repo, workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
             assert_eq!(repo.as_deref(), None);
@@ -4796,7 +4806,12 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show", "--tenant"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { repo, workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
             assert_eq!(repo.as_deref(), None);
@@ -4812,7 +4827,12 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show", "repo-b"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { repo, workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
             assert_eq!(repo.as_deref(), Some("repo-b"));
