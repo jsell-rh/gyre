@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: ["abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
+commits: ["bbd72bc37ffd0bd4b286171ad73d236fca06c64b", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "a2b86d834da6710c12e34301c96434d2bd4a414f"]
 ---
 
 ## Spec Excerpt
@@ -97,16 +97,20 @@ Read `specs/system/user-management.md` §Team Management. Existing team endpoint
 - **Budget reporting by team**: `GET /api/v1/workspaces/:id/budget/by-team` (api/budget.rs, ABAC-registered) aggregates the workspace's real `BudgetCallRecord` audit trail: agent-caused records attribute to the agent's spawning user (via the agents store), then to every team that user belongs to; records with no attributable user are reported under `unattributed` rather than dropped.
 - **Default reviewers** ("MRs in repos owned by team X") is NOT implemented: no spec models a repo→team ownership association (the `Repository` entity has no team field and no spec defines one), so there is nothing to auto-assign against. This needs a modeled repo-team ownership link first and remains open for a future task — noted here rather than faked.
 
+### Verification repair (this round)
+
+The prior verification round (`fb5e572b7f6e411db321da679d58562e`, `bash /tmp/stage/checks.sh`) failed solely on `check-rustfmt-diff.py`: changed lines in the team-management files needed formatting. All other gates in that log passed (clippy changed-lines clean, arch/ABAC/migration/mem-contract/attribution checks OK, web build succeeded). Commit `a2b86d834` applies `rustfmt --edition 2021 --config skip_children=true` to the ten flagged files — formatting only, no semantic changes — and `python3 scripts/check-rustfmt-diff.py 199c1bb78f53f27088c54a0929b5605e7302e874` now reports "changed lines clean (15 Rust files checked)" (evidence: /tmp/stage/review-evidence/task-122/rustfmt-gate.txt). `SKIP_WEB_BUILD=1 cargo check -p gyre-domain -p gyre-adapters -p gyre-server` passes after the reformat (evidence: /tmp/stage/review-evidence/task-122/cargo-check.txt).
+
 ### Test evidence
 
-Implementation history: `bbd72bc37` (production code) and `abaee5ea1` (unused-import cleanup). The executor merged base `199c1bb78` (task-203 search scoping) as `f0b06a8cb`; the team production files are byte-identical to `bbd72bc37` after the merge (evidence: `/tmp/stage/review-evidence/task-122/team-files-diff-bbd72bc3-to-HEAD.txt`, empty).
+Implementation history: `bbd72bc37` (production code), `abaee5ea1` (unused-import cleanup), `a2b86d834` (rustfmt repair). The executor merged base `199c1bb78` (task-203 search scoping) as `f0b06a8cb`; the team production files are byte-identical to `bbd72bc37` after the merge apart from the rustfmt pass.
 
 Executed in this sandbox (via the stage build wrapper):
 
 - `cargo test -p gyre-domain` — 478 passed, 0 failed (includes team slug validation/derivation and membership struct tests).
 - `cargo test -p gyre-adapters` — full suite 475 passed, 0 failed, 6 ignored (post-merge integration run), including the SQLite `team` repository tests (slug round-trip via `find_by_slug`, duplicate-slug create/update rejection, duplicate-membership rejection, `added_at` ordering, delete-removes-memberships) and `migration_000062_backfills_team_slug_and_lead` (real pre-000062 DB → 000062 alone: slug/lead backfills, unique index rejects duplicates, `member_ids` dropped, composite PK rejects duplicate membership).
 - `cargo check -p gyre-server --all-targets` — clean (includes server test targets).
-- Mechanical gates pass: check-arch, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-abac-route-registry, check-abac-exempt-handlers, check-task-commit-attribution.
+- Mechanical gates pass: check-arch, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-abac-route-registry, check-abac-exempt-handlers, check-task-commit-attribution, and now check-rustfmt-diff (this round's repair).
 
 `cargo test --all` remains open: gyre-server test execution exceeds this sandbox's 4 GiB build budget (stage build wrapper restriction — infrastructure, not a code defect). Verifier must run:
 
