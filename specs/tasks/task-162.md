@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["6d20863c02e07c0a51873fdbb735c61bef80af68", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "6d20863c02e07c0a51873fdbb735c61bef80af68", "dd716a986330b7509a7e1e93469d94fdb457628f"]
 ---
 
 ## Spec Excerpt
@@ -68,7 +68,13 @@ every drained message to all registered consumers. The first registered consumer
   resolved through the MR → author agent → spawner chain; tenant resolved from
   the workspace record, never fabricated. The gate executor emits the
   `GateFailure` event and no longer creates the Inbox item synchronously —
-  single creation path via the bridge (HSI §8 p3 amendment).
+  single creation path via the bridge (HSI §8 p3 amendment). The bridge
+  consumes only Workspace/Broadcast-targeted GateFailure events — two
+  production emitters publish GateFailure for the same failed gate
+  (`gate_executor::run_gate`, Workspace-targeted; `ralph_loop::on_gates_failed`,
+  Agent-targeted copy for the agent's next session), and the Agent-directed
+  copy is the agent's inbox record, not a human-notification trigger
+  (review round-1 repair, commit dd716a986).
 - `BudgetWarning` → rank-4 `AgentBudgetWarning` for workspace
   Admin/Developer/Owner members.
 - `AgentError` → rank-2 `AgentEscalation` for the failing agent's spawning user.
@@ -79,8 +85,10 @@ Bridge creation delegates to `notifications::notify_rich`, so bridge-derived
 notifications carry the same structured `NotificationSource` and deep-link
 derivation as every other producer (one creation path end to end). All three
 send paths (`AppState::emit_event`, REST send handler, MCP `message.send`)
-clone into the channel via non-blocking `try_send`; a full channel drops with a
-warning log and never blocks the send path, per spec.
+clone into the channel via non-blocking `try_send`; a full channel drops with
+a warning log at all three call sites (review round-1 repair extended the
+warn match from `emit_event` to the REST and MCP handlers) and never blocks
+the send path, per spec.
 
 ### TTL expiry job (§Implementation Notes)
 
@@ -97,27 +105,25 @@ explicit acks and unacked Directed messages are retained.
 ### Tests
 
 Bridge unit tests for all four message kinds (recipient resolution,
-viewer-role exclusion, unknown-workspace skip), dispatcher fan-out to multiple
-consumers, end-to-end `spawn_message_consumer` through the real send path, TTL
-retention boundaries (expired Event deleted, fresh Event / unacked Directed /
+viewer-role exclusion, unknown-workspace skip), the Agent-directed
+GateFailure dedupe regression (Workspace event + identical Agent copy →
+exactly one rank-3 notification), dispatcher fan-out to multiple consumers,
+end-to-end `spawn_message_consumer` through the real send path, TTL retention
+boundaries (expired Event deleted, fresh Event / unacked Directed /
 explicit-ack retained), env-var TTL override, and
 `failed_gate_creates_gate_failure_notification_via_bridge` (run_gate →
 emit_event → dispatcher → bridge → exactly one rank-3 notification). The
 reconciliation wave-completion test drains the bus via the real dispatcher,
 proving the p6 path.
 
-### Verification repair (this round, commit 6d20863c0)
+### Verification status
 
-Durable finding d57f384e (checks.sh exit 1): rustfmt flagged changed lines in
-main.rs (import wrapping) and message_dispatcher.rs (test import order,
-over-long assert_eq). Fixed formatting-only via rustfmt itself — no semantic
-change. Fresh probes at 6d20863c0: `cargo fmt -p gyre-server -- --check`
-clean, `cargo check -p gyre-server` clean (8m15s), `cargo test -p gyre-adapters
---lib sqlite::message` 33 passed (includes the expire_events /
-expire_acked_inboxes TTL boundary tests), arch / byte-slice /
-relative-path / dead-message-kinds / task-attribution checks pass.
-Gyre-server test compilation remains deferred to the independent verifier
-(4 GiB budget): `cargo test -p gyre-server --lib message_dispatcher`,
-`--lib gate_executor`, `--lib notifications`, `--lib reconciliation`, and the
-full `cargo test --all` gate. Evidence: /tmp/stage/review-evidence/
-verification-repair.md.
+Fresh probes at dd716a986: `cargo check -p gyre-server` and
+`cargo check -p gyre-server --tests` clean, `cargo fmt -p gyre-server --
+--check` clean, arch / dead-message-kinds / mcp-write-tools /
+abac-route-registry checks pass. Gyre-server test compilation is deferred
+to the independent verifier (4 GiB budget); the verifier must execute:
+`cargo test -p gyre-server --lib message_dispatcher` (includes the new
+`notification_bridge_ignores_agent_directed_gate_failure_copy` regression),
+`--lib gate_executor`, `--lib notifications`, `--lib ralph_loop`, `--lib
+reconciliation`, and the full `cargo test --all` gate.
