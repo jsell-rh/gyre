@@ -162,73 +162,15 @@ pub async fn notify_rich(
     }
 }
 
-/// Notify the spawning user that a gate failed on their MR.
-///
-/// GateFailure is High priority — created synchronously by the gate
-/// evaluation handler per HSI §2.
-pub async fn notify_gate_failure(
-    state: &AppState,
-    author_agent_id: &Id,
-    workspace_id: &Id,
-    mr_id: &str,
-    gate_name: &str,
-    tenant_id: &str,
-) {
-    let spawned_by = state
-        .agents
-        .find_by_id(author_agent_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|a| a.spawned_by);
-
-    let user_id = if let Some(ref sb) = spawned_by {
-        Id::new(sb.clone())
-    } else {
-        author_agent_id.clone()
-    };
-
-    // Resolve MR title and repo for a human-friendly notification + deep link.
-    let mr = state
-        .merge_requests
-        .find_by_id(&Id::new(mr_id))
-        .await
-        .ok()
-        .flatten();
-    let mr_label = mr
-        .as_ref()
-        .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
-    let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
-
-    let body_json = serde_json::json!({
-        "gate_name": gate_name,
-        "mr_id": mr_id,
-        "agent_id": author_agent_id.as_str(),
-    })
-    .to_string();
-
-    notify_rich(
-        state,
-        workspace_id.clone(),
-        user_id,
-        NotificationType::GateFailure,
-        format!("Gate '{gate_name}' failed on MR {mr_label}"),
-        tenant_id,
-        Some(body_json),
-        Some(mr_id.to_string()),
-        repo_id,
-        "gate",
-        None,
-    )
-    .await;
-}
-
 /// Notify the spawning user that all gates passed on their MR
 /// (user-management.md §Notification Entity: GatePassed, Low — informational).
 ///
 /// De-duplicated per (user, MR): callers fire this from gate completion, so
 /// without the guard the last-finishing gates would repeat the announcement.
+///
+/// (Gate *failures* are NOT notified from here — the notification bridge in
+/// message_dispatcher.rs consumes GateFailure events off the message bus,
+/// one creation path per HSI §8 p3 amendment, task-162.)
 pub async fn notify_gate_passed(
     state: &AppState,
     author_agent_id: &Id,
@@ -423,6 +365,7 @@ mod tests {
     use gyre_domain::{
         Agent, MergeRequest, Repository, Workspace, WorkspaceMembership, WorkspaceRole,
     };
+    use gyre_ports::MessageConsumer as _;
 
     /// Shared fixture: workspace (slug "ws-one"), repo ("myrepo"), an agent
     /// spawned by "user-n1", and an MR authored by that agent.
@@ -517,25 +460,43 @@ mod tests {
         );
     }
 
-    /// GateFailure keeps its High band and now also carries a deep link.
+    /// GateFailure keeps its High band and carries a deep link. Creation goes
+    /// through the notification bridge (the message-bus MessageConsumer),
+    /// which delegates to `notify_rich` — the single creation path for every
+    /// producer (HSI §8 p3 amendment, task-162).
     #[tokio::test]
     async fn gate_failure_notification_carries_deep_link() {
         let (state, ws) = setup().await;
-        notify_gate_failure(
-            &state,
-            &Id::new("agent-n1"),
-            &ws,
-            "mr-n1",
-            "tests",
-            "tenant-1",
-        )
-        .await;
+        let bridge = crate::message_dispatcher::NotificationBridge::new(state.clone());
+        let msg = gyre_common::message::Message {
+            id: Id::new("msg-gf".to_string()),
+            tenant_id: Id::new("tenant-1".to_string()),
+            from: gyre_common::message::MessageOrigin::Server,
+            workspace_id: Some(ws.clone()),
+            to: gyre_common::message::Destination::Workspace(ws.clone()),
+            kind: gyre_common::message::MessageKind::GateFailure,
+            payload: Some(serde_json::json!({
+                "mr_id": "mr-n1",
+                "gate_name": "tests",
+                "gate_type": "TestCommand",
+                "status": "Failed",
+                "output": "1 test failed",
+                "gate_agent_id": "gate-agent:1",
+            })),
+            created_at: 0,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        bridge.on_message(&msg).await;
 
         let notifs = notifs_for(&state, "user-n1").await;
         assert_eq!(notifs.len(), 1);
         let n = &notifs[0];
         assert_eq!(n.notification_type, NotificationType::GateFailure);
         assert_eq!(n.priority, gyre_common::NotificationPriority::High);
+        assert_eq!(n.source.entity_type, "gate");
+        assert_eq!(n.source.entity_id, "mr-n1");
         assert_eq!(
             n.action_url.as_deref(),
             Some("/workspaces/ws-one/r/myrepo/mrs/mr-n1")

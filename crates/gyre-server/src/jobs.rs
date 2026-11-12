@@ -526,6 +526,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register message expiry job (hourly, message-bus.md §Implementation Notes)
+    registry
+        .register(
+            JobDefinition {
+                name: "message_expiry".to_string(),
+                description: "Deletes expired Event-tier messages and acked dead-agent \
+             inboxes (message-bus.md TTL)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::message_dispatcher::run_message_expiry(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
     // Register task_scheduler job (agent-runtime.md §1 Phases 3–4, task-115):
     // claims Backlog Delegation/Coordination tasks and runs repo orchestrators
     // under per-repo registry locks. The 30 s loop itself is spawned in main.rs

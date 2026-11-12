@@ -1617,9 +1617,10 @@ async fn rollback_atomic_group(
     for author_id in &author_ids {
         // The author is an AGENT; notifications live in HUMAN inboxes. Resolve
         // the agent's spawning user (falling back to the agent id itself when
-        // no human is recorded) — same rule as notify_gate_failure /
-        // notify_mr_merged. Addressing the raw agent id delivers to a user
-        // that does not exist, so no human ever sees the failure notice.
+        // no human is recorded) — same rule as the notification bridge's
+        // GateFailure handling / notify_mr_merged. Addressing the raw agent id
+        // delivers to a user that does not exist, so no human ever sees the
+        // failure notice.
         let author = Id::new(author_id);
         let user_id = match state.agents.find_by_id(&author).await {
             Ok(Some(agent)) => match &agent.spawned_by {

@@ -3632,6 +3632,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn reconciliation_completed_fires_when_all_tasks_terminal() {
         let state = test_state();
+        // Drain the bus with the real dispatcher + notification bridge: the
+        // p6 MetaSpecDrift notification is created asynchronously by
+        // NotificationBridge consuming the ReconciliationCompleted event.
+        crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
         let ws = make_workspace(&state, "ws-wave").await;
         make_repo(&state, "repo-w1", "ws-wave").await;
         make_repo(&state, "repo-w2", "ws-wave").await;
@@ -3710,21 +3714,32 @@ mod tests {
             "all tasks terminal — ReconciliationCompleted must fire exactly once"
         );
 
-        // MetaSpecDrift notification for the admin member (via the shared
-        // emit_reconciliation_completed helper).
-        let notifs = state
-            .notifications
-            .list_for_user(
-                &Id::new("user-wave"),
-                Some(&ws.id),
-                Some(6),
-                Some(6),
-                None,
-                10,
-                0,
-            )
-            .await
-            .unwrap();
+        // MetaSpecDrift notification for the admin member — created by the
+        // NotificationBridge consuming the ReconciliationCompleted event, so
+        // poll until the async dispatcher has drained it.
+        let mut notifs = Vec::new();
+        for _ in 0..100 {
+            notifs = state
+                .notifications
+                .list_for_user(
+                    &Id::new("user-wave"),
+                    Some(&ws.id),
+                    Some(6),
+                    Some(6),
+                    None,
+                    10,
+                    0,
+                )
+                .await
+                .unwrap();
+            if notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
             notifs
                 .iter()

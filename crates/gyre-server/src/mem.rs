@@ -3825,12 +3825,18 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
 /// In-memory MessageRepository for tests.
 pub struct MemMessageRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::message::Message>>>,
+    /// Ack reason per message id — mirrors the SQLite `ack_reason` column.
+    /// `acknowledge()` records `"explicit"`; `acknowledge_all()` records the
+    /// passed reason. `expire_acked_inboxes()` only deletes agent-targeted
+    /// messages acked with `agent_completed`/`agent_orphaned` (port contract).
+    ack_reasons: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for MemMessageRepository {
     fn default() -> Self {
         Self {
             store: Arc::new(Mutex::new(HashMap::new())),
+            ack_reasons: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -3916,20 +3922,26 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
         use gyre_common::message::Destination;
         let mut guard = self.store.lock().await;
         if let Some(m) = guard.get_mut(message_id.as_str()) {
-            if matches!(&m.to, Destination::Agent(id) if id == agent_id) {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
                 m.acknowledged = true;
+                self.ack_reasons
+                    .lock()
+                    .await
+                    .insert(message_id.as_str().to_string(), "explicit".to_string());
             }
         }
         Ok(())
     }
 
-    async fn acknowledge_all(&self, agent_id: &Id, _reason: &str) -> Result<u64> {
+    async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> Result<u64> {
         use gyre_common::message::Destination;
         let mut guard = self.store.lock().await;
+        let mut reasons = self.ack_reasons.lock().await;
         let mut count = 0u64;
         for m in guard.values_mut() {
             if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
                 m.acknowledged = true;
+                reasons.insert(m.id.as_str().to_string(), reason.to_string());
                 count += 1;
             }
         }
@@ -3987,9 +3999,19 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
     }
 
     async fn expire_acked_inboxes(&self, older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        // Lock order: store before ack_reasons (matches acknowledge_all).
         let mut guard = self.store.lock().await;
+        let reasons = self.ack_reasons.lock().await;
         let before = guard.len();
-        guard.retain(|_, m| !m.acknowledged || m.created_at >= older_than);
+        guard.retain(|_, m| {
+            let dead_agent = matches!(&m.to, Destination::Agent(_))
+                && reasons
+                    .get(m.id.as_str())
+                    .map(|r| r == "agent_completed" || r == "agent_orphaned")
+                    .unwrap_or(false);
+            !(dead_agent && m.created_at < older_than)
+        });
         Ok((before - guard.len()) as u64)
     }
 
@@ -4219,6 +4241,7 @@ fn test_state_inner(
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -4312,14 +4335,10 @@ fn test_state_inner(
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while rx.recv().await.is_some() {}
-            });
-            tx
-        },
+        message_dispatch_tx,
+        message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+            message_dispatch_rx,
+        ))),
         meta_specs: Arc::new(MemMetaSpecRepository::with_binding_store(Arc::clone(
             &meta_spec_binding_store,
         ))),

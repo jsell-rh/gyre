@@ -148,22 +148,10 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         }
     }
 
-    // Notify MR author when gate fails (HSI §2).
-    if status == GateStatus::Failed {
-        if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
-            if let Some(ref author_id) = mr.author_agent_id {
-                crate::notifications::notify_gate_failure(
-                    state.as_ref(),
-                    author_id,
-                    &mr.workspace_id,
-                    &mr_id.to_string(),
-                    &gate.name,
-                    "default",
-                )
-                .await;
-            }
-        }
-    }
+    // Gate-failure Inbox notification is created by the notification bridge
+    // (message_dispatcher::NotificationBridge) from the GateFailure event
+    // emitted above — one creation path, not two (HSI §8 p3 amended to route
+    // p3 via MessageConsumer consuming GateFailure events).
 
     // Retry up to 3 times with backoff — concurrent gate writers can
     // contend on the SQLite write lock even with busy_timeout set.
@@ -2803,5 +2791,73 @@ mod tests {
             observed, "payments-api",
             "{{repo_name}} must be templated to the repository name"
         );
+    }
+
+    /// HSI §8 p3 (amended): a failed gate emits a `GateFailure` event, and
+    /// the notification bridge consumes it to create the p3 Inbox
+    /// notification for the MR author's spawning user. This pins the whole
+    /// rewired chain — if `run_gate` stops emitting the event, or the bridge
+    /// stops consuming it, the spawning user silently loses gate-failure
+    /// notifications.
+    #[tokio::test]
+    async fn failed_gate_creates_gate_failure_notification_via_bridge() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-gate-notif"),
+            Id::new("tenant-gate-notif"),
+            "Gate Notif WS",
+            "gate-notif-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-gate-notif"), "gate-notif-agent", now_secs());
+        agent.workspace_id = ws.id.clone();
+        agent.spawned_by = Some("user-gate-notif".to_string());
+        state.agents.create(&agent).await.unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-gate-notif"),
+            Id::new("repo-gate-notif"),
+            "feat",
+            "feat/z",
+            "main",
+            now_secs(),
+        );
+        mr.workspace_id = ws.id.clone();
+        mr.author_agent_id = Some(agent.id.clone());
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Drain the bus with the real dispatcher + notification bridge.
+        crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
+
+        // A TestCommand gate whose command fails.
+        let gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        let result_id = Id::new(Uuid::new_v4().to_string());
+        run_gate(state.clone(), result_id, gate, mr.id.clone()).await;
+
+        let mut notifs = Vec::new();
+        for _ in 0..100 {
+            notifs = state
+                .notifications
+                .list_for_user(&Id::new("user-gate-notif"), None, None, None, None, 100, 0)
+                .await
+                .unwrap();
+            if !notifs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(notifs.len(), 1, "bridge must create the p3 notification");
+        assert_eq!(
+            notifs[0].notification_type,
+            gyre_common::NotificationType::GateFailure
+        );
+        assert_eq!(notifs[0].priority_rank, 3);
+        assert_eq!(notifs[0].tenant_id, "tenant-gate-notif");
+        assert_eq!(notifs[0].source.entity_type, "gate");
+        assert_eq!(notifs[0].source.entity_id, "mr-gate-notif");
     }
 }
