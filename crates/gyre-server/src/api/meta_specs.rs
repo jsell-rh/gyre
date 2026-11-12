@@ -2259,8 +2259,8 @@ async fn authorize_meta_spec_delete(
             // Tenant-registry entry: tenant admin only.
             if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
                 crate::rbac::record_rbac_denied(
-                    &state,
-                    &auth,
+                    state,
+                    auth,
                     "Admin",
                     "DELETE /api/v1/meta-specs-registry/:id",
                 )
@@ -2280,8 +2280,8 @@ async fn authorize_meta_spec_delete(
             if !auth.roles.contains(&gyre_domain::UserRole::Admin) || auth.tenant_id != scope_tenant
             {
                 crate::rbac::record_rbac_denied(
-                    &state,
-                    &auth,
+                    state,
+                    auth,
                     "Admin",
                     "DELETE /api/v1/meta-specs-registry/:id",
                 )
@@ -2313,8 +2313,8 @@ async fn authorize_meta_spec_delete(
             // must not even learn the meta-spec exists.
             if ws.tenant_id.as_str() != auth.tenant_id {
                 crate::rbac::record_rbac_denied(
-                    &state,
-                    &auth,
+                    state,
+                    auth,
                     "Admin",
                     "DELETE /api/v1/meta-specs-registry/:id",
                 )
@@ -2345,8 +2345,8 @@ async fn authorize_meta_spec_delete(
             };
             if !is_tenant_admin && !is_ws_admin {
                 crate::rbac::record_rbac_denied(
-                    &state,
-                    &auth,
+                    state,
+                    auth,
                     "workspace Admin",
                     "DELETE /api/v1/meta-specs-registry/:id",
                 )

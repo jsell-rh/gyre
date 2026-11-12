@@ -762,7 +762,7 @@ mod tests {
             .unwrap();
         // 3 approvals/rejections (not u9's) + 3 audit events (not u9's).
         assert_eq!(entries.len(), 6, "got {:?}", entries.len());
-        let types: Vec<_> = entries.iter().map(|e| e.judgment_type.clone()).collect();
+        let types: Vec<_> = entries.iter().map(|e| e.judgment_type).collect();
         // Descending timestamp across the merged stream.
         let ts: Vec<u64> = entries.iter().map(|e| e.timestamp).collect();
         assert!(ts.windows(2).all(|w| w[0] >= w[1]), "not sorted: {ts:?}");

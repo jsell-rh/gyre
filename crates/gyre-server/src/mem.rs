@@ -5367,20 +5367,11 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
 /// Aggregates the judgment ledger (HSI §12) from the SAME in-memory stores
 /// the audit / spec-approval / spec-ledger repos use — construct via
 /// [`MemJudgmentLedgerRepository::with_sources`] so the sources are shared.
+#[derive(Default)]
 pub struct MemJudgmentLedgerRepository {
     audits: Arc<Mutex<Vec<MemAuditEntry>>>,
     approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
     spec_ledger: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
-}
-
-impl Default for MemJudgmentLedgerRepository {
-    fn default() -> Self {
-        Self {
-            audits: Arc::default(),
-            approvals: Arc::default(),
-            spec_ledger: Arc::default(),
-        }
-    }
 }
 
 impl MemJudgmentLedgerRepository {

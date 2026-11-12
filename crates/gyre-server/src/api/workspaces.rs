@@ -280,7 +280,7 @@ pub async fn update_workspace(
         let changed = new_trust != ws.trust_level;
         let from = ws.trust_level.clone();
         ws.trust_level = new_trust.clone();
-        (changed, changed.then(|| (from, new_trust)))
+        (changed, changed.then_some((from, new_trust)))
     } else {
         (false, None)
     };
