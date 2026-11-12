@@ -248,6 +248,144 @@ pub async fn budget_summary(
     }))
 }
 
+// ── GET /api/v1/workspaces/{id}/budget/by-team  (user-management.md §Team
+//    Management — budget reporting: aggregate budget usage by team) ─────────
+
+#[derive(Debug, Serialize)]
+pub struct TeamBudgetReport {
+    pub team_id: String,
+    pub slug: String,
+    pub name: String,
+    pub member_count: usize,
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TeamBudgetSummary {
+    pub workspace_id: String,
+    pub teams: Vec<TeamBudgetReport>,
+    /// Usage not attributable to any team member: records with no agent, or
+    /// agents with no spawning user (user-initiated queries).
+    pub unattributed: TeamBudgetReport,
+}
+
+/// GET /api/v1/workspaces/{id}/budget/by-team — aggregate the workspace's
+/// LLM budget usage by team membership.
+///
+/// Attribution: each `BudgetCallRecord` caused by an agent is attributed to
+/// the agent's spawning user; a record counts toward every team that user
+/// belongs to (that is what "aggregate by team membership" means when a
+/// user sits on multiple teams). Records with no attributable user are
+/// reported as `unattributed` rather than silently dropped.
+///
+/// Scoped to the caller's tenant like every workspace read.
+pub async fn budget_by_team(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<TeamBudgetSummary>, ApiError> {
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(id.clone()))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.is_system_principal() && ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "cross-tenant workspace access denied".to_string(),
+        ));
+    }
+
+    let teams = state.teams.list_by_workspace(&ws.id).await.map_err(ApiError::Internal)?;
+    let mut reports = Vec::with_capacity(teams.len());
+    let mut member_sets = Vec::with_capacity(teams.len());
+    for team in &teams {
+        let members = state
+            .teams
+            .list_members(&team.id)
+            .await
+            .map_err(ApiError::Internal)?;
+        member_sets.push(
+            members
+                .iter()
+                .map(|m| m.user_id.to_string())
+                .collect::<std::collections::HashSet<String>>(),
+        );
+        reports.push(TeamBudgetReport {
+            team_id: team.id.to_string(),
+            slug: team.slug.clone(),
+            name: team.name.clone(),
+            member_count: members.len(),
+            calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+        });
+    }
+    let mut unattributed = TeamBudgetReport {
+        team_id: String::new(),
+        slug: "unattributed".to_string(),
+        name: "Unattributed (no team member attribution)".to_string(),
+        member_count: 0,
+        calls: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+    };
+
+    // Full audit trail since the epoch, capped at the port's row limit.
+    let records = state
+        .budget_calls
+        .list_by_workspace(ws.id.as_str(), 0, 100_000)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    for record in &records {
+        let report_target = |r: &mut TeamBudgetReport| {
+            r.calls += 1;
+            r.input_tokens += record.input_tokens;
+            r.output_tokens += record.output_tokens;
+            r.cost_usd += record.cost_usd;
+        };
+        // Attribute to the agent's spawning user, when there is one.
+        let spawned_by = match &record.agent_id {
+            Some(aid) => state
+                .agents
+                .find_by_id(aid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|a| a.spawned_by),
+            None => None,
+        };
+        match spawned_by {
+            Some(uid) => {
+                let uid = uid.to_string();
+                let mut attributed = false;
+                for (report, members) in reports.iter_mut().zip(member_sets.iter()) {
+                    if members.contains(&uid) {
+                        report_target(report);
+                        attributed = true;
+                    }
+                }
+                if !attributed {
+                    report_target(&mut unattributed);
+                }
+            }
+            None => report_target(&mut unattributed),
+        }
+    }
+
+    Ok(Json(TeamBudgetSummary {
+        workspace_id: ws.id.to_string(),
+        teams: reports,
+        unattributed,
+    }))
+}
+
 // ── Internal helpers (called from spawn handler and cost recording) ───────────
 
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
@@ -580,6 +718,118 @@ mod tests {
 
     fn json_body(s: &str) -> Body {
         Body::from(s.to_string())
+    }
+
+    /// user-management.md §Team Management — budget reporting: aggregate
+    /// budget usage by team. Attribution flows through real records: an
+    /// agent-caused BudgetCallRecord attributes to the agent's spawning
+    /// user, then to every team that user belongs to. Records with no
+    /// attributable user land in `unattributed` rather than vanishing.
+    #[tokio::test]
+    async fn budget_by_team_aggregates_usage_through_membership() {
+        use gyre_common::Id;
+        use gyre_domain::{BudgetCallRecord, Team, TeamMembership, Workspace};
+
+        let state = crate::mem::test_state();
+        let app = crate::build_router(state.clone());
+
+        let ws = Workspace {
+            id: Id::new("ws-bt"),
+            tenant_id: Id::new("tenant-1"),
+            name: "Budget Teams WS".to_string(),
+            slug: "budget-teams-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Team with two members; a third user sits on no team.
+        state
+            .teams
+            .create(&Team::new(
+                Id::new("t-bt"),
+                Id::new("ws-bt"),
+                "Platform",
+                "platform",
+                Id::new("u-lead"),
+                0,
+            ))
+            .await
+            .unwrap();
+        for uid in ["u-lead", "u-dev"] {
+            state
+                .teams
+                .add_member(&TeamMembership::new(Id::new("t-bt"), Id::new(uid), 0))
+                .await
+                .unwrap();
+        }
+
+        // Agents spawned by the team members and by the teamless user.
+        let mut agent_dev = gyre_domain::Agent::new(Id::new("a-dev"), "dev agent", 0);
+        agent_dev.spawned_by = Some("u-dev".to_string());
+        state.agents.create(&agent_dev).await.unwrap();
+        let mut agent_loner = gyre_domain::Agent::new(Id::new("a-loner"), "loner agent", 0);
+        agent_loner.spawned_by = Some("u-loner".to_string());
+        state.agents.create(&agent_loner).await.unwrap();
+
+        let call = |id: &str, agent: Option<&str>, input: u64, output: u64, cost: f64| BudgetCallRecord {
+            id: Id::new(id),
+            tenant_id: Id::new("tenant-1"),
+            workspace_id: Id::new("ws-bt"),
+            repo_id: None,
+            agent_id: agent.map(Id::new),
+            task_id: None,
+            usage_type: if agent.is_some() { "agent_run" } else { "llm_query" }.to_string(),
+            input_tokens: input,
+            output_tokens: output,
+            cost_usd: cost,
+            model: "test-model".to_string(),
+            timestamp: 1,
+        };
+        // u-dev's agent: 2 calls, 300 tokens total, 0.03.
+        state.budget_calls.save(&call("c-1", Some("a-dev"), 100, 50, 0.01)).await.unwrap();
+        state.budget_calls.save(&call("c-2", Some("a-dev"), 100, 50, 0.02)).await.unwrap();
+        // u-loner's agent: 1 call, unattributed to any team.
+        state.budget_calls.save(&call("c-3", Some("a-loner"), 10, 5, 0.001)).await.unwrap();
+        // A user-initiated query with no agent: unattributed.
+        state.budget_calls.save(&call("c-4", None, 7, 3, 0.0005)).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-bt/budget/by-team")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let teams = v["teams"].as_array().expect("teams array");
+        assert_eq!(teams.len(), 1, "one team in the workspace: {teams:?}");
+        let team = &teams[0];
+        assert_eq!(team["slug"], "platform");
+        assert_eq!(team["member_count"], 2);
+        assert_eq!(team["calls"], 2, "u-dev's two agent calls: {team:?}");
+        assert_eq!(team["input_tokens"], 200);
+        assert_eq!(team["output_tokens"], 100);
+        assert_eq!(team["cost_usd"], 0.03);
+
+        let unattr = &v["unattributed"];
+        assert_eq!(unattr["calls"], 2, "loner + agentless records: {unattr:?}");
+        assert_eq!(unattr["input_tokens"], 17);
+        assert_eq!(unattr["output_tokens"], 8);
     }
 
     #[tokio::test]

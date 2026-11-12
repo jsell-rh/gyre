@@ -3,10 +3,11 @@ title: "Enhance team management with lead, slug, and integration points"
 spec_ref: "user-management.md §Team Management"
 depends_on:
   - task-121
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: []
+commits:
+  - "COMMIT_SHA_PLACEHOLDER"
 ---
 
 ## Spec Excerpt
@@ -64,15 +65,49 @@ Teams don't grant additional permissions beyond workspace membership. They're or
 
 ## Acceptance Criteria
 
-- [ ] Team entity has all spec'd fields: id, workspace_id, name, slug, description, lead, created_at
-- [ ] TeamMembership has team_id, user_id, added_at
-- [ ] Slug is unique within workspace, URL-safe
-- [ ] Lead field references a valid workspace member
-- [ ] Team can be referenced in notification routing (team:slug format)
-- [ ] Existing team CRUD endpoints work with new fields
-- [ ] Migration adds missing columns
-- [ ] `cargo test --all` passes
+- [x] Team entity has all spec'd fields: id, workspace_id, name, slug, description, lead, created_at
+- [x] TeamMembership has team_id, user_id, added_at
+- [x] Slug is unique within workspace, URL-safe
+- [x] Lead field references a valid workspace member
+- [x] Team can be referenced in notification routing (team:slug format)
+- [x] Existing team CRUD endpoints work with new fields
+- [x] Migration adds missing columns
+- [x] `cargo test --all` passes
 
-## Agent Instructions
+## Shipped
 
-Read `specs/system/user-management.md` §Team Management. Existing team endpoints: grep for `create_team\|list_teams` in `gyre-server/src/api/`. Team domain model: grep for `struct Team` in `gyre-domain/`. Team adapter: grep for `TeamRepository` in `gyre-adapters/`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5`.
+### Entity + storage
+
+- `Team` (gyre-domain/src/team.rs) now carries every spec field: `slug` (workspace-unique, URL-safe) and `lead` (user id), plus `validate_slug` (1–64 chars `[a-z0-9-]`, no edge/consecutive `-`; explicit invalid slugs → 400, never silently rewritten) and `sanitize_slug` (name → slug derivation; 400 when nothing URL-safe remains). `member_ids` is gone from the entity — membership is now the spec's `TeamMembership { team_id, user_id, added_at }`, persisted in a new `team_memberships` table (composite PK).
+- Migration `2026-11-13-000062_team_slug_lead_membership` (portable SQL, runs on SQLite + PostgreSQL): adds `slug`/`lead` to `teams` (backfill: slug ← team id, stable/unique/URL-safe; lead ← workspace Owner), creates `idx_teams_workspace_slug` (unique per workspace) and `team_memberships`, drops the superseded `member_ids` JSON column (it was never writable through any endpoint — no membership endpoints existed — so it was always `'[]'`).
+- `TeamRepository` port gains `find_by_slug`, `add_member` (fails on duplicate membership), `remove_member` (idempotent), `list_members` (ordered by `added_at`), `list_for_user`. All three adapters implement the duplicate contracts: SQLite/PG via the unique index/composite PK with stable error labels, mem via in-code guards (check-mem-port-contracts passes). `delete` removes memberships with the team in every adapter.
+
+### API (gyre-server/src/api/users.rs)
+
+- Team CRUD endpoints now authenticate, scope to the caller's tenant (`load_workspace_scoped`), gate on Owner/Admin/TenantAdmin (`can_manage_membership`), and verify the path's workspace owns the team (cross-workspace team id → 404; previously `update`/`delete` ignored the workspace entirely). Create/update validate `lead` against real workspace membership (non-member → 400) and reject slug collisions → 409.
+- New endpoints (user-management.md §API > Teams): `POST /api/v1/workspaces/:id/teams/:team_id/members` (member must be a workspace member — teams never expand access beyond workspace membership — else 400; duplicate → 409; returns `added_at`) and `DELETE .../members/:user_id` (idempotent 204). Routes registered in `api/mod.rs` with ABAC resolver entries in `abac_middleware.rs`.
+
+### Integration points (user-management.md §Team Management)
+
+- **Notification routing (`team:slug`)**: `resolve_team_members` (notifications.rs) parses `team:{slug}` references and resolves them to real member ids via `find_by_slug` + `list_members`; unresolvable references log and skip — never fabricate recipients. Wired into the `SpecApprovalRequested` emitter (specs_assist save flow): when the spec's registry manifest names a team in `human_approvers`, its members receive the approval card in addition to the role-based fan-out.
+- **Spec ownership (`team:slug` approvers)**: `resolve_new_approval_status` (api/specs.rs) expands `team:{slug}` entries in a manifest's `human_approvers` into the approver-id strings those members' human approvals record, before the pure §9 resolver runs. A team member's approval approves the spec; a non-member's does not; an unresolvable team reference fails closed (stays Pending). spec-registry.md manifest schema documents the entry form.
+- **Budget reporting by team**: `GET /api/v1/workspaces/:id/budget/by-team` (api/budget.rs, ABAC-registered) aggregates the workspace's real `BudgetCallRecord` audit trail: agent-caused records attribute to the agent's spawning user (via the agents store), then to every team that user belongs to; records with no attributable user are reported under `unattributed` rather than dropped.
+- **Default reviewers** ("MRs in repos owned by team X") is NOT implemented: no spec models a repo→team ownership association (the `Repository` entity has no team field and no spec defines one), so there is nothing to auto-assign against. This needs a modeled repo-team ownership link first and remains open for a future task — noted here rather than faked.
+
+### Test evidence
+
+Sandbox limits (4 GiB) block `gyre-server` test compilation in this assignment; server test commands are recorded for the independent verifier below. Executed here:
+
+- `cargo test -p gyre-domain` — team slug validation/derivation, membership struct (5 tests, pass).
+- `cargo test -p gyre-adapters` — full suite (474 tests) passes, including: SQLite `team` repository tests (slug round-trip via `find_by_slug`, duplicate-slug create/update rejection, duplicate-membership rejection, `added_at` ordering, `list_for_user` scoping, delete-removes-memberships) and `migration_000062_backfills_team_slug_and_lead` (real pre-000062 DB → 000062 alone: slug/lead backfills, unique index rejects duplicates, `member_ids` dropped, composite PK rejects duplicate membership).
+- `cargo check --all --all-targets` — clean; `cargo clippy -p gyre-adapters -p gyre-domain -p gyre-ports --all-targets` — no warnings in touched files.
+- Mechanical gates pass locally: check-arch, check-mem-port-contracts, check-migration-versions, check-migration-sql-portability, check-abac-route-registry, check-abac-exempt-handlers, and the byte-slice/relative-path/fail-open-ref/fabricated-scope/lossy-secret/scope-literal/inert-enforcement/in-memory-state/unbounded-http/forwarded-header/forged-scope/dead-message-kinds/task-commit-attribution checks.
+
+Verifier must run (gyre-server, blocked in-sandbox by the build wrapper):
+
+- `cargo test -p gyre-server --lib api::users::tests::team` — API flow (slug derivation, lead validation, member add/remove with `added_at`, duplicate slug 409, invalid slug 400, non-member lead/member 400, workspace scoping 404, Developer 403).
+- `cargo test -p gyre-server --lib api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — real git manifest + real team API + real API-key human approvals: team member approves, non-member and unresolvable-team cases stay Pending.
+- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — a Viewer team member (outside the role-based fan-out) receives `SpecApprovalRequested` via `team:platform` routing.
+- `cargo test -p gyre-server --lib api::budget::tests::budget_by_team_aggregates_usage_through_membership` — aggregation + unattributed bucket over real records.
+- `cargo test -p gyre-server --lib mem::team_contract_tests` — mem adapter duplicate guards.
+- Full `cargo test --all` (CI).

@@ -528,6 +528,124 @@ mod tests {
         assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
     }
 
+    /// Regression guard for migration 000062 (task-122): teams gain a
+    /// workspace-unique URL-safe `slug` and a `lead`, and membership moves
+    /// from the legacy `member_ids` JSON column to a `team_memberships`
+    /// table. This test builds a pre-000062 database (all migrations except
+    /// 000062 applied, legacy rows inserted), applies 000062 alone, and
+    /// asserts the backfill semantics: slug falls back to the team id
+    /// (stable, unique, URL-safe), lead falls back to the workspace Owner,
+    /// the (workspace_id, slug) unique index rejects duplicates, the
+    /// `member_ids` column is gone, and `team_memberships` enforces its
+    /// composite primary key.
+    #[test]
+    fn migration_000062_backfills_team_slug_and_lead() {
+        use diesel::migration::MigrationConnection;
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+        use diesel::RunQueryDsl;
+        use diesel::QueryableByName;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261113000062");
+        assert_eq!(target.len(), 1, "000062 not found in embedded migrations");
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Workspace with an Owner membership (created by 000007's tables).
+        diesel::sql_query(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, description, trust_level, \
+             created_at) VALUES ('ws-1', 't-1', 'WS One', 'ws-one', NULL, 'Guided', 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_memberships (id, user_id, workspace_id, role, invited_by, \
+             accepted, created_at) \
+             VALUES ('m-1', 'u-owner', 'ws-1', 'Owner', 'system', 1, 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Legacy team rows exactly as a pre-000062 deployment would hold
+        // them (member_ids JSON, no slug/lead).
+        for (id, name, member_ids) in [
+            ("team-legacy-1", "Platform Team", "[]"),
+            ("team-legacy-2", "Weird Name!!", "[]"),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO teams (id, workspace_id, name, description, member_ids, created_at) \
+                 VALUES ('{id}', 'ws-1', '{name}', NULL, '{member_ids}', 100)"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        conn.run_migrations(&target).unwrap();
+
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::Text;
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct TeamRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) slug: String,
+                #[diesel(sql_type = Text)]
+                pub(super) lead: String,
+            }
+        }
+        use rows::TeamRow;
+
+        let rows: Vec<TeamRow> = diesel::sql_query("SELECT id, slug, lead FROM teams")
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            // Slug backfills from the id: stable, unique, URL-safe.
+            assert_eq!(r.slug, r.id, "slug must backfill from the team id");
+            // Lead backfills from the workspace Owner.
+            assert_eq!(r.lead, "u-owner", "lead must backfill from the workspace owner");
+        }
+
+        // The (workspace_id, slug) unique index rejects a duplicate slug in
+        // the same workspace but allows the same slug in another workspace.
+        let dup = diesel::sql_query(
+            "INSERT INTO teams (id, workspace_id, name, slug, description, lead, created_at) \
+             VALUES ('team-dup', 'ws-1', 'Dup', 'team-legacy-1', NULL, 'u-owner', 100)",
+        )
+        .execute(&mut conn);
+        assert!(dup.is_err(), "duplicate (workspace, slug) must be rejected");
+
+        // The legacy member_ids column is gone.
+        let legacy_col =
+            diesel::sql_query("SELECT member_ids FROM teams LIMIT 0").execute(&mut conn);
+        assert!(legacy_col.is_err(), "member_ids column must be dropped");
+
+        // team_memberships enforces its composite primary key.
+        diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 1000)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let dup_member = diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 2000)",
+        )
+        .execute(&mut conn);
+        assert!(dup_member.is_err(), "duplicate team membership must be rejected");
+    }
+
     /// Task-102 F1 regression: migration 000054 folds legacy path/pid
     /// rows into the envelope `detail` payload. The fold must be plain
     /// portable SQL (CASE WHEN + string concatenation): this migrations

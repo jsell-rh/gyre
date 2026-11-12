@@ -354,9 +354,18 @@ diesel::table! {
         id -> Text,
         workspace_id -> Text,
         name -> Text,
+        slug -> Text,
         description -> Nullable<Text>,
-        member_ids -> Text,
+        lead -> Text,
         created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    team_memberships (team_id, user_id) {
+        team_id -> Text,
+        user_id -> Text,
+        added_at -> BigInt,
     }
 }
 
@@ -727,6 +736,7 @@ diesel::table! {
 }
 
 diesel::joinable!(trace_spans -> gate_traces (gate_trace_id));
+diesel::joinable!(team_memberships -> teams (team_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
@@ -752,6 +762,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     workspaces,
     personas,
     teams,
+    team_memberships,
     workspace_memberships,
     repo_access_overrides,
     notifications,

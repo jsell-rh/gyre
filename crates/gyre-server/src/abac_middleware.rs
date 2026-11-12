@@ -483,6 +483,11 @@ impl ResourceResolver {
                 // ── Budget ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/workspaces/:id/budget", "budget", None),
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/budget/by-team",
+                    "budget",
+                    None,
+                ),
                 // ── Search ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/search", "search", None),
                 RouteResourceMapping::api("/api/v1/search/suggest", "search", None),
@@ -543,6 +548,16 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/teams/:team_id/members",
+                    "team",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/teams/:team_id/members/:user_id",
+                    "team",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/graph/concept/:concept_name",
