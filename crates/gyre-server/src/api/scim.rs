@@ -737,7 +737,15 @@ mod tests {
 
     #[tokio::test]
     async fn scim_unauthorized_without_token() {
-        std::env::set_var("GYRE_SCIM_TOKEN", "secret");
+        // Configure the SAME token value every other SCIM test writes:
+        // GYRE_SCIM_TOKEN is process-global and the lib tests run in parallel,
+        // so pointing it at a divergent value here races the in-flight
+        // handlers of the other SCIM tests (their bearer token no longer
+        // matches the configured one, their creates turn into 403s, and
+        // scim_delete_user panics on the missing "id"). The rejection under
+        // test comes from the missing Authorization header, which fails
+        // against any configured token value.
+        std::env::set_var("GYRE_SCIM_TOKEN", "test-scim-token");
         let resp = app()
             .oneshot(
                 Request::builder()
