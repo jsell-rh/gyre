@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §CLI"
   - "dependency-graph.md §UI"
-commits: ["73928811cafb9f46adc65689ac75291ae815022b"]
+commits: ["73928811cafb9f46adc65689ac75291ae815022b", "f06e04b7db064c2e302d0dd8e7461433bf723d1e"]
 ---
 
 ## Spec Excerpt
@@ -70,6 +70,19 @@ branch closes the remaining gaps rather than re-implementing what worked.
 Acceptance-criteria boxes above are left exactly as assigned — satisfaction is
 reported here.
 
+### Repair round 2 (verification finding 92fd8ef9)
+
+The prior candidate failed `checks.sh` on rustfmt only: the four
+`DepsCommands::Show` match arms in the gyre-cli test module and the
+`gyre_domain` import wrap in the task-164 server integration test. Fixed by
+`cargo fmt` under the workspace edition (2021); formatting-only, no semantic
+change (commit `f06e04b7`). Note for future rounds: bare `rustfmt --edition
+2024` produces different output than this repo's `cargo fmt` and would itself
+fail the changed-lines check. Everything else in the failing run had passed
+(clippy changed-lines, all static gates, web build).
+
+### Behavior
+
 - **`gyre deps show [repo]` (positional repo)**: `DepsCommands::Show` now takes
   an optional positional repository name; without it the repo is inferred from
   the git remote as before. The show table now reports the columns the plan
@@ -112,19 +125,23 @@ Focused suites (full `cargo test --all` + whole-file `npm test` deferred to the
 independent verifier per the 4 GiB budget rule; raw logs and exit codes under
 `/tmp/stage/review-evidence/task-164/`):
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --test
-  task164_dependency_graph_detail` — exit 0.
-- `cargo test -p gyre-cli` — 150 passed / 0 failed, including the new
-  `cli_deps_show_named_repo_parses`.
-- `vitest run src/__tests__/DependencyGraph.test.js` — 30 passed / 0 failed
-  (8 new cases: orphaned edge/node styling + legend, edge click/Enter → detail
-  panel, version + drift + artifact rendering, breaking-change ack status,
-  acknowledge → API + onRefresh, close).
-- `vitest run` on the six suites covering the touched parent components —
-  89 passed / 0 failed.
-- Static gates exit 0: arch, abac-route-registry, mcp-write-tools,
-  byte-slice-truncation, relative-path-defaults, in-memory-state-stores,
-  inert-enforcement, lossy-secret-conversion, fabricated-scope-defaults.
+- Round 1 (`73928811c`):
+  - `cargo check -p gyre-server` and `cargo check -p gyre-server --test
+    task164_dependency_graph_detail` — exit 0.
+  - `cargo test -p gyre-cli` — 150 passed / 0 failed, including
+    `cli_deps_show_named_repo_parses`.
+  - `vitest run src/__tests__/DependencyGraph.test.js` — 30 passed / 0 failed
+    (8 new cases: orphaned edge/node styling + legend, edge click/Enter → detail
+    panel, version + drift + artifact rendering, breaking-change ack status,
+    acknowledge → API + onRefresh, close).
+  - `vitest run` on the six suites covering the touched parent components —
+    89 passed / 0 failed.
+- Round 2 (`f06e04b7`, formatting-only repair):
+  - `cargo fmt -p gyre-cli -- --check` and `cargo fmt -p gyre-server
+    -- --check` — exit 0 (the failing gate).
+  - `cargo check -p gyre-cli --tests` — exit 0.
+  - `cargo test -p gyre-cli deps` — 11 passed / 0 failed. No web or server
+    source changed this round.
 
 ### Verifier must execute
 
