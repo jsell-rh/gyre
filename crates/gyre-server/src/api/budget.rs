@@ -205,7 +205,8 @@ pub async fn set_workspace_budget(
     // Fire-and-forget side-effecting enforcement (kills agents, emits
     // messages); the PUT result is the saved config, the kill outcome is
     // independently observable in agent status.
-    enforce_workspace_budget(&state, &id, None, None, BUDGET_GRACE_PERIOD_SECS).await; // enforcement:ok — side-effecting kill/notify, no decision to consume
+    let cause = BudgetEnforcementCause::BudgetChanged;
+    enforce_workspace_budget(&state, &id, None, None, BUDGET_GRACE_PERIOD_SECS, cause).await; // enforcement:ok — side-effecting kill/notify, no decision to consume
 
     Ok(Json(BudgetResponse {
         entity_type: "workspace".into(),
@@ -598,9 +599,17 @@ pub async fn record_llm_call_usage(state: &Arc<AppState>, usage: &LlmCallUsage) 
 
     // agent-runtime.md §4 Cascade: agent usage is charged to the repo's
     // budget (fine-grained control) and rolls up to the workspace total.
-    // User-initiated queries carry no repo context and charge the workspace
-    // directly (§4 What's Tracked).
-    if let Some(repo_id) = usage.repo_id.as_ref() {
+    // User-initiated queries (llm_query) are charged to the workspace
+    // budget directly with NO repo-level tracking (§4 What's Tracked:
+    // "user queries have no repo context") — even when the calling route
+    // knows which repo the query was scoped to (specs/assist, explorer,
+    // MCP spec_assist all pass a repo_id). Charging them to the repo would
+    // let user queries exhaust a repo budget and block agent spawns.
+    if let Some(repo_id) = usage
+        .repo_id
+        .as_ref()
+        .filter(|_| usage.usage_type != "llm_query")
+    {
         let now = now_secs();
         if let Err(e) = state
             .budget_usages
@@ -630,7 +639,8 @@ pub async fn record_llm_call_usage(state: &Arc<AppState>, usage: &LlmCallUsage) 
     let ws = usage.workspace_id.to_string();
     let agent = usage.agent_id.as_ref();
     let repo = usage.repo_id.as_ref();
-    enforce_workspace_budget(state, &ws, agent, repo, BUDGET_GRACE_PERIOD_SECS).await; // enforcement:ok — side-effecting kill/notify
+    let cause = BudgetEnforcementCause::UsageReport;
+    enforce_workspace_budget(state, &ws, agent, repo, BUDGET_GRACE_PERIOD_SECS, cause).await; // enforcement:ok — side-effecting kill/notify
 
     // agent-runtime.md §4 Cascade: the per-agent lifetime ceiling
     // (repo override → effective workspace limit) is checked on every
@@ -726,6 +736,29 @@ pub(crate) async fn effective_workspace_config(state: &AppState, ws_key: &str) -
     }
 }
 
+/// What caused a budget enforcement pass — decides how usage beyond 100%
+/// is interpreted (agent-runtime.md §4 Enforcement Levels).
+///
+/// The spec defines "beyond limit" exclusively as the budget-reduced-
+/// below-current-usage case ("The 100% threshold handles normal
+/// exhaustion; beyond-limit handles external budget changes"): only a
+/// configuration change can put running agents strictly beyond the
+/// limit, because usage growth alone first crosses 100% and starts the
+/// graceful stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BudgetEnforcementCause {
+    /// Usage grew through a usage report (cred-proxy agent report or a
+    /// user-initiated LLM query). Crossing — and overshooting — the
+    /// limit is *normal exhaustion*: BudgetExhausted + grace period,
+    /// never an immediate kill.
+    UsageReport,
+    /// The configured limits changed underneath running agents
+    /// (workspace budget PUT). Usage strictly beyond the new limit
+    /// means the budget was *reduced below current usage*: immediate
+    /// hard kill, no grace.
+    BudgetChanged,
+}
+
 /// Check a workspace's aggregated usage against its effective limits and
 /// enforce agent-runtime.md §4 Enforcement Levels:
 ///
@@ -736,8 +769,12 @@ pub(crate) async fn effective_workspace_config(state: &AppState, ws_key: &str) -
 ///   `list_after`, the surfaces agents actually poll), a `grace_secs` grace
 ///   period to commit + complete, then `kill_process()` on agents still
 ///   Active (marked `Stopped`; worktree preserved; task remains InProgress).
-/// - Beyond limit (usage strictly greater than the limit — the budget was
-///   reduced below current usage): immediate `kill_process()`, no grace.
+///   This branch covers normal exhaustion however it lands on or past the
+///   limit — a crossing report almost always overshoots (950 → 1150 against
+///   a 1000-token limit) and still gets the mandated grace period.
+/// - Beyond limit (`cause == BudgetChanged` and usage strictly greater than
+///   the limit — the budget was reduced below current usage): immediate
+///   `kill_process()`, no grace.
 ///
 /// Called after every usage report and after every workspace budget
 /// update. Best-effort: enforcement failures are logged, never propagated
@@ -748,6 +785,7 @@ pub async fn enforce_workspace_budget(
     trigger_agent: Option<&Id>,
     trigger_repo: Option<&Id>,
     grace_secs: u64,
+    cause: BudgetEnforcementCause,
 ) {
     let ws_key = workspace_key(workspace_id);
     let effective = effective_workspace_config(state, &ws_key).await;
@@ -764,8 +802,11 @@ pub async fn enforce_workspace_budget(
         return;
     };
 
-    if pct > 1.0 {
+    if pct > 1.0 && cause == BudgetEnforcementCause::BudgetChanged {
         // Beyond limit — hard kill, immediately (agent-runtime.md §4).
+        // Only reachable when the limits changed underneath running
+        // agents: usage growth alone crosses 100% first and takes the
+        // graceful-stop branch below, whatever the overshoot.
         tracing::warn!(
             workspace_id,
             usage_pct = format!("{:.2}", pct),
@@ -1910,7 +1951,15 @@ mod tests {
             .unwrap();
 
         // grace 0: the grace timer fires immediately.
-        super::enforce_workspace_budget(&state, "ws-grace", None, None, 0).await;
+        super::enforce_workspace_budget(
+            &state,
+            "ws-grace",
+            None,
+            None,
+            0,
+            super::BudgetEnforcementCause::UsageReport,
+        )
+        .await;
 
         // BudgetExhausted delivered to the active agent's INBOX — the
         // surface agents actually read (list_unacked/list_after return
@@ -1963,9 +2012,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overshooting_report_gets_graceful_stop_not_hard_kill() {
+        // F1 regression (agent-runtime.md §4 Enforcement Levels): normal
+        // exhaustion that overshoots the limit in the crossing report — the
+        // common case (950 → 1150 against a 1000-token limit) — must get the
+        // 100% graceful stop, not the beyond-limit hard kill. "Beyond
+        // limit" is reserved for budgets reduced below current usage
+        // (external budget changes), which a usage report can never be.
+        let (state, ws_id, agent_id, _task_id) = enforcement_fixture("ws-over").await;
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-over"),
+                "workspace",
+                "ws-over",
+                0,
+                950,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        // The crossing report: 950 + 200 = 1150 vs limit 1000 → 115%.
+        super::record_llm_call_usage(
+            &state,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: ws_id.clone(),
+                repo_id: None,
+                agent_id: Some(agent_id.clone()),
+                task_id: None,
+                usage_type: "agent_run".to_string(),
+                input_tokens: 200,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                model: "test-model".to_string(),
+            },
+        )
+        .await;
+
+        // Graceful stop: the agent is NOT hard-killed — it stays Active
+        // for the grace period to commit + complete.
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            AgentStatus::Active,
+            "overshooting exhaustion must get the grace period, not an immediate kill"
+        );
+        // BudgetExhausted delivered to the agent inbox with the full grace.
+        let inbox = state.messages.list_unacked(&agent_id, 50).await.unwrap();
+        let exhausted: Vec<_> = inbox
+            .iter()
+            .filter(|m| m.kind == gyre_common::MessageKind::BudgetExhausted)
+            .collect();
+        assert_eq!(
+            exhausted.len(),
+            1,
+            "active agent must receive BudgetExhausted in its inbox"
+        );
+        assert_eq!(
+            exhausted[0].payload.as_ref().unwrap()["grace_secs"],
+            serde_json::json!(super::BUDGET_GRACE_PERIOD_SECS)
+        );
+        // Worktree preserved and task still InProgress while in grace.
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn overshoot_exhaustion_kills_after_grace_expiry() {
+        // The overshoot path routes through the grace timer (not the
+        // synchronous beyond-limit kill): after the grace period agents
+        // still Active are killed (Stopped), worktree preserved, task
+        // remains InProgress for human review.
+        let (state, _ws_id, agent_id, task_id) = enforcement_fixture("ws-over-kill").await;
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key("ws-over-kill"),
+                "workspace",
+                "ws-over-kill",
+                0,
+                1150,
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        // grace 0: the grace timer fires immediately.
+        super::enforce_workspace_budget(
+            &state,
+            "ws-over-kill",
+            None,
+            None,
+            0,
+            super::BudgetEnforcementCause::UsageReport,
+        )
+        .await;
+
+        let mut killed = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+            if agent.status == AgentStatus::Stopped {
+                killed = true;
+                break;
+            }
+        }
+        assert!(
+            killed,
+            "overshoot exhaustion must kill via the grace timer after the grace period"
+        );
+        let wts = state.worktrees.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(wts.len(), 1, "budget kill must preserve the worktree");
+        let task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            task.status,
+            TaskStatus::InProgress,
+            "task must remain InProgress after a budget kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_query_with_repo_context_charges_workspace_only() {
+        // F2 regression (agent-runtime.md §4 What's Tracked):
+        // user-initiated queries (llm_query) are "Charged to workspace
+        // budget directly (no repo-level tracking — user queries have no
+        // repo context)" — even when the calling route scoped the query to
+        // a repo (specs/assist, explorer/generate, MCP spec_assist all
+        // pass repo_id). Charging them to the repo would let user queries
+        // exhaust a repo budget and block agent spawns.
+        let state = crate::mem::test_state();
+        let repo_id = gyre_common::Id::new("repo-user-query");
+        super::record_llm_call_usage(
+            &state,
+            &super::LlmCallUsage {
+                tenant_id: gyre_common::Id::new("tenant-1"),
+                workspace_id: gyre_common::Id::new("ws-user-query"),
+                repo_id: Some(repo_id.clone()),
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: 120,
+                output_tokens: 30,
+                cost_usd: 0.01,
+                model: "test-model".to_string(),
+            },
+        )
+        .await;
+
+        // Workspace (and tenant) counters incremented...
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&super::workspace_key("ws-user-query"))
+            .await
+            .unwrap()
+            .expect("workspace usage must exist");
+        assert_eq!(ws_usage.tokens_used_today, 150);
+        let tenant_usage = state
+            .budget_usages
+            .get_usage(super::tenant_key())
+            .await
+            .unwrap()
+            .expect("tenant usage must exist");
+        assert_eq!(tenant_usage.tokens_used_today, 150);
+        // ...but no repo entry: user queries have no repo-level tracking.
+        let repo_usage = state
+            .budget_usages
+            .get_usage(&super::repo_key(repo_id.as_str()))
+            .await
+            .unwrap();
+        assert!(
+            repo_usage.is_none(),
+            "llm_query must not charge the repo budget (charged to workspace directly)"
+        );
+        // The audit trail still records the repo the query was scoped to.
+        let records = state
+            .budget_calls
+            .list_by_workspace("ws-user-query", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].repo_id.as_ref(), Some(&repo_id));
+    }
+
+    #[tokio::test]
     async fn beyond_limit_kills_immediately_without_grace() {
         let (state, ws_id, agent_id, task_id) = enforcement_fixture("ws-beyond").await;
-        // Usage 1500 vs limit 1000 — the budget was "reduced" below usage.
+        // Usage 1500 vs limit 1000 with the limits changed underneath the
+        // running agents — the budget was reduced below current usage
+        // (external budget change), the only path to beyond-limit.
         state
             .budget_usages
             .add_tokens_cost(
@@ -1979,7 +2215,15 @@ mod tests {
             .await
             .unwrap();
 
-        super::enforce_workspace_budget(&state, "ws-beyond", None, None, 60).await;
+        super::enforce_workspace_budget(
+            &state,
+            "ws-beyond",
+            None,
+            None,
+            60,
+            super::BudgetEnforcementCause::BudgetChanged,
+        )
+        .await;
 
         // Immediate, synchronous kill — no grace period.
         let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
