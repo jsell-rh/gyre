@@ -2,7 +2,7 @@
 title: "Moldable Views — type, trait, endpoint, and spec detail views"
 spec_ref: "system-explorer.md §2"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
 commits: ["d655e87ae975d70c4515f120be5ada986aaefcf9", "9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524", "ee5a6e10e30f408fc5609d802663fe848e8b8780"]
@@ -182,6 +182,33 @@ Focused web probes only (locked `npm ci`; repo's locked vitest).
   TaskStatus via the edge and via the doc_comment fallback, renders
   `String` as non-clickable plain text, and unwraps `Option<Id>` to the Id
   type node (evidence: /tmp/stage/review-evidence/field-type-probe-output.txt).
+
+### Rebase repair (merge 0fa83e502)
+
+The published candidate (c39e111cd, verified base f98b17925)
+conflicted with current main at the assignment base 3b734b1af
+(task-168: repo lifecycle, gate config UI). Resolved by merging
+3b734b1af into the branch: source is a clean union — the only
+both-sides overlaps were generated `web/dist` assets, resolved to the
+assignment-base version (the controller's integration stage rebuilds
+and publishes them); Rust files are byte-identical to main's, and the
+task-179 web implementation (moldable views, ExplorerView,
+NodeDetailPanel) is preserved unchanged. The two sides' web changes are
+disjoint (main touched RepoSettings/WorkspaceSettings/App.svelte/api.js/
+locales; task-179 touched ExplorerView/NodeDetailPanel/moldable/*), and
+main's App.svelte change is purely additive (`goToRepo` context).
+
+Fresh probes on the merged tree (locked `npm ci`, repo's locked vitest):
+`npx vitest run src/__tests__/MoldableViews.test.js
+src/__tests__/NodeDetailPanel.test.js src/__tests__/RepoSettings.test.js
+src/__tests__/WorkspaceSettings.test.js` → 4 files, 224/224 passed,
+exit 0; `npx vitest run src/__tests__/ExplorerCanvasDrillDown.test.js`
+→ 3/3, exit 0. `git diff --check` clean; `git diff MERGE_HEAD --
+crates/` empty (Rust unchanged from main, which passed format and
+architecture lint). The verifier should run the standard Rust gates
+(cargo test --all, clippy) and the web build on the merged head — no
+Rust changes exist relative to main, so those gates exercise main's
+already-published code plus this union.
 
 No Rust changes: the knowledge-graph API (`GET /repos/:id/graph`) already
 exposes every field the views consume (GraphNode/GraphEdge in
