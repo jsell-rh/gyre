@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: ["362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "9f5bbc4be272ccc164e10f591be11df5046789ae"]
 ---
 
 ## Spec Excerpt
@@ -123,6 +123,20 @@ with the round-1 review findings repaired.
   Selecting a saved ad-hoc concept from the view selector now re-applies
   the grouping.
 
+### Repair: rebase onto the task-176 assignment base
+
+The candidate branch was rebased onto the current assignment base
+(`7e9b3cfe`, task-176 Meta-specs Preview Loop). The single content
+conflict — `ExplorerView.svelte` import block, task-182's
+`viewDocumentToQuery` import vs. task-176's `flow-templates` import —
+was resolved by keeping both (every symbol is used by the merged file:
+`viewDocumentToQuery` on the saved-concept reload path,
+`pickTraceMr`/`matchFlowTemplate`/`flowTemplateQuery`/`FLOW_TEMPLATES`
+on the flow-template path). No other conflicts; `ExplorerCanvas.svelte`
+and `api.js` auto-merged cleanly. Post-merge, the full focused matrix
+was re-run green on the merged tree (see evidence below), including
+the flow-template suites from the base side.
+
 ### Test evidence
 
 - `web/src/__tests__/ExplorerConceptViews.test.js` (8 tests): concept
@@ -134,19 +148,24 @@ with the round-1 review findings repaired.
   re-applied, fade + annotation); multi-select → right-click → dialog →
   save asserting the persisted ViewQuery spec; dialog validation/error
   paths; edge-emphasis draw-path tests.
-- `web/src/__tests__/generated-view.test.js` (17 tests): substring
+- `web/src/__tests__/generated-view.test.js` (22 tests): substring
   translation (`seed_match: 'substring'`), depth-0 pinning, the Ask-path
   translation + `resolveScopeNodes` end-to-end probe scenario,
   `viewDocumentToQuery` round trip (deep-copy, ViewSpec translation,
   non-object rejection).
-- `web/src/__tests__/view-query-scope.test.js` (16 tests): substring
+- `web/src/__tests__/view-query-scope.test.js` (15 tests): substring
   seed matching (all-matches seeding, edge expansion from substring
   seeds, no-match null, exact default when `seed_match` is absent).
 - Rust: `cargo test -p gyre-domain concept` — 10 unit + 2 integration
   tests pass, including the new substring seed tests (all-matches,
   expansion, unmatched-seed warning) and `seed_match` validation;
   `cargo test -p gyre-common view_query` — 5 pass.
-- Regression suites re-run green: ExplorerGeneratedViews,
-  ExplorerViewNavigableArchitecture, ExplorerViewLayoutRenderers,
-  ExplorerCanvas, filter-categories, view-query-validator,
-  ExplorerDefaultViews (268 tests total across those files).
+- Regression suites re-run green on the merged tree:
+  ExplorerGeneratedViews, ExplorerViewNavigableArchitecture,
+  ExplorerViewLayoutRenderers, ExplorerCanvas, ExplorerCanvas.flow,
+  filter-categories, view-query-validator, ExplorerDefaultViews,
+  canvas-filters, ExplorerViewFlowTemplates, flow-templates — 11
+  files, 300 tests (flow-template suites cover the base-side feature
+  sharing ExplorerView.svelte after the conflict resolution).
+  Evidence: `/tmp/stage/review-evidence/frontend-focused-tests.log`
+  and `rust-focused-tests.log`.
