@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c"]
+commits: ["c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
 ---
 
 ## Spec Excerpt
