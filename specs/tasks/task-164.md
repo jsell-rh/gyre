@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §CLI"
   - "dependency-graph.md §UI"
-commits: ["73928811cafb9f46adc65689ac75291ae815022b", "f06e04b7db064c2e302d0dd8e7461433bf723d1e"]
+commits: ["f06e04b7db064c2e302d0dd8e7461433bf723d1e", "73928811cafb9f46adc65689ac75291ae815022b"]
 ---
 
 ## Spec Excerpt
