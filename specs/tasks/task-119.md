@@ -3,7 +3,7 @@ title: "Implement budget enforcement cascade"
 spec_ref: "agent-runtime.md §4 Budget Enforcement"
 depends_on:
   - task-118
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-runtime.md §4. Budget Enforcement"
   - "agent-runtime.md §Cascade"
@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -104,72 +104,3 @@ From §5 (Agent Prompt Structure): Describes the three-section prompt assembly (
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Prompt Structure) in full. Existing budget code: `gyre-server/src/api/budget.rs` and `gyre-domain/src/budget.rs`. Agent usage reporting: `POST /api/v1/agents/:id/usage` in `gyre-server/src/api/spawn.rs`. BudgetWarning/BudgetExhausted message kinds: `gyre-common/src/message.rs`. Compute target kill: grep for `kill_process` in server. MCP prompt delivery: `gyre-server/src/mcp.rs` — look for `system://persona` or `system://context`. Background jobs: grep for `tokio::spawn` or `interval` in `gyre-server/src/main.rs` or `lib.rs`.
-
-## Shipped
-
-agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) are implemented in production code. Prior rounds (commits
-4bfdf85b, 7bdc6060, bfb2dc3d, 29d1a961, dc09d695, d00113b) shipped:
-cascade validation (repo ≤ workspace ≤ tenant, effective-limit
-semantics), enforcement levels (80% warning notification + bus event,
-100% BudgetExhausted-to-inbox + 60s grace timer then kill, beyond-limit
-immediate kill; worktree preserved, task InProgress, token revoked,
-AgentKilled audit), tracking (llm_tokens/llm_cost_usd per call,
-compute_minutes charged on every terminal transition from spawned_at
-wall clock, llm_query charged to workspace only), the hourly rolling
-24h reset job recomputed from per-call records, and the three-section
-prompt assembly (GYRE_META_SPEC_PROMPT/SET_SHA +
-GYRE_PROTOCOL_PROMPT + GYRE_ITERATION at spawn; four MCP prompts
-delivering persona/protocol/context/constraints).
-
-### This round — rebase repair onto base d31906c5 (merge commit b3b6f502)
-
-The candidate and the new base had independently added MCP prompt
-delivery (candidate: agent-runtime §5 meta-spec semantics; base
-task-150: platform-model §4.3 persona-slug semantics). The auto-merge
-kept BOTH, producing duplicate `prompt_definitions()` /
-`handle_prompt_get()` / dispatcher arms / test names in mcp.rs (does
-not compile) plus content conflicts in docs/agent-protocol.md and
-docs/api-reference.md.
-
-Resolution, per the spec text (identical in both parents and the
-merge-base): agent-runtime.md §5 amends platform-model.md §4's
-mapping — "system://persona delivers the assembled meta-spec prompt
-set":
-
-- `crates/gyre-server/src/mcp.rs`: kept the candidate's meta-spec
-  prompt handlers and dispatcher arms; removed the base's duplicate
-  persona-slug handlers, arms, and its 10 MCP prompt tests
-  (superseded dispatch semantics). The base's `api/prompts.rs` and
-  `GYRE_PROMPT_*` spawn-time injection are preserved — persona
-  resolution/binding at spawn is unchanged, and the spawn env-dump
-  tests covering it are intact.
-- `crates/gyre-server/src/api/spawn.rs`: corrected a merge-stale
-  comment (GYRE_PROMPT_* content is the platform-model §4.3
-  spawn-injection set; the MCP `system://persona` prompt serves the
-  meta-spec set per agent-runtime §5).
-- `docs/agent-protocol.md` / `docs/api-reference.md`: resolved to
-  document both injected env-var sets and the merged MCP prompt
-  semantics.
-- `specs/coverage/system/platform-model.md`: row 23 reconciled — the
-  MCP persona-slug dispatch was superseded by agent-runtime §5
-  (agent-runtime coverage row 32 tracks the delivered semantics);
-  spawn injection retained.
-
-### Test evidence
-
-- `cargo check -p gyre-server` and `cargo check -p gyre-server
-  --tests` pass after the resolution (duplicate fn/test names from
-  the bad auto-merge fail here). Evidence:
-  `/tmp/stage/review-evidence/task119-rebase-repair.txt`.
-- Mechanical checks pass: check-arch, check-mcp-write-tools,
-  check-abac-route-registry, check-dead-message-kinds,
-  check-mem-port-contracts, check-inert-enforcement,
-  check-task-commit-attribution (merge commit recorded above).
-- The 4 GiB sandbox budget blocks gyre-server test-binary linking;
-  the verifier must run: `cargo test -p gyre-server --lib mcp_prompts`
-  (merged MCP prompt tests incl. persona-without-record truthfulness
-  and protocol content), `cargo test -p gyre-server --lib api::budget`
-  (budget enforcement suite), `cargo test -p gyre-server --lib
-  api::spawn::tests` (prompt-set injection), then `cargo test --all`.
-- rustfmt clean on all changed files.
