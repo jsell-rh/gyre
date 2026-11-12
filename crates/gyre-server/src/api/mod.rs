@@ -441,6 +441,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(specs_assist::assist_spec),
         )
         .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
+        )
+        .route(
             "/api/v1/repos/:id/specs/save",
             post(specs_assist::save_spec),
         )
@@ -681,6 +685,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(trust_anchors::get_trust_anchor)
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
+        )
+        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
+        .route(
+            "/api/v1/tenants/:id/meta-specs/set",
+            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
         )
         // Workspaces (M22.1)
         .route(

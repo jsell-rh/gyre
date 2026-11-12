@@ -97,7 +97,7 @@ pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
 pub use message::{MessageConsumer, MessageRepository};
 pub use meta_spec_repository::{MetaSpecBindingRepository, MetaSpecFilter, MetaSpecRepository};
-pub use meta_spec_set::MetaSpecSetRepository;
+pub use meta_spec_set::{MetaSpecSetRepository, TenantMetaSpecSetRepository};
 pub use network::NetworkPeerRepository;
 pub use notification::NotificationRepository;
 pub use policy::PolicyRepository;

@@ -452,10 +452,16 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/tenants/:id/meta-specs/set", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
                     "meta_spec",
                     None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/assist",
+                    "meta_spec",
+                    Some("generate"),
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",

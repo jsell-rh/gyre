@@ -656,6 +656,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    tenant_meta_spec_sets (tenant_id) {
+        tenant_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     rollout_policies (workspace_id) {
         workspace_id -> Text,
         json -> Text,
@@ -758,6 +766,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tenants,
     messages,
     meta_spec_sets,
+    tenant_meta_spec_sets,
     budget_call_records,
     user_workspace_state,
     gate_traces,
@@ -776,6 +785,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    breaking_changes,
+    dependency_policies,
     commit_signatures,
     spec_assertion_results,
 );
@@ -1024,6 +1035,32 @@ diesel::table! {
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
         tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    breaking_changes (id) {
+        id -> Text,
+        dependency_edge_id -> Text,
+        source_repo_id -> Text,
+        commit_sha -> Text,
+        description -> Text,
+        detected_at -> BigInt,
+        acknowledged -> Integer,
+        acknowledged_by -> Nullable<Text>,
+        acknowledged_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    dependency_policies (workspace_id) {
+        workspace_id -> Text,
+        breaking_change_behavior -> Text,
+        max_version_drift -> Integer,
+        stale_dependency_alert_days -> Integer,
+        require_cascade_tests -> Integer,
+        auto_create_update_tasks -> Integer,
+        updated_at -> BigInt,
     }
 }
 
