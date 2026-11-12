@@ -8,12 +8,12 @@
 //! The ledger is synced from the manifest on every push to the default branch.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+pub use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
 pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 
 // ---------------------------------------------------------------------------
@@ -53,30 +53,6 @@ impl Default for ManifestDefaults {
 }
 fn default_true() -> bool {
     true
-}
-/// Link type between specs — drives mechanical enforcement.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SpecLinkType {
-    Implements,
-    Supersedes,
-    DependsOn,
-    ConflictsWith,
-    Extends,
-    References,
-}
-
-impl std::fmt::Display for SpecLinkType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SpecLinkType::Implements => write!(f, "implements"),
-            SpecLinkType::Supersedes => write!(f, "supersedes"),
-            SpecLinkType::DependsOn => write!(f, "depends_on"),
-            SpecLinkType::ConflictsWith => write!(f, "conflicts_with"),
-            SpecLinkType::Extends => write!(f, "extends"),
-            SpecLinkType::References => write!(f, "references"),
-        }
-    }
 }
 
 /// A link declared in the manifest between specs.
@@ -213,40 +189,29 @@ pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
 // ---------------------------------------------------------------------------
 
 // ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
+// The former in-memory `SpecLedger` / `SpecApprovalHistory` store aliases were
+// removed: the ledger is port-backed (`gyre_ports::SpecLedgerRepository`) and
+// approval events are persisted through `gyre_ports::SpecApprovalEventRepository`,
+// both wired via the `store!` macro in `build_state`. Tests build local map
+// fixtures instead (see the test module below).
 
-/// Type alias for the shared ledger store (in-memory, used by tests and sync_spec_ledger).
-pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
-/// Type alias for the shared approval history store (in-memory).
-pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
+// in-memory-state-stores:ok — hot cache of the durable `spec_links` table
+// (spec-links.md §Forge-Maintained Spec Graph): the SQL table behind
+// `AppState.spec_link_repo` is authoritative, every mutation writes through,
+// and boot reloads via `load_spec_links_into_store` (lib.rs).
+pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>; // in-memory-state-stores:ok — see above
 
-/// A resolved link entry stored in the forge's spec link graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecLinkEntry {
-    pub id: String,
-    /// Source spec path (the spec that declares this link).
-    pub source_path: String,
-    /// Repo ID that owns the source spec (for cross-workspace link scoping).
-    pub source_repo_id: Option<String>,
-    pub link_type: SpecLinkType,
-    /// Target spec path (within the target repo, without leading @workspace/repo prefix).
-    pub target_path: String,
-    /// Resolved target repo UUID. None for unresolved cross-workspace links.
-    pub target_repo_id: Option<String>,
-    /// Human-readable composite path preserved from the manifest `target` field
-    /// (e.g. "@platform-core/api-svc/system/auth.md"). Used for display and staleness checking.
-    /// None for same-repo links.
-    pub target_display: Option<String>,
-    /// SHA the link was pinned to.
-    pub target_sha: Option<String>,
-    pub reason: Option<String>,
-    /// Link health: "active" | "stale" | "broken" | "conflicted" | "unresolved"
-    pub status: String,
-    pub created_at: u64,
-    pub stale_since: Option<u64>,
+/// A stale inbound link collected for side-effect processing (sync step 6b):
+/// drift-review task creation (F5/F7) and extends-specific approval
+/// invalidation. Named struct instead of a positional 4-tuple so source and
+/// target paths cannot be swapped silently (TASK-048 F1 hazard class).
+#[derive(Debug, Clone)]
+struct StaleInboundLink {
+    source_path: String,
+    target_path: String,
+    source_repo_id: Option<String>,
+    link_type: SpecLinkType,
 }
-
-/// Type alias for the shared spec links store.
-pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
 
 /// Read the manifest from a commit and return the set of registered spec paths.
 ///
@@ -434,6 +399,10 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
+    // Durable spec-link graph repository (spec-links.md §Forge-Maintained Spec
+    // Graph). All link mutations below are written through so the SQL table is
+    // the authoritative graph across restarts.
+    link_repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
     repo_path: &str,
     new_sha: &str,
     now: u64,
@@ -474,6 +443,10 @@ pub async fn sync_spec_ledger(
     // 4. For each manifest entry, compute blob SHA and sync ledger.
     // Track specs whose SHAs changed for inbound staleness detection (TASK-016 F1).
     let mut changed_spec_paths: Vec<String> = Vec::new();
+    // Per-spec current blob SHA (from HEAD) — reused as `source_sha` on the
+    // spec's link entries (spec-links.md §Forge-Maintained Spec Graph).
+    let mut manifest_sha_by_path: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for entry in &manifest.specs {
         let spec_file_path = format!("specs/{}", entry.path);
         let blob_sha = match get_blob_sha(&git_bin, repo_path, new_sha, &spec_file_path).await {
@@ -487,6 +460,7 @@ pub async fn sync_spec_ledger(
                 "".to_string()
             }
         };
+        manifest_sha_by_path.insert(entry.path.clone(), blob_sha.clone());
 
         let approval_mode = entry.effective_approval_mode().to_string();
         let auto_invalidate = entry.effective_auto_invalidate(&manifest.defaults);
@@ -563,7 +537,12 @@ pub async fn sync_spec_ledger(
         let mut new_links: Vec<SpecLinkEntry> = Vec::new();
         for entry in &manifest.specs {
             for link in &entry.links {
-                let id = format!("{}-{}-{}", entry.path, link.link_type, link.target);
+                let id = gyre_domain::spec_links::spec_link_id(
+                    source_repo_id,
+                    &entry.path,
+                    &link.link_type,
+                    &link.target,
+                );
                 let parsed = parse_cross_workspace_target(&link.target);
 
                 let (target_path, target_repo_id, target_display, status) = match &parsed {
@@ -629,6 +608,10 @@ pub async fn sync_spec_ledger(
                     id,
                     source_path: entry.path.clone(),
                     source_repo_id: source_repo_id.map(|s| s.to_string()),
+                    source_sha: manifest_sha_by_path
+                        .get(&entry.path)
+                        .cloned()
+                        .unwrap_or_default(),
                     link_type: link.link_type.clone(),
                     target_path,
                     target_repo_id,
@@ -715,13 +698,50 @@ pub async fn sync_spec_ledger(
             }
         }
 
-        // Replace all links originating from specs in this manifest (full refresh).
+        // Replace all links originating from specs in this manifest (full refresh),
+        // in memory AND in the durable repository (spec-links.md
+        // §Forge-Maintained Spec Graph — the SQL table is authoritative).
+        // Both stores use the same (source_repo_id, source_path) scoping so
+        // they can never diverge: a push from one repo replaces only that
+        // repo's rows for the manifest's paths.
         {
             let source_paths: std::collections::HashSet<String> =
                 manifest.specs.iter().map(|e| e.path.clone()).collect();
-            let mut store = links_store.lock().await;
-            store.retain(|l| !source_paths.contains(&l.source_path));
-            store.extend(new_links);
+            let repo_scope = source_repo_id.unwrap_or("");
+            {
+                let mut store = links_store.lock().await;
+                store.retain(|l| {
+                    let link_repo_key = l.source_repo_id.as_deref().unwrap_or("");
+                    !(link_repo_key == repo_scope && source_paths.contains(&l.source_path))
+                });
+                store.extend(new_links.iter().cloned());
+            }
+            // One replace_for_source call per source spec in this manifest —
+            // including specs whose link set is now EMPTY, so links removed
+            // from the manifest are deleted from the durable table too (an
+            // empty set must clear the persisted rows, not skip them).
+            let links_by_path: std::collections::HashMap<&str, Vec<SpecLinkEntry>> = new_links
+                .iter()
+                .fold(std::collections::HashMap::new(), |mut acc, link| {
+                    acc.entry(link.source_path.as_str())
+                        .or_default()
+                        .push(link.clone());
+                    acc
+                });
+            for entry in &manifest.specs {
+                let empty: Vec<SpecLinkEntry> = Vec::new();
+                let links = links_by_path.get(entry.path.as_str()).unwrap_or(&empty);
+                if let Err(e) = link_repo
+                    .replace_for_source(repo_scope, &entry.path, links)
+                    .await
+                {
+                    warn!(
+                        source_repo_id = repo_scope,
+                        source_path = %entry.path,
+                        "spec-registry: failed to persist spec links: {e}"
+                    );
+                }
+            }
         }
     }
 
@@ -735,6 +755,9 @@ pub async fn sync_spec_ledger(
         let changed_set: std::collections::HashSet<&str> =
             changed_spec_paths.iter().map(|s| s.as_str()).collect();
         let mut store = links_store.lock().await;
+        // Links mutated to stale in this pass — persisted below so the SQL
+        // table stays authoritative (spec-links.md §Forge-Maintained Spec Graph).
+        let mut mutated: Vec<SpecLinkEntry> = Vec::new();
         for link in store.iter_mut() {
             // Only update links that target a changed spec and aren't already stale/broken.
             if changed_set.contains(link.target_path.as_str())
@@ -749,6 +772,7 @@ pub async fn sync_spec_ledger(
                 );
                 link.status = "stale".to_string();
                 link.stale_since = Some(now);
+                mutated.push(link.clone());
             }
         }
         // Drop the lock before doing ledger updates and task creation.
@@ -756,55 +780,60 @@ pub async fn sync_spec_ledger(
         // - Includes source_repo_id and link_type for correct task assignment (F5).
         // - Covers all link types for drift-review task creation (F7).
         // - Excludes links from the current manifest (already processed in step 6) (F6).
-        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = store
+        let inbound_stale_links: Vec<StaleInboundLink> = store
             .iter()
             .filter(|l| {
                 l.stale_since == Some(now)
                     && changed_set.contains(l.target_path.as_str())
                     && !manifest_paths.contains(&l.source_path)
             })
-            .map(|l| {
-                (
-                    l.source_path.clone(),
-                    l.target_path.clone(),
-                    l.source_repo_id.clone(),
-                    l.link_type.clone(),
-                )
+            .map(|l| StaleInboundLink {
+                source_path: l.source_path.clone(),
+                target_path: l.target_path.clone(),
+                source_repo_id: l.source_repo_id.clone(),
+                link_type: l.link_type.clone(),
             })
             .collect();
         drop(store);
 
+        // Write staleness transitions through to the durable graph.
+        for link in &mutated {
+            if let Err(e) = link_repo.save(link).await {
+                warn!(link_id = %link.id, "spec-registry: failed to persist stale link: {e}");
+            }
+        }
+
         // Apply side effects for inbound stale links.
-        for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
+        for link in &inbound_stale_links {
             // Look up source spec's ledger entry for workspace_id (F5).
-            let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
+            let maybe_source = ledger.find_by_path(&link.source_path).await.ok().flatten();
             let ws_id = maybe_source.as_ref().and_then(|e| e.workspace_id.clone());
 
             // Step 3 (generic): drift-review task for stale inbound links.
             // Excludes `references` — spec says "No mechanical enforcement."
-            if *link_type == SpecLinkType::References {
+            if link.link_type == SpecLinkType::References {
                 continue;
             }
             create_drift_review_task(
                 tasks,
-                source_path,
-                target_path,
-                link_type,
-                link_repo_id.as_deref(),
+                &link.source_path,
+                &link.target_path,
+                &link.link_type,
+                link.source_repo_id.as_deref(),
                 ws_id.as_deref(),
                 now,
             )
             .await;
 
             // Step 4 (extends-specific): drift_status + approval invalidation.
-            if *link_type == SpecLinkType::Extends {
+            if link.link_type == SpecLinkType::Extends {
                 if let Some(mut source_entry) = maybe_source {
                     source_entry.drift_status = "drifted".to_string();
                     source_entry.approval_status = ApprovalStatus::Pending;
                     source_entry.updated_at = now;
                     let _ = ledger.save(&source_entry).await;
                     info!(
-                        spec_path = %source_path,
+                        spec_path = %link.source_path,
                         "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
                     );
                 }
@@ -1261,6 +1290,13 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// Test-only in-memory ledger fixture. Production state never uses this:
+    /// the ledger is port-backed (`gyre_ports::SpecLedgerRepository`, wired
+    /// via `store!` in `build_state`), so the alias lives inside the test
+    /// module rather than production code.
+    type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 
     const SAMPLE_MANIFEST: &str = r#"
 version: 1
@@ -1459,10 +1495,15 @@ concepts:
         let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
             Arc::new(crate::mem::MemSpecLedgerRepository::default());
         let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // Durable link repo (Mem is enough here: this test asserts ledger
+        // population, not link durability, but the sync path requires one).
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
 
         sync_spec_ledger(
             &ledger,
             &links_store,
+            &link_repo,
             dir.path().to_str().unwrap(),
             &sha,
             1_700_000_000,
@@ -2031,6 +2072,7 @@ specs:
             id: "test".to_string(),
             source_path: "system/a.md".to_string(),
             source_repo_id: Some("repo-1".to_string()),
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/contract.md".to_string(),
             target_repo_id: None,
@@ -2085,6 +2127,7 @@ specs:
             id: id.to_string(),
             source_path: source.to_string(),
             source_repo_id: Some(source_repo_id.to_string()),
+            source_sha: "src-sha".to_string(),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
@@ -2616,6 +2659,7 @@ specs:
             link_type: SpecLinkType::References,
             target_sha: Some("old_sha".to_string()),
             source_repo_id: Some("repo_notes".to_string()),
+            source_sha: "src-sha".to_string(),
             target_repo_id: None,
             target_display: None,
             reason: None,
@@ -2702,6 +2746,34 @@ specs:
         let sha = run(&["rev-parse", "HEAD"]);
 
         (dir, sha)
+    }
+
+    /// Helper: overwrite files in an existing test repo, commit, and return
+    /// the new HEAD SHA (models a second push).
+    fn add_commit(dir: &tempfile::TempDir, files: &[(&str, &str)]) -> String {
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        for (file_path, content) in files {
+            let full = path.join(file_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            run(&["add", file_path]);
+        }
+        run(&["commit", "-m", "update"]);
+        run(&["rev-parse", "HEAD"])
     }
 
     #[tokio::test]
@@ -2857,6 +2929,482 @@ specs:
         assert!(
             result.is_ok(),
             "should accept when all specs are registered"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task-198: persistent forge-maintained spec-link graph
+    // (spec-links.md §Forge-Maintained Spec Graph)
+    // -----------------------------------------------------------------------
+
+    /// The in-memory graph must be loadable from the durable repository at
+    /// boot: seed via a real `sync_spec_ledger` push, then simulate a restart
+    /// by building a fresh store from the same repository and asserting the
+    /// graph is non-empty and identical — before any re-push.
+    ///
+    /// This is the section-closing restart-durability evidence: it fails
+    /// against the pre-task empty-init behavior (fresh store starts empty and
+    /// the graph is lost until every repo pushes again).
+    #[tokio::test]
+    async fn restart_rebuilds_spec_link_graph_from_persisted_table() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // Manifest with two specs and a cross-spec depends_on link pinned to a
+        // SHA that does not match the target's ledger SHA — the staleness
+        // checker must see it after a restart too.
+        let manifest = r#"version: 1
+specs:
+  - path: system/parent.md
+    title: Parent
+    owner: user:test
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: old_pinned_sha
+        reason: needs parent guarantees"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/parent.md", "# P"),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        // "Push" phase: run sync against the real durable repo (a real
+        // SQLite database, exactly as the server wires it in build_state).
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        // Target spec already in the ledger at a DIFFERENT SHA than the pinned
+        // one, so the link is stale — the post-restart staleness check below
+        // must observe the same state.
+        let parent = make_test_ledger_entry(
+            "system/parent.md",
+            "new_current_sha",
+            ApprovalStatus::Approved,
+        );
+        ledger.save(&parent).await.unwrap();
+
+        // Context repos for cross-workspace resolution (None-linked tests
+        // don't resolve, but pass real stores to match server wiring).
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+
+        let before_restart: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(
+            before_restart.len(),
+            1,
+            "sync must record the depends_on link"
+        );
+        let pushed = &before_restart[0];
+        assert_eq!(pushed.source_path, "system/child.md");
+        assert_eq!(pushed.target_path, "system/parent.md");
+        assert_eq!(pushed.link_type, SpecLinkType::DependsOn);
+        assert_eq!(pushed.target_sha.as_deref(), Some("old_pinned_sha"));
+        // source_sha must be the source spec's real blob SHA from the push —
+        // not a placeholder.
+        assert!(
+            !pushed.source_sha.is_empty(),
+            "source_sha must be populated from the source spec's blob SHA"
+        );
+
+        // ── Simulated restart: brand-new store over the SAME durable repo. ──
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+
+        assert!(
+            !after_restart.is_empty(),
+            "graph must be non-empty after restart without any re-push"
+        );
+        assert_eq!(
+            after_restart, before_restart,
+            "restarted graph must be identical to the pre-restart graph"
+        );
+
+        // A NEW server process would open a NEW storage handle on the same DB
+        // file — verify the data is in the file, not just this handle.
+        drop(link_repo);
+        let reopened: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let third_boot_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&reopened, &third_boot_store);
+        let from_file: Vec<SpecLinkEntry> = third_boot_store.lock().await.clone();
+        assert_eq!(
+            from_file, before_restart,
+            "graph must survive a fresh storage handle on the same database file"
+        );
+    }
+
+    /// The staleness checker must return the same answer against a restarted
+    /// (loaded-from-disk) graph as it would right after the push — the graph
+    /// consumers (staleness, gates, patrol) must not silently degrade to an
+    /// empty graph across a restart.
+    #[tokio::test]
+    async fn staleness_query_parity_after_restart() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // The link is pinned to the target's CURRENT ledger SHA at push time,
+        // so it is active after the push. The staleness verdict is then
+        // re-derived AFTER a restart, once the target spec has drifted —
+        // the checker must compare the persisted pinned SHA against the
+        // ledger's current SHA and mark the link stale on the restarted
+        // graph, exactly as it would right after the push.
+        let manifest = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: sha_v1"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        // Target spec is in the ledger at the pinned SHA — the link is
+        // healthy at push time.
+        let parent_v1 =
+            make_test_ledger_entry("system/parent.md", "sha_v1", ApprovalStatus::Approved);
+        ledger.save(&parent_v1).await.unwrap();
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+
+        // Right after the push: pinned SHA matches the ledger — the link is
+        // active, not stale.
+        let post_push: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(post_push.len(), 1);
+        assert_eq!(
+            post_push[0].status, "active",
+            "pinned SHA matches the ledger at push time — link must be active"
+        );
+        assert_eq!(post_push[0].target_sha.as_deref(), Some("sha_v1"));
+
+        // ── Restart: fresh store loaded from the durable repo. ──
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart, post_push,
+            "restarted graph must be identical to the post-push graph"
+        );
+
+        // ── The target spec now drifts (ledger SHA advances). ──
+        let parent_v2 =
+            make_test_ledger_entry("system/parent.md", "sha_v2", ApprovalStatus::Approved);
+        ledger.save(&parent_v2).await.unwrap();
+
+        // ── Run the REAL staleness checker against the restarted graph. ──
+        // The verdict must be re-derived from the persisted pinned SHA vs
+        // the ledger's current SHA — two independent sources. Against the
+        // pre-task empty-init behavior this fails: an empty restarted graph
+        // gives the checker nothing to mark stale.
+        let base = crate::mem::test_state();
+        let state = Arc::new(crate::AppState {
+            spec_links_store: restarted_store.clone(),
+            spec_link_repo: link_repo.clone(),
+            spec_ledger: ledger.clone(),
+            ..(*base).clone()
+        });
+        crate::spec_link_staleness::run_once(&state).await.unwrap();
+
+        let rechecked: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(rechecked.len(), 1, "checker must see the restarted graph");
+        assert_eq!(
+            rechecked[0].status, "stale",
+            "checker must re-derive 'stale' from ledger SHA vs persisted pinned SHA"
+        );
+        assert!(
+            rechecked[0].stale_since.is_some(),
+            "checker must stamp stale_since on the restarted graph"
+        );
+
+        // The checker's verdict is written through to the durable table —
+        // the next restart loads the stale verdict, not a reset one.
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "stale");
+        assert_eq!(persisted[0].stale_since, rechecked[0].stale_since);
+    }
+
+    /// Regression (task-198): two repos may carry the same spec path. A push
+    /// from repo B must replace ONLY repo B's rows for that path — repo A's
+    /// links survive in both the hot cache and the durable table, and the two
+    /// stores never diverge (a restart must not resurrect or drop links).
+    #[tokio::test]
+    async fn sync_replaces_links_scoped_to_source_repo() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // The IDENTICAL manifest pushed by both repos — same spec path, same
+        // link type, same target. Under an id format without repo scope the
+        // two links collapse to one id, repo B's replace_for_source INSERT
+        // hits repo A's row's PRIMARY KEY, the transaction rolls back, and
+        // the swallowed error silently loses one repo's durable row (after a
+        // restart that repo's link is gone from the tenant-wide graph).
+        let manifest = r#"version: 1
+specs:
+  - path: system/shared.md
+    title: Shared
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/target.md"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/shared.md", "# S"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+
+        // Real push from repo A, then a real push from repo B with the same
+        // manifest (both use the production id construction).
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_500,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+
+        // Cache: both repos' links present with distinct ids.
+        let cache: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(cache.len(), 2, "both repos' links must be in the cache");
+        assert!(
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-a")),
+            "repo A's link must survive a repo-B push"
+        );
+        assert!(
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-b")),
+            "repo B's new link must be present"
+        );
+        let distinct_ids: std::collections::HashSet<&str> =
+            cache.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            distinct_ids.len(),
+            2,
+            "same-path links from different repos must have distinct ids"
+        );
+
+        // Durable table must match the cache exactly (the invariant the
+        // boot-load path relies on) — a third boot from the same file sees
+        // both links without any re-push.
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert_eq!(persisted.len(), 2, "both repos' rows must be in the table");
+        let mut sorted_cache: Vec<SpecLinkEntry> = cache.clone();
+        sorted_cache.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut sorted_persisted = persisted.clone();
+        sorted_persisted.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            sorted_persisted, sorted_cache,
+            "durable table must match the cache (collision must not drop a repo's row)"
+        );
+
+        // Restart: a fresh store over the same durable table must contain
+        // BOTH repos' links — the collision previously left only one.
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart.len(),
+            2,
+            "restart must rebuild BOTH repos' links (id collision previously dropped one)"
+        );
+        assert!(after_restart
+            .iter()
+            .any(|l| l.source_repo_id.as_deref() == Some("repo-a")));
+        assert!(after_restart
+            .iter()
+            .any(|l| l.source_repo_id.as_deref() == Some("repo-b")));
+    }
+
+    /// Regression (task-198): when a manifest edit REMOVES a spec's links, the
+    /// durable rows must be deleted too — otherwise a restart resurrects
+    /// links that were removed from the manifest. The empty link set must
+    /// still issue a replace (delete) for that source spec.
+    #[tokio::test]
+    async fn sync_clears_durable_rows_when_links_removed_from_manifest() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        let with_link = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md"#;
+        let without_link = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test"#;
+
+        let (dir, sha_with_link) = make_test_repo(&[
+            ("specs/manifest.yaml", with_link),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+
+        // First push: manifest declares the link.
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha_with_link,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(links_store.lock().await.len(), 1);
+        assert_eq!(link_repo.list_all().await.unwrap().len(), 1);
+
+        // Second push: same spec, link removed from the manifest. Commit the
+        // edited manifest and sync the new HEAD.
+        let sha_without_link = add_commit(&dir, &[("specs/manifest.yaml", without_link)]);
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha_without_link,
+            1_700_000_500,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+
+        // Cache dropped the link…
+        assert!(
+            links_store.lock().await.is_empty(),
+            "removed link must be dropped from the hot cache"
+        );
+        // …and the durable table must agree (this is the bug: skipping the
+        // replace for an empty link set left the row behind, resurrecting it
+        // on the next boot load).
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert!(
+            persisted.is_empty(),
+            "removed link must be deleted from the durable table, got {persisted:?}"
         );
     }
 
