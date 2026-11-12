@@ -1208,6 +1208,7 @@ async fn try_spawn_worker(
         loop_config: None,
         agent_type: None,
         conversation_sha: None,
+        persona_slug: None, // scheduler spawns carry no persona request
     };
     match crate::api::spawn::spawn_agent_core(
         state,

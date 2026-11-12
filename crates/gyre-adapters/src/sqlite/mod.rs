@@ -37,6 +37,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
@@ -254,6 +255,8 @@ mod tests {
             "turn_commit_links",
             "budget_call_records",
             "user_workspace_state",
+            // Per-repo access overrides (task-121, user-management.md §Repo Access)
+            "repo_access_overrides",
             // Previously shadowed by duplicate version prefixes — regression guard
             // (these tables were silently skipped on fresh installs before the fix)
             "kv_store",
@@ -313,6 +316,34 @@ mod tests {
                 .is_ok();
             assert!(ok, "column '{table}.{column}' missing after migrations");
         }
+    }
+
+    #[test]
+    fn migrations_create_000060_repo_columns_and_overrides() {
+        // 000060 collision (task-121's repo_access_overrides vs task-118's
+        // repo_agent_limits, same-day merges): Diesel ran only the
+        // alphabetically-first repo_access_overrides, silently dropping the
+        // repositories.max_agents / max_agent_iterations columns. Guard
+        // asserts both sides of the collision exist after the renumbered
+        // 000061.
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+        for (table, column) in [
+            ("repositories", "max_agents"),
+            ("repositories", "max_agent_iterations"),
+        ] {
+            use diesel::RunQueryDsl;
+            let ok = diesel::sql_query(format!("SELECT {column} FROM {table} LIMIT 0"))
+                .execute(&mut *conn)
+                .is_ok();
+            assert!(ok, "column '{table}.{column}' missing after migrations");
+        }
+        // ...and the other side of the collision (the table the
+        // alphabetically-first migration owns) must still be applied.
+        use diesel::RunQueryDsl;
+        diesel::sql_query("SELECT 1 FROM repo_access_overrides LIMIT 0")
+            .execute(&mut *conn)
+            .unwrap_or_else(|e| panic!("table 'repo_access_overrides' missing: {e}"));
     }
 
     #[test]
