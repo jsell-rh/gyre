@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
+commits: ["6b9fb4e2b", "cf8069ea8"]
 ---
 
 ## Spec Excerpt
@@ -82,66 +82,70 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 
 ## Shipped
 
-The Architectural Timeline (system-explorer.md §6) now runs on a real
-point-in-time graph API instead of a client-side `first_seen_at` guess, and
-the key-moment interactions the spec requires (reconciliation markers, click
-→ narrative) are wired end to end. Commit 6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe.
+The Architectural Timeline (system-explorer.md §6) runs on a real
+point-in-time graph API, and the two defects from review round
+1dd7441246b74416b1bc06d19d55520e are repaired. Commits:
+6b9fb4e2b (original implementation) and cf8069ea8 (review repairs).
 
-### Backend: point-in-time graph reconstruction
+### Point-in-time graph API (6b9fb4e2b)
 
 - `GraphPort` gains `list_nodes_at`/`list_edges_at` with an explicit
-  existed-at contract: a node/edge existed at `at` iff `first_seen_at <= at`
-  AND (`deleted_at` is `None` OR `deleted_at > at`). Implemented in BOTH
-  adapters — SQL filters in the SQLite adapter, the same guard in code in
-  `MemGraphStore` — so the contract holds regardless of which adapter serves
-  the request (mem-port-contract invariant).
+  existed-at contract (`first_seen_at <= at` AND (`deleted_at` is None OR
+  `deleted_at > at`)), implemented in BOTH adapters (SQL filters in SQLite,
+  the same guard in code in `MemGraphStore`).
 - `GET /repos/{id}/graph?at=<epoch-seconds|RFC3339>` reconstructs the graph
-  at that instant, including nodes soft-deleted since (invisible to
-  `list_nodes`, which always excludes them — this was the gap that made
-  backward-looking views impossible server-side). Invalid `at` values return
-  400 rather than being silently ignored. The `time` crate's `parsing`
-  feature is now an explicit dependency (it was only transitively enabled).
-- Documented in `docs/api-reference.md`.
+  at that instant, including nodes soft-deleted since; invalid `at` returns
+  400. Documented in `docs/api-reference.md`.
 
-### Frontend: scrubbing, ghosts, delta panel, key moments
+### Scrubber, ghosts, delta panel, key moments (6b9fb4e2b)
 
+- `TimelineScrubber.svelte` at the bottom of the canvas: d3-scale time
+  axis, date label, key-moment markers (spec approvals, milestones,
+  structural changes, reconciliations) with click-through narrative
+  popover, per-type delta stats ("+2 types, -1 trait, 3 types modified").
 - Scrubbing fetches the server `?at=` graph through
-  `createTimelineHistoryFetcher` (200 ms debounce, rapid positions coalesce
-  into one request for the latest position, superseded positions resolve
-  null so the instant client-side `first_seen_at` filter stays until the
-  server graph lands). The "Now" position (slider max) shows the current
-  graph with no ghosts and no fetch.
-- Ghost rendering (green dotted forward / red backward / yellow modified)
-  and the per-type delta summary ("+12 types, -3 types, 8 types modified")
-  now run against the server-reconstructed historical graph, so nodes
-  deleted after the scrub time are correctly absent rather than shown.
-- Key moments now include reconciliation events: workspace
-  `reconciliation_completed` messages (persona v3 → v4) are lazy-loaded on
-  first time-travel activation via `GET /workspaces/{id}/messages?kind=...`
-  and rendered as purple markers positioned by timestamp on the d3-scale
-  axis, alongside the existing spec-approval, milestone, and structural
-  change markers.
-- Clicking a key moment surfaces the delta's grounded narrative: the
-  TimelineScrubber popover gained a "Why" field and ExplorerView renders a
-  dismissible narrative panel above the canvas (previously the marker-click
-  callback was a no-op — the acceptance criterion was unimplemented).
+  `createTimelineHistoryFetcher` (200 ms debounce; superseded positions
+  resolve null so the client-side `first_seen_at` filter is the instant
+  fallback). Ghost overlays: forward ghosts (added since, green dotted),
+  backward ghosts (removed since, red dotted, recovered from
+  ArchitecturalDelta records because removed nodes are absent from the
+  current graph), modified highlights (yellow).
+
+### Review repairs (cf8069ea8)
+
+- **Fetcher race fixed**: a fetch completion used to settle waiters matched
+  against `latestAt`, so scrubbing again while a fetch was in flight
+  resolved the newer position with the older position's graph, pinning the
+  wrong point in time on the canvas. A fetch now settles only the waiters
+  for its own target, and ExplorerView refuses to pin a late out-of-order
+  response whose position is no longer current. Regression test reproduces
+  the exact interleaving and fails on the old logic (verified by mutation:
+  1 failed on old code, 32/32 on fixed).
+- **Reconciliation narrative grounded in the real payload**: the narrative
+  no longer reads fields no emitter sends (persona_name,
+  specs_changed, ...). The production `reconciliation_completed` payload is
+  enriched with `specs: [{name, version}]` — the changed meta-specs of the
+  current wave, materialized as structured provenance labels on each wave
+  task at creation (`meta-spec:{name}@v{version}` plus a
+  `recon-wave:{millis}` wave identity threaded through rolling-rollout
+  pending state, so prior waves cannot bleed into a later wave's event).
+  The frontend narrative derives only from production fields
+  (task_count/duration_secs/specs), with a true fallback for pre-label
+  waves. Tests pin the exact production payload shape (frontend fixture +
+  server payload assertions incl. wave-2-scoped specs).
+- cargo-fmt drift in `graph.rs` from the original candidate commit fixed
+  (would fail the CI rustfmt job).
 
 ### Test evidence
 
-- `cargo test -p gyre-adapters --lib sqlite::graph::tests::list_` — 3 passed
-  (new point-in-time node/edge suites) in this sandbox.
-- `cargo check -p gyre-server --lib --tests` — clean; the two new
-  gyre-server tests (`api::graph::tests::repo_graph_at_returns_point_in_time_graph`,
-  `api::graph::tests::test_mem_list_nodes_at_and_edges_at_contract`) are
-  deferred to the independent verifier (server test codegen exceeds the
-  model-stage memory budget); exact commands recorded in
-  /tmp/stage/review-evidence/task-183-evidence.md. The HTTP suite covers
-  epoch and RFC 3339 `at` forms, soft-deleted-node reconstruction, and the
-  400 on unparseable input.
-- `cd web && npm test` — 106 files, 2151 passed | 41 skipped, including the
-  extended `TimelineScrubber.test.js` (reconciliation markers, narrative
-  popover) and `timeline-utils.test.js` (`resolveScrubTimestamp`,
-  `createTimelineHistoryFetcher` debounce/stale/cancel suites).
-- Mechanical checks pass: check-arch, abac-route-registry,
-  mem-port-contracts, byte-slice-truncation, relative-path-defaults,
-  inert-enforcement, api-auth.
+- Frontend (focused, run here): `vitest run timeline-utils.test.js
+  TimelineScrubber.test.js ExplorerViewNavigableArchitecture.test.js
+  ExplorerViewLivenessWiring.test.js canvas-state.test.js` — 97/97 pass;
+  both repaired defects have mutation-verified regression tests (each
+  fails on the pre-fix code).
+- Server (type-checked here via `cargo check -p gyre-server --tests`, fmt
+  and diff-scoped clippy clean): the verifier must run
+  `cargo test -p gyre-server --lib reconciliation` — covers the label
+  round-trips, provenance-label assertions on created tasks, the payload
+  specs assertions in `reconciliation_completed_fires_when_all_tasks_terminal`,
+  and wave scoping in `second_wave_emits_its_own_completion`.
