@@ -75,3 +75,15 @@ class DeliveryReadinessTests(unittest.TestCase):
         self.save(repair=None,ci=self.data['ci'] | {'status':'merged'})
         self.assertEqual(self.readiness()['status'],'merge_confirmation')
         self.assertFalse(self.store.task('task-001')['data'].get('delivered'))
+
+    def test_known_failure_and_unknown_worker_health_are_distinct_adapter_states(self):
+        for name,category,want in (('task-001','sandbox_oom','attention'),
+                                   ('task-002','gateway_transport','uncertain')):
+            if name != 'task-001':self.store.put_task(name,'g','requirements',self.data)
+            work=self.store.enqueue('verify',name,'g',{'candidate':'source','base':'latest'})
+            claim=self.store.claim('verify','verifier',ident=work)
+            self.store.retry(work,claim['token'],{'category':category,'message':'Retained diagnostic'},attention=True)
+            row=next(r for r in adapter.read_rows(self.store) if r['key']==work)
+            self.assertEqual(row['status'],want)
+            self.assertEqual(row['failure_category'],category)
+            self.assertEqual(row['error'],'Retained diagnostic')

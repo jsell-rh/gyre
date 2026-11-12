@@ -314,6 +314,10 @@ completed list (`c`); history retains the original attempt result. Green CI on
 an older head cannot mark a replacement candidate ready. Integration refreshes
 show whether they are required, queued, running, or blocked for attention
 (including an out-of-memory failure), rather than remaining "awaiting merge".
+Known failures have a distinct needs-attention state and retain their diagnosis
+(out of memory, stalled repair, stopped sandbox, or spec/assessment issue).
+"Outcome unknown" is reserved for uncertain worker outcomes; the details of a
+known failure never claim that its result was lost.
 
 The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
 press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to

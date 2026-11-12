@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // A completed code review is not a completed delivery. This ports the live
@@ -24,6 +26,44 @@ func TestCIReadinessDoesNotHideCompletedReviewOrRewriteHistory(t *testing.T) {
 	r.Activity = "history"
 	if strings.Contains(rowStatus(r), "CI") {
 		t.Fatal("live CI rewrote a historical attempt outcome")
+	}
+}
+
+func TestKnownAttentionFailuresAreNotUnknownOutcomes(t *testing.T) {
+	m := sampleModel()
+	defer m.cancel()
+	base := m.state.Rows[1]
+	for category, want := range map[string]string{
+		"sandbox_oom":         "Out of memory · needs retry",
+		"repair_stalled":      "Repair stalled · needs attention",
+		"requirements_triage": "Spec/task conflict · needs triage",
+		"assessment":          "Assessment needs evidence",
+		"sandbox_stopped":     "Sandbox stopped · needs attention",
+	} {
+		r := base
+		r.Status, r.FailureCategory = "attention", category
+		if rowStatus(r) != want || rowColor(r) != "1" {
+			t.Fatal("known failure lost its diagnosis", category, rowStatus(r))
+		}
+		m.state.Rows = []Row{r}
+		m.index, m.screen = 0, "details"
+		view := m.View()
+		if strings.Contains(view, "OUTCOME NOT RECORDED") || !strings.Contains(view, "NEEDS ATTENTION") {
+			t.Fatal("known failure details claim the worker lost its result", view)
+		}
+	}
+}
+
+func TestKnownFailureRetryDoesNotClaimItsOutcomeIsUnknown(t *testing.T) {
+	m := sampleModel()
+	defer m.cancel()
+	m.index = 1
+	m.state.Rows[1].Status = "attention"
+	m.state.Rows[1].FailureCategory = "sandbox_oom"
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(Model)
+	if cmd == nil || m.pendingRetry != nil {
+		t.Fatal("known OOM incorrectly demanded unknown-worker confirmation")
 	}
 }
 

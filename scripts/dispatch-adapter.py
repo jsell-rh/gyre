@@ -118,9 +118,11 @@ def read_rows(store):
     result = []
     for raw in rows:
         r = dict(raw)
-        status = {'claimed': 'running', 'retry': 'failed', 'attention': 'uncertain',
+        status = {'claimed': 'running', 'retry': 'failed', 'attention': 'attention',
                   'ready': 'queued', 'succeeded': 'succeeded'}[r['state']]
         outcome = json.loads(r['result']) if r['result'] else {}
+        if r['state'] == 'attention' and outcome.get('category') == 'gateway_transport':
+            status = 'uncertain'
         if status == 'failed' and outcome.get('category') == 'observation':
             status = 'waiting'
         canceled = store.setting(f"cancel:{r['id']}:{r['token']}", False)
@@ -134,7 +136,9 @@ def read_rows(store):
             'finished': r['updated'] if status not in ('running','queued') else 0,
             'run_id': f"{r['id']}:{r['token']}",
             'log': str(store.directory/'attempts'/r['id']/str(r['token'])/'output.log'),
-            'error': outcome.get('message', ''), 'cancel_requested': canceled})
+            'error': outcome.get('message', ''),
+            'failure_category':outcome.get('category','') if r['state']=='attention' else '',
+            'cancel_requested': canceled})
     return result
 
 

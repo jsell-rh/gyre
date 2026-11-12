@@ -151,6 +151,8 @@ func rowStatus(r Row) string {
 
 	if r.Activity == "history" {
 		switch r.Status {
+		case "attention":
+			return "Needs attention"
 		case "failed":
 			return "Failed"
 		case "succeeded":
@@ -174,7 +176,31 @@ func rowStatus(r Row) string {
 		}
 		return "Ready to retry"
 	case "uncertain":
+		if r.FailureCategory == "gateway_transport" {
+			return "Worker health unknown"
+		}
 		return "Outcome unknown"
+	case "attention":
+		switch r.FailureCategory {
+		case "sandbox_oom":
+			return "Out of memory · needs retry"
+		case "repair_stalled":
+			return "Repair stalled · needs attention"
+		case "requirements_triage":
+			return "Spec/task conflict · needs triage"
+		case "assessment":
+			return "Assessment needs evidence"
+		case "sandbox_stopped":
+			return "Sandbox stopped · needs attention"
+		case "verification_timeout":
+			return "Verification deadline exceeded"
+		case "verification_source_integrity":
+			return "Verification changed source"
+		case "sandbox_storage":
+			return "Build storage exhausted"
+		default:
+			return "Needs attention"
+		}
 	case "succeeded":
 		return completionStatus(r.Finished)
 	default:
@@ -698,7 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.confirmScroll = 0
 						m.setNotice("")
 					}
-				} else if row.Status != "failed" && row.Status != "canceled" {
+				} else if row.Status != "failed" && row.Status != "canceled" && row.Status != "attention" {
 					m.setNotice("Only failed or canceled jobs can be retried here.")
 				} else {
 					return m, func() tea.Msg { return retryDone{row.Key, m.engine.requestRetry(m.ctx, row.Key)} }
@@ -746,7 +772,7 @@ func (m Model) style(text, color string, bold bool) string {
 }
 func statusColor(status string) string {
 	switch status {
-	case "failed":
+	case "failed", "attention":
 		return "1"
 	case "uncertain", "canceled":
 		return "3"
@@ -849,7 +875,7 @@ func (m Model) agentGroups(rows []Row, w, budget int) []string {
 					switch item.Status {
 					case "running":
 						running++
-					case "failed", "uncertain", "canceled":
+					case "failed", "uncertain", "attention", "canceled":
 						failed++
 					case "succeeded":
 						done++
@@ -907,6 +933,11 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 	if len(rows) > 0 {
 		r := rows[m.index]
 		header = append(header, m.workHeader(r, w, "Details")...)
+		if r.Status == "attention" {
+			body = append(body, m.style("NEEDS ATTENTION", "1", true))
+			body = append(body, m.wrapped("The failure is recorded below. Resolve its blocker before retrying; running work and cleanup remain fenced.", w, "7")...)
+			body = append(body, "")
+		}
 		if r.Status == "uncertain" {
 			body = append(body, m.style("OUTCOME NOT RECORDED", "3", true))
 			body = append(body, m.wrapped("The local worker stopped without saving its result. Check this log and confirm the remote sandbox has stopped before retrying.", w, "7")...)
