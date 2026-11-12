@@ -39,6 +39,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
@@ -106,6 +107,9 @@ pub use policy::{
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GatePhase, GateResult, GateStatus, GateType, QualityGate};
+pub use repo_access::{
+    effective_repo_permissions, effective_repo_role, RepoAccessOverride, RepoPermission,
+};
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
