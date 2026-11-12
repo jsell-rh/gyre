@@ -2,12 +2,12 @@
 title: "Repo lifecycle — archive push rejection, admin repos tab, gate config UI"
 spec_ref: "repo-lifecycle.md §API Summary"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["3399157f03203b1bb57e7924670917b78d4f544a", "26fc7b32667bf8d3121ec07f837d1a960d0681d7", "0237af23cb7403ef2489b1247a52f2601f1bab66", "219780c5aef6f0a9fc88da61185949decc8e97a8", "4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "730f9df11e81dfe1644d2b464cec1352f72bda35", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "36e401fbd899a48fc15a4bf430f25ef904747e1e", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673", "c328b9e0c8b982894b5960435b05335c50ba405c"]
+commits: ["c328b9e0c8b982894b5960435b05335c50ba405c", "3399157f03203b1bb57e7924670917b78d4f544a", "26fc7b32667bf8d3121ec07f837d1a960d0681d7", "0237af23cb7403ef2489b1247a52f2601f1bab66", "219780c5aef6f0a9fc88da61185949decc8e97a8", "4443b66a81b9a29d6cfbf808f624cc76af19c1a6", "0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "730f9df11e81dfe1644d2b464cec1352f72bda35", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "36e401fbd899a48fc15a4bf430f25ef904747e1e", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
 ---
 
 ## Spec Excerpt
@@ -61,37 +61,31 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 ## Shipped
 
 All three coverage sections are implemented in production code on this
-branch (full chain of checkpoints and repair rounds in `commits:`; latest
-assignment base `cba416b46` merged at `b436a91a7`). This round was a
-**contract repair** (finding `d62945336`): the executor restored the assigned
-task document (progress reset, acceptance boxes back to their assigned
-unchecked state), and this round re-applies the ready-for-review state
-without touching any production file. The acceptance boxes are deliberately
-left exactly as assigned — checking them in place mutates the protected
-contract text (the trigger for findings `6ed209f6` and `d62945336`);
-completion is recorded here and in `progress:`.
+branch (implementation chain in `commits:`; latest assignment base
+`1e61f663` merged at `d18a6d790`). Acceptance boxes are deliberately left
+exactly as assigned — checking them in place mutates the protected contract
+text; completion is recorded here and in `progress:`.
 
-### Round: contract restoration, second occurrence (no code change)
+### Round: base merge 1e61f663 (rebase repair, finding 12011b0bc4364353bb5bd863d4ad229a)
 
-- `git diff 90a3d1c --name-only` lists only `specs/tasks/task-168.md`;
-  `git diff 90a3d1c -- crates/ web/src scripts/` is empty (0 lines) — the
-  working tree is byte-identical on the product surface to candidate
-  `90a3d1c`, which passed `SKIP_WEB_BUILD=1 cargo check -p gyre-server
-  --all-targets` and `cargo fmt -p gyre-server -- --check` in the prior
-  round. Fresh evidence saved under
-  `/tmp/stage/review-evidence/task-168-contract-round-2/`.
-- No recompile is needed: no Rust, script, or web source file changed this
-  round, so the prior round's type-check and fmt evidence carries to this
-  head unchanged.
-
-### Round: E0063 verification repair (prior, retained)
-
-- **E0063 in `gyre-server` lib test** — the base merge brought the `position`
-  field on `gyre_domain::QualityGate` into a tree where the `ralph_loop.rs`
-  `loop_state()` fixture initializer had lost it, failing `cargo check` of the
-  gyre-server lib test target. Restored `position: 0` (matching `Default` and
-  every other fixture initializer); verified every other `QualityGate`
-  initializer in the tree already sets `position`.
+- Resolved the merge against current main (task-163 dependency-graph
+  persistence) at merge commit `d18a6d790`: conflicts were confined to
+  `web/dist` build artifacts, resolved toward main's published assets — dist
+  is pipeline-owned and regenerated by final integration.
+- Source verified intact on both sides: `git diff 535301acd -- crates/
+  web/src/ scripts/` shows only main-side additions (task-163 files), zero
+  task-168 product lines removed.
+- Repaired the post-merge migration collision: main's
+  `dep_breaking_policies` took Diesel version 20261008000061, colliding with
+  our `gate_position` migration (only the alphabetically-first directory
+  runs). Renumbered `gate_position` to the next unused slot 000062;
+  `check-migration-versions.sh` exits 0.
+- Fresh merged-head evidence under `/tmp/stage/review-evidence/
+  task-168-merge-1e61f663/`: check-migration-versions, check-arch,
+  check-migration-sql-portability, check-abac-route-registry,
+  check-mcp-write-tools (all exit 0); `SKIP_WEB_BUILD=1 cargo check
+  -p gyre-server --all-targets` and `-p gyre-adapters --all-targets` exit 0;
+  `cd web && npm test` exit 0 (108 files, 2168 passed / 41 skipped).
 
 ### Git push rejection for archived repos (§API Summary)
 
@@ -115,37 +109,16 @@ completion is recorded here and in `progress:`.
 
 ### Gate configuration UI (§Gates)
 
-- `RepoSettings.svelte` gate panel lists gates ordered by `position`, with
-  per-gate name/type/enabled toggle, per-type configuration fields (test
-  command, lint command, reviewer persona), "+ Add Gate" with a gate type
-  selector, and drag-to-reorder persisting `position` via
-  `PUT /api/v1/repos/:id/gates/:gate_id`.
-- Server side: `api/gates.rs` sorts by `(position, created_at)`, appends new
-  gates after the current max, and accepts `position` updates; covered by
-  `list_gates_orders_by_position` and the upsert regression guard in
-  `sqlite/quality_gate.rs`.
+- `RepoSettings.svelte` has a repo-scope **Gates** tab: lists configured
+  gates (name, type, enabled toggle), "+ Add Gate" with a type selector,
+  per-gate configuration editing (command, required flag) via
+  `PUT /api/v1/repos/:id/gates/:gate_id`, delete, and drag-to-reorder that
+  persists 1-based positions through the same PUT, backed by the `position`
+  column (migration `...000062_gate_position`).
 
-### Evidence
+### Verifier note
 
-- This contract round: `git diff 90a3d1c --name-only` → only
-  `specs/tasks/task-168.md`; product-surface diff empty (see
-  `/tmp/stage/review-evidence/task-168-contract-round-2/`). No recompile
-  needed — source byte-identical to the checked candidate.
-- Prior round: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` →
-  clean (lib, lib test, bins, integration tests; the previous round's E0063
-  is gone). Exit 0. `cargo fmt -p gyre-server -- --check` → clean. Exit 0.
-- `scripts/check-task-commit-attribution.sh` re-run on this head with the
-  restored `commits:` frontmatter → exit 0 (all 21 listed SHAs resolve;
-  every task-168 product-surface commit is recorded).
-- The full `scripts/check-*.sh` sweep was re-run for evidence; failures
-  observed in the broader sweep are pre-existing on the base tree (none of
-  the failing scripts read `specs/tasks/`, and the product surface is
-  unchanged from the reviewed candidate) — recorded in
-  `mechanical-checks.txt` under the evidence directory.
-- Verifier must run (deferred per 4 GiB budget): full `cargo test --all` —
-  notably the `ralph_loop` tests that consume the repaired fixture
-  (`gate_failure_respawns_agent_with_fresh_context`,
-  `max_iterations_blocks_task_and_fails_agent`, `merge_completes_task`),
-  the `gyre-server` git_http unit tests,
-  `tests/git_integration.rs::push_to_archived_repo_rejected`, and
-  `cd web && npm test`.
+- Server test compilation is deferred to the independent verifier per the
+  4 GiB budget: run `cargo test --all` (or at minimum
+  `cargo test -p gyre-server --test git_integration` and
+  `cargo test -p gyre-adapters`) at this head `d18a6d790`.
