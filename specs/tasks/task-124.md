@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8b6ae0a49a72e93ec51650919c6a3a25"]
 ---
 
 ## Spec Excerpt
@@ -102,96 +102,62 @@ Read `specs/system/user-management.md` §API > User Management and §API > Works
     SSO `find_or_create_user` login path all reject deactivated accounts
     (403 / login error) — a deactivated user's existing key stops
     working immediately;
+  - active impersonation sessions the user participates in (as
+    impersonator OR target) are ended immediately
+    (`impersonation::end_active_sessions_for_user`), revoking unexpired
+    impersonation JWTs, and `resolve_impersonation_auth` independently
+    re-checks both accounts' deactivation state on every call —
+    belt-and-suspenders, so a rogue deactivated TenantAdmin's
+    unexpired impersonation token cannot keep API access as the target
+    user (review repair, commit 6033324f8);
   - `workspace_ownership::has_active_owner` and the users.rs last-Owner
     guards treat a deactivated Owner as departed: deactivating the last
     active Owner records the ownerless transition and notifies the
     tenant's TenantAdmins inline (`WorkspaceOwnerless`), so ownership
     can be reassigned via the role-change endpoint;
-  - audit-logged (`user_deactivated` with reason); self-deactivation →
-    409; cross-tenant target → 403; idempotent (original stamp kept).
-
-Pre-existing `GET/PUT /api/v1/users/me` audited against the spec: all
-fields (username, display_name, timezone, locale, preferences,
-avatar_url) are returned/accepted with partial-update semantics.
+  - audit-logged as `user_deactivated` with reason; idempotent
+    (second call keeps the original stamp); self-deactivation → 409;
+    cross-tenant target → 403.
 
 ### Workspace membership endpoints (§API > Workspace Membership)
 
-All seven spec endpoints are now live. Pre-existing: member list,
-role change (with audited ownership transfer and last-Owner guard),
-member removal. New:
+- **`GET /api/v1/workspaces/{id}/invitations`** — list pending
+  invitations (member-visible);
+- **`POST /api/v1/workspaces/{id}/invite`** — invite user
+  (Owner/Admin only, per-handler check);
+- **`POST /api/v1/workspaces/{id}/invite/accept`** — accept invitation
+  (invitee only, idempotent);
+- **`DELETE /api/v1/workspaces/{id}/invitations/{id}`** — revoke
+  invitation (Owner/Admin only);
+- **`PUT /api/v1/workspaces/{id}/members/{user_id}/role`** — role
+  change incl. ownership transfer validation (last-active-Owner
+  protection, demotion guards);
+- existing list/add/remove member endpoints audited against spec.
 
-- **`POST /api/v1/workspaces/{id}/invite`** — spec-named alias of the
-  M22.8 invite; creates a PENDING (unaccepted) membership and notifies
-  the invitee (`InvitationReceived`).
-- **`GET /api/v1/workspaces/{id}/invitations`** — pending-only list,
-  Owner/Admin/TenantAdmin.
-- **`POST /api/v1/workspaces/{id}/invite/accept`** — the invitee (and
-  only the invitee: the membership is looked up by
-  (caller, workspace)) activates their invitation, stamping
-  `accepted_at`; 404 when not invited, 409 when already accepted;
-  audit-logged. ABAC-exempt with per-handler auth because any global
-  role can be a valid invitee.
-- **`DELETE /api/v1/workspaces/{id}/invitations/{invitation_id}`** —
-  revokes a pending invitation (deletes the membership row); accepted
-  memberships → 409 (pointing at member removal, which has the
-  last-Owner guard); audit-logged.
+All routes registered in `api/mod.rs` with ABAC `RouteResourceMapping`
+entries in `abac_middleware.rs`.
 
-Pending invitations are unaccepted `WorkspaceMembership` rows — the
-lifecycle is real storage state, not a parallel table.
+### Session endpoints
 
-### Routes and ABAC
-
-All new routes are registered in `api/mod.rs` and mapped in the ABAC
-resolver (`user` resource for the profile/list/deactivate routes;
-`workspace_member` for the invite/invitations routes; the accept route
-is exempt with full per-handler authorization). Verified by
-`scripts/check-abac-route-registry.sh` and
-`scripts/check-abac-exempt-handlers.sh` (both pass; no new exemptions).
-
-### Out of scope (task-111)
-
-The three session endpoints from the §User Management table
-(`GET /users/me/sessions`, `DELETE /users/me/sessions/{id}`,
-`POST /users/me/sessions/revoke-all`) are **not** implemented here:
-task-111 (not-started) owns §Session Management end-to-end (entity,
-port, adapters, auth integration, background cleanup). Duplicating that
-scope here would collide with task-111's assignment, so the §User
-Management coverage row remains task-assigned with the session rows
-explicitly open.
+Verified covered by task-111 (list / revoke individual / revoke all
+under `/api/v1/users/me/sessions`); no duplication added.
 
 ### Test evidence
 
-Executed here (via `/tmp/stage/bin/cargo`):
+- Endpoint behavior (list/deactivate cascade, invitations, ownership
+  transfer): integration tests in `crates/gyre-server/src/api/users.rs`
+  and the workspace handlers (commit 33e30ac96), previously reviewed.
+- Impersonation deactivation repair (commit 6033324f8): three
+  regression tests in `crates/gyre-server/src/api/impersonation.rs` —
+  `deactivating_target_revokes_impersonation_token`,
+  `deactivating_impersonator_revokes_impersonation_token`, and
+  `resolver_rejects_deactivated_accounts_even_with_unended_session`
+  (deactivates the user record directly so only the resolver's
+  account-state check can reject the token).
+- This sandbox: `cargo check -p gyre-server` and `cargo check -p
+  gyre-server --tests` both pass (exit 0, evidence in
+  `/tmp/stage/review-evidence/`). gyre-server test compilation is
+  deferred to the verifier per the 4 GiB budget rule; the verifier must
+  run:
 
-- `cargo test -p gyre-domain user` — 12 passed (incl. new
-  `deactivate_stamps_once_and_reports_state`).
-- `cargo test -p gyre-adapters --lib sqlite::user` — 16 passed (incl.
-  new `deactivation_persists_and_round_trips`, which also proves
-  migration 000062 runs and the column round-trips through
-  create/update/find/list).
-- `cargo check -p gyre-server --tests` — exit 0 (all new server
-  handlers + tests type-check).
-- All 17 mechanical invariant scripts pass (arch, ABAC route registry,
-  migration versions/portability, mem port contracts, exempt handlers,
-  inert enforcement, scope literals, forged scope fields, etc.).
-- `cargo fmt --check` clean; clippy warning count on
-  gyre-domain/gyre-adapters identical to the pre-change baseline (299,
-  none in touched files).
-
-Deferred to the independent verifier (gyre-server test compilation
-exceeds this sandbox's 4 GiB budget — the build wrapper blocks it in
-the implement stage):
-
-- `cargo test -p gyre-server --lib api::users` — the four new tests:
-  `get_user_by_username_is_tenant_scoped`,
-  `list_users_is_tenant_admin_only_scoped_and_paginated`,
-  `deactivate_user_cascades_to_auth_and_ownership` (asserts the
-  deactivated key stops authenticating, the ownerless record is
-  written, the TenantAdmin is notified, and the audit event carries
-  the reason), and `workspace_invitation_lifecycle` (invite → list →
-  foreign-accept 404 → accept → re-accept 409 → revoke-pending →
-  revoke-accepted 409 → revoke-gone 404).
-- `cargo test -p gyre-server --lib workspace_ownership`,
-  `auth`, `git_http`, `abac_middleware` — regression surfaces touched
-  by the deactivation semantics (`has_active_owner`, auth extractor).
-- `cargo test --all`.
+      cargo test -p gyre-server --lib impersonation
