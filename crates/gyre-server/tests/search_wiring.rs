@@ -411,6 +411,9 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     // ── Human user: membership in ws-a only ────────────────────────────────
     let mut alice = User::new(Id::new("user-alice"), "ext-alice", "alice", 0);
     alice.roles = vec![UserRole::Developer];
+    // Bind alice to the tenant the seeded workspaces live in: API-key auth
+    // fail-closes (403) on users without a tenant binding (task-099 F1).
+    alice.tenant_id = Some(Id::new("default"));
     state.users.create(&alice).await.unwrap();
     let alice_key = "gyre_alice_search_key";
     state
