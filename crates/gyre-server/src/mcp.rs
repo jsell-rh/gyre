@@ -587,7 +587,8 @@ fn tool_definitions() -> Value {
                         "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
                         "parent_id": { "type": "string", "description": "Optional parent agent id" },
                         "compute_target_id": { "type": "string", "description": "Optional compute target id" },
-                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16)" }
+                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16)" },
+                        "persona_slug": { "type": "string", "description": "Optional persona slug to bind (resolved repo → workspace → tenant, must be approved); its system prompt is injected as GYRE_PROMPT_PERSONA" }
                     },
                     "required": ["task_id", "name", "branch"]
                 }
@@ -1002,6 +1003,7 @@ async fn handle_spawn_worker(
         loop_config: None,
         conversation_sha: None,
         persona: get_str(args, "persona").map(|s| s.to_string()),
+        persona_slug: get_str(args, "persona_slug").map(|s| s.to_string()),
     };
     match crate::api::spawn::spawn_agent_core(
         state,
@@ -3381,6 +3383,128 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
     }
 }
 
+// ── MCP Prompts ──────────────────────────────────────────────────────────────
+
+/// The four system prompts (platform-model.md §4.3). Shape mirrors
+/// `resource_definitions()`: MCP `prompts/list` returns `{prompts: [...]}`
+/// with per-prompt name, description, and argument schemas.
+fn prompt_definitions() -> Value {
+    use crate::api::prompts::*;
+    json!({
+        "prompts": [
+            {
+                "name": PROMPT_PERSONA,
+                "description": "The agent's persona prompt. Resolves the persona bound to the calling agent, or the persona named by the optional `slug` argument, via nearest-scope-wins (repo → workspace → tenant). Only approved personas resolve.",
+                "arguments": [
+                    {
+                        "name": "slug",
+                        "description": "Persona slug to resolve; defaults to the agent's bound persona.",
+                        "required": false
+                    }
+                ]
+            },
+            {
+                "name": PROMPT_PROTOCOL,
+                "description": "Interaction norms, Ralph loop definition, and escalation rules (platform-model.md §3/§4)."
+            },
+            {
+                "name": PROMPT_CONTEXT,
+                "description": "Current task (title, spec ref, description), worktree info, and repository context for the calling agent.",
+                "arguments": [
+                    {
+                        "name": "task_id",
+                        "description": "Task to render; defaults to the agent's bound task.",
+                        "required": false
+                    }
+                ]
+            },
+            {
+                "name": PROMPT_CONSTRAINTS,
+                "description": "Budget limits, remaining budget, agent lifetime cap, and scope boundaries for the calling agent."
+            }
+        ]
+    })
+}
+
+/// Resolve the caller's [`crate::api::prompts::PromptScope`] for
+/// `prompts/get` — same resolution as the `secrets://` resources (JWT
+/// claims → agent record → task), with the tenant always coming from the
+/// governing workspace record, never fabricated.
+async fn prompt_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Result<crate::api::prompts::PromptScope, String> {
+    let scope = agent_secret_scope(state, auth).await.ok_or_else(|| {
+        "system prompts resolve scope from the caller's agent identity — no agent record or scope claims found".
+            to_string()
+    })?;
+    Ok(crate::api::prompts::PromptScope {
+        tenant_id: Some(Id::new(&scope.tenant_id)),
+        workspace_id: Id::new(&scope.workspace_id),
+        repo_id: if scope.repo_id.is_empty() {
+            None
+        } else {
+            Some(Id::new(&scope.repo_id))
+        },
+        task_id: scope.task_id.as_deref().map(Id::new),
+        agent_id: Some(Id::new(&auth.agent_id)),
+    })
+}
+
+/// `prompts/get` — render one of the four system prompts
+/// (platform-model.md §4.3) for the calling agent. Response follows the MCP
+/// prompts/get result shape: `{description, messages: [{role, content}]}`.
+async fn handle_prompt_get(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    name: &str,
+    arguments: Option<&Value>,
+) -> Result<Value, String> {
+    use crate::api::prompts::*;
+
+    let arg_str = |key: &str| -> Option<String> {
+        arguments
+            .and_then(|a| a.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let text = match name {
+        PROMPT_PERSONA => {
+            let scope = prompt_scope(state, auth).await?;
+            persona_prompt(state, &scope, arg_str("slug").as_deref()).await?
+        }
+        PROMPT_PROTOCOL => protocol_prompt().to_string(),
+        PROMPT_CONTEXT => {
+            let scope = prompt_scope(state, auth).await?;
+            context_prompt_for_caller(state, &scope, arg_str("task_id").as_deref()).await?
+        }
+        PROMPT_CONSTRAINTS => {
+            let scope = prompt_scope(state, auth).await?;
+            constraints_prompt(state, &scope).await
+        }
+        other => return Err(format!("unknown prompt: {other}")),
+    };
+
+    let description = match name {
+        PROMPT_PERSONA => "The agent's persona prompt",
+        PROMPT_PROTOCOL => "Interaction norms, Ralph loop definition, escalation rules",
+        PROMPT_CONTEXT => "Current task, spec refs, and worktree info",
+        PROMPT_CONSTRAINTS => "Budget limits, lifetime, and scope boundaries",
+        _ => unreachable!("validated above"),
+    };
+
+    Ok(json!({
+        "description": description,
+        "messages": [
+            {
+                "role": "user",
+                "content": {"type": "text", "text": text}
+            }
+        ]
+    }))
+}
+
 // ── Main MCP request dispatcher ───────────────────────────────────────────────
 
 #[instrument(skip(state, req, auth), fields(method = %req.method))]
@@ -3401,7 +3525,8 @@ pub async fn mcp_handler(
                 },
                 "capabilities": {
                     "tools": {},
-                    "resources": {}
+                    "resources": {},
+                    "prompts": {}
                 }
             }),
         ),
@@ -3409,6 +3534,20 @@ pub async fn mcp_handler(
         "notifications/initialized" => JsonRpcResponse::ok(id, json!(null)),
         "tools/list" => JsonRpcResponse::ok(id, tool_definitions()),
         "resources/list" => JsonRpcResponse::ok(id, resource_definitions()),
+        // MCP Prompts (platform-model.md §4.3): the four system prompts.
+        "prompts/list" => JsonRpcResponse::ok(id, prompt_definitions()),
+        "prompts/get" => {
+            let params = req.params.unwrap_or(json!({}));
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: name")
+            } else {
+                match handle_prompt_get(&state, &auth, name, params.get("arguments")).await {
+                    Ok(result) => JsonRpcResponse::ok(id, result),
+                    Err(msg) => JsonRpcResponse::err(id, INVALID_PARAMS, msg),
+                }
+            }
+        }
         "resources/read" => {
             let params = req.params.unwrap_or(json!({}));
             let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
@@ -5830,6 +5969,643 @@ mod tests {
         };
         let result = handle_resource_read(&state, &auth, "secrets://names").await;
         assert!(result["error"].as_str().unwrap().contains("agent identity"));
+    }
+
+    // ── MCP Prompts (platform-model.md §4.3) ─────────────────────────────────
+
+    async fn seed_prompt_state() -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-prompt"),
+            Id::new("default"),
+            "MCP Prompts WS",
+            "mcp-prompts-ws",
+            1_700_000_000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-mcp-prompt"),
+            Id::new("ws-mcp-prompt"),
+            "prompt-repo",
+            "/tmp/gyre-test/prompt-repo",
+            1_700_000_000,
+        );
+        state.repos.create(&repo).await.unwrap();
+        state
+    }
+
+    async fn seed_prompt_persona(
+        state: &Arc<crate::AppState>,
+        id: &str,
+        slug: &str,
+        scope: gyre_domain::PersonaScope,
+        system_prompt: &str,
+        approved: bool,
+    ) -> gyre_domain::Persona {
+        let mut persona = gyre_domain::Persona::new(
+            Id::new(id),
+            format!("Persona {slug}"),
+            slug.to_string(),
+            scope,
+            system_prompt.to_string(),
+            1_700_000_000,
+        );
+        if approved {
+            persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+            persona.approved_by = Some("human-admin".to_string());
+            persona.approved_at = Some(1_700_000_000);
+        }
+        state.personas.create(&persona).await.unwrap();
+        persona
+    }
+
+    async fn seed_prompt_agent(
+        state: &Arc<crate::AppState>,
+        agent_id: &str,
+        persona_id: Option<&str>,
+    ) {
+        let mut agent = gyre_domain::Agent::new(Id::new(agent_id), agent_id, 1_700_000_000);
+        agent.workspace_id = Id::new("ws-mcp-prompt");
+        agent.repo_id = Some(Id::new("repo-mcp-prompt"));
+        agent.persona_id = persona_id.map(Id::new);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+    }
+
+    /// agent_auth with an explicit task_id claim (the bound task).
+    fn agent_auth_with_task(
+        agent_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        task_id: &str,
+    ) -> AuthenticatedAgent {
+        AuthenticatedAgent {
+            agent_id: agent_id.to_string(),
+            user_id: None,
+            roles: vec![UserRole::Agent],
+            tenant_id: "default".to_string(),
+            jwt_claims: Some(serde_json::json!({
+                "sub": agent_id,
+                "scope": "agent",
+                "task_id": task_id,
+                "workspace_id": workspace_id,
+                "repo_id": repo_id,
+            })),
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_list_returns_four_system_prompts() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 40,
+                "method": "prompts/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let prompts = json["result"]["prompts"].as_array().unwrap();
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "system://persona",
+                "system://protocol",
+                "system://context",
+                "system://constraints"
+            ],
+            "prompts/list must return the four §4.3 prompts in spec-table order"
+        );
+        // Argument schemas: persona takes an optional slug, context an optional task_id.
+        let arg_names = |p: &Value| -> Vec<String> {
+            p["arguments"]
+                .as_array()
+                .map(|args| {
+                    args.iter()
+                        .map(|a| a["name"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(arg_names(&prompts[0]), vec!["slug"]);
+        assert_eq!(arg_names(&prompts[2]), vec!["task_id"]);
+        // Every entry is described.
+        for p in prompts {
+            assert!(!p["description"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_advertises_prompts_capability() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": { "name": "test", "version": "0.1" },
+                    "capabilities": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["capabilities"]["prompts"].is_object(),
+            "initialize must advertise the prompts capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_unknown_and_missing_name_errors() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "prompts/get",
+                "params": { "name": "system://nope" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], -32602);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown prompt"));
+
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 43,
+                "method": "prompts/get",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], -32602);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing required field: name"));
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_persona_resolves_scope_chain() {
+        let state = seed_prompt_state().await;
+        // Persona exists ONLY at tenant scope: a repo-scoped agent must still
+        // resolve it through the repo → workspace → tenant fallback.
+        seed_prompt_persona(
+            &state,
+            "persona-tenant-fallback",
+            "scope-chain-persona",
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "tenant-level persona prompt",
+            true,
+        )
+        .await;
+        let auth = agent_auth(
+            "agent-prompt-fallback",
+            "ws-mcp-prompt",
+            Some("repo-mcp-prompt"),
+        );
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://persona",
+            Some(&json!({"slug": "scope-chain-persona"})),
+        )
+        .await
+        .expect("tenant-scoped persona must resolve via the 3-level fallback");
+        assert_eq!(
+            result["messages"][0]["content"]["text"],
+            "tenant-level persona prompt"
+        );
+
+        // Nearest scope wins: a repo-scoped persona with the same slug
+        // overrides the tenant one.
+        seed_prompt_persona(
+            &state,
+            "persona-repo-override",
+            "scope-chain-persona",
+            gyre_domain::PersonaScope::Repo(Id::new("repo-mcp-prompt")),
+            "repo-level persona prompt",
+            true,
+        )
+        .await;
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://persona",
+            Some(&json!({"slug": "scope-chain-persona"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result["messages"][0]["content"]["text"],
+            "repo-level persona prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_persona_uses_bound_persona_and_errors_without() {
+        let state = seed_prompt_state().await;
+        let persona = seed_prompt_persona(
+            &state,
+            "persona-bound",
+            "bound-persona",
+            gyre_domain::PersonaScope::Workspace(Id::new("ws-mcp-prompt")),
+            "bound persona prompt text",
+            true,
+        )
+        .await;
+        seed_prompt_agent(&state, "agent-bound-persona", Some(persona.id.as_str())).await;
+        let auth = agent_auth(
+            "agent-bound-persona",
+            "ws-mcp-prompt",
+            Some("repo-mcp-prompt"),
+        );
+        // No slug argument: the persona bound to the agent record is used.
+        let result = handle_prompt_get(&state, &auth, "system://persona", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result["messages"][0]["content"]["text"],
+            "bound persona prompt text"
+        );
+
+        // An agent with no bound persona and no slug fails honestly.
+        seed_prompt_agent(&state, "agent-unbound-persona", None).await;
+        let auth = agent_auth(
+            "agent-unbound-persona",
+            "ws-mcp-prompt",
+            Some("repo-mcp-prompt"),
+        );
+        let err = handle_prompt_get(&state, &auth, "system://persona", None)
+            .await
+            .expect_err("unbound agent must not get a fabricated persona prompt");
+        assert!(err.contains("no persona bound"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_persona_rejects_unapproved_and_unknown() {
+        let state = seed_prompt_state().await;
+        seed_prompt_persona(
+            &state,
+            "persona-pending",
+            "pending-persona",
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "pending persona prompt",
+            false,
+        )
+        .await;
+        let auth = agent_auth("agent-pending", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://persona",
+            Some(&json!({"slug": "pending-persona"})),
+        )
+        .await
+        .expect_err("a Pending persona must not be injected");
+        assert!(err.contains("approve"), "unexpected error: {err}");
+
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://persona",
+            Some(&json!({"slug": "does-not-exist"})),
+        )
+        .await
+        .expect_err("unknown slug must fail");
+        assert!(
+            err.contains("not found in scope chain"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_context_includes_task_spec_and_worktree() {
+        let state = seed_prompt_state().await;
+        let mut task = Task::new(
+            Id::new("task-mcp-prompt"),
+            "Render system prompts at spawn",
+            1_700_000_000,
+        );
+        task.description =
+            Some("The four §4.3 prompts must be injected at spawn time.".to_string());
+        task.spec_path = Some("specs/system/platform-model.md".to_string());
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-mcp-prompt");
+        task.repo_id = Id::new("repo-mcp-prompt");
+        state.tasks.create(&task).await.unwrap();
+
+        let agent_id = Id::new("agent-mcp-context");
+        let worktree = gyre_domain::AgentWorktree::new(
+            Id::new("wt-mcp-context"),
+            agent_id.clone(),
+            Id::new("repo-mcp-prompt"),
+            Some(Id::new("task-mcp-prompt")),
+            "feat/prompts".to_string(),
+            "/tmp/gyre-test/prompt-repo/worktrees/feat-prompts".to_string(),
+            1_700_000_000,
+        );
+        state.worktrees.create(&worktree).await.unwrap();
+
+        let auth = agent_auth_with_task(
+            "agent-mcp-context",
+            "ws-mcp-prompt",
+            "repo-mcp-prompt",
+            "task-mcp-prompt",
+        );
+        let result = handle_prompt_get(&state, &auth, "system://context", None)
+            .await
+            .unwrap();
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Render system prompts at spawn"),
+            "title missing:\n{text}"
+        );
+        assert!(
+            text.contains("specs/system/platform-model.md"),
+            "spec ref missing:\n{text}"
+        );
+        assert!(
+            text.contains("The four §4.3 prompts must be injected at spawn time."),
+            "description missing:\n{text}"
+        );
+        assert!(
+            text.contains("Branch: feat/prompts"),
+            "worktree branch missing:\n{text}"
+        );
+        assert!(
+            text.contains("Path: /tmp/gyre-test/prompt-repo/worktrees/feat-prompts"),
+            "worktree path missing:\n{text}"
+        );
+        assert!(text.contains("prompt-repo"), "repo info missing:\n{text}");
+
+        // An explicit unknown task_id argument fails rather than rendering
+        // an empty task.
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "no-such-task"})),
+        )
+        .await
+        .expect_err("unknown task_id must fail");
+        assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_context_rejects_cross_scope_task_id() {
+        let state = seed_prompt_state().await;
+        // A victim workspace in a different tenant with a confidential task.
+        let victim_ws = gyre_domain::Workspace::new(
+            Id::new("ws-victim"),
+            Id::new("tenant-b"),
+            "Victim WS",
+            "victim-ws",
+            1_700_000_000,
+        );
+        state.workspaces.create(&victim_ws).await.unwrap();
+        let mut victim_task =
+            Task::new(Id::new("task-victim"), "SECRET victim title", 1_700_000_000);
+        victim_task.description = Some("confidential acceptance criteria".to_string());
+        victim_task.workspace_id = Id::new("ws-victim");
+        victim_task.repo_id = Id::new("repo-victim");
+        state.tasks.create(&victim_task).await.unwrap();
+
+        // Explicit task_id from another workspace: denied, no text leaked.
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-victim"})),
+        )
+        .await
+        .expect_err("cross-workspace task_id must be denied");
+        assert!(
+            err.contains("different workspace"),
+            "unexpected error: {err}"
+        );
+        assert!(!err.contains("SECRET"), "error leaked task title: {err}");
+
+        // A bound task (JWT task_id claim) from another workspace is denied
+        // by the same containment check.
+        let auth = agent_auth_with_task(
+            "agent-bound-cross",
+            "ws-mcp-prompt",
+            "repo-mcp-prompt",
+            "task-victim",
+        );
+        let err = handle_prompt_get(&state, &auth, "system://context", None)
+            .await
+            .expect_err("cross-workspace bound task must be denied");
+        assert!(
+            err.contains("different workspace"),
+            "unexpected error: {err}"
+        );
+
+        // Same workspace, different repo: denied for a repo-scoped agent.
+        let mut other_repo_task =
+            Task::new(Id::new("task-other-repo"), "Other repo task", 1_700_000_000);
+        other_repo_task.workspace_id = Id::new("ws-mcp-prompt");
+        other_repo_task.repo_id = Id::new("repo-other");
+        state.tasks.create(&other_repo_task).await.unwrap();
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let err = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-other-repo"})),
+        )
+        .await
+        .expect_err("cross-repo task_id must be denied for a repo-scoped agent");
+        assert!(err.contains("different repo"), "unexpected error: {err}");
+
+        // A workspace-scoped agent (no repo) may read a same-workspace task
+        // in any repo — the workspace is the ABAC boundary there.
+        let auth = agent_auth("agent-ws-scoped", "ws-mcp-prompt", None);
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-other-repo"})),
+        )
+        .await
+        .expect("same-workspace task must render for a workspace-scoped agent");
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("Other repo task"), "task missing:\n{text}");
+
+        // An in-scope explicit task_id still renders for a repo-scoped agent.
+        let mut own_task = Task::new(Id::new("task-own"), "Own in-scope task", 1_700_000_000);
+        own_task.workspace_id = Id::new("ws-mcp-prompt");
+        own_task.repo_id = Id::new("repo-mcp-prompt");
+        state.tasks.create(&own_task).await.unwrap();
+        let auth = agent_auth("agent-attacker", "ws-mcp-prompt", Some("repo-mcp-prompt"));
+        let result = handle_prompt_get(
+            &state,
+            &auth,
+            "system://context",
+            Some(&json!({"task_id": "task-own"})),
+        )
+        .await
+        .expect("in-scope task_id must render");
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("Own in-scope task"), "task missing:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_constraints_include_budget_and_scope() {
+        let state = seed_prompt_state().await;
+        let ws_key = "workspace:ws-mcp-prompt".to_string();
+        state
+            .budget_configs
+            .set_config(
+                &ws_key,
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(100_000),
+                    max_cost_per_day: Some(50.0),
+                    max_concurrent_agents: Some(4),
+                    max_agent_lifetime_secs: Some(3_600),
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .budget_usages
+            .set_usage(
+                &ws_key,
+                &gyre_domain::BudgetUsage {
+                    entity_type: "workspace".to_string(),
+                    entity_id: Id::new("ws-mcp-prompt"),
+                    tokens_used_today: 25_000,
+                    cost_today: 12.5,
+                    active_agents: 2,
+                    period_start: 1_700_000_000,
+                },
+            )
+            .await
+            .unwrap();
+
+        let auth = agent_auth(
+            "agent-mcp-constraints",
+            "ws-mcp-prompt",
+            Some("repo-mcp-prompt"),
+        );
+        let result = handle_prompt_get(&state, &auth, "system://constraints", None)
+            .await
+            .unwrap();
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("max_tokens_per_day: 100000"),
+            "token limit missing:\n{text}"
+        );
+        assert!(
+            text.contains("remaining: 75000"),
+            "remaining budget missing:\n{text}"
+        );
+        assert!(
+            text.contains("max_cost_per_day_usd: 50.0000"),
+            "cost limit missing:\n{text}"
+        );
+        assert!(
+            text.contains("max_concurrent_agents: 4"),
+            "concurrency limit missing:\n{text}"
+        );
+        assert!(
+            text.contains("max_agent_lifetime_secs: 3600"),
+            "lifetime cap missing:\n{text}"
+        );
+        assert!(
+            text.contains("Workspace: ws-mcp-prompt"),
+            "workspace boundary missing:\n{text}"
+        );
+        assert!(
+            text.contains("Repo: repo-mcp-prompt"),
+            "repo boundary missing:\n{text}"
+        );
+        assert!(
+            text.contains("Tenant: default"),
+            "tenant boundary missing:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_protocol_returns_norms() {
+        let state = seed_prompt_state().await;
+        // The protocol prompt is static — a user token can read it too.
+        let auth = AuthenticatedAgent {
+            agent_id: "some-user".to_string(),
+            user_id: Some(Id::new("u-1")),
+            roles: vec![UserRole::ReadOnly],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let result = handle_prompt_get(&state, &auth, "system://protocol", None)
+            .await
+            .unwrap();
+        let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Ralph loop"),
+            "loop definition missing:\n{text}"
+        );
+        assert!(
+            text.contains("Escalation rules"),
+            "escalation rules missing:\n{text}"
+        );
+        assert_eq!(result["messages"][0]["role"], "user");
+        assert_eq!(result["messages"][0]["content"]["type"], "text");
+        assert!(!result["description"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_scoped_prompts_require_agent_identity() {
+        let state = seed_prompt_state().await;
+        // A user token (no agent JWT, no agent record) has no prompt scope.
+        let auth = AuthenticatedAgent {
+            agent_id: "some-user".to_string(),
+            user_id: Some(Id::new("u-1")),
+            roles: vec![UserRole::Developer],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        for name in [
+            "system://persona",
+            "system://context",
+            "system://constraints",
+        ] {
+            let err = handle_prompt_get(&state, &auth, name, None)
+                .await
+                .expect_err("scoped prompts must require an agent identity");
+            assert!(
+                err.contains("agent identity"),
+                "unexpected error for {name}: {err}"
+            );
+        }
     }
 
     // ── TASK-010: graph_concept tool ─────────────────────────────────────────

@@ -80,6 +80,10 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `GYRE_AGENT_ID` | Agent UUID | Identity for API calls |
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
+| `GYRE_PROMPT_PERSONA` | _(optional)_ Persona system prompt | `system://persona` (Platform Model §4.3): the resolved persona's prompt, injected only when a persona is bound to the agent (spawn request `persona_slug`, resolved repo → workspace → tenant, must be approved) |
+| `GYRE_PROMPT_PROTOCOL` | Protocol norms text | `system://protocol` (Platform Model §4.3): interaction norms, Ralph loop definition, escalation rules |
+| `GYRE_PROMPT_CONTEXT` | Task/worktree context text | `system://context` (Platform Model §4.3): current task (title, spec ref, description), worktree branch/path, repo info |
+| `GYRE_PROMPT_CONSTRAINTS` | Constraints text | `system://constraints` (Platform Model §4.3): budget limits + remaining budget, agent lifetime cap, scope boundaries |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
 | `GYRE_CRED_{NAME}` | _(per secret)_ | Resolved secrets from the secrets repository (Platform Model §7): tenant/workspace/repo/task scoped, nearest scope wins on name collision, expired secrets excluded. Held in memory by the `cred-proxy` sidecar and scrubbed before the agent process starts -- raw values never appear in the agent process env |
 | `GYRE_CRED_PROXY` | `http://127.0.0.1:8765` | Address of the `cred-proxy` sidecar (M27); injected so entrypoint and agent-runner can reference the proxy address |
