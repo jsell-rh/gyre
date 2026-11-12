@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1"]
 ---
 
 ## Spec Excerpt
@@ -139,8 +139,21 @@ entries in `abac_middleware.rs`.
 
 ### Session endpoints
 
-Verified covered by task-111 (list / revoke individual / revoke all
-under `/api/v1/users/me/sessions`); no duplication added.
+Not implemented by this task: no `/api/v1/users/me/sessions` routes
+exist anywhere in the server (list, revoke individual, revoke all —
+verified by grep over `gyre-server/src/api/`, `gyre-ports/src/`, and
+`gyre-domain/src/`). The three session endpoints are owned by task-111
+(`specs/tasks/task-111.md`, progress: not-started, commits: []), which
+also owns the full session-management subsystem (`UserSession` entity,
+`SessionRepository` port, session tracking, revocation enforcement in
+the auth path). Coverage matrix row 26
+(`specs/coverage/system/user-management.md`) correctly records the
+three session endpoints as still open; §API > User Management stays
+task-assigned until task-111 lands them. This task's acceptance
+criteria do not include the session endpoints, and no code shipped
+here claims session coverage. (Review repair, round 2: this paragraph
+previously and falsely claimed the endpoints were "verified covered
+by task-111".)
 
 ### Test evidence
 
@@ -160,4 +173,6 @@ under `/api/v1/users/me/sessions`); no duplication added.
   deferred to the verifier per the 4 GiB budget rule; the verifier must
   run:
 
-      cargo test -p gyre-server --lib impersonation
+      cargo test -p gyre-server --lib api::users
+      cargo test -p gyre-server --lib api::impersonation
+      cargo test --all
