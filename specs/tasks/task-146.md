@@ -151,6 +151,21 @@ pub struct AnalyticsEvent {
   forged cross-tenant attribution never appearing in the victim
   workspace's filtered query results.
 
+### Contract repair: protected task text (round 65e4d25e)
+
+- No production change: the executor restored the assigned task
+  document after the previous round's protected-text drift (marked
+  acceptance checkboxes); the production fix on this branch is
+  preserved unchanged (HEAD eae997705, all 13 task-labeled product
+  commits recorded in frontmatter above). This round rebuilds the
+  bookkeeping under the assigned contract and re-verifies the fix:
+  `cargo test -p gyre-domain --lib analytics` (3 passed, incl. the
+  spec-schema round-trip), `cargo test -p gyre-adapters --lib
+  analytics` (13 passed, incl. `analytics_query_filtered_all_params`),
+  and `cargo check -p gyre-server --tests` (clean). The full
+  gyre-server per-event test list for the independent verifier is
+  recorded in /tmp/stage/review-evidence/task-146-contract-repair.md.
+
 ### Rebase repair: merge with base f98b179 (round 65e4d25e, commit d1f06da1a)
 
 - Resolved the rebase onto base `f98b17925` (task-194 + search access
@@ -184,7 +199,11 @@ pub struct AnalyticsEvent {
 
 ### Test evidence
 
-- In-sandbox (this round, head d1f06da1a): `cargo check -p gyre-server`
+- Contract-repair round (head eae997705, no code change):
+  `cargo test -p gyre-domain --lib analytics` — 3 passed;
+  `cargo test -p gyre-adapters --lib analytics` — 13 passed;
+  `cargo check -p gyre-server --tests` — clean.
+- In-sandbox (rebase round, head d1f06da1a): `cargo check -p gyre-server`
   and `cargo check -p gyre-server --tests` finished with 0 errors
   (build wrapper used; 8m37s / 3m44s). Mechanical gates pass on the
   merged tree: `check-arch.sh`, `check-forged-scope-fields.sh`,
@@ -198,7 +217,17 @@ pub struct AnalyticsEvent {
   `cargo test -p gyre-server --lib api::agents`,
   `cargo test -p gyre-server --lib signal_chain`,
   `cargo test -p gyre-server --lib api::orchestrator`,
+  `cargo test -p gyre-server --lib api::spawn`,
+  `cargo test -p gyre-server --lib api::budget`,
+  `cargo test -p gyre-server --lib api::specs`,
+  `cargo test -p gyre-server --lib api::merge_requests`,
+  `cargo test -p gyre-server --lib merge_processor`,
+  `cargo test -p gyre-server --lib gate_executor`,
+  `cargo test -p gyre-server --lib api::tasks`,
+  `cargo test -p gyre-server --lib api::mcp`,
+  `cargo test -p gyre-server --lib stale_agents`,
   `cargo test -p gyre-server --test search_wiring`,
+  `cargo test -p gyre-server --test api_integration analytics`,
   plus the full `cargo test --all` workspace suite and
   `scripts/check-*.sh` gates owned by verification. The merged
   `search_wiring.rs` (base's access-scoping tests + this task's scope
