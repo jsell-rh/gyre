@@ -793,7 +793,8 @@
       "ImpersonationRequest": "Impersonation Requests",
       "ImpersonationAlert": "Impersonation Alerts",
       "SecretExpiring": "Secrets Expiring",
-      "PersonaChangePendingApproval": "Persona Changes Pending Approval"
+      "PersonaChangePendingApproval": "Persona Changes Pending Approval",
+      "WorkspaceOwnerless": "Ownerless Workspaces"
     },
     "switch_workspace": "Switch to {name} workspace",
     "enable_notification": "Enable {label} notifications",

@@ -23,7 +23,27 @@ vi.mock('../lib/toast.svelte.js', () => ({
 
 import { api } from '../lib/api.js';
 import { NOTIF_TYPE_IDS } from '../lib/notification-types.js';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import UserProfile from '../components/UserProfile.svelte';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Canonical NotificationType variant names, extracted from the Rust enum
+// itself (the single source of truth). Deriving the expected set here --
+// instead of hardcoding a count that mirrors the implementation's own list
+// -- makes this test fail when the enum gains a variant with no toggle
+// (review finding: 'WorkspaceOwnerless' shipped with no toggle while a
+// hardcoded toBe(40) still passed).
+const RUST_ENUM_PATH = '../../../crates/gyre-common/src/notification.rs';
+const rustNotificationTypeVariants = () => {
+  const src = readFileSync(resolve(__dirname, RUST_ENUM_PATH), 'utf8');
+  const body = src.match(/^pub enum NotificationType \{[\s\S]*?^\}/m)[0];
+  return body
+    .match(/^    [A-Z][A-Za-z0-9]+,?$/gm)
+    .map((line) => line.trim().replace(/,$/, ''));
+};
 
 const ME = {
   username: 'jsell',
@@ -228,14 +248,16 @@ describe('UserProfile', () => {
     // Review F1: 'ComputeTargetUnavailable' (Priority-1 inbox type) had no
     // toggle -- a human could not disable it. It must render like the rest.
     expect(await findByText('Compute Target Unavailable')).toBeTruthy();
+    // Review round 2: 'WorkspaceOwnerless' (Priority-2, task-121 lineage) had
+    // no toggle either. It must render like the rest.
+    expect(await findByText('Ownerless Workspaces')).toBeTruthy();
     const checkboxes = container.querySelectorAll('.pref-checkbox');
-    // One toggle per canonical NotificationType variant. The count is the
-    // gyre-common enum variant count (40), asserted against the shared
-    // canonical list -- NOT the component's own rendering list length,
-    // which is what a mirrored count would silently forgive.
-    expect(NOTIF_TYPE_IDS.length).toBe(40);
-    expect(new Set(NOTIF_TYPE_IDS).size).toBe(NOTIF_TYPE_IDS.length);
-    expect(checkboxes.length).toBe(NOTIF_TYPE_IDS.length);
+    // One toggle per canonical NotificationType variant. The expected set is
+    // extracted from the gyre-common enum source -- NOT a count mirrored from
+    // the implementation's own list, which silently forgives a missing toggle.
+    const variants = rustNotificationTypeVariants();
+    expect(NOTIF_TYPE_IDS).toEqual(variants);
+    expect(checkboxes.length).toBe(variants.length);
   });
 
   it('loads server-side prefs rows into the toggles', async () => {

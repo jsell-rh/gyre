@@ -35,4 +35,7 @@ export const NOTIF_TYPE_IDS = [
   'ComputeTargetUnavailable',
   'ImpersonationRequest', 'ImpersonationAlert', 'SecretExpiring',
   'PersonaChangePendingApproval',
+  // user-management.md §Ownership Transfer & Reclamation (task-121 lineage):
+  // sent to every TenantAdmin when a workspace loses its last active Owner.
+  'WorkspaceOwnerless',
 ];
