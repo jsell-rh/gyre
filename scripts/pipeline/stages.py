@@ -276,6 +276,7 @@ def verify(execution, task):
                'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
                'engine': 'gateway', 'sandbox': remote['sandbox'],
                'tested_head':remote.get('head'),'artifacts':remote.get('publication')}
+    if remote.get('policy'):receipt['policy']=remote['policy']
     if remote.get('cache'):receipt['cache']=remote['cache']
     (execution.directory / 'verified.json').write_text(json.dumps(receipt))
     return receipt, {'verified': receipt}, []
@@ -312,11 +313,13 @@ def publish(execution, task):
             # Do not overwrite a known failing published head with another
             # integration merge before its failure reaches implementation.
             observed = observe_ci(execution,task,previous)
-            rejected = ci_failure(execution,task,previous,observed)
-            if rejected:
-                return rejected
-            if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
-                raise Wait('Awaiting CI on the recorded published head before changing the branch')
+            from .ci import completed_refresh
+            refreshed=completed_refresh(execution.store,task,verified,previous,observed)
+            if not refreshed:
+                rejected = ci_failure(execution,task,previous,observed)
+                if rejected:return rejected
+                if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
+                    raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
                                                 path / 'specs/tasks' / (task['name'] + '.md'),
@@ -364,18 +367,22 @@ def publish(execution, task):
     rejected = ci_failure(execution,task,verified,observation)
     if rejected:
         return rejected
+    merge_base=verified['base']
     if observation.get('checks') == 'green':
         latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
         if latest != verified['base']:
-            return {'base_changed': latest}, {'verified': None}, []
+            from .integration import same_merge_tree
+            if (observation.get('merge_state')=='BEHIND' or not same_merge_tree(execution,path,latest,verified)):
+                return {'base_changed': latest}, {'verified': None}, []
+            merge_base=latest
     if observation['status'] != 'passed':
         raise Wait('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']
     if not execution.store.reserve(permit, execution.claim['id'], execution.claim['token'], 'merge', 1,
-                                   {'url': url, 'head': head, 'base': verified['base']}):
-        raise Retry('another upstream merge is awaiting confirmation')
+                                   {'url': url, 'head': head, 'base': merge_base}):
+        raise Wait('another upstream merge is awaiting confirmation')
     latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
-    if latest != verified['base']:
+    if latest != merge_base:
         execution.store.resource_state(permit, 'absent')
         return {'base_changed': latest}, {'verified': None}, []
     method = merge_method(execution, repo)
