@@ -864,7 +864,7 @@
               <label class="toggle-row">
                 <input
                   type="checkbox"
-                  bind:checked={specPolicy.require_approval}
+                  bind:checked={specPolicy.require_approved_spec}
                   data-testid="toggle-require-approval"
                 />
                 <span class="toggle-label">
@@ -878,12 +878,40 @@
               <label class="toggle-row">
                 <input
                   type="checkbox"
-                  bind:checked={specPolicy.stale_spec_warning}
+                  bind:checked={specPolicy.warn_stale_spec}
                   data-testid="toggle-stale-warning"
                 />
                 <span class="toggle-label">
                   <span class="toggle-name">{$t('repo_settings.policies.stale_warning')}</span>
                   <span class="toggle-hint">{$t('repo_settings.policies.stale_warning_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specPolicy.require_current_spec}
+                  data-testid="toggle-require-current-spec"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.policies.require_current_spec')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_current_spec_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specPolicy.require_signed_approval}
+                  data-testid="toggle-require-signed-approval"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.policies.require_signed_approval')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_signed_approval_hint')}</span>
                 </span>
               </label>
             </div>
