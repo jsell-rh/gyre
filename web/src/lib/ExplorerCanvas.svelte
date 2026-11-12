@@ -7,6 +7,7 @@
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
+  import RiskMapOverlay from '../components/RiskMapOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
   import {
     buildAdjacency,
@@ -55,6 +56,9 @@
   // synthetic package/module groups ARE the boundary boxes the default
   // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
   import { nodeCategory, nodeMatchesConcept } from './filter-categories.js';
+  // Risk Map overlay (system-explorer.md §7, task-181): heat map metric
+  // scale + anomaly detection on the /graph/risks data.
+  import { buildRiskHeatMap, detectRiskAnomalies } from './risk-map.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -102,6 +106,11 @@
     // Risk metrics per node id from GET /repos/:id/graph/risks (task-178:
     // Evaluative lens overlays risk data — churn × complexity heat).
     riskByNode = {},
+    // Full RiskMetricsResponse entries from GET /repos/:id/graph/risks
+    // (task-181 Risk Map): churn_rate, fan_in, fan_out, complexity,
+    // spec_covered per node — drives the per-metric heat map and anomaly
+    // callouts (system-explorer.md §7).
+    riskEntries = [],
     // Node ids hidden by the in-view filter panel (filter-categories.js
     // hiddenNodeIds) — category checkboxes and concept selection toggle
     // node visibility on the canvas.
@@ -542,6 +551,10 @@
     void hiddenFilterCategories;
     void activeFilterConcepts;
     void Object.keys(riskByNode ?? {}).length;
+    // Risk Map (task-181): heat layer rebuilds when the metric selection or
+    // the underlying risk entries change — redraw without waiting for the
+    // next user interaction.
+    void riskHeatMap;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
   });
@@ -626,156 +639,12 @@
   });
 
   // Anomaly detection state — visible in both structural and evaluative lenses
-  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only)
+  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only).
+  // The patterns live in risk-map.js (detectRiskAnomalies) so they are
+  // unit-testable independently of the render loop (task-181).
   let anomalies = $derived.by(() => {
     if (lens !== 'structural' && lens !== 'evaluative') return [];
-    const results = [];
-    const nodeById = new Map();
-    for (const n of nodes) nodeById.set(n.id, n);
-
-    // Pre-compute trait implementation counts
-    const traitImplCounts = new Map(); // traitId → { total, tested }
-    for (const e of edges) {
-      const src = edgeSrc(e);
-      const tgt = edgeTgt(e);
-      const et = edgeType(e);
-      if (et === 'implements') {
-        const tgtNode = nodeById.get(tgt);
-        if (tgtNode && (tgtNode.node_type === 'interface' || tgtNode.node_type === 'trait')) {
-          if (!traitImplCounts.has(tgt)) traitImplCounts.set(tgt, { total: 0, tested: 0 });
-          const entry = traitImplCounts.get(tgt);
-          entry.total++;
-          const srcNode = nodeById.get(src);
-          if (srcNode?.test_coverage > 0 || srcNode?.test_node) entry.tested++;
-        }
-      }
-    }
-
-    // Compute distribution-relative thresholds (percentile-based, not hardcoded)
-    const complexities = nodes.filter(n => n.complexity != null && !n.deleted_at).map(n => n.complexity);
-    const coverages = nodes.filter(n => n.test_coverage != null && !n.deleted_at).map(n => n.test_coverage);
-    const callCounts = [];
-    for (const n of nodes) {
-      if (!n.deleted_at && n.node_type !== 'tree-group') callCounts.push(incomingCallCounts.get(n.id) ?? 0);
-    }
-    function p90(arr) {
-      if (arr.length === 0) return Infinity;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.9), sorted.length - 1);
-      return sorted[idx];
-    }
-    function p10(arr) {
-      if (arr.length === 0) return 0;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.1), sorted.length - 1);
-      return sorted[idx];
-    }
-    const complexityThreshold = Math.max(10, p90(complexities));
-    const coverageThreshold = Math.min(0.5, p10(coverages));
-    const callThreshold = Math.max(3, p90(callCounts));
-
-    for (const n of nodes) {
-      if (n.node_type === 'tree-group' || n.deleted_at) continue;
-      const calls = incomingCallCounts.get(n.id) ?? 0;
-
-      // Pattern 1: High complexity + low test coverage (distribution-relative)
-      if ((n.complexity ?? 0) > complexityThreshold && (n.test_coverage ?? 0) < coverageThreshold) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `High complexity (${n.complexity}, p90=${complexityThreshold}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
-          severity: 'high',
-        });
-      }
-      // Pattern 2: Heavily depended on with no spec (distribution-relative)
-      if (calls > callThreshold && !n.spec_path) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `Heavily depended on (${calls} callers, p90=${callThreshold}) with no spec`,
-          severity: 'medium',
-        });
-      }
-      // Pattern 3: Trait has N implementations but only M tested
-      if (n.node_type === 'interface' || n.node_type === 'trait') {
-        const entry = traitImplCounts.get(n.id);
-        if (entry && entry.total > 1 && entry.tested < entry.total) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `${entry.total} implementations but only ${entry.tested} tested`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 4: Type/interface created by agent but has no governing spec
-      if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
-        const hasGovEdge = governedByIndex.has(n.id);
-        if (!hasGovEdge) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `Agent-created ${n.node_type} has no governing spec`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 5: Orphan function — no callers (possible dead code)
-      if (n.node_type === 'function' && !n.test_node && calls === 0) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: 'No callers \u2014 possible dead code',
-          severity: 'low',
-        });
-      }
-    }
-    // Pattern 6: Co-change detection — modules that change together but have no shared spec.
-    // Two heuristics: (a) same commit SHA, (b) modified within the same time window (1 hour).
-    // This catches co-changes in separate commits within the same PR.
-    const coChangeGroups = new Map(); // key → [node]
-    for (const n of nodes) {
-      if (n.deleted_at || n.node_type === 'tree-group') continue;
-      // Group by SHA (exact same commit)
-      if (n.last_modified_sha) {
-        const key = `sha:${n.last_modified_sha}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-      // Group by time window (same hour, to catch separate commits in same PR)
-      if (n.last_modified_at) {
-        const hourBucket = Math.floor(n.last_modified_at / 3600);
-        const key = `time:${hourBucket}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-    }
-    // Deduplicate: track which node pairs we've already reported
-    const reportedPairs = new Set();
-    // Find groups of 3+ nodes from different modules that share a change pattern but no shared spec
-    for (const [, group] of coChangeGroups) {
-      if (group.length < 3) continue;
-      const modules = new Set(group.map(n => n.file_path?.split('/').slice(0, -1).join('/') ?? ''));
-      if (modules.size < 2) continue; // Same module, not interesting
-      const specs = new Set(group.filter(n => n.spec_path).map(n => n.spec_path));
-      if (specs.size > 0) continue; // Have shared spec governance
-      // Dedup by first 2 node IDs
-      const pairKey = group.slice(0, 2).map(n => n.id).sort().join(',');
-      if (reportedPairs.has(pairKey)) continue;
-      reportedPairs.add(pairKey);
-      const names = group.slice(0, 3).map(n => n.name ?? '?').join(', ');
-      results.push({
-        nodeId: group[0].id,
-        nodeName: names,
-        message: `${group.length} nodes across ${modules.size} modules change together but have no shared spec`,
-        severity: 'medium',
-      });
-    }
-    // Sort by severity (high first) — show all anomalies, not an arbitrary cap.
-    // The panel scrolls so users can explore the full risk landscape.
-    const order = { high: 0, medium: 1, low: 2 };
-    results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-    return results;
+    return detectRiskAnomalies({ nodes, edges, riskEntries });
   });
   // Index anomalies by nodeId for O(1) canvas-spatial rendering
   let anomalyByNodeId = $derived.by(() => {
@@ -977,6 +846,17 @@
     return { metric: evaluativeMetric, palette: 'blue-red' };
   });
 
+  // ── Risk Map overlay (system-explorer.md §7, task-181) ─────────────────
+  // Heat map layer for the selected risk metric (churn / coupling /
+  // complexity / spec coverage / test coverage). Pure metric → color
+  // mapping lives in risk-map.js; the canvas only swaps node fills —
+  // positions and layout are untouched.
+  let riskMapMetric = $state('churn');
+  let riskHeatMap = $derived.by(() => {
+    if (lens !== 'evaluative' || evaluativeMetric !== 'risk') return null;
+    return buildRiskHeatMap(riskEntries, nodes, riskMapMetric);
+  });
+
   // Pre-compute evaluative heat max values
   let evalHeatMaxValues = $derived.by(() => {
     if (!evaluativeHeatConfig) return new Map();
@@ -1019,6 +899,15 @@
   function evaluativeNodeColor(nodeId, node) {
     if (!evaluativeHeatConfig || !node) return null;
     const metric = evaluativeHeatConfig.metric;
+    // Risk Map heat (task-181): color by the selected risk metric on the
+    // blue → yellow → red scale. Zero is a valid value here (stable /
+    // covered → cool blue), unlike the trace metrics above where 0 means
+    // no data — nodes without data for the metric get no heat fill.
+    // Falls back to the task-178 aggregate (churn × complexity) when only
+    // the reduced riskByNode prop is available.
+    if (metric === 'risk' && riskHeatMap && riskHeatMap.byNodeId.size > 0) {
+      return riskHeatMap.byNodeId.get(nodeId)?.color ?? null;
+    }
     const value = getNodeMetricValue(metric, node);
     if (value === 0) return null;
     const maxVal = evalHeatMaxValues.get(metric) ?? 1;
@@ -6183,6 +6072,19 @@
       <div class="tb-sep"></div>
     {/if}
 
+    <!-- Risk Map overlay controls (system-explorer.md §7, task-181): appear
+         when the Evaluative lens runs the Risk metric — metric selector +
+         color scale legend. Toggling the lens (or the metric) off removes
+         the overlay entirely; nodes return to structural coloring. -->
+    {#if lens === 'evaluative' && evaluativeMetric === 'risk' && riskEntries.length > 0}
+      <RiskMapOverlay
+        metric={riskMapMetric}
+        heat={riskHeatMap}
+        onMetricChange={(key) => { riskMapMetric = key; scheduleRedraw(); }}
+      />
+      <div class="tb-sep"></div>
+    {/if}
+
     <div class="treemap-legend">
       {#each legendItems as [label, color]}
         <span class="legend-item">
@@ -6748,7 +6650,13 @@
           class="anomaly-item anomaly-{anomaly.severity}"
           onclick={() => {
             const n = nodes.find(nd => nd.id === anomaly.nodeId);
-            if (n) { selectedNodeId = n.id; onNodeDetail(n); }
+            if (n) {
+              // Navigate on canvas (spec §7: callouts link to the relevant
+              // nodes): pan/zoom the camera onto the offending node, select
+              // it, and surface its detail panel.
+              zoomToNode(n.id);
+              onNodeDetail(n);
+            }
           }}
           type="button"
         >
