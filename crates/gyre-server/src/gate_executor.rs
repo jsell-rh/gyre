@@ -451,23 +451,42 @@ async fn spawn_manifest_gate_agent(
         );
     }
 
-    // Scoped token: a JWT minted by the server's OIDC provider and
-    // registered in agent_tokens so the gate agent runtime can authenticate
-    // (same registration spawn_agent_core uses). Falls back to an opaque
-    // token when minting fails — the KV registration is what authenticates.
-    let token = state
-        .agent_signing_key
-        .mint(
-            agent.id.as_str(),
-            "",
-            "server",
-            &state.base_url,
-            GATE_AGENT_TOKEN_TTL_SECS,
-        )
-        .unwrap_or_else(|e| {
-            warn!("gate agent JWT mint failed, falling back to UUID token: {e}");
-            format!("gyre_gate_{}", Uuid::new_v4().simple())
-        });
+    // Scoped reviewer identity (review repair): `review:submit` only, minted
+    // with `mint_scoped` exactly like the command-based gate path
+    // (`build_review_agent_context`). `submit_review` binds the reviewer to
+    // the verified token subject ONLY for review:submit-scoped JWTs — a
+    // general-purpose "agent"-scoped token here would leave the gate
+    // agent's reviews recorded under a request-body reviewer id, so the
+    // persona / min_attestation_level / stack_hash constraints would be
+    // evaluated against an identity the token never verified. The ABAC
+    // reviewer allow-list (plus the /mcp surface, which the allow-list does
+    // not cover) still lets the runtime poll its ReviewRequest, read the MR
+    // diff, and submit its verdict — nothing else. A mint or registration
+    // failure fails the spawn closed: an unscoped fallback token is exactly
+    // the hole this closes, and with no gate agent running the gate polls
+    // reviews and fails at its timeout (never auto-passes).
+    let token = match state.agent_signing_key.mint_scoped(
+        agent.id.as_str(),
+        gate.id.as_str(),
+        "forge",
+        &state.base_url,
+        GATE_AGENT_TOKEN_TTL_SECS,
+        crate::auth::REVIEW_SUBMIT_SCOPE,
+    ) {
+        Ok(token) => token,
+        Err(e) => {
+            warn!(
+                agent_id = %agent.id,
+                mr_id = %mr.id,
+                persona = %mg.persona,
+                error = %e,
+                "manifest gate: scoped reviewer token mint failed; failing the gate agent spawn closed"
+            );
+            let _ = agent.transition_status(AgentStatus::Stopped);
+            let _ = state.agents.update(&agent).await;
+            return None;
+        }
+    };
     if let Err(e) = state
         .kv_store
         .kv_set("agent_tokens", agent.id.as_str(), token.clone())
@@ -475,9 +494,13 @@ async fn spawn_manifest_gate_agent(
     {
         warn!(
             agent_id = %agent.id,
+            mr_id = %mr.id,
             error = format!("{e:#}"),
-            "manifest gate: failed to register gate agent token"
+            "manifest gate: failed to register gate agent token; failing the gate agent spawn closed"
         );
+        let _ = agent.transition_status(AgentStatus::Stopped);
+        let _ = state.agents.update(&agent).await;
+        return None;
     }
 
     // Dispatch the review request the gate agent runtime polls for (MCP
@@ -519,26 +542,48 @@ async fn spawn_manifest_gate_agent(
 
 /// Tear down a forge-spawned gate agent after its gate resolved
 /// (agent-gates.md §Gate Agent Lifecycle: "Agent is torn down after
-/// submitting its verdict"). Kills its runtime process if one is still
-/// registered (the admin kill path's pattern), revokes its token (audited
-/// via AgentTokenRevoked) and transitions it to Stopped — the record is kept
+/// submitting its verdict"). Kills its runtime process/container/Pod via
+/// the backend that owns the handle (`spawned_backends` — the same
+/// invariant the admin kill path implements and spawn.rs enforces with a
+/// dedicated test: a container/SshDocker/Kubernetes handle must go to
+/// `docker rm --force` / `kubectl delete pod` / the remote docker daemon,
+/// and an SshBare handle's pid is a REMOTE-host pid that LocalTarget must
+/// never be handed), removes the spawned_backends entry the launch
+/// registered (no map leak), revokes its token (audited via
+/// AgentTokenRevoked) and transitions it to Stopped — the record is kept
 /// so its reviews stay attributed.
 async fn teardown_gate_agent(state: &Arc<AppState>, agent_id: &Id) {
     let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await else {
         return;
     };
-    // Kill the runtime process if it is still running (best-effort — the
-    // handle may already be gone if the process exited on its own).
-    if let Some(handle) = state
+    // Kill the runtime process/container/Pod if it is still running
+    // (best-effort — the handle may already be gone if the process exited
+    // on its own). The backend recorded at spawn time decides how;
+    // LocalTarget (pid kill) is only the fallback for handles with no
+    // recorded backend. The spawned_backends entry is removed
+    // unconditionally so it cannot leak when the handle was already reaped.
+    let handle = state
         .process_registry
         .lock()
         .await
-        .remove(agent_id.as_str())
-    {
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+        .remove(agent_id.as_str());
+    let backend = state
+        .spawned_backends
+        .lock()
+        .await
+        .remove(agent_id.as_str());
+    if let Some(handle) = handle {
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
                 .await
-        {
+            }
+        };
+        if let Err(e) = kill_result {
             warn!(
                 agent_id = %agent_id,
                 error = format!("{e:#}"),
@@ -4581,6 +4626,141 @@ specs:
         assert!(
             !alive,
             "the gate agent's runtime process must be killed on teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_agent_token_is_scoped_reviewer_jwt() {
+        // Review repair: the gate agent's token must carry
+        // `review:submit` — submit_review binds the reviewer to the verified
+        // token subject ONLY for that scope, so an ordinary "agent"-scoped
+        // token would leave the manifest gate's persona/attestation
+        // constraints evaluated against an unverified request-body identity.
+        // Fails if the mint reverts to AgentSigningKey::mint (scope "agent").
+        let state = test_state();
+        let _dir = setup_manifest_mr(
+            &state,
+            "repo-mg-tok",
+            "mr-mg-tok",
+            Some("specs/system/identity-security.md@0123456789abcdef0123456789abcdef01234567"),
+        )
+        .await;
+
+        trigger_gates_for_mr(state.clone(), Id::new("mr-mg-tok"), Id::new("repo-mg-tok")).await;
+
+        let agent = state
+            .agents
+            .find_by_name("gate-security-mr-mg-tok")
+            .await
+            .unwrap()
+            .expect("gate agent for security must be spawned");
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", agent.id.as_str())
+            .await
+            .unwrap()
+            .expect("gate agent token must be registered");
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("gate agent token must be a server-minted JWT");
+        assert_eq!(
+            claims.sub,
+            agent.id.as_str(),
+            "the token subject must be the gate agent itself"
+        );
+        assert_eq!(
+            claims.scope,
+            crate::auth::REVIEW_SUBMIT_SCOPE,
+            "the gate agent must authenticate with a review:submit-scoped token \
+             so submit_review binds its reviewer identity"
+        );
+        assert_eq!(
+            claims.task_id, "manifest-gate:repo-mg-tok:system/identity-security.md:security",
+            "the token must be traceable to the gate run that minted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_agent_teardown_routes_kill_through_registered_backend() {
+        // Review repair: teardown must kill the runtime via the backend that
+        // owns the handle (state.spawned_backends), the same invariant the
+        // admin kill path implements — NOT via LocalTarget directly. A
+        // container-backend handle routed to LocalTarget is a silent no-op
+        // (containers carry pid: None) and an SshBare pid is a REMOTE pid.
+        //
+        // Fixture: a real local process registered with a Container backend,
+        // whose kill routes to `docker rm --force <handle.id>` (a nonexistent
+        // container) — that can never terminate the local process. If
+        // teardown regressed to a LocalTarget kill, the SIGTERM would kill it
+        // and this test fails.
+        let state = test_state();
+        let agent_id = Id::new(Uuid::new_v4().to_string());
+        let mut agent =
+            gyre_domain::Agent::new(agent_id.clone(), "gate-security-backend", now_secs());
+        agent.workspace_id = Id::new("ws-gate-agent");
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent.id.as_str(), "tok-secret".to_string())
+            .await
+            .unwrap();
+
+        // A real long-running process standing in for the launched runtime.
+        let handle = gyre_ports::ComputeTarget::spawn_process(
+            &gyre_adapters::compute::LocalTarget,
+            &gyre_ports::SpawnConfig {
+                name: "gate-runtime-backend".to_string(),
+                command: "sleep".to_string(),
+                args: vec!["60".to_string()],
+                env: std::collections::HashMap::new(),
+                work_dir: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        // Register handle + owning backend exactly as the launch path does
+        // (register_spawned_agent) — but with a Container backend so the
+        // kill must route through it, not through a local pid kill.
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert(agent.id.to_string(), handle.clone());
+        state.spawned_backends.lock().await.insert(
+            agent.id.to_string(),
+            std::sync::Arc::new(crate::api::spawn::SpawnBackend::Container(
+                gyre_adapters::compute::ContainerTarget::new("gyre-agent:test"),
+            )),
+        );
+
+        teardown_gate_agent(&state, &agent.id).await;
+
+        // No map leak: both registry entries the launch registered are gone.
+        assert!(!state
+            .process_registry
+            .lock()
+            .await
+            .contains_key(agent_id.as_str()));
+        assert!(!state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key(agent_id.as_str()));
+
+        // The kill went to the owning backend: `docker rm --force` on a
+        // nonexistent container id cannot terminate the real local process,
+        // so it must still be alive. (A LocalTarget kill would have
+        // SIGTERMed it.)
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive =
+            gyre_ports::ComputeTarget::is_alive(&gyre_adapters::compute::LocalTarget, &handle)
+                .await
+                .unwrap();
+        assert!(
+            alive,
+            "teardown must route the kill through the registered backend, not LocalTarget"
         );
     }
 

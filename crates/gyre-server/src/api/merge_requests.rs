@@ -1044,17 +1044,27 @@ pub async fn submit_review(
     // reviewer id. Exact-match capability (review F3); `validation:report`
     // validators have no review-submission capability at all (F2) and are
     // additionally blocked from this route by the ABAC allow-list.
-    let reviewer_agent_id = if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    //
+    // The same binding applies to EVERY agent-token principal (review
+    // repair, manifest gates): an agent JWT or legacy agent UUID token
+    // authenticates exactly one agent, so a review it submits recorded
+    // under a request-body reviewer id would let any spawned agent forge a
+    // review attributed to a persona-holding, attested agent — defeating
+    // the manifest gates' min_attestation_level / stack_hash constraints
+    // (spec-registry.md §Agent Approver / Gate Schema). Human callers
+    // (user JWT / API key / impersonation) and the server's system token
+    // keep the request-body reviewer: a human recording a review is an
+    // attributed human action, not a forged agent identity.
+    let agent_token_principal = auth.user_id.is_none() && !auth.is_system_principal();
+    let reviewer_agent_id = if agent_token_principal
+        || auth
+            .jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("scope"))
+            .and_then(|s| s.as_str())
+            == Some(crate::auth::REVIEW_SUBMIT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
-            auth.agent_id.clone()
-        } else {
-            req.reviewer_agent_id
-        }
+        auth.agent_id.clone()
     } else {
         req.reviewer_agent_id
     };
@@ -1676,6 +1686,62 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert_eq!(json["decision"], "changes_requested");
+    }
+
+    #[tokio::test]
+    async fn submit_review_binds_agent_token_caller_to_own_identity() {
+        // Review repair (manifest gates): an agent-token principal must
+        // submit under its own verified identity. A request-body
+        // reviewer_agent_id would let any spawned agent forge a review
+        // attributed to a persona-holding, attested agent, defeating the
+        // manifest gates' min_attestation_level / stack_hash constraints
+        // (spec-registry.md §Agent Approver / Gate Schema).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Forge test").await;
+
+        // An unrelated agent holding an ordinary (non-scoped) agent JWT —
+        // exactly what every spawned agent receives at spawn.
+        let mut forger = gyre_domain::Agent::new(gyre_common::Id::new("agt-forger"), "forger", 100);
+        forger
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&forger).await.unwrap();
+        let token = state
+            .agent_signing_key
+            .mint("agt-forger", "task-1", "tester", &state.base_url, 600)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-forger", token.clone())
+            .await
+            .unwrap();
+
+        // The forger claims to be a different reviewer (e.g. a
+        // persona-holding gate agent whose id is discoverable).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-victim",
+            "decision": "approved",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["reviewer_agent_id"], "agt-forger",
+            "an agent-token caller's review must be recorded under its own verified \
+             identity, never the request-body reviewer id"
+        );
     }
 
     #[tokio::test]
