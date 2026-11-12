@@ -27,6 +27,7 @@ struct QualityGateRow {
     gate_phase: String,
     timeout_secs: Option<i64>,
     created_at: i64,
+    position: i32,
 }
 
 impl QualityGateRow {
@@ -53,6 +54,7 @@ impl QualityGateRow {
             gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
             timeout_secs: self.timeout_secs.map(|v| v as u64),
             created_at: self.created_at as u64,
+            position: self.position as u32,
         }
     }
 }
@@ -72,6 +74,7 @@ struct NewQualityGateRow<'a> {
     gate_phase: &'a str,
     timeout_secs: Option<i64>,
     created_at: i64,
+    position: i32,
 }
 
 fn gate_type_str(gt: &GateType) -> &'static str {
@@ -105,6 +108,7 @@ impl QualityGateRepository for SqliteStorage {
                 gate_phase: g.gate_phase.as_str(),
                 timeout_secs: g.timeout_secs.map(|v| v as i64),
                 created_at: g.created_at as i64,
+                position: g.position as i32,
             };
             diesel::insert_into(quality_gates::table)
                 .values(&row)
@@ -120,6 +124,7 @@ impl QualityGateRepository for SqliteStorage {
                     quality_gates::required.eq(row.required),
                     quality_gates::gate_phase.eq(row.gate_phase),
                     quality_gates::timeout_secs.eq(row.timeout_secs),
+                    quality_gates::position.eq(row.position),
                 ))
                 .execute(&mut *conn)
                 .context("upsert quality gate")?;
@@ -150,7 +155,10 @@ impl QualityGateRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order(quality_gates::created_at.asc())
+                .order((
+                    quality_gates::position.asc(),
+                    quality_gates::created_at.asc(),
+                ))
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())
@@ -345,6 +353,7 @@ mod tests {
             required: true,
             gate_phase: GatePhase::PreMerge,
             timeout_secs: Some(30),
+            position: 1,
             created_at: 1000,
         }
     }
@@ -353,8 +362,9 @@ mod tests {
     /// EVERY mutable config column. The checkpoint that added
     /// `validation_type` accidentally dropped `required` from the set list —
     /// re-saving a gate silently kept the old blocking flag (PG kept it;
-    /// SQLite drifted). This test fails on that class of drift: flip both
-    /// columns, re-save, and assert the persisted row carries the new values.
+    /// SQLite drifted). This test fails on that class of drift: flip every
+    /// mutable column, re-save, and assert the persisted row carries the new
+    /// values.
     #[tokio::test]
     async fn save_upsert_updates_all_config_columns() {
         let (_tmp, storage) = tmp_storage();
@@ -364,6 +374,7 @@ mod tests {
         let mut updated = gate.clone();
         updated.required = false;
         updated.validation_type = Some("accessibility".to_string());
+        updated.position = 7;
         QualityGateRepository::save(&storage, &updated)
             .await
             .unwrap();
@@ -380,6 +391,10 @@ mod tests {
         assert!(
             !reloaded.required,
             "upsert must persist required changes — the task-134 checkpoint dropped this column from .set()"
+        );
+        assert_eq!(
+            reloaded.position, 7,
+            "upsert must persist position changes (drag-to-reorder, repo-lifecycle §3)"
         );
     }
 }
