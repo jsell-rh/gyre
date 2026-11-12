@@ -2,7 +2,7 @@
 title: "Moldable Views — type, trait, endpoint, and spec detail views"
 spec_ref: "system-explorer.md §2"
 depends_on: [task-178]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
 commits: ["d655e87ae975d70c4515f120be5ada986aaefcf9", "9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524"]
