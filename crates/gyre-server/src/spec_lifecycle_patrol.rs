@@ -1115,9 +1115,11 @@ mod tests {
         // repo1 watches only specs/milestones/ (ignored_paths cleared — the
         // defaults ignore milestones, which would mask the watched-path
         // assertion).
-        let mut cfg = SpecLifecycleConfig::default();
-        cfg.watched_paths = vec!["specs/milestones/".to_string()];
-        cfg.ignored_paths = vec![];
+        let cfg = SpecLifecycleConfig {
+            watched_paths: vec!["specs/milestones/".to_string()],
+            ignored_paths: vec![],
+            ..SpecLifecycleConfig::default()
+        };
         state
             .spec_lifecycle_configs
             .set_for_repo("repo1", cfg)
