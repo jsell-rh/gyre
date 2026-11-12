@@ -1230,6 +1230,7 @@ pub async fn git_receive_pack(
             crate::spec_registry::sync_spec_ledger(
                 &state_clone.spec_ledger,
                 &state_clone.spec_links_store,
+                &state_clone.spec_link_repo,
                 &repo_path_clone,
                 &update.new_sha,
                 now,
@@ -4681,6 +4682,19 @@ pub(crate) fn verify_context_binding(
     }
 }
 
+/// Constraints accumulated from a verified chain (§4.3, §6.2 Phase 2).
+/// Named carrier (TASK-048 F1): the previous positional tuple was a
+/// field-swap hazard.
+pub(crate) struct ChainConstraints {
+    /// The root SignedInput of the chain, if it carries one.
+    pub root_input: Option<gyre_common::attestation::SignedInput>,
+    /// Explicit constraints from the root SignedInput plus additional
+    /// constraints from each DerivedInput (additive only).
+    pub explicit_constraints: Vec<gyre_common::attestation::OutputConstraint>,
+    /// Gate constraints from gate attestations on each node.
+    pub gate_constraints: Vec<gyre_common::attestation::GateConstraint>,
+}
+
 /// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
 ///
 /// Walks the chain root→leaf, collecting:
@@ -4689,13 +4703,7 @@ pub(crate) fn verify_context_binding(
 /// 3. Gate constraints from gate attestations on each node
 ///
 /// Returns the full constraint set for evaluation.
-pub(crate) fn accumulate_chain_constraints(
-    chain: &[gyre_common::Attestation],
-) -> (
-    Option<gyre_common::attestation::SignedInput>,
-    Vec<gyre_common::attestation::OutputConstraint>,
-    Vec<gyre_common::attestation::GateConstraint>,
-) {
+pub(crate) fn accumulate_chain_constraints(chain: &[gyre_common::Attestation]) -> ChainConstraints {
     let mut explicit_constraints = Vec::new();
     let mut gate_constraints = Vec::new();
     let mut root_input = None;
@@ -4703,7 +4711,11 @@ pub(crate) fn accumulate_chain_constraints(
     for att in chain {
         match &att.input {
             gyre_common::AttestationInput::Signed(si) => {
-                root_input = Some(si.clone());
+                // Root-first chain ordering (see `verify_chain`): the first
+                // Signed input is the chain root.
+                if root_input.is_none() {
+                    root_input = Some(si.clone());
+                }
                 explicit_constraints.extend(si.output_constraints.iter().cloned());
             }
             gyre_common::AttestationInput::Derived(di) => {
@@ -4720,7 +4732,11 @@ pub(crate) fn accumulate_chain_constraints(
         }
     }
 
-    (root_input, explicit_constraints, gate_constraints)
+    ChainConstraints {
+        root_input,
+        explicit_constraints,
+        gate_constraints,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7041,16 +7057,19 @@ specs:
         }
 
         let chain = vec![root, derived];
-        let (root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert!(root_si.is_some(), "should find root signed input");
+        assert!(acc.root_input.is_some(), "should find root signed input");
         // Root has 1 constraint + derived has 1 = 2 total.
         assert_eq!(
-            explicit.len(),
+            acc.explicit_constraints.len(),
             2,
             "should accumulate constraints additively"
         );
-        assert!(gate.is_empty(), "should have no gate constraints");
+        assert!(
+            acc.gate_constraints.is_empty(),
+            "should have no gate constraints"
+        );
     }
 
     #[test]
@@ -7092,11 +7111,19 @@ specs:
             });
 
         let chain = vec![root];
-        let (_root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
-        assert_eq!(gate.len(), 1, "should have 1 gate constraint");
-        assert_eq!(gate[0].gate_name, "Code Review");
+        assert_eq!(
+            acc.explicit_constraints.len(),
+            1,
+            "should have 1 explicit constraint"
+        );
+        assert_eq!(
+            acc.gate_constraints.len(),
+            1,
+            "should have 1 gate constraint"
+        );
+        assert_eq!(acc.gate_constraints[0].gate_name, "Code Review");
     }
 
     /// Spec Approval Ledger regression (agent-gates.md §Spec Approval Ledger):
