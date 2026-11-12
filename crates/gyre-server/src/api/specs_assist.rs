@@ -598,7 +598,7 @@ pub async fn assist_meta_spec(
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -652,33 +652,67 @@ pub async fn assist_meta_spec(
             )
         })?;
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&ws_id, "meta-specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_META_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{meta_spec_kind}}", &meta_kind)
-        .replace("{{meta_spec_name}}", &meta_name)
-        .replace("{{meta_spec_content}}", &spec_content)
-        .replace("{{instruction}}", &req.instruction);
+    // Prompt template (ui-layout.md §2): DB workspace/tenant override →
+    // workspace git tree (specs/prompts/meta-specs-assist.md) → hardcoded
+    // fallback — the same resolution chain as the repo-scoped assist, with
+    // `sha` carrying git provenance for the budget cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &ws_id,
+        None,
+        "meta-specs-assist",
+        crate::llm_defaults::PROMPT_META_SPECS_ASSIST,
+    )
+    .await;
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("meta_spec_kind", meta_kind.as_str()),
+            ("meta_spec_name", meta_name.as_str()),
+            ("meta_spec_content", spec_content.as_str()),
+            ("instruction", req.instruction.as_str()),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "meta-specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2), and mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (same contract as the repo-scoped assist).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(workspace_id = %workspace_id, model = %model, error = ?e, "LLM stream_complete failed in assist_meta_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge the workspace for LLM usage (same estimate as
     // the repo-scoped assist — ~4 chars per token plus response overhead and
@@ -712,6 +746,7 @@ pub async fn assist_meta_spec(
             output_tokens: (base_estimate - estimated_input as f64) as u64,
             cost_usd: 0.0,
             model: model.clone(),
+            prompt_template_sha: template.sha.clone(),
         },
     )
     .await;
@@ -803,9 +838,14 @@ fn assist_sse_events(full_text: &str) -> Vec<Result<Event, std::convert::Infalli
 }
 
 /// Wrap pre-built assist SSE events in a keep-alive SSE response.
+///
+/// Returns the same concrete iterator-backed stream type as
+/// `sse_error_stream`: both handlers funnel every return path (error and
+/// success) through one `impl Trait` return slot, so the two helpers must
+/// agree on the underlying stream type or the opaque types fail to unify.
 fn assist_sse_response(
     events: Vec<Result<Event, std::convert::Infallible>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+) -> Sse<stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
     let s = stream::iter(events);
     Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
