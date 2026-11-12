@@ -2199,7 +2199,13 @@ async fn record_meta_spec_publish(
 ) -> Result<(), ApiError> {
     let workspace_id = match ms.scope {
         MetaSpecScope::Workspace => ms.scope_id.as_ref().map(Id::new),
-        MetaSpecScope::Global => None,
+        // Global and Tenant scopes are not single-workspace judgments: a
+        // Global entry applies platform-wide, a Tenant entry (§8) fans out to
+        // every workspace in its tenant — neither belongs to one workspace's
+        // ledger page, so the judgment carries no workspace attribution and
+        // the ledger's `?workspace_id=` filter (which excludes NULL) surfaces
+        // it only in the unfiltered cross-workspace view.
+        MetaSpecScope::Global | MetaSpecScope::Tenant => None,
     };
     let event = gyre_domain::AuditEvent::new(
         Id::new(uuid::Uuid::new_v4().to_string()),
@@ -2261,6 +2267,29 @@ async fn authorize_meta_spec_delete(
                 .await;
                 return Err(ApiError::Forbidden(
                     "only Admin role may delete tenant-level (Global) meta-specs".to_string(),
+                ));
+            }
+        }
+        MetaSpecScope::Tenant => {
+            // §8 tenant-scoped entry: an Admin of the scope tenant only —
+            // the same containment rule as the tenant force flag (an admin
+            // of another tenant must not delete, or learn of, this entry).
+            // A missing scope_id fails closed: no caller's tenant scope
+            // matches the empty string, so a dangling row is undeletable.
+            let scope_tenant = ms.scope_id.as_deref().unwrap_or("");
+            if !auth.roles.contains(&gyre_domain::UserRole::Admin)
+                || auth.tenant_id != scope_tenant
+            {
+                crate::rbac::record_rbac_denied(
+                    &state,
+                    &auth,
+                    "Admin",
+                    "DELETE /api/v1/meta-specs-registry/:id",
+                )
+                .await;
+                return Err(ApiError::Forbidden(
+                    "only an Admin of the scope tenant may delete tenant-scoped meta-specs"
+                        .to_string(),
                 ));
             }
         }
@@ -4439,6 +4468,150 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_tenant_scoped_meta_spec_requires_scope_tenant_admin() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A second tenant: the scope the meta-spec is pinned to. The system
+        // admin's own tenant is "default", deliberately different.
+        let other_tenant = gyre_domain::Tenant::new(
+            gyre_common::Id::new("tenant-del-other"),
+            "OtherDel",
+            "other-del",
+            0,
+        );
+        state.tenants.create(&other_tenant).await.unwrap();
+
+        // Create a Tenant-scoped meta-spec as the system admin (registry
+        // creation is Admin-governed; the scope tenant must exist).
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:persona", "name": "tenant-p",
+                            "scope": "Tenant", "scope_id": "tenant-del-other"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A non-admin human of the scope tenant must be forbidden.
+        let dev_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-tenant-dev-sub",
+                "preferred_username": "del-tenant-dev",
+                "tenant_id": "tenant-del-other",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {dev_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // An Admin of a DIFFERENT tenant ("default") must be forbidden — the
+        // §8 containment rule: only the scope tenant's admin may delete.
+        let cross_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-tenant-admin-sub",
+                "preferred_username": "del-tenant-admin",
+                "tenant_id": "default",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {cross_admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Still exists (forbidden ≠ delete).
+        let get_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+
+        // An Admin of the scope tenant may delete, and the delete takes effect.
+        let scope_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-scope-admin-sub",
+                "preferred_username": "del-scope-admin",
+                "tenant_id": "tenant-del-other",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test(flavor = "multi_thread")]
