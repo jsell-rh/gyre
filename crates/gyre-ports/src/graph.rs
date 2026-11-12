@@ -14,6 +14,10 @@ use gyre_common::{
 /// deleted_at) but preserves the immutable `first_seen_at` from the original
 /// insert.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async-trait 0.1.89 injects #[must_use] into every
+                                  // expanded method while the boxed-future return type is
+                                  // already #[must_use] (Future); upstream-suppressed set
+                                  // (lint_suppress_without_body) does not cover this lint.
 pub trait GraphPort: Send + Sync {
     /// Persist a new graph node.
     async fn create_node(&self, node: GraphNode) -> Result<GraphNode>;
