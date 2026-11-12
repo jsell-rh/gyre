@@ -78,7 +78,8 @@ def eligible(store, work):
     if candidate != inputs.get('candidate') or data.get('repair'):
         return False
     if stage == 'review':
-        return (data.get('review') or {}).get('candidate') != candidate
+        retry=data.get('review_retry') if (data.get('review_retry') or {}).get('candidate')==candidate else None
+        return (data.get('review') or {}).get('candidate') != candidate and inputs.get('review_retry')==retry
     review = data.get('review') or {}
     if review.get('candidate') != candidate or not review.get('approved'):
         return False
@@ -87,7 +88,8 @@ def eligible(store, work):
         if not verification_ready(store,task,inputs.get('base')) or not store.integration_available(work):
             return False
         verified = data.get('verified') or {}
-        return verified.get('candidate') != candidate or verified.get('base') != inputs['base']
+        return verified.get('candidate') != candidate or verified.get('passed') is not True
     if stage == 'publish':
-        return data.get('verified') == inputs['verified'] and store.integration_available(work)
+        verified = data.get('verified') or {}
+        return data.get('verified') == inputs['verified'] and verified.get('passed') is True and store.integration_available(work)
     return False

@@ -52,7 +52,7 @@ jobs:
         with:
           fetch-depth: 2
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -118,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -181,7 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
