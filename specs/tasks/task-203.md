@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
+commits: ["6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "ccf715b8cde79d9bfedebb0302fb9cb806c1e70a"]
 ---
 
 ## Spec Excerpt
@@ -72,27 +72,36 @@ Depends on task-201 (FTS backend stores `tenant_id`/`workspace_id`/`repo_id` on 
 
 ## Shipped
 
-Search is access-scoped end to end (search.md §Access Scoping), on a history that carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the earlier rebase repair onto base `4e895f76`, the CI runner repair `df800fe2`, and this attempt's rebase repair onto base `7cf2f81c` (merge `87915624`, durable finding `8e976725d`).
+Search is access-scoped end to end (search.md §Access Scoping), on a history that carries the original implementation (`a18e6e25`), verification repairs (`790b031d`, `6bf73593`, `f888d61d`), the earlier rebase repairs onto newer bases, and this attempt's review repair `ccf715b8` (PG suggest alias defect, below).
 
 ### Behavior
 
 - **Scope derivation (server-side, `crates/gyre-server/src/search_scope.rs`)**: `derive_search_scope` resolves the caller's `tenant_id` from auth, then — Admin (incl. global dev token) → unscoped within the tenant; agent JWTs with `orchestrator_type` claims → workspace orchestrator sees its whole workspace, repo orchestrator its single repo; worker agents → their agent record's workspace/repo; human users → accepted workspace memberships; unknown callers → fail closed (empty accessible set, zero results, never unscoped).
-- **Port (`gyre-ports/src/search.rs`)**: `SearchQuery` carries `tenant_id`, `accessible_workspace_ids: Option<Vec<String>>` (`None` = Admin/unscoped, empty = zero rows), `accessible_repo_ids: Option<Vec<String>>` (repo-less workspace docs stay visible). The user-supplied `workspace_id`/`entity_type` remain narrowing filters intersected with the accessible set — they can only narrow, never widen. `suggest()` and `facet_counts()` take the same `SearchQuery` and enforce the same scope (this rebase closed the gap the merged task-153 surface opened: the base's suggest/facets were unscoped).
-- **Adapter enforcement, inside the index query**: SQLite FTS5 and Postgres tsvector adapters build the §Access Scoping WHERE clauses (`tenant_id = ?`, `workspace_id IN (...)`, `(repo_id = '' OR repo_id IN (...))`; empty accessible set → `AND 0`/`AND FALSE`) in one shared `scope_filter_sql` helper applied identically by `search()`, `suggest()`, and `facet_counts()` — never post-filtered, so totals, suggestion lists, and facet counts cannot leak inaccessible documents. Blank facet text aggregates the caller's whole accessible set (not the whole index). The mem adapter applies the same scope predicate in its query filter (port-contract parity).
+- **Port (`gyre-ports/src/search.rs`)**: `SearchQuery` carries `tenant_id`, `accessible_workspace_ids: Option<Vec<String>>` (`None` = Admin/unscoped, empty = zero rows), `accessible_repo_ids: Option<Vec<String>>` (repo-less workspace docs stay visible). The user-supplied `workspace_id`/`entity_type` remain narrowing filters intersected with the accessible set — they can only narrow, never widen. `suggest()` and `facet_counts()` take the same `SearchQuery` and enforce the same scope.
+- **Adapter enforcement, inside the index query**: SQLite FTS5 and Postgres tsvector adapters build the §Access Scoping WHERE clauses (`tenant_id = ?`, `workspace_id IN (...)`, `(repo_id = '' OR repo_id IN (...))`; empty accessible set → `AND 0`/`AND FALSE`) in shared `scope_filter_sql` helpers applied identically by `search()`, `suggest()`, and `facet_counts()` — never post-filtered, so totals, suggestion lists, and facet counts cannot leak inaccessible documents. The mem adapter applies the same scope predicate in its query filter (port-contract parity).
 - **Handlers**: REST `search_handler`, `suggest_handler`, `facets_handler`, and MCP `gyre_search` all take `AuthenticatedAgent` and derive scope from the token context, never from client args; a client `workspace_id` only narrows.
 - **Indexing**: task/agent/MR creation routes documents through `search_scope::index_doc`, which stamps `workspace_id`/`repo_id` from the entity and resolves `tenant_id` from the workspace's scope row (unresolvable → doc visible to no tenant-scoped query, never mis-attributed).
 - **Docs**: `docs/api-reference.md` search/suggest/facets rows state the access scoping and that `workspace_id` only narrows.
 
+### Review repair `ccf715b8` (this attempt)
+
+Reviewer finding: `PgStorage::suggest`'s base SQL was `FROM search_index` with no `s` alias while the §Access Scoping fragments are `s.`-qualified, so PostgreSQL rejected every suggest call with 42P01 "missing FROM-clause entry for table \"s\"" — `GET /api/v1/search/suggest` 500'd for every caller (incl. Admin) on Postgres deployments; `cargo check` passed, making it runtime-only. Fixed by extracting all four PG base SQLs into consts (`SEARCH_BASE_SQL`, `SUGGEST_BASE_SQL`, `FACET_TEXT_BASE_SQL`, `FACET_BLANK_BASE_SQL`) and aliasing the suggest base `FROM search_index s` with `s.`-qualified columns and ORDER BY.
+
+- Added the first test module to `postgres/search.rs`: each base SQL is composed with the production `scope_filter_sql` fragments and asserted to define the `s` alias the fragments reference, keep the tenant boundary inside the index query, keep placeholder numbering contiguous, and compile an empty accessible set to `AND FALSE`. Verified the new `suggest_base_sql_defines_the_scope_alias` test FAILS on the pre-fix SQL (reproducing the finding) and passes after the fix — the regression is now mechanically pinned even without a live PG in CI.
+- No local Postgres exists in this sandbox (no binary, no network to install one), so a live PG execution probe is deferred to remote verification; the defect class (alias/reference mismatch in composed SQL) is now covered by the unit tests on the real composed artifact.
+
 ### Test evidence
 
-Logs retained under `/tmp/stage/review-evidence/task-203-rebase-7cf2f81c/`:
+Logs retained under `/tmp/stage/review-evidence/task-203-repair-ccf715b8/` (this attempt) and `/tmp/stage/review-evidence/task-203-rebase-7cf2f81c/` (prior attempt, retained by controller):
 
-- `cargo test -p gyre-adapters search` — 21 passed (mem + SQLite FTS5): port-level scoping (tenant boundary, accessible-workspace/repo sets, empty-set → zero rows, client `workspace_id` cannot widen), plus this attempt's new legs — scoped `facet_counts` excludes other workspaces from counts, blank-text facet aggregation stays within the accessible set, scoped `suggest` returns only accessible titles.
-- `cargo check -p gyre-ports -p gyre-adapters --tests`, `cargo check -p gyre-server --tests` (incl. `search_wiring`) — clean; `bash scripts/check-arch.sh` — passed.
-- `crates/gyre-server/tests/search_wiring.rs` `search_is_access_scoped_to_the_authenticated_caller` now also asserts alice's `facet_counts`, `/search/suggest`, and `/search/facets` exclude workspace B (type-checked here; execution deferred — see below).
+- `cargo test -p gyre-adapters postgres::search::tests` — pre-fix run: `suggest_base_sql_defines_the_scope_alias` FAILED on the unaliased base SQL; post-fix run: 4 passed.
+- `cargo test -p gyre-adapters search` — 25 passed (mem + SQLite FTS5 scoping/behavior + the 4 new PG composed-SQL tests).
+- Prior attempt: `cargo check -p gyre-ports -p gyre-adapters --tests`, `cargo check -p gyre-server --tests` (incl. `search_wiring`) — clean; `bash scripts/check-arch.sh` — passed. This attempt touches only `gyre-adapters/src/postgres/search.rs` internals (no new dependencies, no port/server surface change).
+- `crates/gyre-server/tests/search_wiring.rs` `search_is_access_scoped_to_the_authenticated_caller` asserts alice's search, `facet_counts`, `/search/suggest`, and `/search/facets` exclude workspace B (type-checked here; execution deferred — see below).
 
 ### Verifier-required probes (server test binaries exceed this sandbox's build budget)
 
 - `cargo test -p gyre-server --test search_wiring`
 - `cargo test -p gyre-server --lib mcp_search`
 - `cargo test --all` and `bash scripts/check-arch.sh` (repo-wide gates)
+- If a Postgres instance is available to the verifier: `GYRE_DATABASE_URL=postgres://... cargo run -p gyre-server`, then `curl -H 'Authorization: Bearer gyre-dev-token' 'http://localhost:3000/api/v1/search/suggest?q=a'` — must return 200 (was 500 with 42P01 before `ccf715b8`)
