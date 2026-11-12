@@ -221,6 +221,75 @@ pub(crate) async fn launch_orchestrator_process(
         agent.workspace_id.to_string(),
     );
 
+    // platform-model.md §4.3: inject the four system prompts. The persona
+    // prompt comes from the persona bound at orchestrator-spawn time
+    // (fail-closed resolution in spawn_orchestrator); orchestrators are not
+    // task-bound and have no worktree, so their context prompt says so
+    // honestly instead of fabricating a task.
+    let prompt_scope = crate::api::prompts::PromptScope {
+        tenant_id: Some(workspace.tenant_id.clone()),
+        workspace_id: workspace.id.clone(),
+        repo_id: agent.repo_id.clone(),
+        task_id: Some(agent.id.clone()),
+        agent_id: Some(agent.id.clone()),
+    };
+    if let Some(persona_id) = &agent.persona_id {
+        match state.personas.find_by_id(persona_id).await {
+            Ok(Some(persona)) => {
+                // Fail-closed (review F1, task-150): a persona file push
+                // (git_http.rs) resets an Approved persona to Pending while
+                // swapping its system_prompt, and the stale-agent detector
+                // restarts a dead orchestrator with the preserved
+                // persona_id. Injecting the stored prompt here would run
+                // the replacement under content no human approved — the
+                // exact scenario relaunch_agent_session refuses for
+                // workers — so the launch fails instead.
+                if persona.approval_status != gyre_domain::PersonaApprovalStatus::Approved {
+                    let detail = format!(
+                        "persona '{}' bound to orchestrator {} is {:?}; \
+                         a human must approve it before the orchestrator can \
+                         (re)launch",
+                        persona.slug, agent.id, persona.approval_status
+                    );
+                    tracing::error!(
+                        agent_id = %agent.id,
+                        persona_id = %persona_id,
+                        approval_status = ?persona.approval_status,
+                        "orchestrator launch: bound persona not Approved; failing launch"
+                    );
+                    return LaunchOutcome {
+                        launch_status: "launch_failed".to_string(),
+                        launch_detail: Some(detail),
+                    };
+                }
+                env.insert("GYRE_PROMPT_PERSONA".to_string(), persona.system_prompt);
+            }
+            _ => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    persona_id = %persona_id,
+                    "bound persona unresolvable; skipping GYRE_PROMPT_PERSONA injection"
+                );
+            }
+        }
+    }
+    env.insert(
+        "GYRE_PROMPT_PROTOCOL".to_string(),
+        crate::api::prompts::protocol_prompt().to_string(),
+    );
+    let orch_repo = match &agent.repo_id {
+        Some(rid) => state.repos.find_by_id(rid).await.ok().flatten(),
+        None => None,
+    };
+    env.insert(
+        "GYRE_PROMPT_CONTEXT".to_string(),
+        crate::api::prompts::context_prompt_for_orchestrator(orch_repo.as_ref()),
+    );
+    env.insert(
+        "GYRE_PROMPT_CONSTRAINTS".to_string(),
+        crate::api::prompts::constraints_prompt(state, &prompt_scope).await,
+    );
+
     let spawn_config = gyre_ports::SpawnConfig {
         name: agent.name.clone(),
         command: command.clone(),
@@ -1481,5 +1550,202 @@ mod tests {
         let agent = gyre_domain::Agent::new(Id::new(ct_id), format!("launch-probe-{ct_id}"), 0);
         state.agents.create(&agent).await.unwrap();
         launch_orchestrator_process(state, &agent, &ws, "tok").await
+    }
+
+    #[tokio::test]
+    async fn orchestrator_launch_injects_system_prompts() {
+        let state = test_state();
+        seed(&state).await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("orch-prompt-dump")
+            .to_string_lossy()
+            .into_owned();
+        let script_path = format!("{dump_path}.sh");
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\nenv | sort > {dump_path}\nexit 0\n"),
+        )
+        .expect("writing orch prompt-dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod orch prompt-dump script");
+        }
+
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-orch-prompts"),
+            Id::new("t1"),
+            "orch-prompt-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": script_path });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        // Launch agent with the seeded (approved) workspace-orchestrator
+        // persona bound — exactly what spawn_workspace_orchestrator_core
+        // persists via resolve_orchestrator_persona.
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("orch-prompt-agent"), "orch-prompt-agent", 0);
+        agent.workspace_id = Id::new("ws-1");
+        agent.persona_id = Some(Id::new("workspace-orchestrator-persona"));
+        agent.orchestrator_type = OrchestratorType::WorkspaceOrchestrator;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let launch = launch_orchestrator_process(&state, &agent, &ws, "tok").await;
+        assert_eq!(
+            launch.launch_status, "running",
+            "launch failed: {:?}",
+            launch.launch_detail
+        );
+
+        // Bounded wait for the dump file (child process writes it).
+        let mut dump = None;
+        for _ in 0..250 {
+            if let Ok(content) = std::fs::read_to_string(&dump_path) {
+                if content.ends_with('\n') {
+                    dump = Some(content);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let dump = dump.expect("orch prompt-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_PROMPT_PERSONA=test orchestrator persona"),
+            "persona prompt must be injected from the bound persona:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_PROTOCOL=# Gyre Agent Protocol"),
+            "protocol prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_CONTEXT=# Agent Context"),
+            "context prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains("No task is bound to this agent"),
+            "orchestrator context must record its unbound task state honestly:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_PROMPT_CONSTRAINTS=# Agent Constraints"),
+            "constraints prompt must be injected:\n{dump}"
+        );
+        assert!(
+            dump.contains("Workspace: ws-1"),
+            "constraints prompt must carry the workspace boundary:\n{dump}"
+        );
+    }
+
+    /// Review finding F1 regression (task-150): a persona file push
+    /// (git_http.rs) resets an Approved persona to Pending while swapping
+    /// its system_prompt, and the stale-agent detector restarts a dead
+    /// orchestrator with the preserved persona_id by calling
+    /// `launch_orchestrator_process` directly. The launch must fail closed
+    /// — never inject the new, human-unapproved prompt content — mirroring
+    /// what relaunch_agent_session refuses for workers.
+    #[tokio::test]
+    async fn orchestrator_launch_fails_closed_on_unapproved_persona() {
+        let state = test_state();
+        seed(&state).await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("orch-unapproved-dump")
+            .to_string_lossy()
+            .into_owned();
+        let script_path = format!("{dump_path}.sh");
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\nenv | sort > {dump_path}\nexit 0\n"),
+        )
+        .expect("writing orch unapproved-dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod orch unapproved-dump script");
+        }
+
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-orch-unapproved"),
+            Id::new("t1"),
+            "orch-unapproved-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": script_path });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        // The restart path's preserved persona binding: the seeded
+        // (approved) workspace-orchestrator persona.
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("orch-unapproved-agent"), "orch-unapproved-agent", 0);
+        agent.workspace_id = Id::new("ws-1");
+        agent.persona_id = Some(Id::new("workspace-orchestrator-persona"));
+        agent.orchestrator_type = OrchestratorType::WorkspaceOrchestrator;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // Simulate the persona-file push that git_http.rs applies: the
+        // bound persona's system_prompt is swapped and approval resets to
+        // Pending (approved_by/approved_at cleared).
+        let mut pushed = state
+            .personas
+            .find_by_id(&Id::new("workspace-orchestrator-persona"))
+            .await
+            .unwrap()
+            .expect("seeded persona");
+        pushed.system_prompt = "UNAPPROVED PUSHED PROMPT CONTENT".to_string();
+        pushed.refresh_content_hash();
+        pushed.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+        pushed.approved_by = None;
+        pushed.approved_at = None;
+        state.personas.update(&pushed).await.unwrap();
+
+        // The exact call stale_agents.rs restart_orchestrator makes.
+        let launch = launch_orchestrator_process(&state, &agent, &ws, "tok").await;
+        assert_eq!(
+            launch.launch_status, "launch_failed",
+            "unapproved bound persona must fail the orchestrator launch"
+        );
+        let detail = launch
+            .launch_detail
+            .as_deref()
+            .expect("launch_failed must carry a reason");
+        assert!(
+            detail.contains("Pending"),
+            "failure detail must name the approval state: {detail}"
+        );
+
+        // Fail-closed means no process at all: the dump script must never
+        // have run, so no environment carrying the unapproved prompt
+        // content was ever created. (The pre-fix defect would have written
+        // the dump with GYRE_PROMPT_PERSONA=UNAPPROVED PUSHED PROMPT CONTENT.)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !std::path::Path::new(&dump_path).exists(),
+            "no orchestrator process may be spawned with an unapproved persona"
+        );
     }
 }
