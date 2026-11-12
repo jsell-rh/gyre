@@ -81,28 +81,30 @@ Scoped-emit compile repairs after earlier base merges (commit 55a6c1f2b:
 `AppState::emit_tenant_event` for `emit_tenant_meta_spec_set_updated`;
 commit 1724c6a3d: patrol escalation emits through the scoped
 `emit_event(ws, ...)` and skips-and-logs workspaceless findings) are part
-of the commit list above; no production code changed this round.
+of the commit list above; no production code changed in the last two
+rounds.
 
-### Contract-restoration round verification (head b58f4003a)
+### Contract-restoration round verification (head a81e9a8e3)
 
-This round restored the assigned task document after the executor
-reverted the protected task text (diff was frontmatter/checkboxes only —
-the production fix was untouched) and re-verified the shipped behavior on
-the head that merges base d31906c5a (task-181/task-150):
+The executor again restored the assigned task document to its baseline
+(frontmatter/checkboxes only — the production fix and its 11 attributed
+commits are untouched and reachable from HEAD). This round re-applied
+the ready-for-review state and re-verified the shipped behavior on the
+current head:
 
-- All three scripts pass on this head: `check-hierarchy.sh` exit 0,
+- HEAD a81e9a8e3 differs from previously verified head b58f4003a only in
+  `specs/tasks/task-160.md` — no production code changed, so the prior
+  round's `SKIP_WEB_BUILD=1 cargo check -p gyre-server` (exit 0) and
+  `cargo test -p gyre-domain` (474 passed, 0 failed) evidence applies to
+  this tree unchanged.
+- All three scripts pass fresh on this head: `check-hierarchy.sh` exit 0,
   `check-tenant-filter.sh` exit 0 (118 read methods on tenant-column
   tables checked), `check-api-auth.sh` exit 0
-  (`/tmp/stage/review-evidence/check-*.txt`).
+  (`/tmp/stage/review-evidence/check-all-scripts.txt`).
 - Negative test re-run: injecting `workspace_id: Option<Id>` into the
   domain `Task` struct makes `check-hierarchy.sh` exit 1 with the §2
-  message; restored, exit 0
-  (`check-hierarchy-negative.txt`/`check-hierarchy-restored.txt`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exits 0 on this head —
-  the earlier E0308 review finding (reconciliation.rs scoped-emit
-  collision) stays fixed through the new base merge
-  (`server-check-merged-head.txt`).
-- `cargo test -p gyre-domain`: 474 passed, 0 failed.
+  message; restored, exit 0, worktree clean
+  (`check-hierarchy-negative.txt`).
 
 Server suites the verifier must run on this head (per the sandbox build
 budget): `cargo test --all`, all-target clippy, and the frozen-baseline
