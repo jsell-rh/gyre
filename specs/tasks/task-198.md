@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["bdbccb488378c3d8f9cf0a45ed1dd5e677273fae", "1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["08290998c390a72627beab883443fabdef06780c", "bdbccb488378c3d8f9cf0a45ed1dd5e677273fae", "1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
 ---
 
 ## Spec Excerpt
@@ -105,15 +105,19 @@ graph queries, and the accountability patrol.
   with the spec's 13-column schema (`source_sha TEXT NOT NULL`; `target_sha`
   NOT NULL stores `''` for the `Option::None` unresolved-link case, mapped
   and documented in both SQL adapters), plus indexes on `source_repo_id`,
-  `source_path`, and `target_path`; registered in `schema.rs`.
+  `source_path`, and `target_path`; registered in `schema.rs`. The derived
+  Diesel version (`20261108000061`) is distinct from base's
+  `2026-11-12-000061_repo_access_overrides` (`20261112000061`), so both
+  migrations run — `check-migration-versions.sh` passes.
 - `SpecLinkEntry` (in `gyre-domain::spec_links`, re-exported by
   `gyre-server::spec_registry`) carries `source_sha: String`, populated in
   `sync_spec_ledger` from the source spec's real blob SHA at HEAD (reused
   from the manifest SHA map, never a placeholder).
 - New port `gyre_ports::SpecLinkRepository` (`list_all`,
   `replace_for_source`, `save` upsert-by-id, `delete_by_source_repo`) with
-  SQLite + Postgres adapters (`crates/gyre-adapters/src/{sqlite,postgres}/spec_links.rs`)
-  and `MemSpecLinkRepository` (`mem.rs`), wired into `AppState.spec_link_repo`
+  SQLite + Postgres adapters
+  (`crates/gyre-adapters/src/{sqlite,postgres}/spec_links.rs`) and the Mem
+  adapter in `gyre-server/src/mem.rs`, wired into `AppState.spec_link_repo`
   via the `store!` macro.
 - Every link mutation writes through to the table: `sync_spec_ledger` issues
   one `replace_for_source` per manifest spec (including empty link sets, so
@@ -126,63 +130,50 @@ graph queries, and the accountability patrol.
 - Link row ids are scoped by declaring repo (`spec_link_id`), so two repos
   carrying the same spec path never collide in the durable table.
 
-### Verification-repair round (finding from attempt 3c2af0b8, commit bdbccb48)
-
-The prior candidate failed checks.sh with `new verification exemptions
-forbidden: scripts/unnamed-tuple-carrier-exemptions.txt` — it had re-pointed
-two stale exemption entries (git_http.rs, mem.rs) at moved line numbers.
-Root cause: base e402e1ed itself carries 4 unexempted tuple-carrier
-violations (stale exemption line numbers); the prior round fixed two in
-code but exempted the rest. This round:
-
-- `scripts/unnamed-tuple-carrier-exemptions.txt` restored byte-identical to
-  base e402e1ed — zero new entries; the check passes with zero violations
-  on this tree.
-- `mem.rs`: `ConvMap` value 4-tuple → `struct ConversationBlob { agent_id,
-  workspace_id, tenant_id, data }` (TASK-048 F1 remediation).
-- `git_http.rs`: `accumulate_chain_constraints` positional tuple return →
-  `struct ChainConstraints`; `root_input` is first-Signed-wins (root-first
-  chain ordering, matching the documented invariant and provenance's prior
-  root-find; the field was previously dead in production) and is now
-  consumed by `api/provenance.rs`, replacing its duplicate root-find walk.
-
 ### Test evidence
 
 - Restart-durability (the bug this task kills):
   `restart_rebuilds_spec_link_graph_from_persisted_table` and
-  `staleness_query_parity_after_restart` in `spec_registry.rs` (lines 2949,
-  3071) — push a real manifest through `sync_spec_ledger` against a real
-  SQLite file, then build a brand-new store from the same repo and assert
-  the graph is identical and the staleness verdict survives without any
-  re-push. These fail against the pre-task empty-init behavior.
+  `staleness_query_parity_after_restart` in `spec_registry.rs` — push a real
+  manifest through `sync_spec_ledger` against a real SQLite file, then build
+  a brand-new store from the same repo and assert the graph is identical and
+  the staleness verdict survives without any re-push. These fail against the
+  pre-task empty-init behavior.
 - Cross-repo scoping and removal: `sync_replaces_links_scoped_to_source_repo`
   and `sync_clears_durable_rows_when_links_removed_from_manifest`.
 - Adapter round-trips: `sqlite::spec_links` tests cover every
   `SpecLinkType` variant, all `Option` columns in `Some`/`None` forms,
   reopen-durability, replace scoping, and repo-scoped delete;
-  `mem::spec_link_contract_tests` mirror the contract for the Mem adapter.
-  The Postgres adapter follows the identical row-mapping as SQLite; the
-  repo has no PG test infrastructure, so PG is compile-verified — same
-  convention as every other PG adapter.
+  `mem.rs` `spec_link_contract_tests` mirror the contract for the Mem
+  adapter. The Postgres adapter follows the identical row-mapping as
+  SQLite; the repo has no PG test infrastructure, so PG is
+  compile-verified — same convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Probe evidence (this round, commit bdbccb48, via the build wrapper)
+### Rebase-repair round (this round, merge commit 08290998)
 
-- `cargo check -p gyre-server` PASS (zero warnings);
-  `cargo check -p gyre-server --tests` PASS.
-- `cargo clippy -p gyre-server --tests`: no warnings on changed lines.
-- `rustfmt --check` on the four changed files: clean.
+Rebased the candidate onto base f98b17925 (task-194 manifest-driven spec
+lifecycle). The single content conflict in `spec_registry.rs` was the
+domain re-export line: resolved as the union — candidate's
+`gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType}` re-export
+alongside base's new `TaskPriority` re-export; both are used in the merged
+file. No other conflicts; base's task-194 `sync_spec_ledger` lifecycle
+changes and the candidate's `replace_for_source` write-through coexist
+(one `replace_for_source` per manifest spec, lines ~769–785).
+
+Post-rebase probes (via the build wrapper, artifacts under
+`/tmp/stage/review-evidence/`):
+
+- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports -p gyre-domain`
+  PASS; `cargo check -p gyre-server --tests` PASS.
 - `cargo test -p gyre-adapters spec_links` 4/4 PASS;
-  `cargo test -p gyre-adapters migrations` 4/4 PASS.
-- Mechanical gates PASS locally: check-unnamed-tuple-carriers (zero
-  violations, exemption file identical to base), check-in-memory-state-stores,
-  check-arch, check-mem-port-contracts, check-migration-versions,
-  check-migration-sql-portability, check-task-commit-attribution.
+  `cargo test -p gyre-adapters migrations` 4/4 PASS (exit 0, logged).
+- Mechanical gates PASS: check-arch, check-migration-versions,
+  check-migration-sql-portability, check-in-memory-state-stores,
+  check-mem-port-contracts, check-unnamed-tuple-carriers,
+  check-task-commit-attribution.
 
 The build wrapper defers gyre-server test binaries to the independent
-verifier (hard 4 GiB budget); the required probes are `cargo test --all`,
-plus focused `spec_registry` (restart-durability pair),
-`spec_link_staleness`, `mem::` (ConversationBlob refactor + spec-link
-contract tests), `git_http` (accumulate_chain_constraints),
-`constraint_check`, and `api::provenance` runs. Details and exit codes in
-the review-evidence artifact `exemption-repair.md`.
+verifier (hard 4 GiB budget); the verifier should run `cargo test --all`,
+plus the focused `spec_registry` (restart-durability pair),
+`spec_link_staleness`, and `mem::spec_link_contract_tests` targets.
