@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use gyre_ports::search::{FacetCounts, SearchQuery};
+use gyre_ports::search::{parse_query, FacetCounts, SearchQuery};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -66,10 +66,27 @@ pub async fn search_handler(
         }));
     }
     let limit = params.limit.min(100);
+    // §Query Language: parse `q` (terms, quoted phrases, facets) — the
+    // structured form is what the search port executes. The legacy
+    // entity_type / workspace_id params remain as backward-compatible
+    // shortcuts, but query-string facets take precedence: `type:` in `q`
+    // overrides entity_type, `workspace:` overrides workspace_id.
+    let parsed = parse_query(&q);
+    let entity_type = if parsed.facets.contains_key("type") {
+        None
+    } else {
+        params.entity_type
+    };
+    let workspace_id = if parsed.facets.contains_key("workspace") {
+        None
+    } else {
+        params.workspace_id
+    };
     let port_query = SearchQuery {
         query: q.clone(),
-        entity_type: params.entity_type,
-        workspace_id: params.workspace_id,
+        parsed,
+        entity_type,
+        workspace_id,
         limit,
     };
     let results = state

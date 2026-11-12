@@ -40,6 +40,7 @@ pub mod quality_gate;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
+pub mod search_query;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
