@@ -130,23 +130,27 @@ pub async fn create_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
-    // Index for search.
+    // Index for search. Scope fields come from the agent record (§Access
+    // Scoping): its workspace (mandatory per M34), its repo when bound, and
+    // the tenant resolved from the workspace's scope row.
     let mut facets = HashMap::new();
     facets.insert("status".to_string(), "idle".to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
+    crate::search_scope::index_doc(
+        &state,
+        SearchDocument {
             entity_type: "agent".to_string(),
             entity_id: agent.id.to_string(),
             title: agent.name.clone(),
             body: String::new(),
-            workspace_id: None,
-            repo_id: None,
+            workspace_id: Some(agent.workspace_id.to_string()),
+            repo_id: agent.repo_id.as_ref().map(|r| r.to_string()),
+            tenant_id: None,
             facets,
             // Entity's own update time — the since:/until: facets filter on it.
             updated_at: Some(now as i64),
-        })
-        .await;
+        },
+    )
+    .await;
     state
         .emit_event(
             Some(agent.workspace_id.clone()),

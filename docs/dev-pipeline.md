@@ -68,8 +68,8 @@ a stop. Another stop requires
 attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
-Infrastructure backoff releases the integration lane so another reviewed
-candidate can advance; claims and exact-source checks still gate publication.
+Infrastructure backoff retains its task checkpoint without blocking other
+candidates; claims and exact-source checks still gate publication.
 Cleanup salvages source only from implementation assignments; reviewers and
 exact-tree verifiers retain bounded logs and are purged without indexing their
 generated output. Verification defaults to four hours. Exhausting that budget
@@ -150,28 +150,26 @@ observations. Upstream failures and transient CI infrastructure retain their
 distinct recovery paths. PR readiness is visible separately from a successful
 review run.
 
-A durable **integration lane** admits one candidate at a time to final
-verification, CI, and merge. Implementation and independent review remain
-parallel up to the normal shared sandbox budget. The lane survives worker
-restarts, infrastructure retries, and gaps while GitHub checks run; repair,
-delivery, cancellation, or a changed contract/candidate releases it. Queued
-candidates pick up current main when admitted. This prevents the controller's
-own merges from repeatedly invalidating one another's full integration checks.
-If an external merge advances main, the current lane owner first observes its
-published CI and then refreshes integration once needed. Independent review is
-retained for the unchanged candidate. An exact-head CI or policy wait lasting
-15 minutes (`integration_wait_timeout` seconds) yields the integration lane so
-other candidates can finish. Sandbox-free observation continues; that task may
-rejoin only after its external gate changes to ready or merged. Receipt changes
-reset the wait, but repeated polls do not. Yielding grants no merge permission
-and discards no candidate or review. A PR with green exact-head CI and GitHub
-merge state `BEHIND` is eligible for base refresh rather than parked: updating
-that base is our integration work, and waiting for GitHub to become ready first
-would deadlock. Pending CI and other policy holds remain parked. The cockpit
-lists waiting tasks separately.
-Checks on a different merge tree are
-never reused as proof of the final tree; protected exact-head GitHub checks
-and authoritative upstream-tree comparison still gate delivery.
+Verification is concurrent across independent candidates within the shared
+sandbox budget. PR preparation and CI observation are sandbox-free and do not
+hold a compute or integration lane. Only the actual upstream merge request and
+its authoritative confirmation own the durable global **merge permit**. An
+uncertain or queued merge retains that permit, while other candidates continue
+verification and publication. Per-task claims, safety holds, dependencies,
+independent review, exact-head CI, and upstream-tree confirmation still apply.
+
+A completed verification receipt stays pinned to its original tested head and
+base while main advances. The publisher checks freshness when CI becomes ready.
+It can reuse that original head only if Git proves the resulting merge tree is
+byte-identical to the verified tree and the trusted verifier/image policy is
+unchanged. New upstream source-history edits also reverify, even if later
+reverted to the same files, because attribution gates inspect commits. No receipt
+is rebound to an untested head. Changed source, test/gate
+inputs, merge conflicts, or a strict GitHub `BEHIND` policy require verification
+against current main. Pending CI has one observer rather than repeated
+publisher and verifier wakeups. An already-completed CI environment refresh
+can replace the old failing branch; it does not rediscover the same setup
+failure and discard the successful refresh.
 
 Generated `web/dist` is produced by final integration, not coding workers.
 The executor discards worker bundle changes against the assigned base and
@@ -712,8 +710,11 @@ Remote verifiers exchange disposable build caches through OpenShell. The host
 only relays archives on disk; compilation remains remote. Archives are bounded
 to 2 GiB compressed / 12 GiB expanded with an 8 GiB local retention budget. Keys
 include image, toolchain, dependency lockfiles/manifests and build settings.
-A cache is reusable only after its successful producer's source is included in
-upstream main. Integrity, ancestry, path, disk-space and size checks reject unsafe
+A cache can be shared after its successful producer's source is included in
+upstream main. Before merge, a cache is private to the same task, requirement
+generation and independently approved candidate, and requires a recorded
+successful full verification with matching artifact digest. Other tasks, changed
+candidates, partial runs and changed contracts cannot consume that private cache. Integrity, ancestry, path, disk-space and size checks reject unsafe
 or stale archives. Credentials and verification decisions are never cached.
 Workspace Rust packages are invalidated before checks; dependency artifacts and
 content-addressed package downloads can be reused. Cache misses run normal full

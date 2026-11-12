@@ -304,6 +304,40 @@ fn count_facet_row(counts: &mut FacetCounts, row: FacetRow) {
     }
 }
 
+/// §Access Scoping WHERE clauses for a query over `search_index`: the
+/// caller's resolved scope (tenant boundary + accessible workspace/repo
+/// sets), pushed into the same WHERE builder as the user filters so every
+/// restriction is evaluated by the index query itself — never
+/// post-filtered — keeping result, suggestion, and facet counts from
+/// leaking inaccessible documents (search.md §Access Scoping). An empty
+/// accessible set compiles to a false clause (zero rows, by query).
+fn build_scope(query: &SearchQuery, w: &mut WhereBuilder) {
+    // Tenant boundary — every result must belong to this tenant.
+    let t = w.push_text(query.tenant_id.clone());
+    w.push_clause(format!("tenant_id = {t}"));
+    // Accessible-workspace set: None = unscoped within the tenant (Admin);
+    // an empty set excludes everything.
+    match &query.accessible_workspace_ids {
+        None => {}
+        Some(ids) if ids.is_empty() => w.push_clause("0".to_string()),
+        Some(ids) => w.push_in_clause("workspace_id", ids),
+    }
+    // Accessible-repo set: repo-less (workspace-level) documents stay
+    // visible — repo scope restricts repos, not the workspace itself.
+    match &query.accessible_repo_ids {
+        None => {}
+        Some(ids) if ids.is_empty() => w.push_clause("0".to_string()),
+        Some(ids) => {
+            let placeholders: Vec<String> =
+                ids.iter().map(|v| w.push_text(v.clone())).collect();
+            w.push_clause(format!(
+                "(repo_id = '' OR repo_id IN ({}))",
+                placeholders.join(", ")
+            ));
+        }
+    }
+}
+
 const INSERT_SQL: &str = "
 INSERT INTO search_index (entity_type, entity_id, tenant_id, workspace_id, repo_id, title, body, metadata)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -328,20 +362,24 @@ impl SearchPort for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
 
-            // Derive tenant from the workspace's real scope row (§Access Scoping);
-            // empty string when the workspace is unknown — never a fabricated scope.
-            let tenant_id = match doc.workspace_id.as_deref() {
-                Some(ws) if !ws.is_empty() => {
-                    match diesel::sql_query("SELECT tenant_id FROM workspaces WHERE id = ?1")
-                        .bind::<Text, _>(ws)
-                        .get_result::<TenantRow>(&mut conn)
-                    {
-                        Ok(r) => r.tenant_id,
-                        Err(diesel::result::Error::NotFound) => String::new(),
-                        Err(e) => return Err(e.into()),
+            // Tenant scope (§Access Scoping): caller-provided when known,
+            // otherwise derived from the workspace's real scope row. Empty
+            // string when the workspace is unknown — never a fabricated scope.
+            let tenant_id = match doc.tenant_id.as_deref() {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => match doc.workspace_id.as_deref() {
+                    Some(ws) if !ws.is_empty() => {
+                        match diesel::sql_query("SELECT tenant_id FROM workspaces WHERE id = ?1")
+                            .bind::<Text, _>(ws)
+                            .get_result::<TenantRow>(&mut conn)
+                        {
+                            Ok(r) => r.tenant_id,
+                            Err(diesel::result::Error::NotFound) => String::new(),
+                            Err(e) => return Err(e.into()),
+                        }
                     }
-                }
-                _ => String::new(),
+                    _ => String::new(),
+                },
             };
 
             let workspace_id = doc.workspace_id.clone().unwrap_or_default();
@@ -389,6 +427,11 @@ impl SearchPort for SqliteStorage {
                 if !has_text && w.is_empty() {
                     return Ok(vec![]);
                 }
+                // §Access Scoping: the tenant boundary and accessible
+                // workspace/repo sets are WHERE clauses in this same index
+                // query — never post-filtered — so result counts cannot leak
+                // inaccessible documents.
+                build_scope(&query, &mut w);
 
                 // bm25/snippet need a MATCH context; without one (facet-only
                 // browse) rank is a constant and the snippet is a body prefix.
@@ -469,31 +512,55 @@ impl SearchPort for SqliteStorage {
         Ok(())
     }
 
-    async fn suggest(&self, prefix: &str, limit: usize) -> Result<Vec<SearchSuggestion>> {
-        let pool = Arc::clone(&self.pool);
+    async fn suggest(&self, query: SearchQuery) -> Result<Vec<SearchSuggestion>> {
         // Trimmed-empty prefixes match every title — treat them as "no
         // suggestion" (the handler guards this too; the port is safe alone).
-        let prefix = prefix.trim();
+        let prefix = query.query.trim().to_string();
         if prefix.is_empty() {
             return Ok(vec![]);
         }
-        let pattern = format!("{}%", escape_like(prefix));
+        let pattern = format!("{}%", escape_like(&prefix));
+        let limit = query.limit;
+        let pool = Arc::clone(&self.pool);
         Ok(
             tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
                 let mut conn = pool.get().context("get db connection")?;
                 // LIKE on the title column is ASCII-case-insensitive in SQLite —
                 // a prefix match, not a token match, which is what autocomplete
                 // needs (mid-word terms are unreachable from a prefix).
-                let rows = diesel::sql_query(
+                //
+                // §Access Scoping: the same scope WHERE clauses as `search()`
+                // are part of this index query — suggestions never include
+                // titles the caller cannot access. The entity_type/
+                // workspace_id shortcuts narrow within that scope.
+                let mut w = WhereBuilder::new();
+                let p = w.push_text(pattern);
+                w.push_clause(format!("title LIKE {p} ESCAPE '\\'"));
+                if let Some(et) = &query.entity_type {
+                    let p = w.push_text(et.clone());
+                    w.push_clause(format!("entity_type = {p}"));
+                }
+                if let Some(ws) = &query.workspace_id {
+                    // User-supplied narrowing — intersects with the accessible
+                    // set, so it can only narrow, never widen.
+                    let p = w.push_text(ws.clone());
+                    w.push_clause(format!("workspace_id = {p}"));
+                }
+                build_scope(&query, &mut w);
+                let limit = w.push_int(limit as i64);
+                let sql = format!(
                     "SELECT entity_type, entity_id, title
-                 FROM search_index
-                 WHERE title LIKE ?1 ESCAPE '\\'
-                 ORDER BY title
-                 LIMIT ?2",
-                )
-                .bind::<Text, _>(&pattern)
-                .bind::<BigInt, _>(limit as i64)
-                .load::<SuggestRow>(&mut conn)?;
+                 FROM search_index{} ORDER BY title LIMIT {limit}",
+                    w.sql()
+                );
+                let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::sqlite::Sqlite>();
+                for param in w.params {
+                    stmt = match param {
+                        SqlParam::Text(v) => stmt.bind::<Text, _>(v),
+                        SqlParam::Int(v) => stmt.bind::<BigInt, _>(v),
+                    };
+                }
+                let rows = stmt.load::<SuggestRow>(&mut conn)?;
 
                 Ok(rows
                     .into_iter()
@@ -508,40 +575,33 @@ impl SearchPort for SqliteStorage {
         )
     }
 
-    async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts> {
+    async fn facet_counts(&self, query: SearchQuery) -> Result<FacetCounts> {
         let pool = Arc::clone(&self.pool);
         Ok(tokio::task::spawn_blocking(move || -> Result<FacetCounts> {
             let mut conn = pool.get().context("get db connection")?;
 
-            // Two shapes: whole-index aggregation (no WHERE) or the same
-            // filtered match set `search()` uses (MATCH + facets + shortcuts),
-            // without the result limit — facet counts must describe the full
-            // filtered set, not the truncated page.
-            let rows: Vec<FacetRow> = match query {
-                None => diesel::sql_query(
-                    "SELECT entity_type, workspace_id, metadata FROM search_index",
-                )
-                .load::<FacetRow>(&mut conn)?,
-                Some(q) => {
-                    let mut w = WhereBuilder::new();
-                    let has_text = build_filters(&q, &mut w);
-                    if !has_text && w.is_empty() {
-                        return Ok(FacetCounts::new());
-                    }
-                    let sql = format!(
-                        "SELECT entity_type, workspace_id, metadata FROM search_index{}",
-                        w.sql()
-                    );
-                    let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::sqlite::Sqlite>();
-                    for param in w.params {
-                        stmt = match param {
-                            SqlParam::Text(v) => stmt.bind::<Text, _>(v),
-                            SqlParam::Int(v) => stmt.bind::<BigInt, _>(v),
-                        };
-                    }
-                    stmt.load::<FacetRow>(&mut conn)?
-                }
-            };
+            // Both shapes are §Access-scoped: a blank query (no text, no
+            // user filters) aggregates the caller's whole accessible set
+            // (the /search/facets endpoint); any text, facet, or shortcut
+            // filter restricts the aggregation to the same filtered match
+            // set `search()` uses — without the result limit, since counts
+            // must describe the full filtered set, not the truncated page,
+            // and must never count documents the caller cannot access.
+            let mut w = WhereBuilder::new();
+            build_filters(&query, &mut w);
+            build_scope(&query, &mut w);
+            let sql = format!(
+                "SELECT entity_type, workspace_id, metadata FROM search_index{}",
+                w.sql()
+            );
+            let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::sqlite::Sqlite>();
+            for param in w.params {
+                stmt = match param {
+                    SqlParam::Text(v) => stmt.bind::<Text, _>(v),
+                    SqlParam::Int(v) => stmt.bind::<BigInt, _>(v),
+                };
+            }
+            let rows = stmt.load::<FacetRow>(&mut conn)?;
 
             let mut counts = FacetCounts::new();
             for row in rows {
@@ -574,7 +634,10 @@ impl SearchPort for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gyre_common::Id;
+    use gyre_domain::Workspace;
     use gyre_ports::search::SearchQuery;
+    use gyre_ports::WorkspaceRepository;
     use std::collections::HashMap;
     use tempfile::NamedTempFile;
 
@@ -592,9 +655,41 @@ mod tests {
             body: body.to_string(),
             workspace_id: None,
             repo_id: None,
+            tenant_id: None,
             facets: HashMap::new(),
             updated_at: None,
         }
+    }
+
+    /// Unscoped query whose tenant matches workspace-less documents ('').
+    /// Scope fields default to "no restriction beyond the tenant".
+    fn unscoped(query: &str) -> SearchQuery {
+        base_query(query, "")
+    }
+
+    /// Unscoped-within-tenant query: no workspace/repo restriction, but
+    /// confined to `tenant_id` (§Access Scoping step 1). Built via
+    /// `SearchQuery::parse` so `query` and its query-language parse stay
+    /// consistent.
+    fn base_query(query: &str, tenant_id: &str) -> SearchQuery {
+        SearchQuery::parse(query.to_string())
+            .with_limit(10)
+            .with_scope(tenant_id.to_string(), None, None)
+    }
+
+    /// Create a real workspace row so index-time tenant derivation resolves
+    /// against the workspaces table (as in production).
+    async fn seed_workspace(storage: &SqliteStorage, id: &str, tenant_id: &str) {
+        storage
+            .create(&Workspace::new(
+                Id::new(id),
+                Id::new(tenant_id),
+                format!("Workspace {id}"),
+                format!("ws-{id}"),
+                0,
+            ))
+            .await
+            .unwrap();
     }
 
     #[derive(diesel::QueryableByName)]
@@ -676,12 +771,10 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(
-                SearchQuery::parse("jwt".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "jwt".to_string(),
+                ..unscoped("jwt")
+            })
             .await
             .unwrap();
 
@@ -730,12 +823,10 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(
-                SearchQuery::parse("alpha beta".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "alpha beta".to_string(),
+                ..unscoped("alpha beta")
+            })
             .await
             .unwrap();
         // Default AND-of-terms: both terms must appear.
@@ -744,24 +835,20 @@ mod tests {
 
         // Empty query matches nothing (parity with prior adapter behavior).
         let empty = storage
-            .search(
-                SearchQuery::parse("".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "".to_string(),
+                ..unscoped("")
+            })
             .await
             .unwrap();
         assert!(empty.is_empty());
 
         // Syntax-hostile query must return cleanly, not a MATCH parse error.
         let hostile = storage
-            .search(
-                SearchQuery::parse("\"unterminated ( AND -^:*".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "\"unterminated ( AND -^:*".to_string(),
+                ..unscoped("")
+            })
             .await
             .unwrap();
         // Every token is quoted into a literal phrase — bare AND/OR/NEAR can
@@ -779,12 +866,10 @@ mod tests {
             .await
             .unwrap();
         let results = storage
-            .search(
-                SearchQuery::parse("running".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "running".to_string(),
+                ..unscoped("running")
+            })
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "porter stemmer must match runs~running");
@@ -801,24 +886,22 @@ mod tests {
         storage.index(d2).await.unwrap();
 
         let by_type = storage
-            .search(
-                SearchQuery::parse("widget".to_string())
-                    .with_entity_type(Some("mr".to_string()))
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                entity_type: Some("mr".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert_eq!(by_type.len(), 1);
         assert_eq!(by_type[0].entity_id, "m1");
 
         let by_ws = storage
-            .search(
-                SearchQuery::parse("widget".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(Some("ws-a".to_string()))
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                workspace_id: Some("ws-a".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert_eq!(by_ws.len(), 1);
@@ -826,12 +909,12 @@ mod tests {
 
         // Combined filter excluding everything.
         let none = storage
-            .search(
-                SearchQuery::parse("widget".to_string())
-                    .with_entity_type(Some("task".to_string()))
-                    .with_workspace_id(Some("ws-b".to_string()))
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                entity_type: Some("task".to_string()),
+                workspace_id: Some("ws-b".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert!(none.is_empty());
@@ -864,7 +947,13 @@ mod tests {
             .unwrap();
 
         // Case-insensitive prefix on the title: lowercase query, mixed-case titles.
-        let sugg = storage.suggest("iden", 10).await.unwrap();
+        let sugg = storage
+            .suggest(SearchQuery {
+                query: "iden".to_string(),
+                ..unscoped("")
+            })
+            .await
+            .unwrap();
         assert_eq!(
             sugg.len(),
             2,
@@ -879,19 +968,40 @@ mod tests {
 
         // A term appearing mid-title is NOT a prefix match — autocomplete must
         // not degrade to substring search.
-        let mid = storage.suggest("security", 10).await.unwrap();
+        let mid = storage
+            .suggest(SearchQuery {
+                query: "security".to_string(),
+                ..unscoped("")
+            })
+            .await
+            .unwrap();
         assert!(
             mid.is_empty(),
             "mid-title term must not prefix-match: {mid:?}"
         );
 
         // Limit truncates.
-        let limited = storage.suggest("iden", 1).await.unwrap();
+        let limited = storage
+            .suggest(SearchQuery {
+                query: "iden".to_string(),
+                limit: 1,
+                ..unscoped("")
+            })
+            .await
+            .unwrap();
         assert_eq!(limited.len(), 1);
 
         // Trimmed-empty prefix matches every title — must yield nothing.
-        assert!(storage.suggest("", 10).await.unwrap().is_empty());
-        assert!(storage.suggest("   ", 10).await.unwrap().is_empty());
+        for blank in ["", "   "] {
+            assert!(storage
+                .suggest(SearchQuery {
+                    query: blank.to_string(),
+                    ..unscoped("")
+                })
+                .await
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[tokio::test]
@@ -917,11 +1027,23 @@ mod tests {
             .await
             .unwrap();
 
-        let pct = storage.suggest("100%", 10).await.unwrap();
+        let pct = storage
+            .suggest(SearchQuery {
+                query: "100%".to_string(),
+                ..unscoped("")
+            })
+            .await
+            .unwrap();
         assert_eq!(pct.len(), 1, "literal % must not act as wildcard: {pct:?}");
         assert_eq!(pct[0].entity_id, "t1");
 
-        let und = storage.suggest("a_", 10).await.unwrap();
+        let und = storage
+            .suggest(SearchQuery {
+                query: "a_".to_string(),
+                ..unscoped("")
+            })
+            .await
+            .unwrap();
         assert_eq!(und.len(), 1, "literal _ must not act as wildcard: {und:?}");
         assert_eq!(und[0].entity_id, "t3");
     }
@@ -929,7 +1051,6 @@ mod tests {
     #[tokio::test]
     async fn facet_counts_whole_index_and_filtered_match_set() {
         let (_f, storage) = tmp_storage();
-
         let mut t1 = doc("task", "t1", "jwt rotation one", "jwt jwt jwt rotation");
         t1.facets
             .insert("status".to_string(), "in_progress".to_string());
@@ -952,8 +1073,8 @@ mod tests {
             .await
             .unwrap();
 
-        // None: whole-index aggregation.
-        let all = storage.facet_counts(None).await.unwrap();
+        // Blank query (admin shape): whole-accessible-set aggregation.
+        let all = storage.facet_counts(unscoped("")).await.unwrap();
         assert_eq!(all["type"]["task"], 3);
         assert_eq!(all["type"]["mr"], 1);
         assert_eq!(all["workspace"]["ws-a"], 1);
@@ -961,15 +1082,13 @@ mod tests {
         assert_eq!(all["status"]["done"], 1);
         assert_eq!(all["priority"]["high"], 1);
 
-        // Some(query): the query's filtered match set. limit=1 must be IGNORED
+        // Text query: the query's filtered match set. limit=1 must be IGNORED
         // — facet counts describe the full filtered set, not the result page.
         let filtered = storage
-            .facet_counts(Some(
-                SearchQuery::parse("jwt".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(1),
-            ))
+            .facet_counts(SearchQuery {
+                limit: 1,
+                ..unscoped("jwt")
+            })
             .await
             .unwrap();
         assert_eq!(filtered["type"]["task"], 2);
@@ -979,12 +1098,10 @@ mod tests {
 
         // entity_type filter restricts the aggregation set.
         let mr_only = storage
-            .facet_counts(Some(
-                SearchQuery::parse("jwt".to_string())
-                    .with_entity_type(Some("mr".to_string()))
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            ))
+            .facet_counts(SearchQuery {
+                entity_type: Some("mr".to_string()),
+                ..unscoped("jwt")
+            })
             .await
             .unwrap();
         assert_eq!(mr_only["type"]["mr"], 1);
@@ -995,12 +1112,10 @@ mod tests {
 
         // workspace_id filter restricts the aggregation set.
         let ws_only = storage
-            .facet_counts(Some(
-                SearchQuery::parse("jwt".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(Some("ws-a".to_string()))
-                    .with_limit(10),
-            ))
+            .facet_counts(SearchQuery {
+                workspace_id: Some("ws-a".to_string()),
+                ..unscoped("jwt")
+            })
             .await
             .unwrap();
         assert_eq!(ws_only["type"]["task"], 1);
@@ -1008,12 +1123,7 @@ mod tests {
 
         // No matching term at all: empty aggregation, not whole-index.
         let none = storage
-            .facet_counts(Some(
-                SearchQuery::parse("zzz-nonexistent".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            ))
+            .facet_counts(unscoped("zzz-nonexistent"))
             .await
             .unwrap();
         assert!(
@@ -1036,36 +1146,32 @@ mod tests {
             .unwrap();
 
         let stale = storage
-            .search(
-                SearchQuery::parse("obsolete".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "obsolete".to_string(),
+                ..unscoped("obsolete")
+            })
             .await
             .unwrap();
         assert!(stale.is_empty(), "upsert left a stale row");
 
         let fresh = storage
-            .search(
-                SearchQuery::parse("fresh".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "fresh".to_string(),
+                ..unscoped("fresh")
+            })
             .await
             .unwrap();
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].title, "new title");
 
-        storage.delete("task", "t1").await.unwrap();
+        gyre_ports::SearchPort::delete(&storage, "task", "t1")
+            .await
+            .unwrap();
         let gone = storage
-            .search(
-                SearchQuery::parse("fresh".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "fresh".to_string(),
+                ..unscoped("fresh")
+            })
             .await
             .unwrap();
         assert!(gone.is_empty());
@@ -1084,12 +1190,10 @@ mod tests {
             .unwrap();
         assert_eq!(storage.reindex_all().await.unwrap(), 2);
         let after = storage
-            .search(
-                SearchQuery::parse("termone".to_string())
-                    .with_entity_type(None)
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "termone".to_string(),
+                ..unscoped("termone")
+            })
             .await
             .unwrap();
         assert!(after.is_empty(), "index must be cleared");
@@ -1109,12 +1213,11 @@ mod tests {
         }
         let storage = SqliteStorage::new(file.path().to_str().unwrap()).unwrap();
         let results = storage
-            .search(
-                SearchQuery::parse("orchestrator".to_string())
-                    .with_entity_type(Some("agent".to_string()))
-                    .with_workspace_id(None)
-                    .with_limit(10),
-            )
+            .search(SearchQuery {
+                query: "orchestrator".to_string(),
+                entity_type: Some("agent".to_string()),
+                ..unscoped("orchestrator")
+            })
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -1126,7 +1229,11 @@ mod tests {
     /// Helper: search ids for a raw query-language string.
     async fn q(storage: &SqliteStorage, query: &str) -> Vec<String> {
         storage
-            .search(SearchQuery::parse(query.to_string()).with_limit(10))
+            .search(
+                SearchQuery::parse(query.to_string())
+                    .with_limit(10)
+                    .with_scope(String::new(), None, None),
+            )
             .await
             .unwrap()
             .into_iter()
@@ -1280,9 +1387,11 @@ mod tests {
 
         // Text + facet filter: aggregation over the filtered match set only.
         let counts = storage
-            .facet_counts(Some(
-                SearchQuery::parse("jwt status:in_progress".to_string()).with_limit(10),
-            ))
+            .facet_counts(
+                SearchQuery::parse("jwt status:in_progress".to_string())
+                    .with_limit(10)
+                    .with_scope(String::new(), None, None),
+            )
             .await
             .unwrap();
         assert_eq!(counts["type"]["task"], 1);
@@ -1294,19 +1403,181 @@ mod tests {
 
         // Facet-only query: aggregation set is the facet's browse set.
         let counts = storage
-            .facet_counts(Some(
-                SearchQuery::parse("status:done".to_string()).with_limit(10),
-            ))
+            .facet_counts(
+                SearchQuery::parse("status:done".to_string())
+                    .with_limit(10)
+                    .with_scope(String::new(), None, None),
+            )
             .await
             .unwrap();
         assert_eq!(counts["status"]["done"], 1);
         assert_eq!(counts["type"]["task"], 1);
 
         // The reserved timestamp key is storage, never an aggregated facet.
-        let all = storage.facet_counts(None).await.unwrap();
+        // Blank scoped query: whole-accessible-set aggregation (every doc
+        // here is workspace-less, i.e. tenant '').
+        let all = storage.facet_counts(unscoped("")).await.unwrap();
         assert!(
             !all.contains_key("updated_at"),
             "timestamp key leaked into facets: {all:?}"
         );
+    }
+
+    // ── §Access Scoping ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn access_scoping_filters_inside_the_index_query() {
+        // Workspaces in two tenants; documents matching "needle" in each plus
+        // one with no workspace (and therefore no resolvable tenant).
+        let (_f, storage) = tmp_storage();
+        seed_workspace(&storage, "ws-a", "t-1").await;
+        seed_workspace(&storage, "ws-b", "t-1").await;
+        seed_workspace(&storage, "ws-c", "t-2").await;
+
+        let mut in_a = doc("task", "in-a", "needle", "needle in workspace a");
+        in_a.workspace_id = Some("ws-a".to_string());
+        let mut in_b = doc("task", "in-b", "needle", "needle in workspace b");
+        in_b.workspace_id = Some("ws-b".to_string());
+        let mut in_c = doc("task", "in-c", "needle", "needle in workspace c");
+        in_c.workspace_id = Some("ws-c".to_string());
+        storage.index(in_a).await.unwrap();
+        storage.index(in_b).await.unwrap();
+        storage.index(in_c).await.unwrap();
+        storage
+            .index(doc("task", "no-ws", "needle", "needle with no workspace"))
+            .await
+            .unwrap();
+
+        // Caller scoped to ws-a: only ws-a's doc. Workspace b's matching doc
+        // and the workspace-less doc are absent — and the returned count
+        // cannot include them because the restriction is a WHERE clause.
+        let scoped = storage
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1, "scoped query leaked documents");
+        assert_eq!(scoped[0].entity_id, "in-a");
+
+        // Admin (unscoped workspaces) in tenant t-1: both t-1 docs, never the
+        // other tenant's doc nor the tenant-unresolvable doc.
+        let admin = storage.search(base_query("needle", "t-1")).await.unwrap();
+        assert_eq!(admin.len(), 2);
+        assert!(admin.iter().all(|r| r.entity_id != "in-c"));
+        assert!(admin.iter().all(|r| r.entity_id != "no-ws"));
+
+        // Admin in tenant t-2: only that tenant's doc.
+        let other_tenant = storage.search(base_query("needle", "t-2")).await.unwrap();
+        assert_eq!(other_tenant.len(), 1);
+        assert_eq!(other_tenant[0].entity_id, "in-c");
+
+        // Caller with access to no workspace: zero results, not "all".
+        let none = storage
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec![]),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        // A client-supplied workspace_id narrows only — requesting an
+        // inaccessible workspace yields zero results, never a widening.
+        let widened = storage
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                workspace_id: Some("ws-b".to_string()),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert!(
+            widened.is_empty(),
+            "client workspace_id must intersect, not widen, the accessible set"
+        );
+
+        // Facet counts enforce the same scope inside the aggregation query:
+        // ws-b's and ws-c's matching docs are absent from the counts — a
+        // post-filter that still leaked counts would include them.
+        let facets = storage
+            .facet_counts(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(facets["workspace"]["ws-a"], 1);
+        for ws in ["ws-b", "ws-c"] {
+            assert!(
+                !facets["workspace"].contains_key(ws),
+                "facet counts leaked {ws}: {facets:?}"
+            );
+        }
+
+        // Blank text + scope: the caller's whole accessible set — same
+        // exclusion, proving the /search/facets shape is scoped too.
+        let whole = storage
+            .facet_counts(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..base_query("", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(whole["workspace"]["ws-a"], 1);
+        assert!(!whole["workspace"].contains_key("ws-b"));
+
+        // Suggest enforces the same scope: only ws-a's titles.
+        let sugg = storage
+            .suggest(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..base_query("need", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(sugg.len(), 1, "suggest leaked titles: {sugg:?}");
+        assert_eq!(sugg[0].entity_id, "in-a");
+    }
+
+    #[tokio::test]
+    async fn repo_scope_restricts_repos_but_keeps_workspace_level_docs() {
+        let (_f, storage) = tmp_storage();
+        seed_workspace(&storage, "ws-a", "t-1").await;
+
+        let mut repo1 = doc("task", "r1-doc", "needle", "needle in repo one");
+        repo1.workspace_id = Some("ws-a".to_string());
+        repo1.repo_id = Some("repo-1".to_string());
+        let mut repo2 = doc("task", "r2-doc", "needle", "needle in repo two");
+        repo2.workspace_id = Some("ws-a".to_string());
+        repo2.repo_id = Some("repo-2".to_string());
+        let mut ws_level = doc("task", "ws-doc", "needle", "needle at workspace level");
+        ws_level.workspace_id = Some("ws-a".to_string());
+        storage.index(repo1).await.unwrap();
+        storage.index(repo2).await.unwrap();
+        storage.index(ws_level).await.unwrap();
+
+        // Repo-scoped caller (repo-1 only): its repo's docs plus repo-less
+        // workspace-level docs — never another repo's.
+        let repo_scoped = storage
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                accessible_repo_ids: Some(vec!["repo-1".to_string()]),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(repo_scoped.len(), 2);
+        assert!(repo_scoped.iter().all(|r| r.entity_id != "r2-doc"));
+
+        // Workspace caller (all repos): everything in the workspace.
+        let ws_scoped = storage
+            .search(SearchQuery {
+                accessible_workspace_ids: Some(vec!["ws-a".to_string()]),
+                ..base_query("needle", "t-1")
+            })
+            .await
+            .unwrap();
+        assert_eq!(ws_scoped.len(), 3);
     }
 }

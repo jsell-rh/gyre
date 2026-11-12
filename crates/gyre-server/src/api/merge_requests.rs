@@ -381,24 +381,28 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
-    // Index for search.
+    // Index for search. Scope fields come from the MR itself (§Access
+    // Scoping): its workspace, its repo, and the tenant resolved from the
+    // workspace's scope row.
     let mut facets = HashMap::new();
     facets.insert("status".to_string(), "open".to_string());
     facets.insert("repo_id".to_string(), mr.repository_id.to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
+    crate::search_scope::index_doc(
+        &state,
+        SearchDocument {
             entity_type: "mr".to_string(),
             entity_id: mr.id.to_string(),
             title: mr.title.clone(),
             body: format!("{} -> {}", mr.source_branch, mr.target_branch),
-            workspace_id: None,
+            workspace_id: Some(mr.workspace_id.to_string()),
             repo_id: Some(mr.repository_id.to_string()),
+            tenant_id: None,
             facets,
             // Entity's own update time — the since:/until: facets filter on it.
             updated_at: Some(mr.updated_at as i64),
-        })
-        .await;
+        },
+    )
+    .await;
     state
         .emit_event(
             Some(mr.workspace_id.clone()),

@@ -42,11 +42,13 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod search_scope;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_lifecycle_patrol;
 pub mod spec_link_staleness;
 pub mod spec_patrol;
 pub mod spec_registry;
@@ -65,6 +67,7 @@ pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
+pub mod workspace_ownership;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -81,11 +84,11 @@ use gyre_ports::{
     MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
     MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
     PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
-    WorkspaceRepository, WorktreeRepository,
+    RepoAccessOverrideRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
+    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -376,6 +379,8 @@ pub struct AppState {
     pub policies: Arc<dyn PolicyRepository>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
+    /// Per-repo access override repository (user-management.md §Repo Access).
+    pub repo_access_overrides: Arc<dyn RepoAccessOverrideRepository>,
     /// Team repository (M22.8).
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
@@ -392,6 +397,9 @@ pub struct AppState {
     pub meta_spec_bindings: Arc<dyn MetaSpecBindingRepository>,
     /// Workspace meta-spec sets persisted to DB (M34 Slice 5).
     pub meta_spec_sets: Arc<dyn MetaSpecSetRepository>,
+    /// Tenant-level meta-spec sets (§8): tenant-wide default bindings that
+    /// workspaces inherit unless their own set overrides the pinned path.
+    pub tenant_meta_spec_sets: Arc<dyn TenantMetaSpecSetRepository>,
     /// Per-workspace rollout policies (meta-spec-reconciliation.md §7).
     pub rollout_policies: Arc<dyn RolloutPolicyRepository>,
     /// Message bus persistence (Directed + Event tier).
@@ -466,25 +474,51 @@ pub struct AppState {
     pub ws_tickets: auth::WsTicketStore,
 }
 
-/// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
+/// Compute the SHA-256 hash of a workspace's EFFECTIVE meta-spec set
+/// (meta-spec-reconciliation.md §8: tenant defaults merged with the
+/// workspace's own overrides — workspace pin wins on conflict).
 ///
-/// Returns the hex-encoded hash, or an empty string if no meta-spec set is
-/// configured for the workspace. Used at spec approval time (to populate
-/// `InputContent.meta_spec_set_sha`) and during constraint evaluation (to
-/// populate `AgentContext.meta_spec_set_sha`).
-pub(crate) async fn compute_meta_spec_set_sha(
-    meta_spec_sets: &dyn gyre_ports::MetaSpecSetRepository,
-    workspace_id: &Id,
-) -> String {
+/// Returns the hex-encoded hash of the canonical serialization of the merged
+/// set, or an empty string when the workspace binds nothing (no workspace set
+/// and no tenant set) or the workspace does not exist. Used at spec approval
+/// time (to populate `InputContent.meta_spec_set_sha`) and during constraint
+/// evaluation (to populate `AgentContext.meta_spec_set_sha`).
+///
+/// For a workspace without a tenant set the merged serialization is
+/// byte-identical to the stored workspace-set JSON, so SHAs recorded before
+/// tenant sets existed remain valid (no false drift on upgrade).
+pub(crate) async fn compute_meta_spec_set_sha(state: &AppState, workspace_id: &Id) -> String {
     use sha2::{Digest, Sha256};
-    match meta_spec_sets.get(workspace_id).await {
-        Ok(Some(json)) => {
-            let mut hasher = Sha256::new();
-            hasher.update(json.as_bytes());
-            hex::encode(hasher.finalize())
-        }
-        _ => String::new(),
+    let ws = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws,
+        _ => return String::new(),
+    };
+    let ws_set = state.meta_spec_sets.get(workspace_id).await.ok().flatten();
+    let tenant_set = state
+        .tenant_meta_spec_sets
+        .get(&ws.tenant_id)
+        .await
+        .ok()
+        .flatten();
+    if ws_set.is_none() && tenant_set.is_none() {
+        // Nothing is bound — no set to conform to.
+        return String::new();
     }
+    let effective = crate::reconciliation::resolve_effective_meta_spec_set(state, &ws)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "compute_meta_spec_set_sha: corrupt set JSON; treating as unbound"
+            );
+            e
+        })
+        .unwrap_or_default();
+    let json = serde_json::to_string(&effective).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -1191,8 +1225,14 @@ pub fn build_state(
             dyn DependencyRepository,
             mem::MemDependencyRepository::default()
         ),
-        breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
-        dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
+        breaking_changes: store!(
+            dyn BreakingChangeRepository,
+            mem::MemBreakingChangeRepository::default()
+        ),
+        dependency_policies: store!(
+            dyn DependencyPolicyRepository,
+            mem::MemDependencyPolicyRepository::default()
+        ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         spawned_backends: Arc::new(Mutex::new(HashMap::new())),
@@ -1310,7 +1350,18 @@ pub fn build_state(
             dyn PolicyRepository,
             mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
         ),
-        workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
+        // Workspace memberships are durable: SQLite/PostgreSQL adapters
+        // implement the port (M22.8 schema); mem mode keeps the in-code
+        // store. Before task-121 this was unconditionally the mem adapter,
+        // so a DB-backed server silently lost every membership on restart.
+        workspace_memberships: store!(
+            dyn WorkspaceMembershipRepository,
+            mem::MemWorkspaceMembershipRepository::default()
+        ),
+        repo_access_overrides: store!(
+            dyn RepoAccessOverrideRepository,
+            mem::MemRepoAccessOverrideRepository::default()
+        ),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: store!(
             dyn NotificationRepository,
@@ -1341,6 +1392,10 @@ pub fn build_state(
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,
             mem::MemMetaSpecSetRepository::default()
+        ),
+        tenant_meta_spec_sets: store!(
+            dyn TenantMetaSpecSetRepository,
+            mem::MemTenantMetaSpecSetRepository::default()
         ),
         rollout_policies: store!(
             dyn RolloutPolicyRepository,
