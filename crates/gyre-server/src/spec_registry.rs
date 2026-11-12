@@ -8,7 +8,6 @@
 //! The ledger is synced from the manifest on every push to the default branch.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -55,7 +54,6 @@ impl Default for ManifestDefaults {
 fn default_true() -> bool {
     true
 }
-
 
 /// A link declared in the manifest between specs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,17 +189,29 @@ pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
 // ---------------------------------------------------------------------------
 
 // ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
-
-/// Type alias for the shared ledger store (in-memory, used by tests and sync_spec_ledger).
-pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
-/// Type alias for the shared approval history store (in-memory).
-pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
+// The former in-memory `SpecLedger` / `SpecApprovalHistory` store aliases were
+// removed: the ledger is port-backed (`gyre_ports::SpecLedgerRepository`) and
+// approval events are persisted through `gyre_ports::SpecApprovalEventRepository`,
+// both wired via the `store!` macro in `build_state`. Tests build local map
+// fixtures instead (see the test module below).
 
 // in-memory-state-stores:ok — hot cache of the durable `spec_links` table
 // (spec-links.md §Forge-Maintained Spec Graph): the SQL table behind
 // `AppState.spec_link_repo` is authoritative, every mutation writes through,
 // and boot reloads via `load_spec_links_into_store` (lib.rs).
 pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>; // in-memory-state-stores:ok — see above
+
+/// A stale inbound link collected for side-effect processing (sync step 6b):
+/// drift-review task creation (F5/F7) and extends-specific approval
+/// invalidation. Named struct instead of a positional 4-tuple so source and
+/// target paths cannot be swapped silently (TASK-048 F1 hazard class).
+#[derive(Debug, Clone)]
+struct StaleInboundLink {
+    source_path: String,
+    target_path: String,
+    source_repo_id: Option<String>,
+    link_type: SpecLinkType,
+}
 
 /// Read the manifest from a commit and return the set of registered spec paths.
 ///
@@ -770,20 +780,18 @@ pub async fn sync_spec_ledger(
         // - Includes source_repo_id and link_type for correct task assignment (F5).
         // - Covers all link types for drift-review task creation (F7).
         // - Excludes links from the current manifest (already processed in step 6) (F6).
-        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = store
+        let inbound_stale_links: Vec<StaleInboundLink> = store
             .iter()
             .filter(|l| {
                 l.stale_since == Some(now)
                     && changed_set.contains(l.target_path.as_str())
                     && !manifest_paths.contains(&l.source_path)
             })
-            .map(|l| {
-                (
-                    l.source_path.clone(),
-                    l.target_path.clone(),
-                    l.source_repo_id.clone(),
-                    l.link_type.clone(),
-                )
+            .map(|l| StaleInboundLink {
+                source_path: l.source_path.clone(),
+                target_path: l.target_path.clone(),
+                source_repo_id: l.source_repo_id.clone(),
+                link_type: l.link_type.clone(),
             })
             .collect();
         drop(store);
@@ -796,36 +804,36 @@ pub async fn sync_spec_ledger(
         }
 
         // Apply side effects for inbound stale links.
-        for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
+        for link in &inbound_stale_links {
             // Look up source spec's ledger entry for workspace_id (F5).
-            let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
+            let maybe_source = ledger.find_by_path(&link.source_path).await.ok().flatten();
             let ws_id = maybe_source.as_ref().and_then(|e| e.workspace_id.clone());
 
             // Step 3 (generic): drift-review task for stale inbound links.
             // Excludes `references` — spec says "No mechanical enforcement."
-            if *link_type == SpecLinkType::References {
+            if link.link_type == SpecLinkType::References {
                 continue;
             }
             create_drift_review_task(
                 tasks,
-                source_path,
-                target_path,
-                link_type,
-                link_repo_id.as_deref(),
+                &link.source_path,
+                &link.target_path,
+                &link.link_type,
+                link.source_repo_id.as_deref(),
                 ws_id.as_deref(),
                 now,
             )
             .await;
 
             // Step 4 (extends-specific): drift_status + approval invalidation.
-            if *link_type == SpecLinkType::Extends {
+            if link.link_type == SpecLinkType::Extends {
                 if let Some(mut source_entry) = maybe_source {
                     source_entry.drift_status = "drifted".to_string();
                     source_entry.approval_status = ApprovalStatus::Pending;
                     source_entry.updated_at = now;
                     let _ = ledger.save(&source_entry).await;
                     info!(
-                        spec_path = %source_path,
+                        spec_path = %link.source_path,
                         "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
                     );
                 }
@@ -1282,6 +1290,13 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// Test-only in-memory ledger fixture. Production state never uses this:
+    /// the ledger is port-backed (`gyre_ports::SpecLedgerRepository`, wired
+    /// via `store!` in `build_state`), so the alias lives inside the test
+    /// module rather than production code.
+    type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 
     const SAMPLE_MANIFEST: &str = r#"
 version: 1

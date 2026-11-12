@@ -29,7 +29,7 @@
 # scripts/in-memory-state-stores-exemptions.txt (path:line form,
 # frozen count). Fix by moving the store behind a port; never add
 # entries.
-FROZEN_EXEMPTION_COUNT=4
+FROZEN_EXEMPTION_COUNT=2
 #
 # Run by pre-commit and CI.
 

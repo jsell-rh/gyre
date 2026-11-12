@@ -3999,7 +3999,7 @@ specs:
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let ledger: crate::spec_registry::SpecLedger =
+        let ledger: Arc<tokio::sync::Mutex<std::collections::HashMap<String, SpecLedgerEntry>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         let now = 1700000000u64;
