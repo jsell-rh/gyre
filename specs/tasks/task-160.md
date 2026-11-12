@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "8458f699df0b4b075eea35a31c2a3e32107c1884"]
 ---
 
 ## Spec Excerpt
@@ -79,39 +79,48 @@ comments, and are wired into `.pre-commit-config.yaml` and
   route↔`RouteResourceMapping` cross-reference delegated to the frozen-baseline
   `check-abac-route-registry.sh` (spec §7).
 
-### Enabling repairs
+### This round: verification repair after base merge
 
-Unfiltered tenant reads fixed in sqlite+postgres
-compute_target/merge_request/notification/repository/saved_view/workspace so
-the lint passes clean rather than by exemption; `tenant_isolation.rs`
-proves cross-tenant invisibility end-to-end. `b82af6b4b` binds both
-`evaluate_attestation_abac` results in `merge_processor.rs` and records them
-in the policy-decision audit trail. `c7ea6ab05` repaired the admin.rs
-merge-regression (token/task-secret revocation, audit events, backend-aware
-kill, persona seeding, the three pinned tests).
+The round-2 verification failure (attempt f5d6200b, exit 1) was the
+exemption gate: `new verification exemptions forbidden:
+scripts/scope-literal-defaults-exemptions.txt` listing the two remaining
+domain entries. Their line numbers had shifted in the rebase onto base
+3af80bd2, so the base-diff read them as newly added. Fixed in the sanctioned
+direction - the sites themselves are gone:
 
-### This round: verification repair
+- `Task::new` and `MergeRequest::new` no longer inline
+  `workspace_id: Id::new("default")`; they bind the documented
+  `bootstrap_workspace()` helper (now shared `pub(crate)` in gyre-domain
+  `lib.rs`, same hierarchy-enforcement.md §1 contract `Agent::new` uses).
+  The exemption file drops to 0 entries and `FROZEN_EXEMPTION_COUNT`
+  lowers 2 → 0. No behavior change.
+- The base merge brought `TenantMetaSpecSetRepository::get` (task-158)
+  querying `tenant_meta_spec_sets` via primary-key `.find()`, which
+  `check-tenant-filter.sh` correctly flagged (reads on tenant-column tables
+  must carry the explicit `.filter(tenant_id.eq(...))` form, spec §3). Both
+  sqlite and postgres `get`s now filter explicitly - semantically identical
+  since `tenant_id` is the primary key - so the lint passes with no
+  skip-list growth.
 
-The round-1 verification failure (attempt 027edf1d, exit 1) was three E0308
-mismatched-type errors in `crates/gyre-server/src/ralph_loop.rs` (lines 240,
-306, 521): the base merge `cba416b46` (task-118 ralph loop) introduced
-`ralph_loop.rs` calling `emit_event` with `Option<Id>` first args, while the
-task-160 branch had hardened `emit_event` to require a scoped workspace `Id`
-(tenant resolved from the workspace record - skip-and-log when unresolvable,
-per the fabricated-scope remediation). `d162c56d0` adapts the three call
-sites (TaskTransitioned, GateFailure, TaskBlocked) to pass the `Id`
-directly, matching every other caller. The merge resolution was otherwise
-sound: branch-side fixes (admin.rs, merge_processor.rs, tenant-filter
-adapters) are byte-identical to the pre-merge candidate.
+### Test evidence
 
-### Verification evidence
+All evidence saved under `/tmp/stage/review-evidence/`:
 
-- All three scripts pass on current HEAD (output saved under
-  `/tmp/stage/review-evidence/`).
-- Negative test: injecting `workspace_id: Option<Id>` into `Task` makes
-  `check-hierarchy.sh` exit 1 with a precise violation report
-  (`check-hierarchy-negative.txt`); file restored afterward.
-- `cargo check -p gyre-server --tests` is clean after the repair (8m03s,
-  wrapper-serialized). Server test suites (`cargo test --all`, clippy,
-  rustfmt full run) are verifier-owned; the verifier should execute
-  `cargo test --all` plus the three scripts on this HEAD.
+- All three task scripts pass on current HEAD (`check-scripts.txt`,
+  `check-tenant-filter.txt`), plus arch/fabricated-scope/inert-enforcement/
+  mem-port-contracts/byte-slice/relative-path lints.
+- Negative tests: injecting `workspace_id: Id::new("default")` into `Task`
+  fails `check-scope-literal-defaults` (`check-scope-literal-negative.txt`);
+  declaring `Task.workspace_id: Option<Id>` fails `check-hierarchy`
+  (`check-hierarchy-negative.txt`); reverting the meta_spec_set filter to
+  `.find()` fails `check-tenant-filter`
+  (`check-tenant-filter-negative.txt`). Files restored after each.
+- `cargo test -p gyre-domain`: 474 passed (`domain-tests.txt`).
+- `cargo test -p gyre-adapters --test tenant_isolation`: 2 passed
+  (`tenant-isolation-tests.txt`); `sqlite::meta_spec_set`: 9 passed
+  (`meta-spec-set-tests.txt`).
+- `cargo check -p gyre-domain -p gyre-adapters` clean; `cargo fmt --check`
+  clean; clippy on both crates shows only pre-existing warnings outside the
+  changed lines.
+- Server suites (`cargo test --all`, all-target clippy, GitHub CI) are
+  verifier-owned; the verifier should run them on this head.
