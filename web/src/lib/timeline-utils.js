@@ -228,8 +228,12 @@ export function resolveScrubTimestamp(timeline, scrubIndex) {
  *
  * Coalesces rapid scrub positions into one server `GET /repos/:id/graph?at=`
  * request per debounce window (200ms default), and drops stale responses:
- * only the fetch for the most recent `at` resolves. A failed fetch rejects
- * so the caller can keep its client-side fallback graph.
+ * a fetch only settles the waiters for its OWN target position, so a
+ * request made while an older fetch is still in flight never resolves with
+ * the older position's graph; it is served by its own fetch once its
+ * debounce window closes. Positions superseded within a debounce window
+ * (and cancel()) resolve null so the caller keeps its client-side fallback
+ * graph. A failed fetch rejects so the caller can do the same.
  *
  * @param {function} fetchAt - `(at: number) => Promise<object>` graph fetcher
  * @param {number} [delayMs=200] - debounce window in milliseconds
@@ -240,19 +244,38 @@ export function createTimelineHistoryFetcher(fetchAt, delayMs = 200) {
   let latestAt = null;
   let pending = [];
 
-  function settle(ok, value) {
-    const waiters = pending;
-    pending = [];
-    for (const w of waiters) {
-      if (w.at !== latestAt) {
-        // Superseded by a newer scrub position — resolve null so the
-        // caller keeps its client-side fallback instead of hanging.
-        w.resolve(null);
+  // Settle the waiters for ONE fetch target. Waiters for other positions
+  // stay pending: their own fetch starts when their debounce window closes
+  // (a newer request restarts the timer), so they must never receive this
+  // fetch's graph. Matching by the fetch's target (not by `latestAt`) is
+  // what prevents an in-flight fetch for an older position from resolving
+  // a newer position's waiter with the older graph.
+  function settleTarget(target, ok, value) {
+    const remaining = [];
+    for (const w of pending) {
+      if (w.at !== target) {
+        remaining.push(w);
         continue;
       }
       if (ok) w.resolve(value);
       else w.reject(value);
     }
+    pending = remaining;
+  }
+
+  // Resolve every waiter whose position will NOT get its own fetch with
+  // null (keep the client-side fallback instead of hanging): positions
+  // superseded within the debounce window, or every waiter on cancel().
+  function releaseSuperseded(exceptAt) {
+    const remaining = [];
+    for (const w of pending) {
+      if (exceptAt != null && w.at === exceptAt) {
+        remaining.push(w);
+        continue;
+      }
+      w.resolve(null);
+    }
+    pending = remaining;
   }
 
   return {
@@ -264,10 +287,16 @@ export function createTimelineHistoryFetcher(fetchAt, delayMs = 200) {
         timer = setTimeout(() => {
           timer = null;
           const target = latestAt;
-          if (target == null) return settle(true, null);
+          if (target == null) {
+            releaseSuperseded(null);
+            return;
+          }
+          // Only the latest position in the window gets a fetch; earlier
+          // positions in the same window are superseded and resolve null.
+          releaseSuperseded(target);
           fetchAt(target)
-            .then((graph) => settle(true, graph))
-            .catch((err) => settle(false, err));
+            .then((graph) => settleTarget(target, true, graph))
+            .catch((err) => settleTarget(target, false, err));
         }, delayMs);
       });
     },
@@ -277,7 +306,7 @@ export function createTimelineHistoryFetcher(fetchAt, delayMs = 200) {
         timer = null;
       }
       latestAt = null;
-      settle(true, null); // release waiters without a fetch
+      releaseSuperseded(null); // release all waiters without a fetch
     },
   };
 }

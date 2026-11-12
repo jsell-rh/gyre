@@ -334,12 +334,24 @@ describe('TimelineScrubber', () => {
     { id: 'p5', repo_id: 'r1', commit_sha: 'ee5', timestamp: NOW_TS, spec_ref: null, agent_id: null, delta_json: null },
   ];
 
+  // Exact production payload shape of reconciliation_completed messages:
+  // crates/gyre-server/src/reconciliation.rs `maybe_emit_reconciliation_completed`
+  // → `emit_reconciliation_completed` sends {workspace_id, wave_started_at,
+  // task_count, duration_secs, specs}. `specs` entries are the changed
+  // meta-specs as {name, version} (provenance labels materialized on the
+  // wave's tasks at creation). `created_at` is epoch milliseconds.
   const RECONCILIATION_EVENTS = [
     {
       id: 'm1',
       kind: 'reconciliation_completed',
       created_at: (NOW_TS - 86400 * 15) * 1000, // epoch milliseconds
-      payload: { workspace_id: 'ws1', persona_id: 'per-3', persona_name: 'Architect', specs_evaluated: 12, specs_changed: 3 },
+      payload: {
+        workspace_id: 'ws1',
+        wave_started_at: NOW_TS - 86400 * 16,
+        task_count: 7,
+        duration_secs: 86400,
+        specs: [{ name: 'architect', version: 4 }],
+      },
     },
   ];
 
@@ -367,14 +379,44 @@ describe('TimelineScrubber', () => {
     await fireEvent.click(markers[0]);
     expect(onMarkerClick).toHaveBeenCalledTimes(1);
     const passedDelta = onMarkerClick.mock.calls[0][0];
-    expect(passedDelta.narrative).toContain('Architect');
-    expect(passedDelta.narrative).toContain('3 of 12 specs changed');
+    // Narrative derives from the production payload fields only: task_count,
+    // specs[] (changed meta-spec name + version), duration_secs.
+    expect(passedDelta.narrative).toContain('7 tasks');
+    expect(passedDelta.narrative).toContain('architect v4');
+    expect(passedDelta.narrative).toContain('1d');
     // Popover shows the narrative under the "Why" label
     const popover = container.querySelector('.tl-popover');
     expect(popover).toBeTruthy();
     const labels = Array.from(popover.querySelectorAll('.tl-popover-label')).map((el) => el.textContent);
     expect(labels).toContain('Why');
-    expect(popover.textContent).toContain('Reconciliation of Architect: 3 of 12 specs changed.');
+    expect(popover.textContent).toContain('Reconciliation wave complete: 7 tasks aligned code with architect v4 (1d).');
+  });
+
+  it('reconciliation narrative falls back to task_count/duration_secs when the wave predates specs provenance', async () => {
+    // Waves whose tasks were created before the meta-spec provenance label
+    // exist emit the payload without a specs array; the narrative must
+    // still be true (task count + duration) and must not fabricate a
+    // persona/specs-evaluated story no emitter ever sent.
+    const legacyEvents = [
+      {
+        id: 'm1',
+        kind: 'reconciliation_completed',
+        created_at: (NOW_TS - 86400 * 15) * 1000,
+        payload: { workspace_id: 'ws1', wave_started_at: NOW_TS - 86400 * 16, task_count: 7, duration_secs: 86400 },
+      },
+    ];
+    const onMarkerClick = vi.fn();
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: legacyEvents, onMarkerClick }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    await fireEvent.click(markers[0]);
+    const passedDelta = onMarkerClick.mock.calls[0][0];
+    expect(passedDelta.narrative).toBe('Reconciliation wave complete: 7 tasks (1d).');
+    // The fabricated pre-fix narrative read fields no emitter sends.
+    expect(passedDelta.narrative).not.toContain('specs evaluated');
+    expect(passedDelta.narrative).not.toContain('persona');
   });
 
   it('popover shows the grounded narrative for delta-backed key moments', async () => {

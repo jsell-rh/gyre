@@ -190,11 +190,9 @@ impl RepoGraphQuery {
         if let Ok(secs) = raw.parse::<u64>() {
             return Ok(Some(secs));
         }
-        let parsed = time::OffsetDateTime::parse(
-            raw,
-            &time::format_description::well_known::Rfc3339,
-        )
-        .map_err(|e| format!("invalid 'at' timestamp {raw:?}: {e}"))?;
+        let parsed =
+            time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                .map_err(|e| format!("invalid 'at' timestamp {raw:?}: {e}"))?;
         let secs = parsed.unix_timestamp();
         if secs < 0 {
             return Err(format!("'at' timestamp {raw:?} is before the unix epoch"));
@@ -432,9 +430,7 @@ pub async fn get_repo_graph(
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
 
-    let at = q
-        .resolve_at()
-        .map_err(ApiError::BadRequest)?;
+    let at = q.resolve_at().map_err(ApiError::BadRequest)?;
 
     let (all_nodes, all_edges) = match at {
         Some(at) => (

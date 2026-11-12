@@ -431,6 +431,44 @@ describe('createTimelineHistoryFetcher', () => {
     await expect(p).resolves.toBeNull();
   });
 
+  it('does not settle a newer position with an older in-flight fetch (race regression)', async () => {
+    // Review finding: a scrub while a fetch for an older position is still
+    // in flight used to resolve the NEW position's waiter with the OLD
+    // fetch's graph (waiters were matched against latestAt, not against
+    // the fetch's target). The canvas then rendered the wrong point in
+    // time (wrong ghosts, wrong delta counts) for as long as the user
+    // stayed at that position.
+    const graph500 = { nodes: [{ id: 'g500' }], edges: [] };
+    const graph1000 = { nodes: [{ id: 'g1000' }], edges: [] };
+    let land500;
+    const fetchAt = vi.fn((at) => {
+      if (at === 500) return new Promise((r) => { land500 = r; });
+      return Promise.resolve(graph1000);
+    });
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p500 = fetcher.request(500);
+    await vi.advanceTimersByTimeAsync(200); // debounce closes; fetch(500) in flight
+    expect(fetchAt).toHaveBeenCalledTimes(1);
+
+    // Scrub again while the fetch for 500 is still in flight.
+    const p1000 = fetcher.request(1000);
+
+    // The OLD fetch lands while the newer position is still debouncing.
+    land500(graph500);
+    await vi.advanceTimersByTimeAsync(0); // flush the old fetch's settlement
+
+    // The newer debounce window closes; its own fetch runs.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchAt).toHaveBeenCalledTimes(2);
+    expect(fetchAt).toHaveBeenNthCalledWith(2, 1000);
+
+    await expect(p500).resolves.toBe(graph500);
+    // With the race, p1000 resolved with the 500-graph the moment land500()
+    // fired; it must instead carry its own position's graph.
+    await expect(p1000).resolves.toBe(graph1000);
+  });
+
   it('issues a new fetch after the window when the position changes later', async () => {
     const fetchAt = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     const fetcher = createTimelineHistoryFetcher(fetchAt, 200);

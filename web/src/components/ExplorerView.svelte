@@ -1917,7 +1917,10 @@
       .request(at)
       .then((g) => {
         // null = superseded by a newer position or cancelled — keep fallback.
-        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive) {
+        // The position check keeps a late out-of-order response for an
+        // older position from clobbering the newer position's pinned
+        // graph (the fetcher already guarantees `g` is the graph for `at`).
+        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive && at === timelineScrubTimestamp) {
           timelineHistoricalGraph = { at, graph: g };
         }
       })
