@@ -8212,7 +8212,7 @@ mod tests {
             .upsert(&Id::new(ws_id), &json)
             .await
             .unwrap();
-        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &Id::new(ws_id)).await
+        crate::compute_meta_spec_set_sha(state, &Id::new(ws_id)).await
     }
 
     /// A signed provenance attestation recording `meta_sha` as the set the
