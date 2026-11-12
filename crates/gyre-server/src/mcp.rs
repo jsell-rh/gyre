@@ -587,7 +587,7 @@ fn tool_definitions() -> Value {
                         "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
                         "parent_id": { "type": "string", "description": "Optional parent agent id" },
                         "compute_target_id": { "type": "string", "description": "Optional compute target id" },
-                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16)" },
+                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16); must resolve to an Approved persona in the repo/workspace/tenant chain, else the spawn is rejected" },
                         "persona_slug": { "type": "string", "description": "Optional persona slug to bind (resolved repo → workspace → tenant, must be approved); its system prompt is injected as GYRE_PROMPT_PERSONA" }
                     },
                     "required": ["task_id", "name", "branch"]

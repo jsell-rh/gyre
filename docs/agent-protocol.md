@@ -17,7 +17,7 @@ This document covers the full agent lifecycle: spawn, operation, and completion.
   "branch": "feat/my-feature",
   "parent_id": "<orchestrator-agent-uuid>",    // optional
   "compute_target_id": "<target-uuid>",        // optional -- remote compute target
-  "persona": "security",                       // optional -- bare persona name; recorded as the agent's persona (spec-registry.md §16) and injected as GYRE_PERSONA in the container env
+  "persona": "security",                       // optional -- bare persona name; recorded as the agent's persona (spec-registry.md §16) and injected as GYRE_PERSONA in the container env. Must resolve to an Approved persona in the repo/workspace/tenant chain (same fail-closed posture as persona_slug), else the spawn is rejected with 400
   "disconnected_behavior": "Pause"             // optional -- "Pause" (default) | "ContinueOffline" | "Abort"; controls stale-agent-detector behavior when agent loses connectivity
 }
 

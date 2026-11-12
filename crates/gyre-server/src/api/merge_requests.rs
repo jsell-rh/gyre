@@ -1051,10 +1051,23 @@ pub async fn submit_review(
     // under a request-body reviewer id would let any spawned agent forge a
     // review attributed to a persona-holding, attested agent — defeating
     // the manifest gates' min_attestation_level / stack_hash constraints
-    // (spec-registry.md §Agent Approver / Gate Schema). Human callers
-    // (user JWT / API key / impersonation) and the server's system token
-    // keep the request-body reviewer: a human recording a review is an
-    // attributed human action, not a forged agent identity.
+    // (spec-registry.md §Agent Approver / Gate Schema).
+    //
+    // Human principals (user JWT / API key / impersonation) may record a
+    // review under the request-body reviewer id ONLY when it names their
+    // own verified identity (`auth.user_id` — the id the credential
+    // actually resolves to), mirroring task-193's approve_spec, which
+    // derives the approver identity from verified claims for every
+    // principal. A body reviewer naming a DIFFERENT agent from a human
+    // caller is attribution forgery against the same manifest-gate
+    // constraints (the Review row attributes only the named agent;
+    // nothing records the submitting human), so it is reserved for Admin
+    // principals recording on behalf of an agent. The comparison uses
+    // `user_id`, never `agent_id`: API-key/JWT auth fills `agent_id` from
+    // the user-controlled display name, so comparing against it would let
+    // a user named after a gate agent forge that agent's review. The
+    // server's system token keeps the request-body reviewer (server-
+    // internal flows).
     let agent_token_principal = auth.user_id.is_none() && !auth.is_system_principal();
     let reviewer_agent_id = if agent_token_principal
         || auth
@@ -1065,6 +1078,19 @@ pub async fn submit_review(
             == Some(crate::auth::REVIEW_SUBMIT_SCOPE)
     {
         auth.agent_id.clone()
+    } else if auth.user_id.is_some() {
+        let caller_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+        let own_identity =
+            auth.user_id.as_ref().map(|uid| uid.as_str()) == Some(req.reviewer_agent_id.as_str());
+        if !caller_admin && !own_identity {
+            return Err(ApiError::Forbidden(format!(
+                "a human caller may record a review only under its own identity; \
+                 recording a review for another reviewer requires an Admin principal \
+                 (requested reviewer: {})",
+                req.reviewer_agent_id
+            )));
+        }
+        req.reviewer_agent_id
     } else {
         req.reviewer_agent_id
     };
@@ -1742,6 +1768,158 @@ mod tests {
             "an agent-token caller's review must be recorded under its own verified \
              identity, never the request-body reviewer id"
         );
+    }
+
+    /// Seed a human principal (user row + API key) and return nothing — the
+    /// raw key authenticates the caller in subsequent requests.
+    async fn seed_human_caller(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        display_name: &str,
+        roles: Vec<gyre_domain::UserRole>,
+        raw_key: &str,
+    ) {
+        let mut user = gyre_domain::User::new(
+            Id::new(user_id),
+            format!("external-{user_id}"),
+            display_name,
+            0,
+        );
+        user.roles = roles;
+        user.tenant_id = Some(Id::new("t-review-forge"));
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_review_human_non_admin_cannot_forge_agent_reviewer() {
+        // Review repair (manifest gates): a human principal (user JWT /
+        // API key) honoring a request-body reviewer_agent_id naming a
+        // DIFFERENT agent would forge the exact reviewer identity the
+        // manifest gates evaluate (persona + min_attestation_level /
+        // stack_hash constraints) — the Review row attributes only the
+        // named agent; nothing records the submitting human. A non-admin
+        // human may record a review only under its own verified identity.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Human forge test").await;
+
+        seed_human_caller(
+            &state,
+            "u-dev-reviewer",
+            "dev-reviewer",
+            vec![gyre_domain::UserRole::Developer],
+            "gyre_test_dev_reviewer_key",
+        )
+        .await;
+
+        // The developer names the MR's forge-spawned gate agent as the
+        // reviewer (its id is discoverable via the agents listing; its
+        // persona and attestation satisfy the manifest gate).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "forged"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-admin human must not record a review attributed to another agent"
+        );
+        let reviews = state.reviews.list_reviews(&Id::new(&mr_id)).await.unwrap();
+        assert!(
+            reviews.is_empty(),
+            "the forged review must not be persisted"
+        );
+
+        // The same caller MAY record a review under its own verified user
+        // identity — an attributed human action. The comparison is against
+        // the verified user id, never the display name (which is
+        // user-controlled and could collide with an agent id).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "u-dev-reviewer",
+            "decision": "approved",
+            "body": "own identity"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "a human recording a review under its own identity is an attributed action"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "u-dev-reviewer");
+    }
+
+    #[tokio::test]
+    async fn submit_review_admin_can_record_on_behalf_of_agent() {
+        // The on-behalf escape hatch is reserved for Admin principals —
+        // the same trust level that can merge directly.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Admin on-behalf test").await;
+
+        seed_human_caller(
+            &state,
+            "u-admin-reviewer",
+            "admin-reviewer",
+            vec![gyre_domain::UserRole::Admin],
+            "gyre_test_admin_reviewer_key",
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "admin-recorded"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_admin_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "an Admin principal may record a review on behalf of an agent"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "agt-gate-security");
     }
 
     #[tokio::test]

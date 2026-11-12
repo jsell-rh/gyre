@@ -149,7 +149,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
-| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes). Reviewer identity binding: callers authenticated with an agent token (including `review:submit`-scoped gate agents) submit under their own verified identity — the request-body `reviewer_agent_id` is honored only for human callers (user JWT / API key) and the server's system token |
+| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes). Reviewer identity binding: callers authenticated with an agent token (including `review:submit`-scoped gate agents) submit under their own verified identity. Human callers (user JWT / API key) may use the request-body `reviewer_agent_id` only when it equals their own verified user identity (recording a review for a different reviewer requires an Admin principal); the server's system token keeps the request-body reviewer |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
 | `GET` | `/api/v1/merge-requests/{id}/attestation` | Get signed merge attestation bundle for a merged MR — fields: `attestation_version`, `mr_id`, `merge_commit_sha`, `merged_at`, `gate_results`, `spec_ref`, `spec_fully_approved`, `author_agent_id`; returns 404 if not yet merged or attestation pending (G5) |

@@ -44,7 +44,12 @@ pub struct SpawnAgentRequest {
     /// the spec manifest's `gates:` entries use). Recorded at spawn time in
     /// the `agent_personas` KV namespace — the persona source
     /// `build_agent_context` and the manifest-gate persona checks read
-    /// (spec-registry.md §16). Optional for backward compatibility.
+    /// (spec-registry.md §16). Validated fail-closed at spawn: the name
+    /// must resolve to an Approved persona in the spawn's scope chain
+    /// (`resolve_persona_in_chain`, same posture as `persona_slug`) — the
+    /// namespace feeds the manifest gates' persona check, so an unvalidated
+    /// writer would let any spawn-capable caller mint a gate-satisfiable
+    /// persona identity. Optional for backward compatibility.
     #[serde(default)]
     pub persona: Option<String>,
     /// Persona slug to bind to this agent (platform-model.md §4.3): resolved
@@ -677,6 +682,48 @@ pub(crate) async fn spawn_agent_core(
         _ => None,
     };
 
+    // Bare persona name (review repair, manifest gates): the `persona`
+    // field feeds the `agent_personas` KV namespace — the exact trust
+    // source `evaluate_persona_reviews` (gate_executor) uses to decide
+    // whether a reviewer runs a manifest gate's required persona. A
+    // caller-supplied string recorded verbatim would let any
+    // spawn-capable caller (a repo orchestrator via gyre_spawn_worker, any
+    // Developer via the REST route) mint a gate-satisfiable persona
+    // identity: spawn a worker labeled `security`, self-approve the MR,
+    // merge — the weakened-persona scenario the manifest gate constraints
+    // exist to prevent. Fail-closed exactly like `persona_slug`: the name
+    // must resolve to an Approved persona in the spawn's scope chain, and
+    // validation runs BEFORE any state is created (agent row, token,
+    // worktree, task assignment) so a rejected spawn leaves nothing
+    // behind. The comparison a manifest gate makes is against the persona
+    // string, so the requested name is what gets recorded — but only once
+    // it has resolved to a human-approved persona. The forge's own
+    // manifest-gate writer (`spawn_manifest_gate_agent`) is server-
+    // internal and sources the persona from the reviewed manifest — it
+    // does not pass through this validation.
+    let bare_persona: Option<String> = match req.persona.as_deref() {
+        Some(name) if !name.is_empty() => {
+            let ws = workspace.as_ref().ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "cannot resolve persona '{name}': workspace {} unresolvable",
+                    repo.workspace_id
+                ))
+            })?;
+            let prompt_scope = crate::api::prompts::PromptScope {
+                tenant_id: Some(ws.tenant_id.clone()),
+                workspace_id: repo.workspace_id.clone(),
+                repo_id: Some(repo.id.clone()),
+                task_id: Some(Id::new(&req.task_id)),
+                agent_id: None,
+            };
+            crate::api::prompts::resolve_persona_in_chain(state, name, &prompt_scope)
+                .await
+                .map_err(ApiError::InvalidInput)?;
+            Some(name.to_string())
+        }
+        _ => None,
+    };
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
@@ -766,8 +813,11 @@ pub(crate) async fn spawn_agent_core(
     // Record the agent's persona (spec-registry.md §16): the
     // `agent_personas` KV namespace is the persona source
     // `build_agent_context` and the manifest-gate persona checks read —
-    // spawn time is its production writer.
-    if let Some(persona) = &req.persona {
+    // spawn time is its production writer. `bare_persona` is the
+    // validated form of `req.persona` (resolved to an Approved persona
+    // above, before any state was created) — recording the raw request
+    // field here would bypass that validation.
+    if let Some(persona) = &bare_persona {
         let _ = state
             .kv_store
             .kv_set("agent_personas", &agent.id.to_string(), persona.clone())
@@ -1111,7 +1161,7 @@ pub(crate) async fn spawn_agent_core(
             resolved_ct_entity: resolved_ct_entity.clone(),
             jj_workspace_path: jj_workspace_path.clone(),
             plain_worktree_path: worktree_path.clone(),
-            persona_name: req.persona.clone(),
+            persona_name: bare_persona.clone(),
             persona: persona.clone(),
             is_interrogation,
         },
@@ -6661,6 +6711,199 @@ exit 1\n"
             rejected.is_empty(),
             "rejected spawns must not leave agent rows behind: {:?}",
             rejected.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review repair (manifest gates): the bare `persona` field feeds the
+    /// `agent_personas` KV namespace — the trust source the manifest-gate
+    /// persona check (`evaluate_persona_reviews`) reads. A caller-supplied
+    /// name that does not resolve to an Approved persona must reject the
+    /// spawn BEFORE any state is created, and must never be recorded:
+    /// otherwise any spawn-capable caller (repo orchestrator via
+    /// gyre_spawn_worker, any Developer via REST) could mint a
+    /// gate-satisfiable persona identity and self-approve an MR.
+    #[tokio::test]
+    async fn spawn_bare_persona_fails_closed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-bare-failclosed").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Fail-closed bare persona").await;
+
+        // Unknown persona name: rejected.
+        let body = serde_json::json!({
+            "name": "worker-missing-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/missing-bare-persona",
+            "persona": "no-such-persona",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown bare persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("not found in scope chain"),
+            "error should name the unresolvable persona: {}",
+            json["error"]
+        );
+
+        // Unapproved (Pending) persona: rejected — a pending persona is a
+        // human-unapproved behavior definition and must not become a
+        // gate-satisfiable reviewer identity.
+        let persona = gyre_domain::Persona::new(
+            Id::new("persona-pending-bare"),
+            "Persona pending-bare".to_string(),
+            "pending-bare".to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "pending bare persona prompt".to_string(),
+            1_700_000_000,
+        );
+        // approval_status stays Pending (Persona::new default)
+        state.personas.create(&persona).await.unwrap();
+        let body = serde_json::json!({
+            "name": "worker-pending-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/pending-bare-persona",
+            "persona": "pending-bare",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a Pending bare persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"].as_str().unwrap().contains("approve"),
+            "error should demand approval: {}",
+            json["error"]
+        );
+
+        // No orphaned agent rows from the rejected spawns.
+        let agents = state.agents.list().await.unwrap();
+        let rejected: Vec<&gyre_domain::Agent> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("worker-"))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "rejected spawns must not leave agent rows behind: {:?}",
+            rejected.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+
+        // And nothing was recorded in the persona namespace an unapproved
+        // spawn must never write: `agent_personas` is the exact trust
+        // source the manifest-gate persona check reads.
+        let recorded = state.kv_store.kv_list("agent_personas").await.unwrap();
+        assert!(
+            recorded.is_empty(),
+            "a rejected bare-persona spawn must not record a persona: {:?}",
+            recorded
+        );
+    }
+
+    /// Positive counterpart: an Approved bare persona is recorded in the
+    /// `agent_personas` namespace (the manifest-gate persona source) and
+    /// injected as `GYRE_PERSONA` for the launched runtime.
+    #[tokio::test]
+    async fn spawn_bare_persona_approved_is_recorded() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump-bare")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-bare-ok").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Bare persona record").await;
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-bare-ok", &dump_path).await;
+
+        seed_spawn_persona(&state, "security-probe", "You are the security probe.").await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/bare-persona");
+        let body = serde_json::json!({
+            "name": "worker-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/bare-persona",
+            "compute_target_id": ct_id,
+            "persona": "security-probe",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+
+        // The validated persona name is recorded in the namespace the
+        // manifest-gate persona check reads.
+        let recorded = state
+            .kv_store
+            .kv_get("agent_personas", &agent_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded.as_deref(),
+            Some("security-probe"),
+            "an Approved bare persona must be recorded for the spawned agent"
+        );
+
+        // And delivered to the launched runtime for self-identification.
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        assert_eq!(
+            env.get("GYRE_PERSONA").map(String::as_str),
+            Some("security-probe"),
+            "the validated bare persona must be injected as GYRE_PERSONA:\n{dump}"
         );
     }
 
