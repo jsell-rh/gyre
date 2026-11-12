@@ -867,6 +867,7 @@ mod tests {
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
+            position: 0,
             timeout_secs: None,
             created_at: 0,
         };

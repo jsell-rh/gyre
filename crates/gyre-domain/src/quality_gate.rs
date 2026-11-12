@@ -41,6 +41,15 @@ pub struct QualityGate {
     /// `None` uses the system default (300s).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Position of this gate in the repo's ordered gate chain
+    /// (agent-gates.md §Gate Chains: "repos configure gate chains as
+    /// ordered policies"). Lower positions run/are listed first; ties
+    /// (including all-zero rows written before this column existed)
+    /// fall back to creation order. `create_gate` assigns the next free
+    /// position; the gate-chain configuration endpoint rewrites the whole
+    /// chain's positions atomically.
+    #[serde(default)]
+    pub position: u32,
     pub created_at: u64,
 }
 
