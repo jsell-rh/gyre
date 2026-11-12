@@ -106,6 +106,15 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
+  // Workspace-scoped MR list (GET /workspaces/:id/merge-requests). Supports
+  // `has_trace` + `limit` (HSI §3 MR ID discovery for flow-layout
+  // trace_source) — the has_trace filter uses the same get_by_mr lookup
+  // GET /merge-requests/:id/trace serves, so the list cannot drift from
+  // what the trace endpoint returns.
+  workspaceMergeRequests: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/workspaces/${workspaceId}/merge-requests${qs ? '?' + qs : ''}`);
+  },
   mergeRequest: (id) => request(`/merge-requests/${id}`),
   mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
