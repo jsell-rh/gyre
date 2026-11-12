@@ -210,13 +210,21 @@ def discover(store, stage, base):
                     inputs['review_retry']=data['review_retry']
         elif stage == 'verify' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') == candidate and review.get('approved'):
-                if verified.get('candidate') != candidate or verified.get('base') != base:
+                if verified.get('candidate') != candidate or not verified.get('passed'):
                     from .ci import verification_ready
                     if verification_ready(store,task,base):
                         inputs = {'candidate': candidate, 'base': base}
         elif stage == 'publish' and deps_ready and candidate and not repair:
-            if verified.get('candidate') == candidate and (verified.get('base') == base or data.get('pr')):
-                inputs = {'candidate': candidate, 'base': base, 'verified': verified}
+            if verified.get('candidate') == candidate and verified.get('passed'):
+                ci=data.get('ci') or {}
+                published=data.get('pr') and data.get('published_head')==verified.get('head')
+                merge_ready=(ci.get('head')==verified.get('head') and (
+                    ci.get('status') in ('passed','merged','artifact_refresh') or
+                    ci.get('checks')=='green' and ci.get('merge_state')=='BEHIND'))
+                # One observer owns pending CI. A publisher runs only to push
+                # a new verified head, refresh a green base, merge, or confirm.
+                if not published or merge_ready:
+                    inputs = {'candidate': candidate, 'base': base, 'verified': verified}
         if inputs is not None:
             priority = 1000 if repair else 0
             selected.append(store.enqueue(stage, name, task['generation'], inputs, priority))
