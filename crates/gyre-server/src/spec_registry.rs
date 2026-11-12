@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 pub use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
-pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, TaskPriority};
 
 // ---------------------------------------------------------------------------
 // Manifest structs (parsed from specs/manifest.yaml)
@@ -40,6 +40,11 @@ pub struct ManifestDefaults {
     pub auto_create_tasks: bool,
     #[serde(default = "default_true")]
     pub auto_invalidate_on_change: bool,
+    /// Default lifecycle-task priority override (spec-registry.md §15:
+    /// "manifest can override default task priority"). `None` keeps the
+    /// change-kind default chosen by the lifecycle hook.
+    #[serde(default)]
+    pub priority: Option<TaskPriority>,
 }
 
 impl Default for ManifestDefaults {
@@ -48,6 +53,7 @@ impl Default for ManifestDefaults {
             requires_approval: true,
             auto_create_tasks: true,
             auto_invalidate_on_change: true,
+            priority: None,
         }
     }
 }
@@ -87,6 +93,11 @@ pub struct SpecEntry {
     pub auto_create_tasks: Option<bool>,
     /// Overrides `defaults.auto_invalidate_on_change` for this spec.
     pub auto_invalidate_on_change: Option<bool>,
+    /// Overrides the lifecycle-task priority for changes to this spec
+    /// (spec-registry.md §15). `None` falls back to `defaults.priority`,
+    /// then to the change-kind default.
+    #[serde(default)]
+    pub priority: Option<TaskPriority>,
     /// If set, this spec has been superseded by another.
     pub superseded_by: Option<String>,
     /// Links to other specs (machine-readable graph edges).
@@ -106,6 +117,15 @@ impl SpecEntry {
     pub fn effective_auto_invalidate(&self, defaults: &ManifestDefaults) -> bool {
         self.auto_invalidate_on_change
             .unwrap_or(defaults.auto_invalidate_on_change)
+    }
+
+    /// Effective lifecycle-task priority override for this spec
+    /// (spec-registry.md §15): per-entry override, else the manifest
+    /// `defaults:` priority, else `None` (caller keeps its change-kind
+    /// default). Never hardcodes a priority — an override is applied only
+    /// when the manifest declares one.
+    pub fn effective_priority(&self, defaults: &ManifestDefaults) -> Option<TaskPriority> {
+        self.priority.clone().or_else(|| defaults.priority.clone())
     }
 
     pub fn effective_approval_mode(&self) -> ApprovalMode {
@@ -161,32 +181,12 @@ pub struct GateConfig {
     pub stack_hash: Option<String>,
 }
 
-/// Parse YAML text into a SpecManifest.
-pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
-    serde_yaml::from_str(yaml)
-}
-
-/// Read and parse `specs/manifest.yaml` from a git commit.
-///
-/// Returns `None` when the manifest is absent or unparseable. Callers use
-/// this to resolve per-spec approval policy (agent approvers, attestation
-/// constraints) at approval time (spec-registry.md §9).
-pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
-    let parsed = parse_manifest(&yaml);
-    match parsed {
-        Ok(m) => Some(m),
-        Err(e) => {
-            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
-            None
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Ledger types (runtime state tracked per spec)
 // ---------------------------------------------------------------------------
+
+// NOTE: the in-memory store aliases in this section are legacy debt grandfathered
+// in scripts/in-memory-state-stores-exemptions.txt at frozen line coordinates.
 
 // ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
 // The former in-memory `SpecLedger` / `SpecApprovalHistory` store aliases were
@@ -221,6 +221,56 @@ pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections
         .await
         .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Manifest reading and path resolution (used by the ledger sync and
+// the spec lifecycle hooks)
+// ---------------------------------------------------------------------------
+
+/// Normalize a spec path to the manifest's canonical identity: relative to
+/// `specs/`, with no leading `specs/` prefix (the same form `sync_spec_ledger`
+/// uses when it prefixes entries with `specs/` and `GET /api/v1/specs/:path`
+/// accepts).
+fn normalize_spec_rel_path(path: &str) -> &str {
+    path.strip_prefix("specs/").unwrap_or(path)
+}
+
+/// Resolve the manifest `SpecEntry` for a changed file path from a git diff
+/// (e.g. `specs/system/foo.md`). For renames, callers pass the NEW path —
+/// the manifest at the pushed HEAD describes where the spec lives now.
+pub fn manifest_entry_for_path<'a>(
+    manifest: &'a SpecManifest,
+    path: &str,
+) -> Option<&'a SpecEntry> {
+    let rel = normalize_spec_rel_path(path);
+    manifest
+        .specs
+        .iter()
+        .find(|e| normalize_spec_rel_path(&e.path) == rel)
+}
+
+/// Parse YAML text into a SpecManifest.
+pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
+    serde_yaml::from_str(yaml)
+}
+
+/// Read and parse `specs/manifest.yaml` from a git commit.
+///
+/// Returns `None` when the manifest is absent or unparseable. Callers use
+/// this to resolve per-spec approval policy (agent approvers, attestation
+/// constraints) at approval time (spec-registry.md §9).
+pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
+    let parsed = parse_manifest(&yaml);
+    match parsed {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1616,66 @@ concepts:
     fn test_parse_invalid_yaml() {
         let result = parse_manifest("not: valid: yaml: ][");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // §15 manifest helpers — path resolution and priority overrides
+    // -----------------------------------------------------------------------
+
+    const PRIORITY_MANIFEST: &str = r#"
+version: 1
+defaults:
+  priority: Low
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:jsell
+    priority: Critical
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:jsell
+  - path: development/spec-c.md
+    title: Spec C
+    owner: user:jsell
+"#;
+
+    #[test]
+    fn manifest_entry_for_path_resolves_with_and_without_prefix() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        // Diff paths carry the specs/ prefix; manifest entries do not.
+        let a = manifest_entry_for_path(&m, "specs/system/spec-a.md").unwrap();
+        assert_eq!(a.path, "system/spec-a.md");
+        // The same identity without the prefix also resolves.
+        let b = manifest_entry_for_path(&m, "system/spec-b.md").unwrap();
+        assert_eq!(b.title, "Spec B");
+        // Unregistered files do not resolve.
+        assert!(manifest_entry_for_path(&m, "specs/system/unregistered.md").is_none());
+        assert!(manifest_entry_for_path(&m, "src/main.rs").is_none());
+    }
+
+    #[test]
+    fn effective_priority_entry_override_beats_defaults() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        let a = manifest_entry_for_path(&m, "specs/system/spec-a.md").unwrap();
+        assert_eq!(
+            a.effective_priority(&m.defaults),
+            Some(TaskPriority::Critical)
+        );
+    }
+
+    #[test]
+    fn effective_priority_falls_back_to_defaults_then_none() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        // No per-entry override: manifest defaults priority applies.
+        let b = manifest_entry_for_path(&m, "specs/system/spec-b.md").unwrap();
+        assert_eq!(b.effective_priority(&m.defaults), Some(TaskPriority::Low));
+        // No override anywhere (defaults has none): caller keeps its default.
+        let bare = parse_manifest(
+            "version: 1\nspecs:\n  - path: system/x.md\n    title: X\n    owner: user:t\n",
+        )
+        .unwrap();
+        let x = &bare.specs[0];
+        assert_eq!(x.effective_priority(&bare.defaults), None);
     }
 
     // -----------------------------------------------------------------------

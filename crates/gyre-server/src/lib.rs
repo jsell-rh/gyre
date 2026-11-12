@@ -42,6 +42,7 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod search_scope;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
