@@ -83,8 +83,9 @@ def run(execution, task):
     previous = task['data'].get('previous_delivery')
     if previous:
         updates['delivered'] = previous | {'generation':task['generation'], 'assessment':receipt['artifact']}
-    elif source == inp['base']:
-        updates['resolved'] = {'reason':'Current requirements independently assessed and verified on main',
+    elif ((checked.get('publication') or {}).get('artifact_commit') is None and
+          execution.command('git','merge-base','--is-ancestor',source,inp['base'],cwd=path,check=False).returncode==0):
+        updates['resolved'] = {'reason':'Current requirements independently assessed and verified on upstream',
                                'source':source,'generation':task['generation'],'assessment':receipt['artifact']}
     else:
         # An unmerged candidate still needs normal independent review and publication.
