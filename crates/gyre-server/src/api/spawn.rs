@@ -1316,7 +1316,7 @@ async fn dispatch_agent_launch(
 
                     register_spawned_agent(
                         state,
-                        &agent,
+                        agent,
                         handle.clone(),
                         SpawnBackend::Container(ct),
                         resolved_target_config,
@@ -1392,8 +1392,7 @@ async fn dispatch_agent_launch(
                 }
                 let ssh_docker =
                     gyre_adapters::compute::ssh::ssh_docker_target_from_config(&cfg.config);
-                match gyre_ports::ComputeTarget::spawn_process(&ssh_docker, &ssh_spawn_config)
-                    .await
+                match gyre_ports::ComputeTarget::spawn_process(&ssh_docker, &ssh_spawn_config).await
                 {
                     Ok(handle) => {
                         spawned_pid = handle.pid;
@@ -1405,7 +1404,7 @@ async fn dispatch_agent_launch(
                         spawned_container_image = ssh_docker.remote_image_digest().await.ok();
                         register_spawned_agent(
                             state,
-                            &agent,
+                            agent,
                             handle.clone(),
                             SpawnBackend::SshDocker(ssh_docker),
                             resolved_target_config,
@@ -1436,8 +1435,7 @@ async fn dispatch_agent_launch(
                 if let Some(port) = cfg.config["port"].as_u64() {
                     ssh_target = ssh_target.with_port(port as u16);
                 }
-                match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config)
-                    .await
+                match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
                 {
                     Ok(handle) => {
                         spawned_pid = handle.pid;
@@ -1446,7 +1444,7 @@ async fn dispatch_agent_launch(
                         spawned_container_image = None;
                         register_spawned_agent(
                             state,
-                            &agent,
+                            agent,
                             handle.clone(),
                             SpawnBackend::SshBare(ssh_target),
                             resolved_target_config,
@@ -1493,7 +1491,7 @@ async fn dispatch_agent_launch(
                     spawned_container_image = k8s.pod_image_digest(&handle.id).await.ok();
                     register_spawned_agent(
                         state,
-                        &agent,
+                        agent,
                         handle.clone(),
                         SpawnBackend::Kubernetes(k8s),
                         resolved_target_config,
@@ -1545,7 +1543,7 @@ async fn dispatch_agent_launch(
                             spawned_container_image = ct.image_digest().await.ok();
                             register_spawned_agent(
                                 state,
-                                &agent,
+                                agent,
                                 handle.clone(),
                                 SpawnBackend::Container(ct),
                                 resolved_target_config,
@@ -1567,8 +1565,7 @@ async fn dispatch_agent_launch(
                     // No container runtime — bare local process (e2e /
                     // dev environments with GYRE_AGENT_COMMAND).
                     let local = gyre_adapters::compute::LocalTarget;
-                    match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await
-                    {
+                    match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
                         Ok(handle) => {
                             spawned_pid = handle.pid;
                             launched = true;
@@ -1576,7 +1573,7 @@ async fn dispatch_agent_launch(
                             spawned_container_image = None;
                             register_spawned_agent(
                                 state,
-                                &agent,
+                                agent,
                                 handle.clone(),
                                 SpawnBackend::Local,
                                 resolved_target_config,
@@ -1602,7 +1599,6 @@ async fn dispatch_agent_launch(
         container_image: spawned_container_image,
     })
 }
-
 
 /// Everything the compute-target launch of one agent session needs.
 ///
