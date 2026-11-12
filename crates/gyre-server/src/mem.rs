@@ -3933,10 +3933,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -3950,10 +3947,7 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
@@ -3972,10 +3966,10 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         ws_store,
-        Some(storage),
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            storage: Some(storage),
+            ..Default::default()
+        },
     )
 }
 
@@ -3989,10 +3983,10 @@ pub fn test_state_with_search(search: Arc<dyn gyre_ports::SearchPort>) -> Arc<cr
         workspaces,
         policies,
         ws_store,
-        None,
-        Some(search),
-        None,
-        None,
+        TestStateOverrides {
+            search: Some(search),
+            ..Default::default()
+        },
     )
 }
 
@@ -4006,7 +4000,11 @@ pub fn test_state_with_jj_and_git_ops(
 ) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     let mut state = test_state_inner(
-        git_ops, workspaces, policies, ws_store, None, None, None, None,
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
     );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
@@ -4026,10 +4024,10 @@ pub fn test_state_with_secrets(
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        Some(secrets),
-        None,
+        TestStateOverrides {
+            secrets: Some(secrets),
+            ..Default::default()
+        },
     )
 }
 
@@ -4044,10 +4042,10 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
-        Some(kv),
+        TestStateOverrides {
+            kv: Some(kv),
+            ..Default::default()
+        },
     )
 }
 
@@ -4061,10 +4059,7 @@ pub fn test_state_failing_trust() -> Arc<crate::AppState> {
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4083,10 +4078,7 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4106,10 +4098,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4149,25 +4138,46 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
     test_state_inner(
-        git_ops, workspaces, policies, ws_store, None, None, None, None,
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
     )
 }
+/// Optional port overrides for `test_state_inner`: each field replaces the
+/// default in-memory implementation when `Some`. Bundling them in one struct
+/// keeps the shared builder under clippy's `too_many_arguments` threshold.
+#[cfg(test)]
+#[derive(Default)]
+struct TestStateOverrides {
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    search: Option<Arc<dyn gyre_ports::SearchPort>>,
+    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
+    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+}
+
 /// Shared builder for all in-memory test states. Callers supply the git ops
-/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
-/// `secrets` overrides the default in-memory SecretRepository when given.
+/// adapter plus a paired workspace/policy repo (see
+/// `shared_workspace_policy_pair`); `overrides` replaces individual default
+/// in-memory ports (storage/search/secrets/kv) when set.
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
-    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
-    search: Option<Arc<dyn gyre_ports::SearchPort>>,
-    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
-    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    overrides: TestStateOverrides,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+
+    let TestStateOverrides {
+        storage,
+        search,
+        secrets,
+        kv,
+    } = overrides;
 
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
