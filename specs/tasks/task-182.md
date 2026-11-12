@@ -2,7 +2,7 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
 commits: ["188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
