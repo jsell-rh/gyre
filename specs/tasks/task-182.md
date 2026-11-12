@@ -58,15 +58,15 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 
 ## Acceptance Criteria
 
-- [x] Concept browser lists predefined concepts from manifest
-- [x] Selecting a concept filters canvas to show related nodes
-- [x] Non-related nodes fade to background (not removed)
-- [x] Edges between concept nodes highlighted
-- [x] Active concept shown as filter chip in control bar
-- [x] Multi-select + right-click → "Create concept" works
-- [x] Ad-hoc concepts saved as explorer views
-- [x] Ask input handles concept questions via LLM
-- [x] Tests pass
+- [ ] Concept browser lists predefined concepts from manifest
+- [ ] Selecting a concept filters canvas to show related nodes
+- [ ] Non-related nodes fade to background (not removed)
+- [ ] Edges between concept nodes highlighted
+- [ ] Active concept shown as filter chip in control bar
+- [ ] Multi-select + right-click → "Create concept" works
+- [ ] Ad-hoc concepts saved as explorer views
+- [ ] Ask input handles concept questions via LLM
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -77,7 +77,8 @@ Read `system-explorer.md` §4 "Concept Views" for the full specification. The co
 Concept views (system-explorer.md §4) on the task-178 canvas substrate,
 covering all three interaction modes and both data-source mechanisms,
 with the round-1 review findings and the round-1 verification findings
-repaired.
+repaired, and the round-2 contract repair applied (task bookkeeping
+only — no product code changed this round).
 
 ### Behavior
 
@@ -100,83 +101,66 @@ repaired.
 - **LLM concept exploration:** the `explorer-generate` prompt template
   and the hardcoded fallback route "show me everything related to X"
   questions to `data.concept` with a worked example.
-- **Substring mechanism (review finding 1, repaired):** the ViewSpec
-  `data.concept` field is a case-insensitive substring search on node
-  name/qualified_name (ui-layout.md §4 Data Layer), not an exact seed
-  name. `viewSpecToViewQuery` now translates it to a concept scope with
-  `seed_match: 'substring'` — a new ViewQuery grammar field (default
+- **Substring mechanism:** the ViewSpec `data.concept` field is a
+  case-insensitive substring search on node name/qualified_name
+  (ui-layout.md §4 Data Layer), not an exact seed name.
+  `viewSpecToViewQuery` translates it to a concept scope with
+  `seed_match: 'substring'` — a ViewQuery grammar field (default
   `'exact'`, documented in view-query-grammar.md, validated in
   gyre-common, implemented in the server resolver) — and all three
   concept-scope evaluation surfaces (ExplorerCanvas
   `queryMatchedWithDepth`, `view-query-scope.js` `resolveScopeNodes`,
-  gyre-domain `view_query_resolver`) seed EVERY node whose
-  name/qualified_name contains the seed. The Ask concept path
-  (`data.concept: 'auth'` over a graph with no node named "auth") now
-  fades the canvas to the matched nodes instead of resolving to a null
-  scope (undimmed full graph). `data.depth: 0` pins `expand_depth: 0`
-  (matched nodes only) per ui-layout.md §4.
-- **Saved-concept round trip (review finding 2, repaired):** the reload
-  path classifies the stored explorer-view document by grammar via the
-  new `viewDocumentToQuery` — a ViewQuery-shaped spec (the exact document
-  the Create-concept dialog persists; the server accepts and stores both
-  grammars) is applied with its concept scope intact instead of being
+  gyre-domain `view_query_resolver`) seed every node whose
+  name/qualified_name contains the seed.
+- **Saved-concept round trip:** the reload path classifies the stored
+  explorer-view document by grammar via `viewDocumentToQuery` — a
+  ViewQuery-shaped spec (the exact document the Create-concept dialog
+  persists) is applied with its concept scope intact instead of being
   flattened to `{scope:{type:'all'}}` by the ViewSpec translator.
-  Selecting a saved ad-hoc concept from the view selector now re-applies
-  the grouping.
+  Selecting a saved ad-hoc concept from the view selector re-applies the
+  grouping.
 
-### Repair: merge onto the task-181 assignment base + verification findings
+### Round 2: contract repair
 
-The candidate was merged onto the current assignment base (`d31906c5a`,
-task-181 Risk Map). Two content conflicts, both resolved by union where
-the features share a file:
+The round-1 checkpoint modified the protected task text (acceptance
+criteria checkboxes), flagged as a contract repair. This round restores
+the assigned task document's protected text verbatim (checkboxes left
+unchecked, matching the repo convention — see task-178), re-records the
+bookkeeping (progress, frontmatter commits), and rewrites these Shipped
+notes under the exact `## Shipped` heading with `###` subheadings. No
+product code changed. The candidate was re-merged onto the current
+assignment base `e402e1ed6` (task-121 repo-access work; clean merge, no
+conflicts with task-182 files) and the focused matrix was re-run green
+on the merged tree (see Test evidence).
 
-- `ExplorerCanvas.svelte` import block: HEAD's `nodeCategory` import
-  (the merged draw loop classifies fade via the `conceptNodeIds` prop,
-  not `nodeMatchesConcept` container filtering) plus the base's
-  `risk-map.js` import driving the merged-in Risk Map overlay.
-- `docs/ui.md` Architecture Tab: task-181's expanded Risk Map overlay
-  description on the lens-selector bullet, task-182's two-mechanism
-  Concepts section detail on the filter-panel bullet.
+### Round 1: merge + verification repair (historical)
 
-Round-1 verification (`bash /tmp/stage/checks.sh`, exit 1) failed on two
-changed-line findings, repaired in `188b9f948`:
-
-- rustfmt: `crates/gyre-server/src/api/graph.rs` (manifest_concepts
-  signature + concepts-listing test assert rewrapped).
-- clippy::useless_vec: `gyre-domain/src/view_query_resolver.rs`
-  substring seed-match tests passed `&vec![]` where `resolve_scope`
-  takes `&[GraphEdge]` — replaced with `&[]`.
+The candidate was merged onto the then-assignment base (`d31906c5a`,
+task-181 Risk Map); two content conflicts resolved by union
+(ExplorerCanvas.svelte import block, docs/ui.md Architecture Tab).
+Round-1 verification failed on two changed-line findings, repaired in
+`188b9f948`: rustfmt in `crates/gyre-server/src/api/graph.rs`
+(manifest_concepts signature + concepts-listing test assert rewrapped),
+and clippy::useless_vec in `gyre-domain/src/view_query_resolver.rs`
+substring seed-match tests (`&vec![]` → `&[]`).
 
 ### Test evidence
 
-- `web/src/__tests__/ExplorerConceptViews.test.js` (8 tests): concept
-  browser listing; manifest-concept fade pinned against actual canvas
-  draw output; end-to-end Ask flow (generate SSE → ViewSpec
-  `data.concept: 'auth'` → canvas fade, matched nodes boosted to full
-  opacity, non-concept tree groups at 0.15×, annotation rendered);
-  saved-ad-hoc-concept reload round trip (view selector → concept scope
-  re-applied, fade + annotation); multi-select → right-click → dialog →
-  save asserting the persisted ViewQuery spec; dialog validation/error
-  paths; edge-emphasis draw-path tests.
-- `web/src/__tests__/generated-view.test.js` (22 tests): substring
-  translation (`seed_match: 'substring'`), depth-0 pinning, the Ask-path
-  translation + `resolveScopeNodes` end-to-end probe scenario,
-  `viewDocumentToQuery` round trip (deep-copy, ViewSpec translation,
-  non-object rejection).
-- `web/src/__tests__/view-query-scope.test.js` (15 tests): substring
-  seed matching (all-matches seeding, edge expansion from substring
-  seeds, no-match null, exact default when `seed_match` is absent).
-- Rust: `cargo test -p gyre-domain view_query_resolver` — 145 pass;
-  `cargo test -p gyre-domain concept` — 10 unit + 2 integration pass;
-  `cargo test -p gyre-common view_query` — 5 pass; `cargo check -p
-  gyre-server` clean; `cargo clippy -p gyre-domain --all-targets`
-  reports no useless_vec in view_query_resolver.rs (remaining crate
-  warnings are pre-existing base-code lines outside this task's diff).
-- Focused matrix re-run green on the merged tree: ExplorerConceptViews,
-  ExplorerCanvas, filter-categories, RiskMap (base side),
-  ExplorerCanvas.evaluative-lens (base side), view-query-scope,
-  view-spec, view-query-validator, generated-view, ExplorerCanvas.flow,
-  canvas-filters, ExplorerDefaultViews, ExplorerViewFlowTemplates,
-  flow-templates, ExplorerGeneratedViews — 373 tests. Evidence:
-  `/tmp/stage/review-evidence/frontend-focused-tests.log` and
-  `rust-focused-tests.log`.
+Focused matrix, re-run green on the round-2 merged tree (HEAD
+`2cd8c210c`), evidence: `/tmp/stage/review-evidence/focused-repair-round2.log`:
+
+- `web` vitest: ExplorerConceptViews (8), generated-view (22),
+  view-query-scope (15) — 45 tests passed. ExplorerConceptViews pins
+  the manifest-concept fade against actual canvas draw output, the
+  end-to-end Ask flow, the saved-ad-hoc-concept reload round trip, the
+  multi-select → right-click → dialog → save persistence assert, and
+  dialog validation/error paths.
+- `cargo test -p gyre-common view_query` — 5 pass.
+- `cargo test -p gyre-domain view_query_resolver` — 145 pass.
+- `cargo test -p gyre-domain concept` — 10 unit + 2 integration pass.
+- `cargo check -p gyre-server` — clean on the merged tree.
+
+Full workspace suites, architecture checks, all-target Clippy, and
+GitHub CI are owned by the independent verifier. Server tests for the
+verifier: `cargo test -p gyre-server graph`, plus full gyre-domain and
+gyre-common suites.
