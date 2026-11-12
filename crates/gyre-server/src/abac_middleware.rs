@@ -299,6 +299,14 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/:path/history", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/links", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/progress", "spec", None),
+                // task-204: spec-lifecycle accountability patrol. Registered here
+                // (not in scripts/abac-route-registry-exemptions.txt, which is
+                // frozen) so the route gets real policy evaluation. It mutates
+                // state — every finding is persisted as an orchestrator
+                // escalation — and needs the same write-level policy as the other
+                // spec-write routes; POST derives the `write` action
+                // (`method_to_action`), so no `action_override` is needed.
+                RouteResourceMapping::api("/api/v1/patrol/spec-lifecycle", "spec", None),
                 // ── Spec editing backend (S3.3) ────────────────────────────
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/specs/assist",
@@ -457,6 +465,11 @@ impl ResourceResolver {
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
                     "meta_spec",
                     None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/assist",
+                    "meta_spec",
+                    Some("generate"),
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",
