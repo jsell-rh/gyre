@@ -544,7 +544,6 @@ mod tests {
         use diesel::migration::MigrationSource;
         use diesel::Connection;
         use diesel::RunQueryDsl;
-        use diesel::QueryableByName;
 
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();
