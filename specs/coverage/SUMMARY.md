@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-11
+**Last updated:** 2026-11-12
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -23,16 +23,16 @@
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 0 | 1 | 16 | 100% |
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
-| meta-spec-reconciliation.md | 18 | 7 | 0 | 6 | 5 | 0 | 45% |
+| meta-spec-reconciliation.md | 18 | 7 | 0 | 5 | 6 | 0 | 54% |
 | observability.md | 9 | 0 | 0 | 1 | 5 | 3 | 88% |
-| platform-model.md | 56 | 5 | 0 | 23 | 20 | 8 | 54% |
+| platform-model.md | 56 | 5 | 0 | 22 | 21 | 8 | 56% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 0 | 5 | 3 | 100% |
 | repo-lifecycle.md | 20 | 2 | 0 | 3 | 11 | 4 | 83% |
 | sdlc.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | search.md | 18 | 4 | 0 | 8 | 5 | 1 | 42% |
 | source-control.md | 13 | 2 | 0 | 1 | 0 | 10 | 90% |
-| spec-lifecycle.md | 13 | 3 | 0 | 1 | 4 | 5 | 90% |
+| spec-lifecycle.md | 13 | 3 | 0 | 0 | 5 | 5 | 100% |
 | spec-links.md | 17 | 3 | 0 | 1 | 3 | 10 | 92% |
 | spec-registry.md | 19 | 1 | 0 | 4 | 5 | 9 | 77% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
@@ -41,7 +41,7 @@
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 36 | 2 | 0 | 5% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 11 | 0 | 21 | 4 | 0 | 16% |
+| user-management.md | 36 | 11 | 0 | 20 | 5 | 0 | 20% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **255** | **164** | **163** | **56%** |
+| **TOTAL** | **802** | **220** | **0** | **251** | **168** | **163** | **56%** |
