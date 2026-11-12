@@ -2,7 +2,7 @@
 title: "Dependency graph — persistent storage for breaking changes and policies"
 spec_ref: "dependency-graph.md §Enforcement Policies"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
