@@ -1,0 +1,35 @@
+# Review — task-209 (Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info)
+
+Spec: `specs/system/human-system-interface.md` §12 "What the Profile Is".
+Candidate under review: `c8354939` (branch `pipeline/task-209/8999b6600e06489583272f71ac3e2ddf-1`, base `e402e1ed`).
+Verdict: **approved** — all three §12 gaps are closed by real production code with real write→read chains; no findings. This round re-verified the prior round's F1/F2 repair (WorkspaceOwnerless toggle) independently, including a mutation probe.
+
+## Probes run (independent evidence, logs in /tmp/stage/review-evidence/)
+
+- `/tmp/stage/bin/cargo test -p gyre-adapters --lib user_profile` → **12/12 passed** (ledger merge across 4 sources, reverse-chron, workspace filter drops unattributed, `?type=` selects source, pagination across merged stream, rejection attributed to withdrawer, zstd detail decompression, notification exclusion list+count, record_login debounce incl. issuer-change carve-out, prefs roundtrip, token CRUD/scoping).
+- `/tmp/stage/bin/cargo test -p gyre-domain` → **474+8 passed** (AuditEventType round-trip incl. explicit not-Custom arms for `trust_change`/`gate_override`/`meta_spec_publish`; JudgmentType `gate` wire string).
+- `cd web && npm ci && npm test` → **110 files, 2210 passed | 41 skipped, exit 0**.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` and `... --tests` → clean; all new `#[cfg(test)]` write-path tests type-check (runtime execution deferred to verifier — its build wrapper blocks gyre-server test codegen in this sandbox; see `verifier-scope.log`).
+- All 21 mechanical guard scripts → pass (see `guard-scripts.log`). `check-tenant-filter.sh` exits 2 identically on base `e402e1ed` (mawk-vs-gawk dialect, sandbox restriction, not a defect). `check-task-commit-attribution.sh` passes against the candidate's committed task file (the stage's working-tree reset of `specs/tasks/task-209.md` to `commits: []` is assignment setup, not a candidate defect).
+- **Mutation probe** (restored afterwards): deleting `'WorkspaceOwnerless'` from `web/src/lib/notification-types.js` → `check-notification-toggle-coverage.sh` exit 1 **and** `UserProfile.test.js` 1 failed/26 passed; restored → gate exit 0, 27/27. The repaired F2 test derives its expected set from the Rust enum source at test time, so it kills the missing-toggle bug class rather than mirroring the implementation list.
+
+## Verified against the acceptance criteria
+
+- **Spec amendment (Part 1)** — HSI §12 now carries a concrete Sources table (`spec_approvals` + `spec_ledger_entries` join; `audit_events` rows with `event_type` in `gate_override`/`trust_change`/`meta_spec_publish`, human attribution via `user_id`) and `?type=` values `approval|rejection|gate|trust|meta-spec` matching `JudgmentType::as_str()`. The amendment also documents why `audit_events.agent_id` and the KeyBinding label are NOT the human attribution key, and requires PUT notification-preferences to 400 on unknown type names.
+- **`JudgmentType::GateOverride`** — added (`as_str() = "gate"`, `from_db_str("gate")` parses); sqlite + postgres + mem all map it.
+- **Aggregation (Part 2)** — `list_for_user` (sqlite/postgres query the real tables; mem aggregates the same shared stores the handlers write through, so server tests exercise genuine write→read chains). `?workspace_id=` is a SQL `WHERE` filter (NULL/unattributed rows excluded when set), not a stamp. Union → sort reverse-chron with deterministic `entity_ref` tie-break → `skip(offset).take(limit)` after the merge. Per-source type filters; `since` applied per source. Approval attribution: rejection/revocation attributed to the declining human (`rejected_by`/`revoked_by`), not the original approver — tested both at adapter level and end-to-end (specs.rs JWT tests). Compressed `detail_zstd` rows decompress via the shared `AuditEventRow` materialization (tested with a real compression pass).
+- **Write paths (Part 3)** — trust transition (PUT /workspaces/:id, only on actual change, after the atomic `apply_trust_transition`, failure propagates) writes `trust_change` with from/to/workspace_id; human approval on an MR with failed gate results writes one `gate_override` per failed gate with mr_id/gate_id/gate_type/from→to (agent-token approvals excluded — negative control in test; attribution uses server-side `auth.user_id`, not the caller-supplied reviewer label); meta-spec registry create/update writes `meta_spec_publish` with kind/name/version/content_hash and scope-derived workspace attribution (Global/Tenant scoped → no workspace, surfaced only in the unfiltered view — documented in spec + code).
+- **Notification filtering** — `exclude_types` added to the port contract, applied in-query before limit/offset in both `list_for_user` and `count_unresolved` (sqlite `ne_all`, postgres, mem parity); inbox + badge endpoints and the MCP `notifications://` tool load disabled types from `user_notification_preferences`; background de-dup callers explicitly pass `&[]` (documented exemption); preferences normalize legacy parse aliases to canonical `as_str()` names before storing (a stored alias would be an inert toggle — tested).
+- **Auth provider info** — `users.oidc_issuer` migration (portable SQL, single owner; `last_login_at` column owned by task-120's migration, duplicate-column collision resolved — record_login tests pass against a real migrated SQLite DB, proving the column exists); `validate_jwt` records verified issuer + login time via single-statement debounced `record_login` (sqlite/postgres/mem parity, issuer-change carve-out tested); `GET /users/me` returns both read-only (PUT has no field for either, verified); Profile tab renders both.
+- **Mechanical gate** — `scripts/check-notification-toggle-coverage.sh` (41 variants ↔ 41 toggles ↔ labels) wired into pre-commit and CI; mutation-verified above.
+- **Coverage matrix** — row 53 flipped to `implemented` with landed evidence; counts updated consistently (21/35, 0 not-started in this spec's matrix).
+
+## Non-blocking observations (no action required)
+
+- `GET /users/me/judgments` treats an unrecognized `?type=` value as "no filter" rather than 400 — pre-existing handler pattern; the amended spec does not require rejection.
+- In `submit_review`, the gate-override audit writes happen after the review row is persisted; an audit failure returns 500 with the review already stored (no transactionality across the two stores). Loud failure was the deliberate choice over silent drop; acceptable.
+- Postgres judgment-ledger/user-profile implementations are code-parity with SQLite and type-check, but have no live-PG test run here (none exists in the repo for this module either); parity is enforced by shared domain types and mirrored SQL, consistent with repo practice.
+
+## Verifier scope
+
+See `/tmp/stage/review-evidence/verifier-scope.log`: full `cargo test --all`, the nine focused gyre-server lib tests named above (proving the write paths at runtime), `cd web && npm test` (already green in review), and a gawk-equipped `check-tenant-filter.sh` run.
