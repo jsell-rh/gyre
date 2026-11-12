@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,65 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code on this branch and
-shipped in earlier rounds; the tree is intact after the merge of base
-e402e1ed (1d1be681c). This round repairs the two findings from the last
-verification run of candidate 498a9bdc (exit 1: rustfmt-diff + E0061).
-
-### This round: base-e402e1ed merge repair
-
-- **E0061 (compile)**: base task-121 plus this task's earlier rounds both
-  extended `NotificationRepository::list_for_user`; the merged signature
-  carries `exclude_types` (HSI §12 disabled-type filtering) as the 6th
-  parameter (8 total), but two call sites in
-  `crates/gyre-server/src/workspace_ownership.rs` (ownerless-workspace
-  dedup probe at :173 and its test helper at :457) still passed the old
-  7-argument form, so `gyre-server` failed to compile. Both now pass
-  `&[]`, which the port contract specifies for background
-  de-duplication/verification surfaces that must observe notifications
-  regardless of the recipient's toggles — correct for both sites.
-- **rustfmt-diff**: applied rustfmt to the changed lines flagged in the
-  failing verification round (`sqlite/user_profile.rs`,
-  `postgres/user_profile.rs`, `api/meta_specs.rs`, `api/specs_assist.rs`,
-  `api/users.rs`).
-- **Evidence** (`/tmp/stage/review-evidence/`):
-  `task-209-merge-repair.log` — `cargo check -p gyre-server` (lib) exit 0
-  in 6m48s; `cargo check -p gyre-server --tests` exit 0 in 3m07s (all
-  test targets type-check after the merge); repo-wide arity scan of every
-  `list_for_user` call site (no other 7-argument notification-repo call
-  remains); `check-rustfmt-diff.py` clean against both e402e1ed and
-  HEAD^1.
-
-### Prior rounds (unchanged, intact after merge)
-
-- Notification filtering: inbox queries
-  (`get_my_notifications`/`_count`, users.rs) compute the user's disabled
-  types from `user_notification_preferences` and pass them as
-  `exclude_types` to `list_for_user`, applied by the query before
-  limit/offset; preferences are stored under canonical `as_str()` names;
-  the profile UI offers toggles for all 40 canonical `NotificationType`
-  variants (shared `web/src/lib/notification-types.js`), guarded by
-  `scripts/check-notification-toggle-coverage.sh` in pre-commit and CI.
-- Judgment ledger: `JudgmentLedgerRepository::list_for_user`
-  (sqlite + postgres adapters) aggregates spec approvals/rejections,
-  gate overrides, trust changes, and meta-spec publishes from real
-  tables, with `?workspace_id=` filtering (not stamping), per-source type
-  filters, reverse-chronological sort, limit/offset after union+sort;
-  write paths emit `gate_override` (human approval review on a
-  failed-gate MR), `trust_change` (workspace trust transition), and
-  meta-spec publish attribution audit events; zstd-compressed audit
-  details are decompressed on read.
-- Auth provider info: `GET /api/v1/users/me` returns read-only
-  `oidc_issuer` and `last_login_at`.
-
-### Verifier scope
-
-Full `cargo test --all` and `cd web && npm test` (no Rust or web changes
-this round beyond the two call sites, formatting, and this task file);
-the focused suites covering this task's behavior are the
-`user_profile`/judgment-ledger adapter tests and the
-`workspace_ownership` tests whose helper signature this round repaired.
