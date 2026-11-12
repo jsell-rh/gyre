@@ -27,11 +27,13 @@ Infrastructure failures retry with backoff without changing the task contract.
 
 ## Thin workers and runtime recovery
 
-Build-capable assignments always request one CPU and **4 GiB RAM**. Historical
-per-task 8 GiB settings are ignored. An OOM is retained as a resource failure
-requiring a lower-memory implementation or build strategy; it never authorizes
-larger allocations or cluster-policy changes. The harness does not read or
-change namespace admission policy to increase its budget.
+Build-capable assignments default to one CPU and **4 GiB RAM**. The operator's
+`worker_memory_max_gib` setting permits ceilings of 4 or 6 (default 6). A recorded,
+authoritative 4 GiB OOM permits a **6 GiB retry** for that task stage and requirements
+generation after the old allocation is cleaned up. An OOM at 6 GiB requires
+attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
+ignored. The harness does not change namespace admission policy or cluster
+resources to increase its budget. Running allocations keep their assigned size.
 
 Build commands share one sandbox lock, with one Cargo job and one test thread.
 Agent and verifier environments use the same settings: no incremental Rust
@@ -56,7 +58,9 @@ cluster diagnostics are not a prerequisite for healthy gateway execution. Read-o
 cgroup counters also detect child-only OOM kills that leave the pod running;
 a compiler failure by itself never raises memory.
 An authoritative OOM and its allocation size are retained as diagnostics;
-no automatic memory escalation is permitted. The cockpit reports the actual runtime failure instead of calling
+only the bounded retry policy above permits a larger next allocation. Unknown
+limits, ordinary compiler failures and transport errors never raise memory.
+The cockpit reports the actual runtime failure instead of calling
 an OOM a model or generic transport failure.
 
 Agent polling refreshes expired gateway authentication. Failed polls preserve
@@ -556,8 +560,8 @@ Implementation and review use Fullsend/Pi. Verification is a model-free gateway
 job using the same pinned worker image and shared sandbox reservations. The local
 controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
 source guards, npm builds, and tests execute only in the disposable verifier.
-Verification uses the gateway resource defaults, just like coding workers;
-explicit `verification_cpu` and `verification_memory` settings override them.
+Verification uses the shared one-CPU, 4 GiB default and the bounded 6 GiB OOM
+retry policy, just like coding workers; gateway defaults cannot override them.
 Every verifier gets an isolated build target, so cross-checkout host cache
 invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
 can bound verification concurrency independently without changing desired slots.
@@ -622,7 +626,7 @@ an independent, read-only Fullsend assignment through OpenShell, sharing the
 normal claim/admission/cleanup budget. Its structured report names the exact
 source and requirement fingerprint. Concrete gaps become durable
 `requirements_gap` findings for implementation. A no-gap decision must also pass
-the normal full deterministic verification in a 4 GiB remote sandbox before
+the normal full deterministic verification under the same 4/6 GiB policy before
 currentness is restored. Ambiguous evidence or failed checks require attention;
 they never silently close a task or request a speculative code rewrite.
 
