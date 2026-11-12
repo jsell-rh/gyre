@@ -667,14 +667,24 @@ pub(crate) async fn spawn_agent_core(
             None,
             // identity-security.md attestation levels: 1=raw subprocess,
             // 2=CLI-managed, 3=Gyre-managed container with attestation.
-            resolved_ct_entity.as_ref().map(|ct| match ct.target_type {
-                ComputeTargetType::Container => 3,
-                ComputeTargetType::Ssh => 2,
-                // No target (None) is a plain local subprocess: level 1.
-                // Kubernetes falls back to 1 until the runtime reports
-                // workload attestations for pods (tracked by task-129).
-                ComputeTargetType::Kubernetes => 1,
-            }),
+            // Every spawn-minted JWT carries attestation_level (Task-Scoped
+            // JWT Claims reference): no target (None) is a plain local
+            // subprocess — level 1, not an absent claim. An absent claim
+            // leaves subject.attestation_level unset at ABAC evaluation, so
+            // Deny policies keyed on the least-attested class would
+            // silently miss raw-subprocess agents.
+            Some(
+                resolved_ct_entity
+                    .as_ref()
+                    .map_or(1u8, |ct| match ct.target_type {
+                        ComputeTargetType::Container => 3,
+                        ComputeTargetType::Ssh => 2,
+                        // Kubernetes falls back to 1 until the runtime
+                        // reports workload attestations for pods
+                        // (tracked by task-129).
+                        ComputeTargetType::Kubernetes => 1,
+                    }),
+            ),
             wl_image_hash,
         )
         .unwrap_or_else(|e| {
@@ -3004,6 +3014,34 @@ mod tests {
         assert_eq!(json["branch"], "feat/build");
         // jj_change_id is present in the response (null when worktree doesn't exist on disk)
         assert!(json.get("jj_change_id").is_some());
+    }
+
+    /// identity-security.md §Task-Scoped JWT Claims: every JWT minted by
+    /// POST /api/v1/agents/spawn carries `attestation_level`. A spawn that
+    /// resolves no compute target is a plain local subprocess and must mint
+    /// level 1 — not omit the claim. An absent claim leaves
+    /// `subject.attestation_level` unset at ABAC evaluation, so Deny policies
+    /// keyed on the least-attested class (e.g. the spec's own
+    /// gate-approved-persona deny on attestation_level < 3) would silently
+    /// miss raw-subprocess agents (fail-open for those denies).
+    #[tokio::test]
+    async fn spawn_without_compute_target_mints_attestation_level_one() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "no-target spawn").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/no-target").await;
+
+        let token = json["token"].as_str().expect("spawn returns a token");
+        let claims = state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .expect("spawn token is a valid agent JWT signed by this server");
+        assert_eq!(
+            claims.attestation_level,
+            Some(1),
+            "no-target (local subprocess) spawn must mint attestation_level 1"
+        );
     }
 
     #[tokio::test]
