@@ -6703,11 +6703,14 @@ exit 1\n"
 
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Persona prompt delivery task").await;
-        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/persona-prompt").await;
+        let (_app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/persona-prompt").await;
         let agent_token = spawn_json["token"].as_str().unwrap().to_string();
 
-        // Fetch the persona prompt AS the spawned agent.
-        let resp = app
+        // Fetch the persona prompt AS the spawned agent. `/mcp` is served by
+        // the full server router (`build_router`), not `api_router()` — the
+        // spawn/fixture calls above share the same `state`, so the agent
+        // spawned through the bare API router is visible here.
+        let resp = crate::build_router(state.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
