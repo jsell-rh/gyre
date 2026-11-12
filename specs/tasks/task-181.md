@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: complete
 coverage_sections:
   - "system-explorer.md §7. Risk Map"
-commits: ["69b388d0e504dc8bb374af836675c142c651e310"]
+commits: ["69b388d0e504dc8bb374af836675c142c651e310", "40dc0d1d06d5410969b2d30512800f4041c3a0de"]
 ---
 
 ## Spec Excerpt
