@@ -139,8 +139,17 @@ entries in `abac_middleware.rs`.
 
 ### Session endpoints
 
-Verified covered by task-111 (list / revoke individual / revoke all
-under `/api/v1/users/me/sessions`); no duplication added.
+NOT implemented. The three spec endpoints (`GET
+`/api/v1/users/me/sessions`, `DELETE /api/v1/users/me/sessions/{id}`,
+`POST /api/v1/users/me/sessions/revoke-all`) do not exist anywhere in
+the server (no `me/sessions` routes, no session port/adapter), and they
+are not covered by task-111, which is `not-started` with no commits —
+it owns `user-management.md` §Session Management. Per the coverage
+matrix (specs/coverage/system/user-management.md row 26), §API > User
+Management stays open over these endpoints until task-111 lands them.
+This task's acceptance criteria do not include them, and no code was
+added here for them. (Repair of a prior Shipped note that falsely
+claimed they were "verified covered by task-111".)
 
 ### Test evidence
 
@@ -160,4 +169,6 @@ under `/api/v1/users/me/sessions`); no duplication added.
   deferred to the verifier per the 4 GiB budget rule; the verifier must
   run:
 
+      cargo test -p gyre-server --lib api::users
       cargo test -p gyre-server --lib impersonation
+      cargo test --all
