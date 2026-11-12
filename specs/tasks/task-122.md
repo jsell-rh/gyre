@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: ["abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
+commits: ["bbd72bc37ffd0bd4b286171ad73d236fca06c64b", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b"]
 ---
 
 ## Spec Excerpt
@@ -64,20 +64,24 @@ Teams don't grant additional permissions beyond workspace membership. They're or
 
 ## Acceptance Criteria
 
-- [x] Team entity has all spec'd fields: id, workspace_id, name, slug, description, lead, created_at
-- [x] TeamMembership has team_id, user_id, added_at
-- [x] Slug is unique within workspace, URL-safe
-- [x] Lead field references a valid workspace member
-- [x] Team can be referenced in notification routing (team:slug format)
-- [x] Existing team CRUD endpoints work with new fields
-- [x] Migration adds missing columns
-- [ ] `cargo test --all` passes — domain + adapters suites pass in-sandbox (see `## Shipped`); the gyre-server suites type-check clean but are blocked from executing here by the 4 GiB build wrapper and are recorded for the independent verifier
+- [ ] Team entity has all spec'd fields: id, workspace_id, name, slug, description, lead, created_at
+- [ ] TeamMembership has team_id, user_id, added_at
+- [ ] Slug is unique within workspace, URL-safe
+- [ ] Lead field references a valid workspace member
+- [ ] Team can be referenced in notification routing (team:slug format)
+- [ ] Existing team CRUD endpoints work with new fields
+- [ ] Migration adds missing columns
+- [ ] `cargo test --all` passes
+
+## Agent Instructions
+
+Read `specs/system/user-management.md` §Team Management. Existing team endpoints: grep for `create_team\|list_teams` in `gyre-server/src/api/`. Team domain model: grep for `struct Team` in `gyre-domain/`. Team adapter: grep for `TeamRepository` in `gyre-adapters/`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5`.
 
 ## Shipped
 
 ### Entity + storage
 
-- `Team` (gyre-domain/src/team.rs) now carries every spec field: `slug` (workspace-unique, URL-safe) and `lead` (user id), plus `validate_slug` (1–64 chars `[a-z0-9-]`, no edge/consecutive `-`; explicit invalid slugs → 400, never silently rewritten) and `sanitize_slug` (name → slug derivation; 400 when nothing URL-safe remains). `member_ids` is gone from the entity — membership is now the spec's `TeamMembership { team_id, user_id, added_at }`, persisted in a new `team_memberships` table (composite PK).
+- `Team` (gyre-domain/src/team.rs) carries every spec field: `slug` (workspace-unique, URL-safe) and `lead` (user id), plus `validate_slug` (1–64 chars `[a-z0-9-]`, no edge/consecutive `-`; explicit invalid slugs → 400, never silently rewritten) and `sanitize_slug` (name → slug derivation; 400 when nothing URL-safe remains). `member_ids` is gone from the entity — membership is the spec's `TeamMembership { team_id, user_id, added_at }`, persisted in a new `team_memberships` table (composite PK).
 - Migration `2026-11-13-000062_team_slug_lead_membership` (portable SQL, runs on SQLite + PostgreSQL): adds `slug`/`lead` to `teams` (backfill: slug ← team id, stable/unique/URL-safe; lead ← workspace Owner), creates `idx_teams_workspace_slug` (unique per workspace) and `team_memberships`, drops the superseded `member_ids` JSON column (it was never writable through any endpoint — no membership endpoints existed — so it was always `'[]'`).
 - `TeamRepository` port gains `find_by_slug`, `add_member` (fails on duplicate membership), `remove_member` (idempotent), `list_members` (ordered by `added_at`), `list_for_user`. All three adapters implement the duplicate contracts: SQLite/PG via the unique index/composite PK with stable error labels, mem via in-code guards (check-mem-port-contracts passes). `delete` removes memberships with the team in every adapter.
 
@@ -95,14 +99,16 @@ Teams don't grant additional permissions beyond workspace membership. They're or
 
 ### Test evidence
 
-Sandbox limits (4 GiB) block `gyre-server` test compilation in this assignment; server test commands are recorded for the independent verifier below. Executed here:
+Implementation history: `bbd72bc37` (production code) and `abaee5ea1` (unused-import cleanup). The executor merged base `199c1bb78` (task-203 search scoping) as `f0b06a8cb`; the team production files are byte-identical to `bbd72bc37` after the merge (evidence: `/tmp/stage/review-evidence/task-122/team-files-diff-bbd72bc3-to-HEAD.txt`, empty).
 
-- `cargo test -p gyre-domain` — team slug validation/derivation, membership struct (5 tests, pass).
-- `cargo test -p gyre-adapters` — full suite (474 tests) passes, including: SQLite `team` repository tests (slug round-trip via `find_by_slug`, duplicate-slug create/update rejection, duplicate-membership rejection, `added_at` ordering, `list_for_user` scoping, delete-removes-memberships) and `migration_000062_backfills_team_slug_and_lead` (real pre-000062 DB → 000062 alone: slug/lead backfills, unique index rejects duplicates, `member_ids` dropped, composite PK rejects duplicate membership).
-- `cargo check --all --all-targets` — clean; `cargo clippy -p gyre-adapters -p gyre-domain -p gyre-ports --all-targets` — no warnings in touched files.
-- Mechanical gates pass locally: check-arch, check-mem-port-contracts, check-migration-versions, check-migration-sql-portability, check-abac-route-registry, check-abac-exempt-handlers, and the byte-slice/relative-path/fail-open-ref/fabricated-scope/lossy-secret/scope-literal/inert-enforcement/in-memory-state/unbounded-http/forwarded-header/forged-scope/dead-message-kinds/task-commit-attribution checks.
+Executed in this sandbox (via the stage build wrapper):
 
-Verifier must run (gyre-server, blocked in-sandbox by the build wrapper):
+- `cargo test -p gyre-domain` — 478 passed, 0 failed (includes team slug validation/derivation and membership struct tests).
+- `cargo test -p gyre-adapters` — full suite 475 passed, 0 failed, 6 ignored (post-merge integration run), including the SQLite `team` repository tests (slug round-trip via `find_by_slug`, duplicate-slug create/update rejection, duplicate-membership rejection, `added_at` ordering, delete-removes-memberships) and `migration_000062_backfills_team_slug_and_lead` (real pre-000062 DB → 000062 alone: slug/lead backfills, unique index rejects duplicates, `member_ids` dropped, composite PK rejects duplicate membership).
+- `cargo check -p gyre-server --all-targets` — clean (includes server test targets).
+- Mechanical gates pass: check-arch, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-abac-route-registry, check-abac-exempt-handlers, check-task-commit-attribution.
+
+`cargo test --all` remains open: gyre-server test execution exceeds this sandbox's 4 GiB build budget (stage build wrapper restriction — infrastructure, not a code defect). Verifier must run:
 
 - `cargo test -p gyre-server --lib api::users::tests::team` — API flow (slug derivation, lead validation, member add/remove with `added_at`, duplicate slug 409, invalid slug 400, non-member lead/member 400, workspace scoping 404, Developer 403).
 - `cargo test -p gyre-server --lib api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — real git manifest + real team API + real API-key human approvals: team member approves, non-member and unresolvable-team cases stay Pending.
