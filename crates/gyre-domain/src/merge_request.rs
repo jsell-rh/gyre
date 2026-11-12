@@ -121,7 +121,7 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
-            workspace_id: Id::new("default"),
+            workspace_id: crate::bootstrap_workspace(),
             merge_commit_sha: None,
             revert_commit_sha: None,
             reverted_at: None,
