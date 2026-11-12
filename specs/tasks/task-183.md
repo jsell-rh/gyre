@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
+commits: ["6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "f5a45295b4d7bbee06549f64427dcbc291843050"]
 ---
 
 ## Spec Excerpt
@@ -83,11 +83,9 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 ## Shipped
 
 The Architectural Timeline (system-explorer.md §6) runs on a real
-point-in-time graph API. Both defects from review round
-1dd7441246b74416b1bc06d19d55520e and the rustfmt finding from review
-round ee39d9c979e1495d981921b0fc97cfe6 are repaired. Commits:
-6b9fb4e2b (original implementation), cf8069ea8 (review round-1 repairs),
-8405c8e47 (review round-2 repair).
+point-in-time graph API. Four commits: 6b9fb4e2b (implementation),
+cf8069ea8 (review round-1 repairs), 8405c8e47 (review round-2 rustfmt
+repair), f5a45295b (verification repair: clippy gate).
 
 ### Point-in-time graph API (6b9fb4e2b)
 
@@ -101,72 +99,55 @@ round ee39d9c979e1495d981921b0fc97cfe6 are repaired. Commits:
 
 ### Scrubber, ghosts, delta panel, key moments (6b9fb4e2b)
 
-- `TimelineScrubber.svelte` at the bottom of the canvas: d3-scale time
-  axis, date label, key-moment markers (spec approvals, milestones,
-  structural changes, reconciliations) with click-through narrative
-  popover, per-type delta stats ("+2 types, -1 trait, 3 types modified").
+- `TimelineScrubber.svelte` at the bottom of the canvas: time axis, date
+  label, key-moment markers (spec approvals, milestones, structural
+  changes, reconciliations) with click-through narrative popover, per-type
+  delta stats ("+2 types, -1 trait, 3 types modified").
 - Scrubbing fetches the server `?at=` graph through
   `createTimelineHistoryFetcher` (200 ms debounce; superseded positions
-  resolve null so the client-side `first_seen_at` filter is the instant
-  fallback). Ghost overlays: forward ghosts (added since, green dotted),
-  backward ghosts (removed since, red dotted, recovered from
-  ArchitecturalDelta records because removed nodes are absent from the
-  current graph), modified highlights (yellow).
+  resolve null). Ghost overlays: forward ghosts (added since, green
+  dotted), backward ghosts (removed since, red dotted, recovered from
+  ArchitecturalDelta records), modified highlights (yellow).
 
-### Review repairs, round 1 (cf8069ea8)
+### Review repairs (cf8069ea8, 8405c8e47)
 
-- **Fetcher race fixed**: a fetch completion used to settle waiters matched
-  against `latestAt`, so scrubbing again while a fetch was in flight
-  resolved the newer position with the older position's graph, pinning the
-  wrong point in time on the canvas. A fetch now settles only the waiters
+- **Fetcher race fixed** (cf8069ea8): a fetch now settles only the waiters
   for its own target, and ExplorerView refuses to pin a late out-of-order
-  response whose position is no longer current. Regression test reproduces
-  the exact interleaving and fails on the old logic (verified by mutation:
-  1 failed on old code, 32/32 on fixed).
-- **Reconciliation narrative grounded in the real payload**: the narrative
-  no longer reads fields no emitter sends (persona_name,
-  specs_changed, ...). The production `reconciliation_completed` payload is
-  enriched with `specs: [{name, version}]` — the changed meta-specs of the
-  current wave, materialized as structured provenance labels on each wave
-  task at creation (`meta-spec:{name}@v{version}` plus a
-  `recon-wave:{millis}` wave identity threaded through rolling-rollout
-  pending state, so prior waves cannot bleed into a later wave's event).
-  The frontend narrative derives only from production fields
-  (task_count/duration_secs/specs), with a true fallback for pre-label
-  waves. Tests pin the exact production payload shape (frontend fixture +
-  server payload assertions incl. wave-2-scoped specs).
+  response; regression test reproduces the interleaving and fails on the
+  old logic.
+- **Reconciliation narrative grounded in the real payload** (cf8069ea8):
+  the production `reconciliation_completed` payload is enriched with
+  `specs: [{name, version}]` (wave-scoped provenance labels); the frontend
+  narrative derives only from production fields.
+- **rustfmt drift** (8405c8e47): the point-in-time tests in
+  `crates/gyre-adapters/src/sqlite/graph.rs` formatted; `cargo fmt --check`
+  clean on gyre-adapters and gyre-server.
 
-### Review repair, round 2 (8405c8e47)
+### Verification repair (f5a45295b)
 
-- **rustfmt drift in the SQLite adapter fixed for real**: round 1
-  formatted `crates/gyre-server/src/api/graph.rs` but left the identical
-  drift in the two point-in-time tests this task adds in
-  `crates/gyre-adapters/src/sqlite/graph.rs` (six single-line assert!
-  macros rustfmt wants split). `cargo fmt -p gyre-adapters` applied;
-  verified: `cargo fmt --check -p gyre-adapters` and `-p gyre-server` both
-  exit 0, and `python3 scripts/check-rustfmt-diff.py
-  3afece9d73e0d76baf53c9983dede637f15449e8` (task base) reports
-  "changed lines clean". Evidence:
-  /tmp/stage/review-evidence/fmt-diff-fix.txt, fmt-crate-checks.txt.
-  The formatting change is behavior-preserving;
-  `cargo test -p gyre-adapters sqlite::graph::tests::list_` still passes
-  (3/3, incl. both point-in-time tests) — evidence:
-  /tmp/stage/review-evidence/adapters-point-in-time-tests.txt.
+- Verification round de578256a9b2458a97ef8c182bb9173a (base d31906c5)
+  failed the changed-lines clippy gate: 26 `clippy::double_must_use`
+  findings at `crates/gyre-ports/src/graph.rs:16`. Root cause: async-trait
+  0.1.89 injects `#[must_use]` into every expanded trait method while the
+  boxed-future return type is already `#[must_use]`, and the lint span
+  covers the whole GraphPort trait that task-183's new methods fall
+  inside. Fixed with the same targeted
+  `#[allow(clippy::double_must_use)]` already established on
+  `SpecApprovalRepository` (spec_approval.rs) — attribute only, no
+  behavior change. Evidence:
+  /tmp/stage/review-evidence/clippy-double-must-use-fix.txt (focused
+  `cargo clippy -p gyre-ports --all-targets` exit 0, zero findings in
+  src/graph.rs; `cargo fmt --check -p gyre-ports` exit 0).
 
 ### Test evidence
 
-- Frontend (focused, run in the round-1 repair): `vitest run
-  timeline-utils.test.js TimelineScrubber.test.js
-  ExplorerViewNavigableArchitecture.test.js
-  ExplorerViewLivenessWiring.test.js canvas-state.test.js` — 97/97 pass;
-  both round-1 defects have mutation-verified regression tests (each
-  fails on the pre-fix code).
-- Server (type-checked via `cargo check -p gyre-server --tests`, fmt and
-  diff-scoped clippy clean at the time): the verifier must run
-  `cargo test -p gyre-server --lib reconciliation` — covers the label
-  round-trips, provenance-label assertions on created tasks, the payload
-  specs assertions in
-  `reconciliation_completed_fires_when_all_tasks_terminal`, and wave
-  scoping in `second_wave_emits_its_own_completion`.
-- Adapter (run in this round, this sandbox): `cargo test -p gyre-adapters
-  sqlite::graph::tests::list_` — 3/3 pass after the fmt repair.
+- Frontend (focused, run in round 1): `vitest run timeline-utils.test.js
+  TimelineScrubber.test.js ExplorerViewNavigableArchitecture.test.js`
+  32/32 passed; fetcher-race regression fails on old logic (mutation
+  verified).
+- Rust (focused, run in round 2): `cargo test -p gyre-adapters
+  sqlite::graph::tests::list_` 3/3 passed, including both point-in-time
+  tests.
+- Round 3 (f5a45295b) is a lint-attribute-only change: focused clippy +
+  fmt probes above; the verifier should re-run the full changed-lines
+  clippy gate and the listed suites.
