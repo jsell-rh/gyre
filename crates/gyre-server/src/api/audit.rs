@@ -94,6 +94,26 @@ impl From<AuditEvent> for AuditEventResponse {
     }
 }
 
+/// Record a server-initiated audit event and broadcast it to SSE subscribers.
+///
+/// Shared emission path for every server-side audit event (task-104:
+/// observability.md §Audit Event Types source control + access control
+/// events). Recording is best-effort — a storage failure is logged and the
+/// requesting path continues; the audit trail must never take down the
+/// operation it observes.
+pub async fn emit_server_audit_event(state: &AppState, event: AuditEvent) {
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            error = %e,
+            event_type = event.event_type.as_str(),
+            "failed to record server-side audit event"
+        );
+    }
+    if let Ok(json) = serde_json::to_string(&AuditEventResponse::from(event)) {
+        let _ = state.audit_broadcast_tx.send(json);
+    }
+}
+
 /// Caller-scope validation (task-102 F2): the scoping fields on a recorded
 /// audit event must resolve within the caller's tenant. `agent_id` is bound
 /// server-side in the handler; letting `workspace_id`/`repo_id` pass through
@@ -172,7 +192,14 @@ pub async fn record_audit_event(
     } else {
         Some(gyre_common::Id::new(auth.agent_id.clone()))
     };
-    let user_id = auth.user_id.clone();
+    // Identity-security.md §Impersonation: events pushed during an
+    // impersonation session are attributed to the impersonator (the admin
+    // acting as the target), with the attribution context in detail.
+    let user_id = auth
+        .impersonation
+        .as_ref()
+        .map(|imp| imp.impersonator_id.clone())
+        .or_else(|| auth.user_id.clone());
 
     // Caller-scope validation (task-102 F2), see `validate_workspace_scope` /
     // `validate_repo_scope` above: mismatch or unknown scope rejects the
@@ -221,6 +248,17 @@ pub async fn record_audit_event(
         if let Some(p) = pid {
             obj.entry("pid").or_insert(serde_json::json!(p));
         }
+    }
+    // Impersonation attribution context (identity-security.md §Impersonation):
+    // the record's user_id is the impersonator; detail carries both identities
+    // plus the session so the trail shows the impersonator acting as the target.
+    if let (Some(obj), Some(imp)) = (detail.as_object_mut(), auth.impersonation.as_ref()) {
+        obj.entry("impersonator_id")
+            .or_insert(serde_json::json!(imp.impersonator_id.as_str()));
+        obj.entry("target_user_id")
+            .or_insert(serde_json::json!(imp.target_user_id.as_str()));
+        obj.entry("impersonation_session_id")
+            .or_insert(serde_json::json!(imp.session_id));
     }
 
     let event = AuditEvent::new(
@@ -802,6 +840,7 @@ mod tests {
         // Agent-role JWT with known sub.
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "known-agent-sub",
                 "preferred_username": "known-agent",
                 "realm_access": { "roles": ["agent"] }

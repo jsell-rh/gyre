@@ -136,6 +136,14 @@ pub enum MessageKind {
     /// server_only = true. Tier: Event (signed, TTL).
     /// Broadcast to workspace.
     MergeQueueResumed,
+    /// Emitted when a task reaches `Blocked` terminally in the Ralph loop:
+    /// max iterations reached or spawn failure after all retries
+    /// (agent-runtime.md §1 Phase 7). server_only = true.
+    /// Tier: Event (signed, TTL). Directed to the repo orchestrator's inbox
+    /// (same routing mechanism as `SpecApproved` — the server spawns an
+    /// orchestrator to process the failure when none is live).
+    /// Payload: `{task_id, repo_id, reason, agent_id?, iteration?}`.
+    TaskBlocked,
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ──────────────────
     ToolCallStart,
@@ -205,6 +213,7 @@ impl MessageKind {
             MessageKind::MrReverted => "mr_reverted",
             MessageKind::MergeQueuePaused => "merge_queue_paused",
             MessageKind::MergeQueueResumed => "merge_queue_resumed",
+            MessageKind::TaskBlocked => "task_blocked",
             MessageKind::SpecApproved => "spec_approved",
             MessageKind::GateFailure => "gate_failure",
             MessageKind::StaleSpecWarning => "stale_spec_warning",
@@ -261,6 +270,7 @@ impl MessageKind {
                 | MessageKind::MrReverted
                 | MessageKind::MergeQueuePaused
                 | MessageKind::MergeQueueResumed
+                | MessageKind::TaskBlocked
         )
     }
 
@@ -302,6 +312,7 @@ impl MessageKind {
             | MessageKind::MrReverted
             | MessageKind::MergeQueuePaused
             | MessageKind::MergeQueueResumed
+            | MessageKind::TaskBlocked
             | MessageKind::Custom(_) => MessageTier::Event,
 
             MessageKind::ToolCallStart
@@ -480,6 +491,17 @@ impl MessageKind {
                         f("agent_id", Str, true),
                         f("error", Str, true),
                         f("context", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::TaskBlocked => Some(
+                &(const {
+                    [
+                        f("task_id", Str, true),
+                        f("repo_id", Str, true),
+                        f("reason", Str, true),
+                        f("agent_id", Str, false),
+                        f("iteration", U32, false),
                     ]
                 }),
             ),
@@ -691,6 +713,7 @@ impl MessageKind {
             "mr_reverted" => MessageKind::MrReverted,
             "merge_queue_paused" => MessageKind::MergeQueuePaused,
             "merge_queue_resumed" => MessageKind::MergeQueueResumed,
+            "task_blocked" => MessageKind::TaskBlocked,
             "budget_exhausted" => MessageKind::BudgetExhausted,
             "agent_error" => MessageKind::AgentError,
             "constraint_violation" => MessageKind::ConstraintViolation,
@@ -1196,6 +1219,7 @@ mod tests {
             MessageKind::MrReverted,
             MessageKind::MergeQueuePaused,
             MessageKind::MergeQueueResumed,
+            MessageKind::TaskBlocked,
             MessageKind::MrCreated,
             MessageKind::MrStatusChanged,
             MessageKind::MrMerged,
