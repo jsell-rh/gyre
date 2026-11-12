@@ -6473,7 +6473,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_prompts_get_constraints_include_budget_and_scope() {
         let state = seed_prompt_state().await;
-        let ws_key = format!("workspace:ws-mcp-prompt");
+        let ws_key = "workspace:ws-mcp-prompt".to_string();
         state
             .budget_configs
             .set_config(
