@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "76faba58a195a0c04156141a0979ee4428043b2e", "5acaf065f8d32e1ac3d6d5bd9397f7ce625ea6f2", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,97 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+All three HSI §12 gaps (notification filtering, judgment ledger,
+auth provider info) are implemented in production code on this branch.
+This round rebased the completed task onto assignment base 3af80bd
+(task-158 tenant-scope meta-spec changes) as merge 76faba58a and repaired
+the semantic conflicts the textual merge could not see (1639c531). No
+acceptance-criterion behavior changed; the implementation shipped in
+earlier rounds is intact in the merged tree.
+
+### This round: rebase onto 3af80bd (task-158)
+
+- **Textual conflicts (2 files)** — `gyre-ports/src/notification.rs`:
+  kept task-209's `exclude_types` (HSI §12 inbox preference filtering)
+  doc contract on `list_for_user`/`count_unresolved` and adopted base's
+  method-site `#[allow(clippy::too_many_arguments)]`. `meta_specs.rs`
+  registry_tests: kept BOTH sides' independent tests — task-209's
+  judgment-ledger tests (publish audit event, delete authorization) and
+  task-158's tenant-scope tests (creation validation, force flag).
+- **Semantic conflict 1 — `MetaSpecScope::Tenant` non-exhaustive matches**
+  (task-158 introduced the variant; task-209's matches predate it):
+  `authorize_meta_spec_delete` gained a Tenant arm mirroring the base's
+  tenant force-flag containment rule — Admin role AND
+  `auth.tenant_id == scope_id` (a missing scope_id fails closed:
+  undeletable). `record_meta_spec_publish` maps Tenant-scope publishes to
+  no workspace attribution (a tenant-wide judgment is not one
+  workspace's ledger page, same as Global; `?workspace_id=` excludes
+  NULL). New focused test
+  `delete_tenant_scoped_meta_spec_requires_scope_tenant_admin` covers
+  non-admin 403, cross-tenant admin 403, scope-tenant admin 204 + 404.
+- **Semantic conflict 2 — stale 7-arg `list_for_user` call sites** in
+  base-side tests (`specs_assist.rs`, `ralph_loop.rs`, `signal_chain.rs`):
+  updated to the 8-arg signature with `exclude_types = &[]` (those tests
+  assert raw delivery, not preference filtering — the port docs' "see
+  everything" value).
+
+### Behavior shipped (unchanged from prior rounds, verified present)
+
+- **Spec amendment** — HSI §12 Judgment Ledger Sources table (category →
+  table → human/workspace attribution keys), `?type=` pinned to
+  `approval|rejection|gate|trust|meta-spec`.
+- **Write paths** — `AuditEventType::{TrustChange, GateOverride,
+  MetaSpecPublish}`; trust transition via `PUT /workspaces/:id`, human
+  approval review on failed-gate MR (one `gate_override` per failed
+  gate), and meta-spec registry create/update all write attributed
+  audit events.
+- **Aggregation** — `JudgmentLedgerRepository::list_for_user` (sqlite,
+  postgres, mem) unions all four categories; `?workspace_id=` filters in
+  SQL; reverse-chron; limit/offset after union+sort;
+  `JudgmentType::GateOverride` (`"gate"`).
+- **Auth provider info** — `GET /users/me` returns read-only
+  `oidc_issuer` + `last_login_at`.
+- **Notification filtering** — inbox list + badge count exclude types
+  disabled in `user_notification_preferences`; prefs endpoint
+  normalizes aliases, rejects unknown names; UI exposes all 39 canonical
+  toggles.
+
+### Test evidence (this round, merged HEAD 1639c531)
+
+Evidence files under `/tmp/stage/review-evidence/`:
+
+- `cargo check --workspace --all-targets` — exit 0 (type-checks all
+  crates AND all test targets, including the reconstructed test module
+  and the new tenant-scope delete test).
+- `cargo test -p gyre-adapters sqlite::user_profile` — 12 passed /
+  0 failed (ledger aggregation, filters, notification filtering, prefs).
+- `cargo test -p gyre-common notification` — 8 passed / 0 failed.
+- `check-arch.sh` exit 0; `check-migration-versions.sh` exit 0;
+  `check-task-commit-attribution.sh` exit 0 after this task file update.
+- `check-tenant-filter.sh` exits 2 with an awk syntax error on this
+  sandbox (mawk 1.3.4 lacks gawk's 3-arg `match()`) — pre-existing on
+  the pristine base too; environment limitation, not a branch defect.
+  This round's merged queries introduce no new tenant-filter surface
+  (resolution touched tests, doc comments, and one authorization arm).
+- `web/src/locales/en.json` (auto-merged from base) validated: parses,
+  no duplicate keys.
+
+### Server tests for the independent verifier
+
+Gyre-server test compilation is deferred to the verifier per the
+runtime budget rule. Run:
+
+- `cargo test -p gyre-server meta_spec` (covers the reconstructed
+  registry_tests module, task-209's judgment-ledger tests, task-158's
+  tenant-scope tests, and the new
+  `delete_tenant_scoped_meta_spec_requires_scope_tenant_admin`)
+- `cargo test -p gyre-server trust_transition_writes_trust_change_audit_event`
+- `cargo test -p gyre-server gate_override`
+- `cargo test -p gyre-server meta_spec_publish`
+- `cargo test -p gyre-server users::`
+- `cargo test -p gyre-server specs_assist` and `signal_chain` and
+  `ralph_loop` (signature-fixed call sites)
+- Full `cargo test --all` and `cd web && npm ci && npm test`
