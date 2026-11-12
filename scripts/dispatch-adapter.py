@@ -23,7 +23,7 @@ from pipeline.store import Store, StaleClaim, STAGES
 from pipeline.settings import configuration, save_configuration
 
 pipeline = helper('dev-pipeline')
-COMPUTE = {'triage', 'implement', 'review', 'verify'}
+COMPUTE = {'triage', 'assess', 'implement', 'review', 'verify'}
 AGENTS = {'implement': 'code-implementation', 'review': 'code-review'}
 
 
@@ -172,6 +172,8 @@ def control(store, request, cancel=False):
                 raise ValueError('only a failed or canceled attempt can be retried')
             store.db.execute("UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE id=? AND state IN ('attention','retry')", (time.time(),row['id']))
             store.db.execute('DELETE FROM settings WHERE key=?', (store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
+            from pipeline.repair_budget import reset
+            reset(store,row['task'],row['stage'])
             store.db.execute('DELETE FROM settings WHERE key=?', ('task_paused:'+row['task'],))
             store.db.execute('DELETE FROM settings WHERE key=?', (f"cancel:{row['id']}:{row['token']}",))
         store.event('operator_cancel' if cancel else 'operator_retry', {'token':row['token']}, row['task'], row['id'])

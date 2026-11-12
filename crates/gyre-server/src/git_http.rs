@@ -444,6 +444,35 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
+    // Task-134: scoped gate-agent tokens are read-only — a `review:submit`
+    // reviewer or `validation:report` validator may read MR context, never
+    // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
+    // Caller-scoped capability, exact-match (review F3): checked before
+    // workspace/repo resolution so the denial does not depend on (or leak
+    // the existence of) the target.
+    if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
+            || scope == crate::auth::VALIDATION_REPORT_SCOPE
+        {
+            warn!(
+                agent_id = %auth.agent_id,
+                workspace_slug = %workspace_slug,
+                repo_name = %repo_name,
+                "git-receive-pack 403: scoped gate-agent token cannot push"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                "push rejected: gate-agent scoped tokens are read-only".to_string(),
+            )
+                .into_response();
+        }
+    }
+
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -2177,8 +2206,9 @@ async fn process_persona_changes(
                                  human review.",
                                 repo.name
                             ));
-                            notif.entity_ref = Some(format!("persona:{slug}"));
-                            notif.repo_id = Some(repo.id.to_string());
+                            notif.source.entity_type = "persona".to_string();
+                            notif.source.entity_id = slug.clone();
+                            notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.notifications.create(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
@@ -2565,7 +2595,8 @@ async fn notify_cross_workspace_dependents(
                 now as i64,
             );
             notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.entity_id = changed_spec_path.to_string();
 
             if let Err(e) = state.notifications.create(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
@@ -3805,12 +3836,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
@@ -4261,6 +4297,145 @@ pub(crate) fn verify_chain(
             )
         } else {
             "chain verification failed".to_string()
+        },
+        children,
+    }
+}
+
+/// Context binding verification for the root `SignedInput` (§2.4 Replay Prevention).
+///
+/// Compares the signed `InputContent` against the actual target of the current
+/// push/merge. A `SignedInput` that authorizes work on repo-A must not be
+/// replayable to authorize work on repo-B; a modified spec (different SHA)
+/// must require a new approval; an `expected_generation` pin is only valid for
+/// that specific deployment generation of the task.
+///
+/// `task_spec_sha` — the task's currently approved spec SHA (`None` when it
+/// cannot be resolved; the spec_sha binding is then skipped rather than
+/// failing on absent data). `task_generation` — the task's CURRENT persisted
+/// deployment generation. Both are looked up from real state by the caller;
+/// this function performs no lookups itself.
+///
+/// `valid_until` is NOT re-checked here — it is enforced by
+/// `verify_attestation_audit_only` (signed_input.valid_until node) and must
+/// not be duplicated.
+///
+/// Fail closed: every present binding must match exactly; a mismatch yields
+/// `valid: false` with a `context_binding.*` child naming the failing binding.
+pub(crate) fn verify_context_binding(
+    root: &gyre_common::SignedInput,
+    target_repo_id: &str,
+    target_workspace_id: &str,
+    task_spec_sha: Option<&str>,
+    task_generation: Option<u32>,
+) -> gyre_common::VerificationResult {
+    let mut children = Vec::new();
+    let mut all_valid = true;
+
+    // Binding 1: repo_id — the input cannot be replayed to a different repo.
+    let repo_ok = root.content.repo_id == target_repo_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.repo_id".to_string(),
+        valid: repo_ok,
+        message: if repo_ok {
+            format!("signed repo_id {} matches target", root.content.repo_id)
+        } else {
+            format!(
+                "signed repo_id {} does not match target repo {} — authorization is \
+                 bound to a different repository",
+                root.content.repo_id, target_repo_id
+            )
+        },
+        children: vec![],
+    });
+    if !repo_ok {
+        all_valid = false;
+    }
+
+    // Binding 2: workspace_id — the input cannot be replayed across workspaces.
+    let ws_ok = root.content.workspace_id == target_workspace_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.workspace_id".to_string(),
+        valid: ws_ok,
+        message: if ws_ok {
+            format!(
+                "signed workspace_id {} matches target",
+                root.content.workspace_id
+            )
+        } else {
+            format!(
+                "signed workspace_id {} does not match target workspace {} — \
+                 authorization is bound to a different workspace",
+                root.content.workspace_id, target_workspace_id
+            )
+        },
+        children: vec![],
+    });
+    if !ws_ok {
+        all_valid = false;
+    }
+
+    // Binding 3: spec_sha — a modified spec requires a new approval and new
+    // SignedInput. Only compared when the task's current approved SHA is
+    // resolvable; an empty signed SHA cannot match any real spec and fails.
+    if let Some(current_sha) = task_spec_sha {
+        let spec_ok = !root.content.spec_sha.is_empty() && root.content.spec_sha == current_sha;
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.spec_sha".to_string(),
+            valid: spec_ok,
+            message: if spec_ok {
+                format!(
+                    "signed spec_sha {} matches current approved spec",
+                    root.content.spec_sha.chars().take(8).collect::<String>()
+                )
+            } else {
+                format!(
+                    "signed spec_sha {} does not match current approved spec {} — \
+                     the spec changed after this authorization was signed",
+                    root.content.spec_sha, current_sha
+                )
+            },
+            children: vec![],
+        });
+        if !spec_ok {
+            all_valid = false;
+        }
+    }
+
+    // Binding 4: expected_generation — when present, the input is only valid
+    // for that specific deployment generation of the task (prevents replay of
+    // an old authorization after reassignment). Absent → no pin, no check.
+    if let Some(expected) = root.expected_generation {
+        let gen_ok = task_generation == Some(expected);
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.expected_generation".to_string(),
+            valid: gen_ok,
+            message: if gen_ok {
+                format!("signed expected_generation {expected} matches task generation")
+            } else {
+                format!(
+                    "signed expected_generation {expected} does not match current task \
+                     generation {} — the task was reassigned after this authorization \
+                     was signed",
+                    task_generation
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "unavailable".to_string())
+                )
+            },
+            children: vec![],
+        });
+        if !gen_ok {
+            all_valid = false;
+        }
+    }
+
+    gyre_common::VerificationResult {
+        label: "context_binding".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            "signed input context matches the verification target".to_string()
+        } else {
+            "context binding failed — signed input targets a different context".to_string()
         },
         children,
     }
@@ -7145,8 +7320,9 @@ mod tests {
             })
             .expect("owner must be notified");
         assert_eq!(notif.title, title);
-        assert_eq!(notif.entity_ref.as_deref(), Some("persona:security"));
-        assert_eq!(notif.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(notif.source.entity_type, "persona");
+        assert_eq!(notif.source.entity_id, "security");
+        assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
     }

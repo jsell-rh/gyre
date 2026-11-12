@@ -738,6 +738,22 @@ pub(crate) async fn mrs_needing_lineage_reeval(
     selected
 }
 
+/// Enrich a merged-MR response with `merge_commit_sha` / `merged_at` from the
+/// attestation store — the same lookup `GET /merge-requests/:id` performs.
+/// The list endpoints must enrich too: clients resolve merged MRs by
+/// merge-commit SHA from list rows (the Inbox's HSI §8 P5 arbitration matches
+/// the divergence body's commit SHAs against the repo's merged MRs), and a
+/// list row without `merge_commit_sha` made that resolution always fail.
+async fn enrich_merged_attestation(state: &AppState, resp: &mut MrResponse) {
+    if resp.status != "merged" {
+        return;
+    }
+    if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&resp.id).await {
+        resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
+        resp.merged_at = Some(att.attestation.merged_at);
+    }
+}
+
 pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
@@ -765,8 +781,10 @@ pub async fn list_mrs(
         mrs.truncate(cap);
     }
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
-    // Enrich with task_id from agent worktree tracking (best-effort).
+    // Enrich with task_id from agent worktree tracking (best-effort), and
+    // merged rows with their attestation merge-commit SHA.
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -831,6 +849,7 @@ pub async fn list_workspace_mrs(
 
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -854,12 +873,7 @@ pub async fn get_mr(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let mut resp = MrResponse::from(mr);
     // Enrich merged MRs with merge_commit_sha and merged_at from attestation.
-    if resp.status == "merged" {
-        if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&id).await {
-            resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
-            resp.merged_at = Some(att.attestation.merged_at);
-        }
-    }
+    enrich_merged_attestation(&state, &mut resp).await;
     // Enrich with task_id from the authoring agent's worktree tracking.
     if let Some(ref agent_id) = resp.author_agent_id {
         if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
@@ -1010,9 +1024,10 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
@@ -1023,8 +1038,29 @@ pub async fn submit_review(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
+    // Reviewer identity binding (task-134): a caller authenticated with a
+    // scoped reviewer JWT (`review:submit`) must submit under its own token
+    // subject. Without this, a gate agent could forge reviews under any
+    // reviewer id. Exact-match capability (review F3); `validation:report`
+    // validators have no review-submission capability at all (F2) and are
+    // additionally blocked from this route by the ABAC allow-list.
+    let reviewer_agent_id = if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
+            auth.agent_id.clone()
+        } else {
+            req.reviewer_agent_id
+        }
+    } else {
+        req.reviewer_agent_id
+    };
+
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
@@ -1385,6 +1421,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "self-approving-agent",
                 "preferred_username": "self-approving-agent",
                 "realm_access": { "roles": ["agent"] }
@@ -1589,6 +1626,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    // submit_review extracts AuthenticatedAgent; the bare
+                    // api_router() used here has no require_auth layer, so
+                    // the test must present the test_state auth token itself.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1626,6 +1667,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1651,6 +1693,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1709,6 +1752,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1718,6 +1762,79 @@ mod tests {
     }
 
     // ── Attestation tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_mrs_enriches_merged_rows_with_merge_commit_sha() {
+        use crate::attestation::{sign_attestation, MergeAttestation};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Merged MR").await;
+
+        // Open -> Approved -> Merged (the domain's valid transition chain).
+        for status in ["approved", "merged"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "status": status })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Store the attestation the enrichment reads (same store the merge
+        // processor writes on a real merge).
+        let attestation = MergeAttestation {
+            attestation_version: 1,
+            mr_id: mr_id.clone(),
+            merge_commit_sha: "feedface".to_string(),
+            merged_at: 1_700_000_000,
+            gate_results: vec![],
+            spec_ref: None,
+            spec_fully_approved: true,
+            author_agent_id: None,
+            conversation_sha: None,
+            completion_summary: None,
+            meta_specs_used: vec![],
+        };
+        let bundle = sign_attestation(attestation, &state.agent_signing_key);
+        state.attestation_store.save(&mr_id, &bundle).await.unwrap();
+
+        // The LIST response must carry the merge-commit SHA: the Inbox's
+        // HSI §8 P5 arbitration resolves merged MRs by that SHA from the
+        // list. Previously only GET /merge-requests/:id enriched it, so the
+        // list lookup always failed and Pick A/Pick B could never resolve
+        // the MR to act on.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let row = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == serde_json::json!(mr_id))
+            .expect("merged MR must appear in the repo list");
+        assert_eq!(row["status"], "merged");
+        assert_eq!(row["merge_commit_sha"], "feedface");
+        assert_eq!(row["merged_at"], 1_700_000_000);
+    }
 
     #[tokio::test]
     async fn attestation_missing_mr_returns_404() {

@@ -19,8 +19,8 @@ use gyre_ports::{
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -161,6 +161,15 @@ impl GitOpsPort for NoopGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -353,6 +362,15 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -2489,15 +2507,15 @@ impl NotificationRepository for MemNotificationRepository {
             .filter(|n| {
                 n.user_id == *user_id
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
-                    && min_priority.is_none_or(|min| n.priority >= min)
-                    && max_priority.is_none_or(|max| n.priority <= max)
+                    && min_priority.is_none_or(|min| n.priority_rank >= min)
+                    && max_priority.is_none_or(|max| n.priority_rank <= max)
                     && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
             })
             .cloned()
             .collect();
         items.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
+            a.priority_rank
+                .cmp(&b.priority_rank)
                 .then(b.created_at.cmp(&a.created_at))
         });
         Ok(items
@@ -2505,6 +2523,29 @@ impl NotificationRepository for MemNotificationRepository {
             .skip(offset as usize)
             .take(limit as usize)
             .collect())
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let mut updated = 0u64;
+        for n in self.store.lock().await.iter_mut() {
+            // Same match + unresolved guard as the SQL adapters: resolved or
+            // dismissed cards keep their historical body (audit record of what
+            // was acted on), so the guard is enforced in code here too.
+            if n.source.entity_id == entity_ref
+                && n.notification_type.as_str() == notification_type
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+            {
+                n.body = Some(body.to_string());
+                updated += 1;
+            }
+        }
+        Ok(updated)
     }
 
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
@@ -2529,6 +2570,21 @@ impl NotificationRepository for MemNotificationRepository {
         for n in self.store.lock().await.iter_mut() {
             if n.id == *id && n.user_id == *user_id {
                 n.resolved_at = Some(now);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for n in self.store.lock().await.iter_mut() {
+            if n.id == *id && n.user_id == *user_id {
+                n.read = read;
+                n.read_at = if read { Some(now) } else { None };
                 break;
             }
         }
@@ -2578,6 +2634,25 @@ impl NotificationRepository for MemNotificationRepository {
         }))
     }
 
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> Result<bool> {
+        Ok(self.store.lock().await.iter().any(|n| {
+            n.workspace_id == *workspace_id
+                && n.user_id == *user_id
+                && n.notification_type.as_str() == notification_type
+                && n.source.entity_id == entity_ref
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+                && n.created_at >= since
+        }))
+    }
+
     async fn delete_older_than(
         &self,
         read_cutoff_secs: u64,
@@ -2585,9 +2660,10 @@ impl NotificationRepository for MemNotificationRepository {
     ) -> Result<u64> {
         let mut store = self.store.lock().await;
         let before = store.len();
-        // "Read" = the human resolved or dismissed it (business-continuity.md §5).
+        // "Read" = the human resolved it, dismissed it, or marked it read in
+        // the UI (business-continuity.md §5 + user-management.md read state).
         store.retain(|n| {
-            let read = n.resolved_at.is_some() || n.dismissed_at.is_some();
+            let read = n.read || n.resolved_at.is_some() || n.dismissed_at.is_some();
             let cutoff = if read {
                 read_cutoff_secs
             } else {
@@ -3375,6 +3451,35 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// In-memory `TenantMetaSpecSetRepository` — same contract as
+/// `MemMetaSpecSetRepository`, keyed by tenant id. Kept in a separate store
+/// so a tenant and a workspace that happen to share an id string never
+/// shadow each other's set (mirrors the two DB tables).
+#[derive(Default)]
+pub struct MemTenantMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl TenantMetaSpecSetRepository for MemTenantMetaSpecSetRepository {
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(tenant_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(tenant_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemRolloutPolicyRepository ──────────────────────────────────────────────
 
 #[derive(Default)]
@@ -4096,10 +4201,10 @@ fn test_state_inner(
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
+        commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
+        signing_config: crate::commit_signatures::SigningConfig::default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
@@ -4140,6 +4245,7 @@ fn test_state_inner(
             &meta_spec_binding_store,
         ))),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        tenant_meta_spec_sets: Arc::new(MemTenantMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),
@@ -5475,6 +5581,48 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
         Ok(())
     }
 }
+
+// ── In-memory CommitSignatureRepository (identity-security.md §Layer 3) ──────
+
+/// In-memory `CommitSignatureRepository` for pure-mem mode and tests.
+/// Mirrors the SQLite adapter's `(repo_id, commit_sha)` keying.
+#[derive(Default)]
+pub struct MemCommitSignatureRepository {
+    store: Arc<Mutex<Vec<gyre_ports::commit_signature_repo::CommitSignature>>>,
+}
+
+#[async_trait]
+impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitSignatureRepository {
+    async fn save(
+        &self,
+        record: &gyre_ports::commit_signature_repo::CommitSignature,
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store
+            .iter_mut()
+            .find(|r| r.repo_id == record.repo_id && r.commit_sha == record.commit_sha)
+        {
+            Some(existing) => *existing = record.clone(),
+            None => store.push(record.clone()),
+        }
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        repo_id: &str,
+        commit_sha: &str,
+    ) -> Result<Option<gyre_ports::commit_signature_repo::CommitSignature>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|r| r.repo_id == repo_id && r.commit_sha == commit_sha)
+            .cloned())
+    }
+}
+
 #[cfg(test)]
 mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's

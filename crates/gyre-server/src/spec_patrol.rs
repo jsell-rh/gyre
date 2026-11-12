@@ -430,13 +430,19 @@ pub async fn create_notifications_for_error_findings(
                 id,
                 Id::new(workspace_id),
                 member.user_id.clone(),
-                NotificationType::GateFailure,
+                // Spec-drift finding (user-management.md §Notification Entity:
+                // SpecDriftDetected — patrol findings are spec-graph drift:
+                // unresolved conflicts and dangling implementations), not a
+                // gate failure.
+                NotificationType::SpecDriftDetected,
                 title,
                 &tenant_id,
                 now_i64,
             );
-            // Override priority to 3 per task plan.
-            notif.priority = 3;
+            // Error-severity findings keep the High band (rank 3) the patrol
+            // task plan specified, overriding the type's Medium default.
+            notif.priority_rank = 3;
+            notif.priority = gyre_common::NotificationPriority::from_rank(3);
             notif.body = Some(
                 serde_json::json!({
                     "finding_type": finding.finding_type,
@@ -447,7 +453,8 @@ pub async fn create_notifications_for_error_findings(
                 })
                 .to_string(),
             );
-            notif.entity_ref = Some(finding.spec_path.clone());
+            notif.source.entity_type = "spec".to_string();
+            notif.source.entity_id = finding.spec_path.clone();
 
             if let Err(e) = state.notifications.create(&notif).await {
                 warn!(
@@ -566,6 +573,8 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
         }
     }
 
@@ -1045,12 +1054,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 1, "Admin should receive notification");
-        assert_eq!(admin_notifs[0].priority, 3);
-        assert!(admin_notifs[0].title.contains("Spec graph patrol"));
         assert_eq!(
-            admin_notifs[0].entity_ref,
-            Some("system/spec-a.md".to_string())
+            admin_notifs[0].notification_type,
+            NotificationType::SpecDriftDetected
         );
+        assert_eq!(admin_notifs[0].priority_rank, 3);
+        assert!(admin_notifs[0].title.contains("Spec graph patrol"));
+        assert_eq!(admin_notifs[0].source.entity_id, "system/spec-a.md");
         // Verify body contains expected fields.
         let body: serde_json::Value =
             serde_json::from_str(admin_notifs[0].body.as_deref().unwrap()).unwrap();
@@ -1078,7 +1088,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dev_notifs.len(), 1, "Developer should receive notification");
-        assert_eq!(dev_notifs[0].priority, 3);
+        assert_eq!(
+            dev_notifs[0].notification_type,
+            NotificationType::SpecDriftDetected
+        );
+        assert_eq!(dev_notifs[0].priority_rank, 3);
 
         // Viewer should NOT get notification.
         let viewer_notifs = state
@@ -1175,7 +1189,7 @@ mod tests {
         // Verify each notification references a different spec_path.
         let mut entity_refs: Vec<String> = admin_notifs
             .iter()
-            .filter_map(|n| n.entity_ref.clone())
+            .map(|n| n.source.entity_id.clone())
             .collect();
         entity_refs.sort();
         assert_eq!(
@@ -1187,9 +1201,10 @@ mod tests {
             ]
         );
 
-        // All should have priority 3.
+        // All should be error-severity drift findings at rank 3 (High band).
         for notif in &admin_notifs {
-            assert_eq!(notif.priority, 3);
+            assert_eq!(notif.notification_type, NotificationType::SpecDriftDetected);
+            assert_eq!(notif.priority_rank, 3);
         }
     }
 

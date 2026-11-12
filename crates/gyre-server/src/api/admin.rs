@@ -473,6 +473,9 @@ pub async fn admin_reassign_agent(
         .unwrap_or_else(|| auth.agent_id.clone());
     for mut task in tasks {
         task.assigned_to = Some(target.id.clone());
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
 
@@ -913,6 +916,7 @@ mod tests {
     fn admin_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
                 "realm_access": { "roles": ["admin"] }
@@ -924,6 +928,7 @@ mod tests {
     fn developer_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "dev-user",
                 "realm_access": { "roles": ["developer"] }

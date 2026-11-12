@@ -34,6 +34,10 @@
   import SpecRealizationView from './explorer/SpecRealizationView.svelte';
   import ChangeView from './explorer/ChangeView.svelte';
   import SystemTraceView from './explorer/SystemTraceView.svelte';
+  // In-view filter panel (ui-navigation.md §3, task-178): category filters +
+  // discovered concepts, toggled by the filter icon in the control bar.
+  import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
+  import { hiddenNodeIds as computeHiddenNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -130,6 +134,23 @@
   let gateStatusBySpec = $state({});
   let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
+
+  // ── In-view filter panel (ui-navigation.md §3, task-178) ─────────────
+  // Collapsible 200px left panel inside the Architecture content area
+  // (NOT the app sidebar). Category checkboxes + concept selection toggle
+  // node visibility on the canvas via filter-categories.js.
+  let filterPanelOpen = $state(false);
+  let activeFilterCategories = $state({ boundaries: true, interfaces: true, data: true, specs: true });
+  let activeFilterConcepts = $state([]);
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ────────────────
+  // "Edit view spec" opens a collapsible JSON editor for the view spec
+  // grammar (data/layout/encoding/highlight); Apply translates via
+  // viewSpecToViewQuery and re-renders the canvas.
+  let viewSpecEditorOpen = $state(false);
+  let viewSpecText = $state('');
+  let viewSpecError = $state('');
+  let activeViewSpec = $state(null); // generated/edited ViewSpec currently applied
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
   // Causal trace step focus: clicking a step in the detail panel pans/zooms
@@ -155,8 +176,10 @@
    * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
    * render on the SVG canvas positioned by ELK, 'side-by-side' on the
    * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
-   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
-   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   * the shell's virtualized node list; 'graph'/'timeline' stay on the
+   * unified ExplorerCanvas (Canvas 2D + TimelineScrubber), and 'flow'
+   * stays on ExplorerCanvas too, which delegates its rendering to
+   * FlowCanvas (SVG nodes/edges + Canvas/WebGL particle overlay, §4).
    *
    * For the canvas-rendered layouts the ViewSpec is translated to a
    * ViewQuery the canvas renders (concept / node-type filters, callouts,
@@ -169,6 +192,7 @@
    */
   function applyGeneratedViewSpec(spec) {
     if (!spec || typeof spec !== 'object') return;
+    activeViewSpec = spec; // view spec editor prefills the active spec
     const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
     activeLayout = getLayout(layoutName) ? layoutName : 'graph';
     const query = viewSpecToViewQuery(spec);
@@ -303,6 +327,8 @@
     // ViewEvent actions menu dismisses it.
     if (viewTooltip) viewTooltip = null;
     if (viewMenu && !e.target.closest?.('.viewevent-menu')) viewMenu = null;
+    // Clicking outside the view selector dropdown dismisses it.
+    if (viewSelectOpen && !e.target.closest?.('.explorer-view-select')) viewSelectOpen = false;
   }
 
   function viewMenuAction(action) {
@@ -1170,7 +1196,140 @@
    *  in explorerCanvasState, so nothing is lost while other views are shown). */
   function setExplorerView(mode) {
     explorerViewMode = mode;
+    activeSavedViewName = null;
     pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  // ── View selector dropdown (ui-navigation.md §3, task-178) ───────────
+  // "The view selector is a dropdown listing built-in views, then user's
+  // saved views, then a 'Generate view...' option."
+  let viewSelectOpen = $state(false);
+  let activeSavedViewName = $state(null);
+
+  // Saved views via REST (task-178 repair): the dropdown must list the
+  // workspace's saved views even when the explorer chat socket fails or
+  // the chat column is collapsed before its `views` message arrives — the
+  // socket is one delivery path, not the only one. Fetched when the
+  // dropdown opens; best-effort (a failed fetch keeps the current list).
+  // Both scopes are merged by id, mirroring the socket's ListViews: the
+  // repo-scoped records carry the stored ViewQuery directly, the
+  // workspace-scoped records carry a ViewSpec (translated via
+  // viewSpecToViewQuery).
+  let savedViewsRefreshing = false;
+  async function refreshSavedViews() {
+    if (savedViewsRefreshing) return;
+    savedViewsRefreshing = true;
+    try {
+      const wsId = scope?.workspaceId;
+      const repoId = selectedRepoId;
+      const [wsViews, repoViews] = await Promise.all([
+        wsId ? api.explorerViews(wsId).catch(() => null) : null,
+        repoId ? api.savedViews(repoId).catch(() => null) : null,
+      ]);
+      if (!Array.isArray(wsViews) && !Array.isArray(repoViews)) return;
+      const byId = new Map();
+      for (const r of Array.isArray(repoViews) ? repoViews : []) {
+        if (r?.id && !byId.has(r.id)) byId.set(r.id, { ...r, query: r.query ?? null });
+      }
+      for (const r of Array.isArray(wsViews) ? wsViews : []) {
+        if (!r?.id || byId.has(r.id)) continue;
+        byId.set(r.id, {
+          ...r,
+          is_system: r.is_system ?? r.is_builtin ?? false,
+          query: r.query ?? (r.spec ? viewSpecToViewQuery(r.spec) : null),
+        });
+      }
+      explorerSavedViews = [...byId.values()];
+    } finally {
+      savedViewsRefreshing = false;
+    }
+  }
+
+  /** Load a saved view: apply its query to the canvas (works with or
+   *  without the chat WebSocket — the query is part of the view record). */
+  function selectSavedView(view) {
+    viewSelectOpen = false;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = view?.name ?? null;
+    if (view?.query && typeof view.query === 'object') {
+      activeViewQuery = JSON.parse(JSON.stringify(view.query));
+      pushInteraction({ action: 'query', preset: view.name ?? null });
+    }
+  }
+
+  /** "Generate view..." — focus the Ask input (natural-language view
+   *  generation via POST /workspaces/:id/explorer-views/generate). */
+  function openGenerateView() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'generate';
+  }
+
+  let activeViewLabel = $derived(
+    activeSavedViewName
+    ?? EXPLORER_VIEWS.find((v) => v.id === explorerViewMode)?.label
+    ?? 'Boundary'
+  );
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ──────────────
+  /** The ViewSpec to prefill the JSON editor with: the active generated
+   *  spec when one is applied, else a spec synthesized from the current
+   *  view state (data layer derived from the active view query's scope). */
+  function currentViewSpecForEditor() {
+    if (activeViewSpec) return activeViewSpec;
+    const q = activeViewQuery;
+    const spec = {
+      name: activeViewLabel,
+      layout: activeLayout ?? 'graph',
+      data: {},
+      encoding: { color: 'spec_coverage', size: 'complexity' },
+      highlight: {},
+    };
+    if (q?.scope?.type === 'concept' && Array.isArray(q.scope.seed_nodes) && q.scope.seed_nodes.length > 0) {
+      spec.data.concept = q.scope.seed_nodes[0];
+      spec.data.depth = q.scope.expand_depth ?? 2;
+    } else if (q?.scope?.type === 'filter' && Array.isArray(q.scope.node_types) && q.scope.node_types.length > 0) {
+      spec.data.node_types = [...q.scope.node_types];
+    }
+    return spec;
+  }
+
+  function toggleViewSpecEditor() {
+    viewSpecEditorOpen = !viewSpecEditorOpen;
+    if (viewSpecEditorOpen && !viewSpecText.trim()) {
+      viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2);
+      viewSpecError = '';
+    }
+  }
+
+  /** Apply the edited ViewSpec: validate JSON, translate to a ViewQuery
+   *  (viewSpecToViewQuery), and re-render the canvas. Errors are shown
+   *  inline in the editor panel. */
+  function applyViewSpecEditor() {
+    const text = viewSpecText.trim();
+    if (!text) {
+      viewSpecError = 'View spec cannot be empty';
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      viewSpecError = `Invalid JSON: ${e.message}`;
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      viewSpecError = 'View spec must be a JSON object';
+      return;
+    }
+    const query = viewSpecToViewQuery(parsed);
+    if (!query) {
+      viewSpecError = 'View spec must be an object (layers: data, layout, encoding, highlight)';
+      return;
+    }
+    viewSpecError = '';
+    activeViewSpec = parsed;
+    applyGeneratedViewSpec(parsed);
   }
 
   /** Navigate from another view (Change / Spec Realization) to a node's
@@ -1574,9 +1733,11 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
+      if (viewSelectOpen) { viewSelectOpen = false; return; }
       if (viewMenu) { viewMenu = null; return; }
       if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
+      if (viewSpecEditorOpen) { viewSpecEditorOpen = false; return; }
       if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
       if (repoDetail) { repoDetail = null; return; }
@@ -1683,6 +1844,55 @@
 
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
+
+  // ── In-view filter panel → canvas node visibility (task-178) ──────────
+  // filter-categories.js owns the classification; the panel's category
+  // checkboxes and concept chips reduce to the set of node ids the canvas
+  // hides. null when no filter is active (no filtering cost on the draw loop).
+  let explorerHiddenNodeIds = $derived.by(() => {
+    const hiddenCategories = CATEGORY_IDS.filter((id) => !activeFilterCategories[id]);
+    if (hiddenCategories.length === 0 && activeFilterConcepts.length === 0) return null;
+    return computeHiddenNodeIds(effectiveGraph.nodes ?? [], {
+      hiddenCategories,
+      concepts: activeFilterConcepts,
+    });
+  });
+
+  // Unchecked category ids + selected concepts, BEFORE reduction to node
+  // ids: the canvas classifies tree-group containers (synthetic boundary
+  // boxes) through their own node, so it needs the panel state itself, not
+  // just the hidden leaf-id set.
+  let explorerHiddenCategories = $derived(CATEGORY_IDS.filter((id) => !activeFilterCategories[id]));
+
+  // ── Evaluative lens risk overlay (task-178) ───────────────────
+  // GET /repos/:id/graph/risks — fetched when the Evaluative lens is active
+  // (best-effort, non-blocking; the lens renders fine without it). The score
+  // mirrors the canvas's client-side risk definition (churn × complexity)
+  // but sourced from the server's stored metrics.
+  let riskByNode = $state({});
+  let riskLoadedFor = $state('');
+  $effect(() => {
+    if (explorerLens !== 'evaluative' || explorerViewMode !== 'boundary' || !selectedRepoId) return;
+    if (riskLoadedFor === selectedRepoId) return;
+    const currentRepoId = selectedRepoId;
+    riskLoadedFor = currentRepoId;
+    api.repoGraphRisks(currentRepoId)
+      .then((risks) => {
+        if (selectedRepoId !== currentRepoId) return; // stale
+        const m = {};
+        for (const r of Array.isArray(risks) ? risks : []) {
+          if (!r?.node_id) continue;
+          const churn = Number(r.churn_rate ?? 0) || 0;
+          const complexity = Number(r.complexity ?? 0) || 0;
+          m[r.node_id] = churn * complexity;
+        }
+        riskByNode = m;
+      })
+      .catch(() => {
+        // Risk endpoint unavailable — allow a retry on the next lens toggle.
+        if (selectedRepoId === currentRepoId) riskLoadedFor = '';
+      });
+  });
 
   // Rendering density policy for the canvas area (ui-layout.md §10):
   // the shell owns the >1000-node list fallback; the public-only filter
@@ -2013,21 +2223,105 @@
     <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
-        <!-- HSI §3 view selector: Boundary | Spec Realization | Change | System Trace -->
-        <div class="explorer-view-tabs" role="tablist" aria-label="Explorer view" data-testid="explorer-view-selector">
-          {#each EXPLORER_VIEWS as v (v.id)}
-            <button
-              type="button"
-              role="tab"
-              class="view-tab"
-              class:active={explorerViewMode === v.id}
-              aria-selected={explorerViewMode === v.id}
-              onclick={() => setExplorerView(v.id)}
-            >{v.label}</button>
-          {/each}
+        <!-- HSI §3 / ui-navigation.md §3 view selector: a dropdown listing
+             built-in views, then the user's saved views, then a "Generate
+             view..." option (task-178). -->
+        <div class="explorer-view-select" data-testid="explorer-view-selector">
+          <button
+            class="view-select-btn"
+            onclick={() => {
+              viewSelectOpen = !viewSelectOpen;
+              // REST refresh on open: the saved-views list must not depend
+              // solely on the chat socket's `views` message.
+              if (viewSelectOpen) void refreshSavedViews();
+            }}
+            aria-haspopup="listbox"
+            aria-expanded={viewSelectOpen}
+            aria-label="View selector"
+            type="button"
+          >
+            <span class="view-select-label">{activeViewLabel}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if viewSelectOpen}
+            <div class="view-select-menu" role="listbox" aria-label="Explorer views">
+              <div class="view-select-section">Built-in views</div>
+              {#each EXPLORER_VIEWS as v (v.id)}
+                <button
+                  class="view-select-option"
+                  class:active={explorerViewMode === v.id && !activeSavedViewName}
+                  role="option"
+                  aria-selected={explorerViewMode === v.id && !activeSavedViewName}
+                  onclick={() => { viewSelectOpen = false; setExplorerView(v.id); }}
+                  data-testid={`view-option-${v.id}`}
+                  type="button"
+                >{v.label}</button>
+              {/each}
+              {#if explorerSavedViews.length > 0}
+                <div class="view-select-section">Saved views</div>
+                {#each explorerSavedViews as view (view.id)}
+                  <button
+                    class="view-select-option"
+                    class:active={activeSavedViewName === view.name}
+                    role="option"
+                    aria-selected={activeSavedViewName === view.name}
+                    onclick={() => selectSavedView(view)}
+                    data-testid="view-option-saved"
+                    title={view.description ?? view.name}
+                    type="button"
+                  >{view.name}</button>
+                {/each}
+              {/if}
+              <div class="view-select-divider" role="presentation"></div>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openGenerateView}
+                data-testid="view-option-generate"
+                title="Describe a view in natural language — the LLM generates it"
+                type="button"
+              >Generate view…</button>
+            </div>
+          {/if}
         </div>
 
         {#if explorerViewMode === 'boundary'}
+        <!-- In-view filter panel toggle (ui-navigation.md §3): filter icon in
+             the control bar opens the collapsible 200px left panel inside the
+             Architecture content area (not the app sidebar). -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={filterPanelOpen}
+          onclick={() => { filterPanelOpen = !filterPanelOpen; }}
+          title="Toggle filter panel"
+          aria-label="Toggle filter panel"
+          aria-pressed={filterPanelOpen}
+          data-testid="filter-panel-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>
+
+        <!-- View spec editor toggle (ui-navigation.md §3): "Edit view spec"
+             opens a collapsible JSON editor for the view spec grammar. -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={viewSpecEditorOpen}
+          onclick={toggleViewSpecEditor}
+          title="Edit view spec"
+          aria-label="Edit view spec"
+          aria-pressed={viewSpecEditorOpen}
+          data-testid="view-spec-editor-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          </svg>
+        </button>
+
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -2158,6 +2452,19 @@
                 </div>
               {/if}
               {#if explorerViewMode === 'boundary'}
+              <!-- In-view filter panel row (ui-navigation.md §3): collapsible
+                   200px left panel INSIDE the Architecture content area —
+                   category filters + concepts, not the app sidebar. -->
+              <div class="explorer-boundary-row">
+              {#if filterPanelOpen}
+                <ExplorerFilterPanel
+                  nodes={effectiveGraph.nodes ?? []}
+                  bind:activeCategories={activeFilterCategories}
+                  bind:activeConcepts={activeFilterConcepts}
+                  onClose={() => { filterPanelOpen = false; }}
+                />
+              {/if}
+              <div class="explorer-boundary-main">
               {#if LayoutRenderer}
                 <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
                      Engines): the ViewSpec `layout` field selects the renderer
@@ -2231,6 +2538,7 @@
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
+                layout={activeLayout}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
@@ -2254,6 +2562,10 @@
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
                 {gateRecords}
+                riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
+                hiddenNodeIds={explorerHiddenNodeIds}
+                hiddenCategories={explorerHiddenCategories}
+                filterConcepts={activeFilterConcepts}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;
@@ -2264,6 +2576,8 @@
                 {timelineDeltaStats}
               />
               {/if}
+              </div><!-- /explorer-boundary-main -->
+              </div><!-- /explorer-boundary-row -->
               {:else if explorerViewMode === 'spec-realization'}
                 <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
                 <SpecRealizationView
@@ -2808,6 +3122,50 @@
                 </div>
               </div>
             {/if}
+            {#if viewSpecEditorOpen}
+              <!-- View spec editor (ui-navigation.md §3): collapsible JSON editor
+                   for the view spec grammar — data / layout / encoding / highlight
+                   layers. Apply translates the spec to a ViewQuery and re-renders
+                   the canvas live. -->
+              <div class="query-editor-panel" role="complementary" aria-label="View spec editor" data-testid="view-spec-editor">
+                <div class="query-editor-header">
+                  <h3 class="query-editor-title">View Spec Editor</h3>
+                  <button class="query-editor-close" onclick={() => { viewSpecEditorOpen = false; }} aria-label="Close view spec editor" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+                <div class="query-editor-body">
+                  <textarea
+                    class="query-editor-textarea"
+                    bind:value={viewSpecText}
+                    placeholder={'{\n  "name": "My view",\n  "layout": "graph",\n  "data": { "node_types": ["endpoint"] },\n  "encoding": { "color": "spec_coverage", "size": "complexity" },\n  "highlight": {}\n}'}
+                    spellcheck="false"
+                    aria-label="View spec JSON"
+                    data-testid="view-spec-textarea"
+                  ></textarea>
+                </div>
+                {#if viewSpecError}
+                  <div class="query-editor-error" role="alert">
+                    {viewSpecError}
+                  </div>
+                {/if}
+                <div class="query-editor-actions">
+                  <button
+                    class="query-editor-clear-btn"
+                    onclick={() => { viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2); viewSpecError = ''; }}
+                    type="button"
+                  >Reset</button>
+                  <button
+                    class="query-editor-run-btn"
+                    onclick={applyViewSpecEditor}
+                    disabled={!viewSpecText.trim()}
+                    type="button"
+                  >Apply</button>
+                </div>
+              </div>
+            {/if}
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
@@ -2848,7 +3206,15 @@
                   onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
-                  onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onSavedViewsUpdate={(views) => {
+                    // The socket's SavedViewSummary carries no query — keep
+                    // the query/spec fields already fetched via REST for ids
+                    // that survive the replace.
+                    const prev = new Map(explorerSavedViews.map((v) => [v.id, v]));
+                    explorerSavedViews = (views ?? []).map((v) =>
+                      prev.has(v.id) ? { ...prev.get(v.id), ...v } : v
+                    );
+                  }}
                   onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
@@ -3373,39 +3739,97 @@
     flex-wrap: wrap;
   }
 
-  /* HSI §3 view selector tabs (Boundary | Spec Realization | Change | System Trace) */
-  .explorer-view-tabs {
-    display: inline-flex;
-    gap: 2px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md, 8px);
-    padding: 2px;
+  /* HSI §3 / ui-navigation.md §3 view selector dropdown (task-178):
+     built-in views → saved views → "Generate view..." option. */
+  .explorer-view-select {
+    position: relative;
     flex-shrink: 0;
   }
 
-  .view-tab {
-    border: none;
-    background: none;
-    color: var(--color-text-muted);
+  .view-select-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-xs);
+    font-weight: 600;
     padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm, 6px);
     cursor: pointer;
     white-space: nowrap;
   }
 
-  .view-tab:hover {
-    color: var(--color-text);
+  .view-select-btn:hover { border-color: var(--color-border-strong); }
+  .view-select-btn[aria-expanded='true'] { border-color: var(--color-focus); }
+
+  .view-select-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 60;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
     background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: var(--space-1);
   }
 
-  .view-tab.active {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-    box-shadow: inset 0 -2px 0 var(--color-focus);
+  .view-select-section {
+    font-size: 10px;
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+
+  .view-select-option {
+    border: none;
+    background: none;
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    text-align: left;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .view-select-option:hover { background: var(--color-surface); }
+  .view-select-option.active { font-weight: 600; box-shadow: inset 2px 0 0 var(--color-focus); }
+  .view-select-generate { color: var(--color-focus, #3b82f6); font-style: italic; }
+
+  .view-select-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: var(--space-1) 0;
+  }
+
+  /* In-view filter panel row (task-178): filter panel left, canvas right. */
+  .explorer-boundary-row {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  .explorer-boundary-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
   }
 
   .search-input-wrap {
@@ -3939,6 +4363,8 @@
     overflow: hidden;
     min-width: 0;
     position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
   .canvas-warning-stack {
