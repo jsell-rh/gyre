@@ -361,37 +361,23 @@ pub enum ReconciliationPriority {
 
 A tenant-level meta-spec change affects all workspaces in the tenant. This is the "3803 teams" problem.
 
-**The system does not auto-reconcile at tenant scope.** Instead:
+**The unit of tenant-level binding is the tenant meta-spec set** (`GET/PUT /api/v1/tenants/{id}/meta-specs/set`, Admin-only, caller's tenant must match): a tenant-wide default pinning that every workspace in the tenant **inherits** unless its own meta-spec set overrides the pinned path (the workspace pin wins on conflict). A workspace with no set of its own governs agents entirely by the tenant defaults; the workspace's *effective* set — what `GET /api/v1/workspaces/{id}/meta-spec-set` returns, what the §9 constraint and the §10 sweep hash, and what the blast-radius endpoint resolves — is always the merge of tenant defaults with workspace overrides.
 
-1. Human updates the tenant-level meta-spec
-2. System computes blast radius across all workspaces
-3. System presents a **rollout plan**: an ordered list of workspaces with blast radius per workspace
-4. Human approves the plan (one touchpoint)
-5. System updates workspace meta-spec sets in the plan order
-6. Each workspace reconciles autonomously per its own rollout policy
+When a tenant-level meta-spec changes, the reconciliation process:
 
-The rollout plan can be:
-- **All at once:** update all workspace bindings simultaneously. Each workspace reconciles per its own policy.
-- **Staged:** update workspace bindings in waves (e.g., 1 workspace first, then 5, then all). Wait for each wave to complete before starting the next.
-- **Selective:** update only specific workspaces. Others stay on the old version indefinitely.
+1. Computes blast radius across all workspaces (`GET /api/v1/meta-specs/{path}/blast-radius` — every workspace whose effective set pins the path; inherited pins are reported with reason `tenant_inheritance`)
+2. Creates per-workspace reconciliation plans (one `run_reconciliation` wave per non-overriding workspace — §6 task per repo)
+3. Applies workspace rollout policies individually: a workspace whose own set pins the changed meta-spec **overrides** it and is skipped — its own binding update (the §6 set-diff trigger) owns its rollout, so an override stays on its chosen version indefinitely. A workspace whose own set cannot be read (storage error or corrupt JSON) is skipped too: the override gate never fails open, so an unreadable set is never treated as "no overrides"
+4. The tenant admin can override workspace policies for urgent changes: a `force` flag on the reconciliation trigger (`PUT /api/v1/tenants/{id}/meta-specs/set` body, or `PUT /api/v1/meta-specs-registry/{id}` when approving a Tenant-scoped entry) propagates the change past workspace-level overrides so compliance-driven changes are applied immediately. Force is restricted to admins of the scope tenant.
 
-```
-POST /api/v1/tenant/meta-spec-rollout
-{
-  "meta_spec_path": "meta/personas/backend-developer.md",
-  "new_sha": "x7y8z9",
-  "plan": {
-    "strategy": "staged",
-    "waves": [
-      { "workspaces": ["payments"], "wait_for_completion": true },
-      { "workspaces": ["onboarding", "kyc"], "wait_for_completion": true },
-      { "workspaces": ["*"], "wait_for_completion": false }
-    ]
-  }
-}
-```
+Triggers: a tenant meta-spec set update propagates its changed pins (new or re-pinned entries; removals are not triggers), and the approval of a **Tenant-scoped** registry meta-spec (`scope: Tenant`, `scope_id` = tenant id) fans out through the same tenant controller. Only paths the tenant set pins propagate — a change nothing binds has an empty blast radius. Inheriting workspaces reconcile autonomously per the §6 controller; no agent is spawned by the trigger itself.
 
-After the human approves the plan, execution is autonomous. No further human touchpoints.
+Rollout shapes map onto the binding model:
+- **All at once:** every non-overriding workspace's wave starts in the same propagation run; each workspace reconciles per its own policy.
+- **Staged:** waves are expressed by updating the tenant set (or workspace sets) incrementally — the diff-based trigger reconciles exactly what changed in each step.
+- **Selective:** a workspace that overrides a path simply keeps its own pin; it stays on its chosen version indefinitely.
+
+After the change is approved (the human touchpoint), execution is autonomous. No further human touchpoints.
 
 ### 9. Merge Gate Behavior
 

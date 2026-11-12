@@ -19,8 +19,8 @@ use gyre_ports::{
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -3451,6 +3451,35 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// In-memory `TenantMetaSpecSetRepository` — same contract as
+/// `MemMetaSpecSetRepository`, keyed by tenant id. Kept in a separate store
+/// so a tenant and a workspace that happen to share an id string never
+/// shadow each other's set (mirrors the two DB tables).
+#[derive(Default)]
+pub struct MemTenantMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl TenantMetaSpecSetRepository for MemTenantMetaSpecSetRepository {
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(tenant_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(tenant_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemRolloutPolicyRepository ──────────────────────────────────────────────
 
 #[derive(Default)]
@@ -4216,6 +4245,7 @@ fn test_state_inner(
             &meta_spec_binding_store,
         ))),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        tenant_meta_spec_sets: Arc::new(MemTenantMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),
