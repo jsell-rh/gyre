@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170", "2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb"]
 ---
 
 ## Spec Excerpt
@@ -107,26 +107,12 @@ shortcuts. Parser and integration tests live in `gyre-domain`
 (`search_query`), `gyre-server` (`mcp_search_query_language`, REST
 search tests), and `tests/search_wiring.rs`.
 
-### This round — repair review finding (compile fix)
+### Repair round (2c3eff661)
 
-The rebase of the query language onto task-203's access scoping left
-three E0063 errors in the gyre-server lib test target: the task-203
-test helper `mcp_search_is_access_scoped_to_the_agent_token` was
-missing the new `updated_at` field, and both `SearchDocument` literals
-in the new `mcp_search_query_language` test were missing `tenant_id`
-— so the MCP query-language acceptance test had never compiled. Fixed
-by completing the three initializers (commit `5ace1b3ac`).
-
-Evidence (this sandbox): `/tmp/stage/bin/cargo check -p gyre-server
---lib --tests` → exit 0, no errors (all test targets compile, including
-`tests/search_wiring.rs`). Saved under
-`/tmp/stage/review-evidence/task-154-cargo-check.txt`.
-
-### Verifier must run
-
-- `cargo test -p gyre-server --lib mcp_search`
-- `cargo test -p gyre-server --test search_wiring`
-- `cargo test -p gyre-domain search_query`
-
-(server test compilation is deferred to the verifier per the 4 GiB
-budget constraint)
+The verification round flagged changed-line rustfmt violations in the
+SQLite search filter builder, the facets handler, and the search wiring
+test. Commit `2c3eff661` applies rustfmt's layout — formatting only,
+no behavior change. Evidence: `python3 scripts/check-rustfmt-diff.py
+199c1bb78f53f27088c54a0929b5605e7302e874` now reports "changed lines
+clean (13 Rust files checked)"; `cargo test -p gyre-domain search_query`
+passes 25/25; `cargo check -p gyre-server --tests` finishes clean.
