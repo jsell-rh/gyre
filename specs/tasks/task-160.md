@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "1724c6a3d38c6086c0d01f198783cd860d4a7787"]
 ---
 
 ## Spec Excerpt
@@ -77,46 +77,50 @@ comments, and are wired into `.pre-commit-config.yaml` and
   route↔`RouteResourceMapping` cross-reference delegated to the
   frozen-baseline `check-abac-route-registry.sh` (spec §7).
 
-### This round: compile repair after base merge
+### Compile repairs after base merges
 
-The round-3 review finding (attempt 5c276126): the candidate tree did not
-compile — `emit_tenant_meta_spec_set_updated` (reconciliation.rs) still
-called `state.emit_event(None, ...)` after the base merge reintroduced it,
-while the scoped `emit_event` signature (candidate commit 2698b9b63)
-requires an `Id` workspace. Fixed in the sanctioned direction
-(commit 55a6c1f2b):
+The scoped `emit_event` contract (commit 2698b9b63: workspace `Id`
+required, tenant resolved from the workspace record, never a fabricated
+`"default"`) repeatedly collided with main-side call sites arriving via
+base merges. Each was adapted at the call site, per the review direction:
 
-- New `AppState::emit_tenant_event(tenant_id, to, kind, payload)` — an
-  Event-tier emit path for tenant-level domain events whose scope is the
-  authenticated caller's tenant, carried directly (never fabricated). It
-  shares the sign/persist/broadcast/dispatch core with `emit_event` via
-  the extracted `emit_scoped_event`; the message carries
-  `workspace_id: None` (no single workspace audience, per the §11 doc
-  comment on the emitter).
-- `emit_tenant_meta_spec_set_updated` now calls `emit_tenant_event` with
-  the handler's tenant scope. The live production path is
-  `api/meta_specs.rs` `put_tenant_meta_spec_set`.
-- `message_tenant_id` drops its now-dead `Option` arm (the
-  system-principal-tenant fallback); both remaining callers pass a
-  concrete workspace `Id`.
+- `AppState::emit_tenant_event(tenant_id, ...)` (commit 55a6c1f2b) —
+  Event-tier emit path for tenant-level domain events whose tenant scope
+  the caller holds directly; used by `emit_tenant_meta_spec_set_updated`
+  (live path: `api/meta_specs.rs` `put_tenant_meta_spec_set`).
+- Patrol escalation (commit 1724c6a3d) — base merge 3afece9d (task-204)
+  reintroduced `spec_lifecycle_patrol.rs` calling `emit_event` with
+  `Option<Id>` (E0308 at spec_lifecycle_patrol.rs:371). `escalate_findings`
+  now emits through the scoped `emit_event(ws,
+  Destination::Workspace(ws), ...)` for findings with a resolvable
+  workspace, and skips-and-logs findings without one — the same contract
+  as `api/specs.rs`' SpecApproved/deprecation emissions the patrol was
+  patterned on; there is no scope-less broadcast path, and the finding
+  still reaches the caller through the patrol response. Tests adapted:
+  the workspaceless finding must emit nothing (quiet broadcast channel)
+  and nothing may persist under fabricated scopes.
 
 ### Test evidence
 
-Evidence for this round saved under `/tmp/stage/review-evidence/`:
+Evidence saved under `/tmp/stage/review-evidence/` (current round, head
+1724c6a3d):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exits 0 on the repaired
-  head (`server-check-pass.txt`) — the E0308 from the review finding is
-  gone.
-- `cargo fmt -p gyre-server --check` clean.
-- All three task scripts pass on the repaired head
-  (`check-hierarchy.txt`, `check-tenant-filter.txt`,
-  `check-api-auth.txt`), plus arch / fabricated-scope-defaults /
-  inert-enforcement / scope-literal-defaults / mem-port-contracts lints.
-- Earlier rounds' evidence (negative tests proving each script fails on
-  injected violations, domain/adapter test runs) is recorded in the prior
-  attempt artifacts; this round changed only `gyre-server` source, which
-  is type-checked above.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exits 0
+  (`server-check-pass.txt`); `--tests` type-check also exits 0
+  (`server-tests-check.txt`); `cargo fmt -p gyre-server -- --check` clean.
+- All three task scripts pass on this head (`check-hierarchy.txt`,
+  `check-tenant-filter.txt`, `check-api-auth.txt`), plus
+  fabricated-scope-defaults / scope-literal-defaults / inert-enforcement
+  lints.
+- Negative test (`check-hierarchy-negative.txt`): injecting
+  `workspace_id: Option<Id>` into the domain `Task` struct makes
+  `check-hierarchy.sh` exit 1 with the §2 message; restored, it exits 0.
+- Earlier rounds' evidence (per-script negative tests on injected
+  violations, domain/adapter test runs) is recorded in the prior attempt
+  artifacts.
 
 Server suites the verifier must run on this head (per the sandbox build
 budget): `cargo test --all`, all-target clippy, and the frozen-baseline
-script gates in CI.
+script gates in CI — including `cargo test -p gyre-server`
+(`spec_lifecycle_patrol` and `api::specs` patrol-endpoint tests cover the
+commit 1724c6a3d behavior change).
