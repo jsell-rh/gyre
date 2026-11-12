@@ -7,7 +7,7 @@ progress: complete
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: ["87e2aed4a851148071f0fa3c7b625dcf561730c2", "c92e8f534ef8e9c24ac7228d8d453d472f7e90e7", "33cc4941521a7e94d9742f2f7bb626b18adc4e45", "ec05bf9afe4de6256b57ba977c6e5f63ea7e1fa4", "059586a37a49b184d7a32a47d8c11c59da5702a3", "99edd0bcaddd740a5b560e61ef2937b156d780fb"]
+commits: ["87e2aed4a851148071f0fa3c7b625dcf561730c2", "c92e8f534ef8e9c24ac7228d8d453d472f7e90e7", "33cc4941521a7e94d9742f2f7bb626b18adc4e45", "ec05bf9afe4de6256b57ba977c6e5f63ea7e1fa4", "059586a37a49b184d7a32a47d8c11c59da5702a3", "99edd0bcaddd740a5b560e61ef2937b156d780fb", "d08359f1666233094a5ea0fda89c4bbbb80cde99"]
 ---
 
 ## Spec Excerpt
