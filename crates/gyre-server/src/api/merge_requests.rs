@@ -1703,7 +1703,7 @@ mod tests {
                 &gate_agent_id,
                 gate.id.as_str(),
                 "forge",
-                "http://localhost:0",
+                &state.base_url,
                 60,
                 crate::auth::REVIEW_SUBMIT_SCOPE,
             )
