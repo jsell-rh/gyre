@@ -5,7 +5,7 @@ depends_on: [task-178, task-170]
 progress: complete
 coverage_sections:
   - "system-explorer.md §5. Flow Traces"
-commits: ["23fbb3b60500026eb0751cc34614e2338083f337"]
+commits: ["23fbb3b60500026eb0751cc34614e2338083f337", "152e7f833b1c3f5d055203b2c77c6de75c2065d1"]
 ---
 
 ## Spec Excerpt
