@@ -2,10 +2,10 @@
 title: "Moldable Views — type, trait, endpoint, and spec detail views"
 spec_ref: "system-explorer.md §2"
 depends_on: [task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
-commits: ["f3e7ed8af3d08409f971e4f5e562cbeae8e1d524"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -75,84 +75,3 @@ Every field type is clickable → navigates to that type. Every spec reference �
 ## Agent Instructions
 
 Read `system-explorer.md` §2 "Moldable Views" for the exact wireframes and data requirements for each view type. The data comes from the knowledge graph API — check `GET /repos/:id/graph` response format for node properties (spec_path, visibility, churn_count_30d, etc.). The existing `DetailPanel.svelte` is the entry point — entity type detection should route to the appropriate Moldable View component. The clickable references are critical: every type, spec, and agent reference must be a navigation link. Check the existing graph node types in `crates/gyre-domain/` for the Rust-side data model.
-
-## Shipped
-
-The four moldable views of system-explorer.md §2 ship as dedicated
-components routed by entity type, with one shared computation layer and
-tests that exercise the real implementation.
-
-### What shipped
-
-- `web/src/lib/moldable/model.js` — the single computation layer (node-type
-  routing table, relationship graph, risk, story, method signatures,
-  endpoint route/flow/shapes/gates/test counts, spec governed-nodes and
-  completeness). Extracted from NodeDetailPanel.svelte; the new tests import
-  these functions directly instead of mirroring logic into the test file.
-- `MoldableTypeView.svelte` — spec linkage (clickable → opens the spec
-  inline), last-modified agent + time, persona row when the extractor
-  recorded one (never fabricated), fields with clickable type annotations,
-  Implements, Used by with crate attribution, Story (creation history,
-  churn, commit SHAs), and the risk footer (churn / coupling / spec
-  coverage / tests).
-- `MoldableTraitView.svelte` — crate, methods with signatures and
-  per-method call-site counts, implementations with crate attribution, and
-  Dependents with per-dependent call-site counts. Gap closed: dependents now
-  include every caller of the trait's methods (previously only direct
-  callers of the trait node itself, which the extractor rarely emits).
-- `MoldableEndpointView.svelte` — route method + path now read from the
-  RoutesTo edge metadata (`{"path":…,"method":…}` — the extractor's
-  canonical location per rust_extractor.rs; doc_comment is the fallback),
-  handler file:line, request/response body shapes, the handler call-flow
-  diagram (depth-3 BFS), gates from metadata/doc-comment, and test count.
-- `MoldableSpecView.svelte` — spec content fetched from the spec ledger
-  (`GET /specs/:path`) and rendered as markdown alongside the
-  implementation realization: governed nodes with ✓ (present in the current
-  extraction) / ✗ (soft-deleted), completeness percentage, stored assertion
-  results (`GET /repos/:id/specs/:path/assertions`), plus Edit (opens the
-  inline spec editor, which carries the progressive Preview / Publish
-  workflow) and inline History (`GET /specs/:path/history`) actions.
-- `NodeDetailPanel.svelte` routes `node_type` → the moldable view component
-  (type/table/component → Type; interface/trait → Trait; endpoint →
-  Endpoint; spec → Spec; everything else keeps the generic view) and keeps
-  the edge/span/evaluative/shared sections. All clickable references are
-  wired: type refs navigate to the type's view, spec refs open the spec
-  inline in the same panel, and agent refs (`last_modified_by`) open the
-  agent's provenance via the app-level detail panel (ExplorerView wires
-  `openDetailPanel({type:'agent'})`).
-- `docs/ui.md` documents the views and components.
-
-Deviation note: the Spec View action row ships Edit + History rather than
-literal Preview/Publish buttons — the inline spec editor (opened by Edit)
-already owns the progressive Preview / Full preview / Publish workflow, and
-duplicating it inside the read-oriented spec view would fork that flow.
-Progressive preview itself is §3 (task-186) territory.
-
-### Test evidence
-
-Focused web probes only (locked `npm ci`; repo's locked vitest).
-
-- Initial round (batches 1–5, 566 tests, all passing; logs retained in the
-  controller's review-evidence directory): `MoldableViews.test.js` (new,
-  22 tests — model unit tests on the real functions, per-view rendering
-  with mock graph data, clickable reference navigation, agent-provenance
-  callback, spec content/history/assertions against a mocked api,
-  NodeDetailPanel routing by node type) plus `NodeDetailPanel.test.js`
-  (60), and every ExplorerView/NodeDetailPanel-adjacent suite (484 more:
-  NavigableArchitecture, Scope, WorkspaceGraph, DrillUrl, LensUrl,
-  DefaultViews, responsive, ViewEvents, Shortcuts, LayoutRenderers,
-  LivenessWiring, GeneratedViews, LargeGraph, AppShell, RepoMode,
-  WorkspaceHome*, DetailPanel, ExplorerCanvas*, ExplorerChat, canvas-state).
-  No Svelte compile warnings from the new components.
-- Repair round (contract restore only; no product change): re-ran the
-  focused probe at the repaired head — `npx vitest run
-  src/__tests__/MoldableViews.test.js src/__tests__/NodeDetailPanel.test.js`
-  → 2 files, 82/82 tests passed, exit 0. Confirmed `git diff
-  f3e7ed8af..HEAD -- web/src web/tests docs/ui.md` is empty, i.e. the
-  shipped code is unchanged since the reviewed feature commit.
-
-No Rust changes: the knowledge-graph API (`GET /repos/:id/graph`) already
-exposes every field the views consume (GraphNode/GraphEdge in
-gyre-common/src/graph.rs). `web/dist` intentionally not rebuilt here —
-generated assets are restored/rebuilt by the controller's integration
-stage.
