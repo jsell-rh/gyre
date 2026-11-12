@@ -2353,6 +2353,8 @@ pub async fn record_agent_usage(
                 .llm_model
                 .clone()
                 .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
+            // Agent-initiated runs have no user-facing prompt template.
+            prompt_template_sha: None,
         },
     )
     .await;
