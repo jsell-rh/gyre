@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "1f28b18839adaa0092f89b9167688768a0d0de16"]
 ---
 
 ## Spec Excerpt
@@ -75,16 +75,17 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 ## Shipped
 
 Budget enforcement is real end-to-end (platform-model.md §5 Enforcement
-Behavior): the task-190 counters drive the specced actions on every usage
-recording. This round resolved the rebase onto base 7e9b3cfee (merge commit
-`e038b72eb`) and repaired the retained verification findings from round
-ea30174c (rustfmt drift + one clippy `needless_return`) in commit
-`c39c673ce` — behavior-neutral: an orphaned trailing
-`if agents.is_empty() { return; }` left behind in `emit_budget_warn` when
-75adf7def moved the spawner-notification block out to
-`maybe_notify_budget_threshold` was removed, and the task-touched regions
-were reformatted. No thresholds, de-dup markers, grace timer, kill path, or
-notifications changed.
+Behavior): the task-190 usage counters drive the specced actions on every
+usage recording. This round resolved the merge with base `d31906c5a`
+(merge commit `5b335ef7e`) and repaired the retained verification finding
+from round 8e5fb0fe (verification exit 1) in commit `1f28b1883`: the base
+brought task-150's `mcp_prompts_get_constraints_include_budget_and_scope`
+test whose `BudgetConfig` struct literal predates the task-191
+`enforcement_action` field, so the gyre-server lib test target no longer
+compiled (E0063 at `mcp.rs:6485`). The initializer now passes
+`enforcement_action: None` (spec default); `cargo check -p gyre-server
+--all-targets` and `cargo fmt --check` pass. No thresholds, de-dup
+markers, grace timer, kill path, or notifications changed this round.
 
 ### Enum + persistence
 
@@ -143,33 +144,23 @@ body and deep link. It runs in `record_llm_call_usage` right after
 notification (human channel) both fire from the one usage-recording funnel
 and a spawner is never notified twice for one crossing.
 
-### Rebase resolution (base 7e9b3cfee, merge commit e038b72eb)
+### Tests
 
-- Base brought task-163 (dependency-graph storage/adapters, new
-  `2026-10-08-000061_dep_breaking_policies` migration, specs_assist/scim/
-  llm_defaults changes) and task-176 (web UI + regenerated dist assets).
-  No conflicts with the task-191 surface; `schema.rs` additions from both
-  sides merged cleanly.
-- The earlier 3af80bd21 rebase resolutions still hold in the merged tree:
-  `NotificationType::AgentBudgetWarning` canonical naming, the single
-  rich notification path, and the four `signal_chain.rs` test-fixture
-  `enforcement_action: None` initializers.
-
-### Test evidence
-
-Sandbox probes (evidence: `/tmp/stage/review-evidence/task191-round2-verification-repair.md`):
-`cargo check --workspace` PASS on merge `e038b72eb` + repair (7m13s);
-`cargo fmt -- --check` clean; `cargo test -p gyre-adapters --lib budget`
-PASS (4/4, incl. `enforcement_action_round_trips_through_sqlite`);
-`check-arch.sh`, `check-migration-versions.sh`,
-`check-dead-message-kinds.sh`, `check-in-memory-state-stores.sh`, and
-`check-inert-enforcement.sh` PASS. gyre-server test *execution* is blocked
-by the sandbox build wrapper (4 GiB cap) and must run in the independent
-verifier: `cargo test -p gyre-server --lib api::budget` (task-191
-acceptance tests: 85% warn with message + notification + no kill + no
-re-fire, below-threshold silence, ≥100% graceful stop with Dead + counter
-0 + worktree intact + reassignment task, HardKill inline, QueuePause kv
-state, cost-limit crossing, serde round-trips, API persistence, plus the
-upstream threshold-notification test), `api::admin` (kill_agent cutover),
-`signal_chain`, and `notifications`. `cargo build --all`, all-target
-clippy, and full gates are owned by verification.
+Server-side tests in `crates/gyre-server/src/api/budget.rs`
+(`warn_at_80pct_emits_message_and_notification_no_kill`,
+`below_threshold_emits_neither_message_nor_notification`,
+`exhausted_graceful_stop_kills_preserves_work_creates_reassignment`,
+`exhausted_hardkill_override_kills_immediately_without_timer`,
+`exhausted_queuepause_override_pauses_workspace_merge_queues`,
+`exhausted_crossing_cost_limit_also_fires`,
+`enforcement_action_persists_through_budget_api`,
+`budget_threshold_notifications_fire_once_per_period`) fail if the
+enforcement behavior is removed. The verifier should run
+`cargo test -p gyre-server --lib budget` (covers all of the above) and
+`cargo test -p gyre-server --lib mcp_prompts_get_constraints` (the
+repaired base test). Large gyre-server test compilation was deferred to
+the independent verifier per the 4 GiB budget constraint; this round ran
+`cargo check -p gyre-server --all-targets` (pass, exit 0),
+`cargo fmt -p gyre-server -- --check` (pass), and
+`bash scripts/check-arch.sh` (pass) — evidence saved under
+`/tmp/stage/review-evidence`.
