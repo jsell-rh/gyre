@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,76 +71,3 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 ## Agent Instructions
 
 Read `system-explorer.md` §4 "Concept Views" for the full specification. The concept API endpoints are already registered in `mod.rs` — check `GET /repos/:id/graph/concept/:name` and `GET /workspaces/:id/graph/concept/:name` response shapes in `graph.rs`. The canvas is built in task-178 — check `ExplorerView.svelte` for the SVG node rendering and how to apply opacity/highlight styles. The in-view filter panel is also in task-178. For ad-hoc concept saving, use the existing explorer-views CRUD endpoints (`POST /workspaces/:id/explorer-views`). The view spec grammar `concept` field is defined in `ui-layout.md` §4 Data Layer.
-
-## Shipped
-
-Concept views (system-explorer.md §4) on the task-178 canvas substrate,
-covering all three interaction modes and both data-source mechanisms.
-
-### Behavior
-
-- **Concept browser (manifest mechanism):** new `GET /repos/:id/graph/concepts`
-  and `GET /workspaces/:id/graph/concepts` list a repo's (or workspace union
-  of) manifest-defined concepts; the in-view filter panel's Concepts section
-  now shows a "Predefined" subsection (manifest concepts, projection-backed)
-  alongside "Discovered" (substring). Selecting a predefined concept fetches
-  its `GET /repos/:id/graph/concept/:name` projection and activates the
-  concept view. A repo without a manifest lists no predefined concepts
-  (empty list — the valid answer; the single-concept endpoint still 404s on
-  an undefined name).
-- **Canvas concept emphasis:** concept nodes keep full draw opacity and gain
-  a highlighted border (leaves and summary containers); everything else
-  fades to background at 0.15 opacity — drawn, never removed, per the spec
-  sentence "everything else fades to background". Concept nodes bypass
-  semantic-zoom type hiding. Edges between concept nodes are highlighted
-  (accent color + alpha floor + thickness) on both the individual and
-  bundled edge paths; other edges dim with their endpoints. Discovered
-  (substring) concept chips moved from hiding to the same fade mechanism.
-- **Control-bar filter chip:** the active concept (manifest or discovered)
-  renders as `Concept: <name>` with a ✕ that clears it and restores the
-  full-opacity graph.
-- **Ad-hoc concepts:** Shift+Click multi-select + right-click → "Create
-  concept" (context-menu item and the selection-bar button) opens a naming
-  dialog; saving persists the grouping as an explorer view
-  (`POST /workspaces/:id/explorer-views`) whose ViewQuery concept scope
-  seeds exactly the selected nodes (`expand_depth: 0`, empty `expand_edges`).
-  Synthetic tree-group selections resolve to their contained graph node
-  ids before reaching the shell. Validation errors (empty name, server
-  rejection) surface inline; Escape closes the dialog.
-- **LLM concept exploration:** the `explorer-generate` prompt template and
-  the hardcoded fallback now route "show me everything related to X" /
-  "what is part of the X concept" questions to `data.concept` (substring
-  mechanism) with a graph layout, with a worked example in the template.
-- Also fixed en route: `treeGroupHasAny`'s parent matching compared object
-  references across Svelte `$state` proxies and never matched — the
-  query-matching recursion it backs was dead code; it now compares parent
-  ids.
-
-### Test evidence
-
-- `web/src/__tests__/ExplorerConceptViews.test.js` (new, 6 tests): concept
-  browser listing (manifest fetch + Predefined/Discovered sections);
-  manifest-concept selection pinned against actual canvas draw output
-  (unrelated package drawn at exactly 0.15× baseline opacity — fade, not
-  removal — concept package unchanged; chip renders and clears, restoring
-  baseline opacity); end-to-end multi-select → right-click → dialog → save
-  asserting the persisted ViewQuery spec; dialog validation/error paths;
-  edge-emphasis draw-path tests (highlighted concept edge at the 0.8 alpha
-  floor, non-concept calls edges faded, no emphasis leak without a concept).
-- Task-178's discovered-concept test rewritten to the fade semantics
-  (label-alpha ratios instead of label disappearance) — it previously
-  pinned the hide behavior this task's spec supersedes.
-- `filter-categories.test.js`: `conceptNodeIds` union semantics +
-  `hiddenNodeIds` no longer hides by concept (regression pin).
-- Full frontend suite: 108 files, 2149 passed / 41 skipped.
-- Server: `cargo check -p gyre-server` clean. The new endpoint tests
-  (`list_graph_concepts_returns_manifest_concepts`,
-  `list_graph_concepts_repo_without_manifest_returns_empty_list`,
-  `list_workspace_graph_concepts_unions_and_dedupes`) are recorded for the
-  independent verifier — the sandbox build wrapper blocks gyre-server test
-  compilation under the 4 GiB budget (see
-  /tmp/stage/review-evidence/verifier-server-tests.md).
-- Mechanical checks pass locally: check-arch, check-abac-route-registry
-  (both new routes registered), check-abac-exempt-handlers,
-  check-mcp-write-tools, check-mem-port-contracts, plus the standing
-  invariant lint suite.
