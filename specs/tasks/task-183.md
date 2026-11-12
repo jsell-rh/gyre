@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["6b9fb4e2b", "cf8069ea8"]
+commits: ["cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
 ---
 
 ## Spec Excerpt
