@@ -24,6 +24,7 @@ struct BudgetCallRow {
     output_tokens: i64,
     cost_usd: f64,
     model: String,
+    prompt_template_sha: Option<String>,
     timestamp: i64,
 }
 
@@ -37,18 +38,19 @@ impl From<BudgetCallRow> for BudgetCallRecord {
             agent_id: r.agent_id.map(Id::new),
             task_id: r.task_id.map(Id::new),
             usage_type: r.usage_type,
-            input_tokens: r.input_tokens as u64,
-            output_tokens: r.output_tokens as u64,
+            input_tokens: r.input_tokens.max(0) as u64,
+            output_tokens: r.output_tokens.max(0) as u64,
             cost_usd: r.cost_usd,
             model: r.model,
-            timestamp: r.timestamp as u64,
+            prompt_template_sha: r.prompt_template_sha,
+            timestamp: r.timestamp.max(0) as u64,
         }
     }
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = budget_call_records)]
-struct BudgetCallNew<'a> {
+struct NewBudgetCallRow<'a> {
     id: &'a str,
     tenant_id: &'a str,
     workspace_id: &'a str,
@@ -60,6 +62,7 @@ struct BudgetCallNew<'a> {
     output_tokens: i64,
     cost_usd: f64,
     model: &'a str,
+    prompt_template_sha: Option<&'a str>,
     timestamp: i64,
 }
 
@@ -67,27 +70,28 @@ struct BudgetCallNew<'a> {
 impl BudgetCallRepository for SqliteStorage {
     async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
         let pool = Arc::clone(&self.pool);
-        let r = record.clone();
+        let rec = record.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let row = BudgetCallNew {
-                id: r.id.as_str(),
-                tenant_id: r.tenant_id.as_str(),
-                workspace_id: r.workspace_id.as_str(),
-                repo_id: r.repo_id.as_ref().map(|id| id.as_str()),
-                agent_id: r.agent_id.as_ref().map(|id| id.as_str()),
-                task_id: r.task_id.as_ref().map(|id| id.as_str()),
-                usage_type: &r.usage_type,
-                input_tokens: r.input_tokens as i64,
-                output_tokens: r.output_tokens as i64,
-                cost_usd: r.cost_usd,
-                model: &r.model,
-                timestamp: r.timestamp as i64,
+            let row = NewBudgetCallRow {
+                id: rec.id.as_str(),
+                tenant_id: rec.tenant_id.as_str(),
+                workspace_id: rec.workspace_id.as_str(),
+                repo_id: rec.repo_id.as_ref().map(|i| i.as_str()),
+                agent_id: rec.agent_id.as_ref().map(|i| i.as_str()),
+                task_id: rec.task_id.as_ref().map(|i| i.as_str()),
+                usage_type: &rec.usage_type,
+                input_tokens: rec.input_tokens as i64,
+                output_tokens: rec.output_tokens as i64,
+                cost_usd: rec.cost_usd,
+                model: &rec.model,
+                prompt_template_sha: rec.prompt_template_sha.as_deref(),
+                timestamp: rec.timestamp as i64,
             };
             diesel::insert_into(budget_call_records::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert budget_call_record")?;
+                .context("insert budget call record")?;
             Ok(())
         })
         .await?
@@ -108,10 +112,11 @@ impl BudgetCallRepository for SqliteStorage {
                 .filter(budget_call_records::tenant_id.eq(&tenant_id))
                 .filter(budget_call_records::workspace_id.eq(&ws))
                 .filter(budget_call_records::timestamp.ge(since as i64))
-                .order(budget_call_records::timestamp.desc())
+                .order_by(budget_call_records::timestamp.desc())
+                .then_order_by(budget_call_records::id.desc())
                 .limit(limit)
                 .load::<BudgetCallRow>(&mut *conn)
-                .context("list budget_call_records by workspace")?;
+                .context("list budget call records by workspace")?;
             Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
         })
         .await?
@@ -159,12 +164,13 @@ mod tests {
             workspace_id: Id::new(ws),
             repo_id: Some(Id::new("repo-1")),
             agent_id: None,
-            task_id: None,
+            task_id: Some(Id::new("task-1")),
             usage_type: "llm_query".into(),
             input_tokens: 120,
             output_tokens: 240,
             cost_usd: 0.0042,
             model: "test-model".into(),
+            prompt_template_sha: Some("a".repeat(40)),
             timestamp: ts,
         }
     }
@@ -188,6 +194,8 @@ mod tests {
         assert!((r.cost_usd - 0.0042).abs() < f64::EPSILON);
         assert_eq!(r.model, "test-model");
         assert_eq!(r.timestamp, 1_000);
+        // Prompt-template provenance round-trips (ui-layout.md §2).
+        assert_eq!(r.prompt_template_sha.as_deref(), Some(&"a".repeat(40)[..]));
     }
 
     #[tokio::test]
@@ -209,6 +217,8 @@ mod tests {
         assert_eq!(since.len(), 2);
         let limited = s.list_by_workspace("ws-1", 0, 1).await.unwrap();
         assert_eq!(limited.len(), 1);
+        // Other workspace unaffected.
+        assert_eq!(s.list_by_workspace("ws-2", 0, 10).await.unwrap().len(), 1);
     }
 
     /// TASK-119 (agent-runtime.md §4 Budget Reset): list_since returns

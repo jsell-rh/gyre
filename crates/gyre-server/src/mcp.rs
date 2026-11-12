@@ -2706,13 +2706,14 @@ async fn handle_spec_assist(
         Err(e) => return tool_error(format!("failed to look up repo: {e}")),
     };
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = crate::llm_rate_limit::check_rate_limit(
             &mut limiter,
-            &auth.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(auth),
             &workspace_id,
             crate::llm_rate_limit::LLM_RATE_LIMIT,
             crate::llm_rate_limit::LLM_WINDOW_SECS,
@@ -2778,25 +2779,38 @@ async fn handle_spec_assist(
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .ok()
-        .flatten()
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
+    // Prompt template (ui-layout.md §2, MCP parity with REST handler per
+    // HSI §11): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md) → hardcoded fallback.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
 
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &instruction)
-        .replace(
-            "{{draft_content}}",
-            draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Meta-spec-set binding (ui-layout.md §2, MCP parity with REST handler):
+    // inject the workspace's pinned personas/principles/standards/process
+    // as `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(state, &repo.workspace_id, Some(&repo.id))
+            .await;
+
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {instruction}");
 
     // Resolve model and call LLM.
@@ -2838,8 +2852,11 @@ async fn handle_spec_assist(
         tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
     }
 
-    // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking). User-initiated query via MCP.
+    // Per-call `llm_query` budget record + workspace/tenant counter
+    // increment (platform-model.md §Budget Tracking; REST handler parity,
+    // HSI §11), with the prompt-template git SHA for audit (ui-layout.md
+    // §2). Tenant scope comes from the repo's workspace; skip and log if
+    // unresolvable.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -2860,6 +2877,7 @@ async fn handle_spec_assist(
                 output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
