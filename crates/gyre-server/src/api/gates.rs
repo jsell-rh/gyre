@@ -1854,6 +1854,93 @@ type = "PsychicReview"
     }
 
     #[tokio::test]
+    async fn update_gate_rename_to_sibling_name_rejected() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        for name in ["unit-tests", "lint"] {
+            let body = serde_json::json!({
+                "name": name,
+                "gate_type": "test_command",
+                "command": "true"
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/gates")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+        let listed = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/repos/repo-1/gates")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let lint_id = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "lint")
+            .map(|g| g["id"].as_str().unwrap().to_string())
+            .unwrap();
+
+        // Renaming `lint` to the sibling `unit-tests` name would break the
+        // per-repo uniqueness the gate-chain endpoint's by-name replacement
+        // relies on — it must be a 409, and the gate must keep its name.
+        let update = serde_json::json!({ "name": "unit-tests" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{lint_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "lint");
+
+        // A rename to a name no sibling holds still succeeds.
+        let update = serde_json::json!({ "name": "lint-arch" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{lint_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "lint-arch");
+    }
+
+    #[tokio::test]
     async fn update_unknown_gate_returns_404() {
         let state = test_state();
         create_repo(state.clone()).await;
