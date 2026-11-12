@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5", "b3b6f502d2cf7d537e7ef54022886fbee4e9ac21"]
 ---
 
 ## Spec Excerpt
@@ -108,59 +108,68 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 ## Shipped
 
 agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) implemented in production code across commits 4bfdf85b8,
-7bdc60603, bfb2dc3de, 29d1a9618, dc09d6950 (prior rounds — cascade
-validation, enforcement levels incl. 60s grace vs beyond-limit hard
-kill, tracking incl. llm_query workspace-only charging, rolling-24h
-reset job, three-section prompt assembly + MCP prompt delivery), and
-d00113b22 (this round's review repairs).
+Structure) are implemented in production code. Prior rounds (commits
+4bfdf85b, 7bdc6060, bfb2dc3d, 29d1a961, dc09d695, d00113b) shipped:
+cascade validation (repo ≤ workspace ≤ tenant, effective-limit
+semantics), enforcement levels (80% warning notification + bus event,
+100% BudgetExhausted-to-inbox + 60s grace timer then kill, beyond-limit
+immediate kill; worktree preserved, task InProgress, token revoked,
+AgentKilled audit), tracking (llm_tokens/llm_cost_usd per call,
+compute_minutes charged on every terminal transition from spawned_at
+wall clock, llm_query charged to workspace only), the hourly rolling
+24h reset job recomputed from per-call records, and the three-section
+prompt assembly (GYRE_META_SPEC_PROMPT/SET_SHA +
+GYRE_PROTOCOL_PROMPT + GYRE_ITERATION at spawn; four MCP prompts
+delivering persona/protocol/context/constraints).
 
-### This round — repairs for review cf0145abb (commit d00113b22)
+### This round — rebase repair onto base d31906c5 (merge commit b3b6f502)
 
-**F1 — rolling-window resync keeps llm_query off the repo budget**
-(`crates/gyre-server/src/api/budget.rs`): `apply_rolling_24h_window`
-recomputed repo usage entries from `BudgetCallRecords` with no
-`usage_type` filter, while `record_llm_call_usage` (correctly) excludes
-`llm_query` from the incremental repo charge. specs/assist, explorer,
-and MCP spec_assist persist llm_query records WITH `repo_id`, so after
-the first hourly cycle user queries were re-charged into the repo
-budget entry — letting them exhaust a repo budget and block agent
-spawns (`check_repo_spawn_budget`), exactly what the spec forbids
-("Charged to workspace budget directly (no repo-level tracking)").
-The resync now excludes `usage_type == "llm_query"` from `repo_sums`
-(kept in ws_sums/tenant total), mirroring the incremental path. New
-mixed-sequence regression test
-`rolling_window_keeps_llm_query_out_of_repo_budget`: 900 agent_run +
-500 llm_query tokens against one repo → after `apply_rolling_24h_window`
-the repo entry stays 900 and the workspace total is 1400.
+The candidate and the new base had independently added MCP prompt
+delivery (candidate: agent-runtime §5 meta-spec semantics; base
+task-150: platform-model §4.3 persona-slug semantics). The auto-merge
+kept BOTH, producing duplicate `prompt_definitions()` /
+`handle_prompt_get()` / dispatcher arms / test names in mcp.rs (does
+not compile) plus content conflicts in docs/agent-protocol.md and
+docs/api-reference.md.
 
-**F2 — `list_since` is deployment-wide in every adapter**
-(`crates/gyre-adapters/src/sqlite/budget_call.rs`,
-`crates/gyre-adapters/src/postgres/budget_call.rs`,
-`crates/gyre-ports/src/budget_call.rs`): the SQL adapters filtered
-`list_since` by the storage handle's tenant scope, but the hourly
-resync runs on the BASE handle (tenant scope "default") and recomputes
-usage entries for every workspace plus the storage-wide
-`tenant:global` ceiling. In any DB-backed deployment with a workspace
-whose tenant != "default", the job zeroed that workspace's
-`tokens_used_today`/`cost_today` hourly — daily budgets reset hourly,
-80%/100% enforcement stopped binding (fail-open). Both SQL adapters
-now implement `list_since` unscoped, matching the mem adapter; the
-port contract documents the deployment-wide scope. New SQL-adapter
-test `list_since_spans_tenants_inside_the_window` saves a record
-under a tenant different from the handle's scope and requires it
-returned.
+Resolution, per the spec text (identical in both parents and the
+merge-base): agent-runtime.md §5 amends platform-model.md §4's
+mapping — "system://persona delivers the assembled meta-spec prompt
+set":
+
+- `crates/gyre-server/src/mcp.rs`: kept the candidate's meta-spec
+  prompt handlers and dispatcher arms; removed the base's duplicate
+  persona-slug handlers, arms, and its 10 MCP prompt tests
+  (superseded dispatch semantics). The base's `api/prompts.rs` and
+  `GYRE_PROMPT_*` spawn-time injection are preserved — persona
+  resolution/binding at spawn is unchanged, and the spawn env-dump
+  tests covering it are intact.
+- `crates/gyre-server/src/api/spawn.rs`: corrected a merge-stale
+  comment (GYRE_PROMPT_* content is the platform-model §4.3
+  spawn-injection set; the MCP `system://persona` prompt serves the
+  meta-spec set per agent-runtime §5).
+- `docs/agent-protocol.md` / `docs/api-reference.md`: resolved to
+  document both injected env-var sets and the merged MCP prompt
+  semantics.
+- `specs/coverage/system/platform-model.md`: row 23 reconciled — the
+  MCP persona-slug dispatch was superseded by agent-runtime §5
+  (agent-runtime coverage row 32 tracks the delivered semantics);
+  spawn injection retained.
 
 ### Test evidence
 
-- `cargo test -p gyre-adapters budget_call` — 5 passed (incl. the new
-  mismatched-tenant test); output in
-  `/tmp/stage/review-evidence/task119-adapters-budget-call-tests.txt`.
-- `cargo check -p gyre-server --tests` — the new server-side
-  regression test type-checks; the build wrapper blocks gyre-server
-  test compilation in this sandbox (4 GiB budget), so the verifier
-  must run `cargo test -p gyre-server --lib api::budget` (see
-  `/tmp/stage/review-evidence/task119-README.txt`).
-- rustfmt clean on all changed files; `scripts/check-arch.sh` and
-  `scripts/check-mem-port-contracts.sh` pass; clippy reports no
-  warnings in changed files.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server
+  --tests` pass after the resolution (duplicate fn/test names from
+  the bad auto-merge fail here). Evidence:
+  `/tmp/stage/review-evidence/task119-rebase-repair.txt`.
+- Mechanical checks pass: check-arch, check-mcp-write-tools,
+  check-abac-route-registry, check-dead-message-kinds,
+  check-mem-port-contracts, check-inert-enforcement,
+  check-task-commit-attribution (merge commit recorded above).
+- The 4 GiB sandbox budget blocks gyre-server test-binary linking;
+  the verifier must run: `cargo test -p gyre-server --lib mcp_prompts`
+  (merged MCP prompt tests incl. persona-without-record truthfulness
+  and protocol content), `cargo test -p gyre-server --lib api::budget`
+  (budget enforcement suite), `cargo test -p gyre-server --lib
+  api::spawn::tests` (prompt-set injection), then `cargo test --all`.
+- rustfmt clean on all changed files.
