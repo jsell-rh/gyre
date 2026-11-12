@@ -1,7 +1,7 @@
 # Coverage: ABAC Policy Engine
 
 **Spec:** [`system/abac-policy-engine.md`](../../system/abac-policy-engine.md)
-**Last audited:** 2026-11-09 (task-128 repair rounds: rows 2-7 flipped to implemented with evidence — shipped in commits 29ad56fb (core), 8ca9afaf merge line, d779f1e89 (review-round fixes), review round 2 claim-spoofing fix, review round 3 spec-path resource.id + normalize-guard fixes; notes below.)
+**Last audited:** 2026-11-09 (task-128 repair rounds: rows 2-7 flipped to implemented with evidence — shipped in commits 29ad56fb (core), 8ca9afaf merge line, d779f1e89 (review-round fixes), review round 2 claim-spoofing fix, review round 3 spec-path resource.id + normalize-guard fixes; review round 5 (198830867): no-compute-target spawns now mint attestation_level 1 per identity-security.md §Task-Scoped JWT Claims, so subject.attestation_level is set for raw-subprocess agents and Deny policies keyed on the least-attested class match; notes below.)
 **Coverage:** 6/19 (2 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
