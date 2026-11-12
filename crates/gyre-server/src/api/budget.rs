@@ -1262,7 +1262,17 @@ pub async fn apply_rolling_24h_window(state: &AppState) -> anyhow::Result<()> {
         let e = ws_sums.entry(r.workspace_id.to_string()).or_default();
         e.0 = e.0.saturating_add(tokens);
         e.1 += r.cost_usd;
-        if let Some(repo_id) = r.repo_id.as_ref() {
+        // agent-runtime.md §4 What's Tracked: user-initiated queries
+        // (llm_query) are "Charged to workspace budget directly (no
+        // repo-level tracking — user queries have no repo context)".
+        // `record_llm_call_usage` excludes them from the incremental repo
+        // charge even when the calling route scoped the query to a repo
+        // (specs/assist, explorer, MCP spec_assist persist the record
+        // WITH repo_id); this resync must apply the same rule or the
+        // first hourly cycle re-charges user queries into the repo
+        // budget entry and blocks agent spawns
+        // (`check_repo_spawn_budget`) that never owed them.
+        if let Some(repo_id) = r.repo_id.as_ref().filter(|_| r.usage_type != "llm_query") {
             let e = repo_sums.entry(repo_id.to_string()).or_default();
             e.0 = e.0.saturating_add(tokens);
             e.1 += r.cost_usd;
@@ -2400,6 +2410,72 @@ mod tests {
             "period_start must be the rolling window cutoff (±2s), got {} vs {expected}",
             usage.period_start
         );
+    }
+
+    #[tokio::test]
+    async fn rolling_window_keeps_llm_query_out_of_repo_budget() {
+        // F1 regression (agent-runtime.md §4 What's Tracked): the resync
+        // must apply the same rule as `record_llm_call_usage` — llm_query
+        // is "Charged to workspace budget directly (no repo-level
+        // tracking)". specs/assist, explorer/generate and MCP spec_assist
+        // persist llm_query records WITH repo_id; without the usage_type
+        // filter here, the first hourly cycle re-charges those records
+        // into the repo budget entry, so user queries exhaust a repo
+        // budget and block agent spawns (`check_repo_spawn_budget`).
+        let state = crate::mem::test_state();
+        let repo_id = gyre_common::Id::new("repo-mixed");
+        let mk_usage = |usage_type: &str, tokens: u64| super::LlmCallUsage {
+            tenant_id: gyre_common::Id::new("tenant-1"),
+            workspace_id: gyre_common::Id::new("ws-mixed"),
+            repo_id: Some(repo_id.clone()),
+            agent_id: None,
+            task_id: None,
+            usage_type: usage_type.to_string(),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            model: "m".to_string(),
+        };
+        // Agent reports 900 tokens (agent_run: repo + workspace).
+        super::record_llm_call_usage(&state, &mk_usage("agent_run", 900)).await;
+        // User specs/assist scoped to the repo consumes 500 tokens
+        // (llm_query persisted WITH repo_id, charged to workspace only).
+        super::record_llm_call_usage(&state, &mk_usage("llm_query", 500)).await;
+
+        // Incremental counters before the resync: repo 900, workspace 1400.
+        let repo_before = state
+            .budget_usages
+            .get_usage(&super::repo_key(repo_id.as_str()))
+            .await
+            .unwrap()
+            .expect("repo usage entry must exist")
+            .tokens_used_today;
+        assert_eq!(repo_before, 900);
+
+        super::apply_rolling_24h_window(state.as_ref())
+            .await
+            .unwrap();
+
+        // After the resync the repo entry must still hold ONLY the
+        // agent-run usage...
+        let repo_usage = state
+            .budget_usages
+            .get_usage(&super::repo_key(repo_id.as_str()))
+            .await
+            .unwrap()
+            .expect("repo usage entry must survive the roll");
+        assert_eq!(
+            repo_usage.tokens_used_today, 900,
+            "the resync must not re-charge llm_query into the repo budget"
+        );
+        // ...while the workspace total keeps both charges.
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&super::workspace_key("ws-mixed"))
+            .await
+            .unwrap()
+            .expect("workspace usage must survive the roll");
+        assert_eq!(ws_usage.tokens_used_today, 1400);
     }
 
     #[tokio::test]

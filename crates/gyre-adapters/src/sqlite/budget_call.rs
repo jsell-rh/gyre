@@ -119,11 +119,17 @@ impl BudgetCallRepository for SqliteStorage {
 
     async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>> {
         let pool = Arc::clone(&self.pool);
-        let tenant_id = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Deliberately NOT filtered by this handle's tenant scope:
+            // the only caller is the hourly rolling-24h-window resync
+            // (`apply_rolling_24h_window`), which runs on the BASE
+            // storage handle (tenant scope "default") yet recomputes
+            // usage entries for every workspace in the deployment and
+            // the storage-wide `tenant:global` ceiling. A tenant filter
+            // here drops every non-default tenant's records, zeroing
+            // their counters hourly (fail-open on 80%/100% enforcement).
             let rows = budget_call_records::table
-                .filter(budget_call_records::tenant_id.eq(&tenant_id))
                 .filter(budget_call_records::timestamp.ge(since as i64))
                 .order(budget_call_records::timestamp.desc())
                 .limit(limit)
@@ -226,6 +232,30 @@ mod tests {
         assert_eq!(all.len(), 3);
         let limited = s.list_since(0, 2).await.unwrap();
         assert_eq!(limited.len(), 2);
+    }
+
+    /// TASK-119 F2 (agent-runtime.md §4 Budget Reset): `list_since`
+    /// feeds the deployment-wide rolling-window resync, which runs on
+    /// the BASE storage handle (tenant scope "default") while records
+    /// are saved with the workspace's real tenant id. It must NOT filter
+    /// by the handle's tenant scope, or non-default tenants' records
+    /// vanish from the resync and their usage entries get zeroed hourly
+    /// (fail-open on 80%/100% enforcement). Matches the mem adapter.
+    #[tokio::test]
+    async fn list_since_spans_tenants_inside_the_window() {
+        let (_tmp, s) = setup(); // handle scoped to tenant-1
+        let mut other_tenant = record("t2", "ws-9", 30);
+        other_tenant.tenant_id = Id::new("tenant-2");
+        s.save(&record("t1", "ws-1", 20)).await.unwrap();
+        s.save(&other_tenant).await.unwrap();
+
+        let got = s.list_since(0, 10).await.unwrap();
+        assert_eq!(
+            got.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["t2", "t1"],
+            "list_since is deployment-wide: a record saved under another \
+             tenant must be returned despite the handle's tenant scope"
+        );
     }
 
     #[tokio::test]

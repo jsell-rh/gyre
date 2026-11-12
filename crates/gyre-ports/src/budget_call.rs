@@ -26,10 +26,16 @@ pub trait BudgetCallRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<BudgetCallRecord>>;
 
-    /// List records across ALL workspaces, newest first, filtered to
-    /// `timestamp >= since`. `limit` caps the number of rows returned.
-    /// Input to the hourly rolling-24h-window budget reset job
-    /// (agent-runtime.md §4 Budget Reset), which recomputes the aggregate
-    /// counters from the per-call records inside the window.
+    /// List records across ALL workspaces and tenants (deployment-wide),
+    /// newest first, filtered to `timestamp >= since`. `limit` caps the
+    /// number of rows returned. Input to the hourly rolling-24h-window
+    /// budget reset job (agent-runtime.md §4 Budget Reset), which
+    /// recomputes the aggregate counters from the per-call records
+    /// inside the window. Deliberately NOT scoped to the storage
+    /// handle's tenant: the reset job runs on the base handle and
+    /// resyncs every workspace's counters plus the storage-wide
+    /// `tenant:global` ceiling, so a tenant filter here would drop
+    /// other tenants' records and zero their usage. Every adapter
+    /// (mem, SQLite, PostgreSQL) must implement this unscoped.
     async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>>;
 }
