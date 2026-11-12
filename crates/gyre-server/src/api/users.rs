@@ -1132,7 +1132,18 @@ pub async fn add_team_member(
         )));
     }
 
-    let membership = TeamMembership::new(team.id.clone(), user_id, now_secs());
+    let membership = TeamMembership::new(team.id.clone(), user_id.clone(), now_secs());
+    // Port contract: duplicate membership fails. Surface it as 409 here
+    // (mirroring `reject_duplicate_slug`) so the adapter's guard never
+    // bubbles up as an undifferentiated 500.
+    let existing_members = state.teams.list_members(&tid).await?;
+    if existing_members.iter().any(|m| m.user_id == user_id) {
+        return Err(ApiError::Conflict(format!(
+            "user {} is already a member of team {}",
+            user_id.as_str(),
+            tid.as_str()
+        )));
+    }
     state.teams.add_member(&membership).await?;
     Ok((
         StatusCode::CREATED,

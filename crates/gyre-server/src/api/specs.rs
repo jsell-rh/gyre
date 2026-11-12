@@ -956,8 +956,12 @@ pub async fn approve_spec(
 /// (display name, username, user id — a display-name rename between the
 /// approval and this resolution must not orphan the approval).
 ///
-/// An unresolvable team reference expands to nothing — the approval stays
-/// Pending (fail-closed), never fail-open.
+/// A team reference that does not resolve — no such team, or a team with
+/// no members — is kept verbatim in the approver list: no human approval
+/// ever records a `team:{slug}` approver id, so the §9 resolver can never
+/// match it and the approval stays Pending (fail-closed). Dropping it
+/// instead would leave an empty `human_approvers` list, which the resolver
+/// treats as "any human may approve" — a fail-open.
 async fn expand_team_approvers(
     state: &crate::AppState,
     workspace_id: &gyre_common::Id,
@@ -966,17 +970,19 @@ async fn expand_team_approvers(
     let mut expanded = Vec::with_capacity(human_approvers.len());
     for approver in human_approvers {
         if crate::notifications::parse_team_ref(approver).is_some() {
-            let Some(member_ids) =
-                crate::notifications::resolve_team_members(state, workspace_id, approver).await
-            else {
-                continue;
-            };
-            for uid in member_ids {
-                if let Ok(Some(user)) = state.users.find_by_id(&uid).await {
-                    expanded.push(format!("user:{}", user.display_name));
-                    expanded.push(format!("user:{}", user.username));
+            let resolved =
+                crate::notifications::resolve_team_members(state, workspace_id, approver).await;
+            match resolved {
+                Some(member_ids) if !member_ids.is_empty() => {
+                    for uid in member_ids {
+                        if let Ok(Some(user)) = state.users.find_by_id(&uid).await {
+                            expanded.push(format!("user:{}", user.display_name));
+                            expanded.push(format!("user:{}", user.username));
+                        }
+                        expanded.push(format!("user:{}", uid));
+                    }
                 }
-                expanded.push(format!("user:{}", uid));
+                _ => expanded.push(approver.clone()),
             }
         } else {
             expanded.push(approver.clone());

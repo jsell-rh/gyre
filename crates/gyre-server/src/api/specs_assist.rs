@@ -1048,7 +1048,16 @@ pub async fn save_spec(
     // Best-effort: an unreadable manifest adds no recipients (the
     // role-based fan-out above already covers the approver-capable roles).
     if let Some(manifest) = crate::spec_registry::read_manifest(&repo.path, "HEAD").await {
-        if let Some(spec_entry) = manifest.specs.iter().find(|e| e.path == req.spec_path) {
+        // Manifest paths are relative to `specs/` (e.g. "system/owned.md"),
+        // while `spec_path` arrives in the client-facing `specs/...` form —
+        // match both, the same normalization the conflict check above uses.
+        let stripped = req
+            .spec_path
+            .strip_prefix("specs/")
+            .unwrap_or(&req.spec_path)
+            .to_string();
+        let path_matches = |p: &str| p == req.spec_path || p == stripped;
+        if let Some(spec_entry) = manifest.specs.iter().find(|e| path_matches(&e.path)) {
             if let Some(approval) = spec_entry.approval.as_ref() {
                 for approver in &approval.human_approvers {
                     if crate::notifications::parse_team_ref(approver).is_some() {
@@ -2543,6 +2552,11 @@ specs:
     /// Commit `specs/manifest.yaml` and `specs/system/<spec_file>` to the
     /// HEAD branch of a bare git repo (plumbing only — no worktree), so
     /// `read_manifest(repo_path, "HEAD")` resolves in tests.
+    ///
+    /// The API-created repo record points at a path that `NoopGitOps`
+    /// (test_state's git ops) never initialized on disk, so the bare repo
+    /// is created here — without it both this plumbing and the save flow's
+    /// `read_manifest` would fail against a nonexistent directory.
     fn commit_to_bare_repo_head(
         repo_path: &str,
         branch: &str,
@@ -2551,6 +2565,19 @@ specs:
         spec_content: &str,
     ) {
         use std::io::Write;
+
+        if !std::path::Path::new(repo_path).exists() {
+            let out = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", branch])
+                .arg(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git init --bare {repo_path} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
 
         let hash_object_stdin = |content: &str| -> String {
             let mut child = std::process::Command::new("git")
@@ -2613,7 +2640,26 @@ specs:
             "100644 blob {manifest_blob}\tmanifest.yaml\n040000 tree {system_tree}\tsystem"
         ));
         let root_tree = mktree(&format!("040000 tree {specs_tree}\tspecs"));
-        let commit = git(&["commit-tree", &root_tree, "-m", "manifest"]);
+        // `git commit-tree` needs an author identity; the test environment
+        // has no global git config, so pass one explicitly (same identity
+        // `make_manifest_repo`-style tests set via local repo config).
+        let commit = {
+            let out = std::process::Command::new("git")
+                .args(["commit-tree", &root_tree, "-m", "manifest"])
+                .env("GIT_AUTHOR_NAME", "Gyre Test")
+                .env("GIT_AUTHOR_EMAIL", "test@gyre.dev")
+                .env("GIT_COMMITTER_NAME", "Gyre Test")
+                .env("GIT_COMMITTER_EMAIL", "test@gyre.dev")
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git commit-tree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
         git(&["update-ref", &format!("refs/heads/{branch}"), &commit]);
     }
 
