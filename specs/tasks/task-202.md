@@ -2,10 +2,10 @@
 title: "Index all searchable entity types and implement real full reindex"
 spec_ref: "search.md §Searchable Entities"
 depends_on: [task-201]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -61,80 +61,3 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 - The file/code-search job MUST use the existing `JobRegistry` (`AppState.job_registry`) — do not invent a new async runtime.
 - Keep FTS SQL in `gyre-adapters`; the coordinator only calls the port. Preserve hexagonal boundaries.
 - Run validation once at the end. On completion set `progress: ready-for-review` and record commit SHAs.
-
-## Shipped
-
-All 10 searchable entity types from search.md §Searchable Entities are
-indexed with real content and the specced indexed fields and facets, and
-`POST /api/v1/admin/search/reindex` performs a true full rebuild from
-domain storage. The production implementation is commits `80f13a70`/
-`309fc7dd` (plus review/verification repairs `3e223c8a`, `e2583917`,
-`2faf26af2`, `3dc6cdcc5`, `b522dd5cd`, `b316bc37f`, rebase repairs
-`f38e8ad07`/`1f80f64f4`), integrated with current main by merge
-`b170723e0`. This round (`3e5f747b9`) repairs the last open
-verification finding: clippy `too_many_arguments` (8/7) on the
-`#[cfg(test)]` `test_state_inner` helper that the earlier rebase repair
-left with 8 parameters — the four optional port overrides
-(storage/search/secrets/kv) are now bundled into a
-`#[derive(Default)] TestStateOverrides` struct (5-arg builder, all 11
-test-state call sites updated, no behavior change).
-
-### Behavior
-
-- **Server-level coordinator** (`crates/gyre-server/src/search_indexer.rs`):
-  document builders for every entity type (spec, task, mr, commit, agent,
-  persona, activity_event, audit_event, review, file) with the specced
-  indexed fields and facet maps (`status`, `priority`, `approval_status`,
-  `scope`, `branch`, `author`, `decision`, `language`, ISO-date for
-  date-range facets, etc.). Best-effort `index`/`deindex` helpers keep
-  search failures from failing the entity write.
-- **Write paths** call `SearchPort::index` synchronously: task
-  create/update/transition (`api/tasks.rs`), MR create/status and review
-  submission (`api/merge_requests.rs`), agent create/spawn/status
-  (`api/agents.rs`, `api/spawn.rs`), persona create/update
-  (`api/personas.rs`, delete also de-indexes), activity events at every
-  analytics emit path (`api/analytics.rs`, `api/tasks.rs`,
-  `api/merge_requests.rs`, `api/spawn.rs`, `api/orchestrator.rs`,
-  `merge_processor.rs`), and audit events (`api/audit.rs`,
-  `container_audit.rs`, `procfs_monitor.rs`).
-- **Spec pushes** (`git_http.rs`): spec content is extracted from the
-  pushed git blob and indexed as `body` with the ledger's linked task/MR
-  ids (the specced `links` field) and `approval_status`/`scope`/`owner`
-  facets.
-- **Commit pushes** (`git_http.rs`): message + author are read from the
-  git object store and indexed with `branch`/`agent_id`/`date` facets.
-- **Code search (files)** is eventually consistent per spec: the
-  `search_code_index` job registered in the existing `JobRegistry` walks
-  the default branch (`git ls-tree -r -l`), skips binaries (NUL sniff)
-  and blobs over 1 MiB, and indexes real file content with a `language`
-  facet; triggered on default-branch pushes and runs hourly.
-- **Real full reindex**: `POST /api/v1/admin/search/reindex` calls the
-  coordinator, which clears the index first and then rebuilds from every
-  domain repository (spec ledger + git blobs, tasks, MRs + reviews,
-  agents, personas, activity events, audit events, agent-commit
-  mappings, repo file trees), returning the true document count.
-
-### Test evidence
-
-- This round (sandbox, build-wrapper constrained):
-  - `cargo check -p gyre-server --tests` — exit 0 (type-checks the
-    repaired `#[cfg(test)]` helpers).
-  - `cargo clippy -p gyre-server --all-targets` — exit 0; the flagged
-    mem.rs:4159 `too_many_arguments` finding is gone and no clippy
-    warning falls on any line changed by this branch (remaining crate
-    warnings are pre-existing on unchanged lines).
-  - `rustfmt --edition 2021 --check crates/gyre-server/src/mem.rs` —
-    clean.
-  - Evidence: `/tmp/stage/review-evidence/task-202-clippy-repair.txt`.
-- Deferred to the independent verifier (gyre-server codegen exceeds the
-  sandbox's 4 GiB model+build budget):
-  - `cargo test -p gyre-server --lib search_indexer` — includes
-    `full_reindex_rebuilds_all_entity_types_from_real_storage` (seeds
-    spec-by-blob-content, commit-by-message, task, MR, review, agent,
-    persona, activity/audit events, and file docs against a real SQLite
-    FTS5 backend; poisons the index with a stale doc; asserts every type
-    is retrievable and the stale doc is dropped).
-  - `cargo test -p gyre-server --test search_wiring` — FTS5 port wiring
-    through the real router (`/api/v1/search`, `/suggest`, `/facets`,
-    admin reindex).
-  - `cargo test --all` and remaining CI gates.
