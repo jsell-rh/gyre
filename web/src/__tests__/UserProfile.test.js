@@ -22,6 +22,7 @@ vi.mock('../lib/toast.svelte.js', () => ({
 }));
 
 import { api } from '../lib/api.js';
+import { NOTIF_TYPE_IDS } from '../lib/notification-types.js';
 import UserProfile from '../components/UserProfile.svelte';
 
 const ME = {
@@ -97,13 +98,13 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('exposes exactly the six permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
+  it('exposes exactly the six permitted tabs -- HSI §12 forbids My Agents/Tasks/MRs', async () => {
     const { container, findAllByText } = r();
     await findAllByText('James Sell');
     const ids = [...container.querySelectorAll('[role="tab"]')].map((el) => el.dataset.id);
     expect(ids).toEqual(['info', 'tokens', 'memberships', 'ledger', 'notif-prefs', 'notifications']);
     // HSI §12 "What the Profile Is NOT": tasks are agent work units, MRs are
-    // judged not authored, agents are machinery — none is a per-user surface.
+    // judged not authored, agents are machinery -- none is a per-user surface.
     for (const forbidden of ['my-agents', 'my-tasks', 'my-mrs']) {
       expect(ids).not.toContain(forbidden);
     }
@@ -125,7 +126,7 @@ describe('UserProfile', () => {
 
   it('shows read-only last login in Profile tab', async () => {
     const { findByText } = r();
-    // 1759000000 * 1000 formatted by toLocaleString — assert the label and
+    // 1759000000 * 1000 formatted by toLocaleString -- assert the label and
     // that some rendered value carries the year of the recorded login.
     expect(await findByText('Last Login')).toBeTruthy();
     const d = new Date(1759000000 * 1000);
@@ -152,7 +153,7 @@ describe('UserProfile', () => {
 
   it('badge count comes from the server-side count endpoint, not the list page', async () => {
     const { findByText } = r();
-    // notificationCount resolves 7 while the list mock holds only 2 items —
+    // notificationCount resolves 7 while the list mock holds only 2 items --
     // a client-side `list.filter(unread)` badge would show a different number.
     api.notificationCount.mockResolvedValue(7);
     expect(await findByText('7')).toBeTruthy();
@@ -210,7 +211,7 @@ describe('UserProfile', () => {
     expect(await findByText(/No activity recorded/)).toBeTruthy();
   });
 
-  it('shows a toggle for every canonical NotificationType (39)', async () => {
+  it('shows a toggle for every canonical NotificationType', async () => {
     const { findByText, container } = r();
     const prefsTab = await findByText('Notification Preferences');
     await fireEvent.click(prefsTab);
@@ -224,8 +225,17 @@ describe('UserProfile', () => {
     expect(await findByText('Security Findings')).toBeTruthy();
     expect(await findByText('Merge Queue Paused')).toBeTruthy();
     expect(await findByText('Persona Changes Pending Approval')).toBeTruthy();
+    // Review F1: 'ComputeTargetUnavailable' (Priority-1 inbox type) had no
+    // toggle -- a human could not disable it. It must render like the rest.
+    expect(await findByText('Compute Target Unavailable')).toBeTruthy();
     const checkboxes = container.querySelectorAll('.pref-checkbox');
-    expect(checkboxes.length).toBe(39);
+    // One toggle per canonical NotificationType variant. The count is the
+    // gyre-common enum variant count (40), asserted against the shared
+    // canonical list -- NOT the component's own rendering list length,
+    // which is what a mirrored count would silently forgive.
+    expect(NOTIF_TYPE_IDS.length).toBe(40);
+    expect(new Set(NOTIF_TYPE_IDS).size).toBe(NOTIF_TYPE_IDS.length);
+    expect(checkboxes.length).toBe(NOTIF_TYPE_IDS.length);
   });
 
   it('loads server-side prefs rows into the toggles', async () => {
@@ -273,12 +283,13 @@ describe('UserProfile', () => {
     expect(api.updateNotificationPreferences).toHaveBeenCalledTimes(1);
     const arg = api.updateNotificationPreferences.mock.calls[0][0];
     // Backend PUT expects { preferences: [{ notification_type, enabled }] }
-    // with canonical names — anything else is a 400.
+    // with canonical names -- anything else is a 400.
     expect(Array.isArray(arg.preferences)).toBe(true);
-    expect(arg.preferences.length).toBe(39);
+    expect(arg.preferences.length).toBe(NOTIF_TYPE_IDS.length);
     const types = arg.preferences.map(p => p.notification_type);
     expect(types).toContain('GateFailure');
     expect(types).toContain('MergeQueueEscalation');
+    expect(types).toContain('ComputeTargetUnavailable');
     // Previously-omitted canonical variants are now toggleable and saved.
     expect(types).toContain('AgentFailed');
     expect(types).toContain('SecurityFinding');
@@ -287,7 +298,7 @@ describe('UserProfile', () => {
     // Fabricated names must be gone.
     expect(types).not.toContain('SpecApproval');
     expect(types).not.toContain('MergeRequestMerged');
-    // Legacy parse aliases are not canonical as_str() names — a toggle
+    // Legacy parse aliases are not canonical as_str() names -- a toggle
     // keyed on an alias never matches a stored notification.
     expect(types).not.toContain('SpecPendingApproval');
     expect(types).not.toContain('BudgetWarning');

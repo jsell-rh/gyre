@@ -789,6 +789,7 @@
       "AtomicGroupFailure": "Atomic Group Failures",
       "SpecConflict": "Spec Conflicts",
       "MergeQueueEscalation": "Merge Queue Escalations",
+      "ComputeTargetUnavailable": "Compute Target Unavailable",
       "ImpersonationRequest": "Impersonation Requests",
       "ImpersonationAlert": "Impersonation Alerts",
       "SecretExpiring": "Secrets Expiring",

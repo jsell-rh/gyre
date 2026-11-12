@@ -7,6 +7,7 @@
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
+  import { NOTIF_TYPE_IDS } from '../lib/notification-types.js';
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
@@ -24,39 +25,14 @@
   let activeTab = $state('info');
   let unread = $state(0);
 
-  // Notification preferences — per-type toggles (HSI §12).
-  // Type ids are the canonical `NotificationType::as_str()` names the backend
-  // stores in user_notification_preferences.notification_type; PUT rejects
-  // any other spelling, and the inbox filter only matches these names.
-  // (Legacy parse aliases like 'SpecPendingApproval'/'BudgetWarning' must
-  // NOT appear here: the inbox exclusion compares raw strings, so an alias
-  // id would be a silently inert toggle.)
-  // Every canonical NotificationType::as_str() name, in enum declaration
-  // order (HSI §12: "enable/disable any NotificationType variant"). The
-  // backend PUT rejects names that are not canonical as_str() spellings, so
-  // this list must stay in lockstep with gyre-common's NotificationType.
-  const NOTIF_TYPE_IDS = [
-    // user-management.md §Notification Entity taxonomy
-    'SpecApprovalRequested', 'PersonaApprovalRequested',
-    'AgentEscalation', 'AgentBudgetWarning', 'AgentBudgetExhausted',
-    'AgentFailed',
-    'GateFailure', 'GatePassed',
-    'MrMerged', 'MrReverted', 'MergeQueuePaused',
-    'BreakingChangeDetected', 'SpecDriftDetected', 'DependencyStale',
-    'SecurityFinding',
-    'InvitationReceived', 'MembershipChanged',
-    'SystemAlert',
-    // HSI §2 inbox types
-    'AgentNeedsClarification', 'CrossWorkspaceSpecChange',
-    'ConflictingInterpretations', 'MetaSpecDrift',
-    'TrustSuggestion', 'SpecAssertionFailure',
-    'AbandonedBranch', 'AgentCompleted', 'SuggestedSpecLink',
-    'SpecRejected', 'ConstraintViolation',
-    'CascadeTestTriggered', 'CascadeTestFailed', 'DependencyChainTooDeep',
-    'AtomicGroupFailure', 'SpecConflict', 'MergeQueueEscalation',
-    'ImpersonationRequest', 'ImpersonationAlert', 'SecretExpiring',
-    'PersonaChangePendingApproval',
-  ];
+  // Notification preferences: per-type toggles (HSI §12).
+  // NOTIF_TYPE_IDS (lib/notification-types.js) is the canonical
+  // `NotificationType::as_str()` name list the backend stores in
+  // user_notification_preferences.notification_type; PUT rejects any other
+  // spelling, and the inbox filter only matches these names, so legacy parse
+  // aliases like 'SpecPendingApproval'/'BudgetWarning' must not appear there.
+  // scripts/check-notification-toggle-coverage.sh keeps it in lockstep with
+  // gyre-common's NotificationType enum and the locale labels.
   // Build NOTIF_TYPES array with localized labels for compatibility with defaultPrefs()
   const NOTIF_TYPES = NOTIF_TYPE_IDS.map(id => ({ id, labelKey: `user_profile.notif_types.${id}` }));
 
