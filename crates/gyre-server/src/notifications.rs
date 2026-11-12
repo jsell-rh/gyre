@@ -459,7 +459,7 @@ mod tests {
     async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new(user), None, None, None, None, &[], 50, 0)
             .await
             .unwrap()
     }

@@ -8384,7 +8384,7 @@ specs:
         // The owner was notified.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-1"), None, None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-1"), None, None, None, None, &[], 100, 0)
             .await
             .unwrap();
         let notif = notifs
