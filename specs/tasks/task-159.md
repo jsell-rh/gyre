@@ -2,7 +2,7 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
 commits: ["2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "51528a6c51b11f2714bf026c34bc9886d4a93d1d"]
@@ -48,21 +48,12 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 
 ## Acceptance Criteria
 
-- [ ] Merge processor checks meta_spec_set_sha on MRs with attestations
-- [ ] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
-- [ ] Warning does not block merge by default
-- [ ] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
-- [ ] MRs without attestation skip the check gracefully
-- [ ] Tests cover match, mismatch, hard-block, and no-attestation cases
-
-## Agent Instructions
-
-- Read `crates/gyre-server/src/merge_processor.rs` for the merge queue processing loop — find where gate checks are evaluated
-- Read `crates/gyre-server/src/gate_executor.rs` for how gate results are structured and reported
-- Read `crates/gyre-domain/src/attestation.rs` for the MergeAttestation struct (meta_spec_set_sha field)
-- Read `crates/gyre-server/src/constraint_check.rs` for existing constraint evaluation (meta_spec_set_sha constraint exists but may not be wired into gates)
-- The meta_spec_set_sha is already captured in attestations — the check is comparing it against the workspace's current set SHA
-- Follow the existing gate result pattern for adding the drift warning
+- [x] Merge processor checks meta_spec_set_sha on MRs with attestations
+- [x] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
+- [x] Warning does not block merge by default
+- [x] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
+- [x] MRs without attestation skip the check gracefully
+- [x] Tests cover match, mismatch, hard-block, and no-attestation cases
 
 ## Shipped
 
@@ -113,31 +104,34 @@ result into a `meta_spec_drift` node field;
 `web/src/components/MergeQueueGraph.svelte` renders the ⚠ badge with
 tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
 
-### Base-merge (rebase) resolution — this round
+### Rebase repair round — merge of current main 3b734b1af (merge commit d0d5832a3)
 
-Merged assignment base `1e61f6637` (task-158 tenant-scope meta-specs +
-task-163 dependency graph) into the branch (merge commit `73e1491aa`,
-in `commits:` above). Conflicts resolved as a union in
-`abac_middleware.rs` (both route mappings), `docs/api-reference.md`, and
-the coverage matrix (§8 row takes task-158's `implemented`, §9 row keeps
-task-159's). `reconciliation.rs` kept both terminal test blocks (§9 drift
-+ §8 tenant). Semantic fix: `compute_meta_spec_set_sha` call sites
-(`mr_meta_spec_drift` and the drift test helpers) adapted to the task-158
-`&AppState` effective-set signature — for tenant-less workspaces the
-merged serialization is byte-identical to the stored workspace-set JSON,
-so SHAs recorded before tenant sets existed remain valid (no false drift
-on upgrade).
+The published PR (head `de155f824`) conflicted with current main
+(`3b734b1af`, task-168 repo lifecycle: gate `position` field, migration
+`2026-10-08-000062_gate_position`, repo archive/settings UI). Resolved by
+merging main into the task branch, preserving the retained task-159
+implementation. Source conflicts: none — the only content conflicts were
+generated `web/dist` assets, resolved to the assignment base (final
+integration rebuilds and publishes them remotely). Main's `position` field
+additions to `QualityGate` were taken in (test struct literals in
+`merge_processor.rs` gained `position: 0`; the drift gate path constructs
+gate *results*, not `QualityGate` rows, so no drift-code adaptation was
+needed). Verified post-merge: `cargo check -p gyre-server` passes; the
+coverage matrix §9 row (`implemented | task-159`) and all `commits:`
+frontmatter SHAs are intact.
 
 ### Test evidence
 
-In-sandbox (4 GiB budget): `cargo check --workspace` and
-`cargo check -p gyre-server --tests` both pass;
-`check-abac-route-registry.sh`, `check-arch.sh`,
-`check-migration-versions.sh`, `check-dead-message-kinds.sh`, and
-`check-task-commit-attribution.sh` all pass. `cargo test -p gyre-server`
-is blocked by the sandbox build wrapper (server test compilation exceeds
-the 4 GiB budget with the model resident) — the independent verifier must
-run the recorded server probes:
+In-sandbox (4 GiB budget), this round on the merged tree:
+`cargo check -p gyre-server` passes (7m26s, includes build.rs web asset
+build); `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 29/29
+pass (drift badge + tooltip); `npx vitest run
+src/__tests__/WorkspaceSettings.test.js
+src/__tests__/RepoSettings.test.js` — 141/141 pass (main's task-168 UI
+changes merged cleanly). `cargo test -p gyre-server` is owned by the
+independent verifier (server test compilation exceeds the sandbox budget
+with the model resident) — the verifier must run the recorded server
+probes:
 
     cargo test -p gyre-server --lib reconciliation::tests::drift_
     cargo test -p gyre-server --lib reconciliation::tests::drift_warning_parse
@@ -150,6 +144,5 @@ run the recorded server probes:
 These cover the acceptance criteria (match → no warning, mismatch → §9
 warning, warn-only proceeds, strict policy hard-blocks + relax recovery,
 no-attestation skip, gate-result idempotency, queue-starvation
-regression) plus the task-158 §8 test block preserved by the conflict
-resolution. Web component tests: `web/src/__tests__/MergeQueueGraph.test.js`
-(drift badge rendering).
+regression) plus the task-158 §8 test block preserved by the earlier
+conflict resolution.
