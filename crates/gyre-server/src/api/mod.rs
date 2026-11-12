@@ -37,6 +37,7 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
