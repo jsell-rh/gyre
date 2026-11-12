@@ -598,7 +598,6 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         if !matches!(task_type, TaskType::Delegation | TaskType::Coordination) {
             continue; // Implementation → worker spawn path, not orchestrators
         }
-
         // Resolve the repo this task targets.
         let repo_id = task.repo_id.clone();
         let repo = match repo_id {
@@ -718,7 +717,731 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             );
         }
     }
+
+    // Phase 4 (agent-runtime.md §1): worker agent spawning for
+    // Implementation tasks the cycles above may just have decomposed (and
+    // for any other Backlog Implementation task). Same cycle lock: a
+    // worker spawn claim can never interleave with another cycle's claim.
+    spawn_implementation_workers(state).await;
     Ok(())
+}
+
+// ── Phase 4: task scheduler → worker agent spawning ─────────────────────────
+
+/// Task label flagging a Backlog task that could not spawn because the
+/// workspace budget is exhausted (agent-runtime.md §1 Phase 4 step 3:
+/// "task stays Backlog with a BudgetExhausted flag"). Cleared when a later
+/// cycle spawns the task successfully.
+const BUDGET_EXHAUSTED_LABEL: &str = "budget-exhausted";
+
+/// Exponential backoff between worker spawn attempts, in seconds
+/// (agent-runtime.md §1 Phase 7 "Spawn failure": 3 retries at 1s / 5s /
+/// 30s, then the task is Blocked with a priority-1 notification).
+pub(crate) const SPAWN_RETRY_BACKOFF_SECS: [u64; 3] = [1, 5, 30];
+
+/// One worker-spawn cycle (agent-runtime.md §1 Phase 4).
+///
+/// Detects `Backlog` tasks with `task_type: Implementation`, checks the
+/// spec's preconditions (repo not Archived, `depends_on` complete, `order`
+/// next, `max_agents` limit, workspace budget) and claims + spawns each
+/// eligible task. Ineligible tasks stay `Backlog` — the scheduler
+/// re-checks periodically as agents complete (queuing, not rejection).
+///
+/// Runs under the scheduler cycle lock (the caller holds it), so two
+/// cycles can never both claim the same Backlog task.
+async fn spawn_implementation_workers(state: &Arc<AppState>) {
+    // Crash recovery first (review F2, task-118): release stale InProgress
+    // claims whose agent is not Active — stranded by a dead process — so
+    // the Backlog scan below (and later cycles) can re-spawn them.
+    recover_stale_worker_claims(state).await;
+
+    let now = crate::api::now_secs();
+    let backlog = match state.tasks.list_by_status(&TaskStatus::Backlog).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("signal-chain: worker scan failed: {e}");
+            return;
+        }
+    };
+
+    for task in backlog {
+        if task.task_type != Some(TaskType::Implementation) {
+            continue; // Delegation/Coordination → orchestrators; untyped → never spawned
+        }
+        let Some(repo) = resolve_task_repo(state, &task).await else {
+            continue;
+        };
+
+        // Precondition: repo not Archived (repo-lifecycle.md §4). The task
+        // stays Backlog — archiving cancels active tasks separately, and an
+        // unarchived repo resumes spawning on a later cycle.
+        if repo.is_archived() {
+            tracing::debug!(
+                task_id = %task.id,
+                repo_id = %repo.id,
+                "signal-chain: repo archived; worker spawn deferred"
+            );
+            continue;
+        }
+
+        // Ordering: every depends_on task resolved (Done or Cancelled —
+        // a cancelled dependency never completes, blocking forever).
+        if !depends_on_satisfied(state, &task).await {
+            continue;
+        }
+        // Ordering: this task's `order` is next — no incomplete sibling
+        // with a lower order value in the same decomposition group.
+        if !order_is_next(state, &task).await {
+            continue;
+        }
+
+        // Precondition: max_agents per repo (repo override → workspace
+        // fallback → unlimited). At the limit the task is QUEUED (stays
+        // Backlog; the scheduler re-checks as agents complete) — never
+        // rejected.
+        let limit = effective_max_agents(state, &repo).await;
+        if let Some(limit) = limit {
+            match count_active_agents_for_repo(state, &repo.id).await {
+                Ok(active) if active >= limit as usize => {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        repo_id = %repo.id,
+                        active,
+                        limit,
+                        "signal-chain: repo at max_agents; task queued"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(task_id = %task.id, "signal-chain: agent count failed: {e}");
+                    continue;
+                }
+            }
+        }
+
+        // Precondition: workspace budget. Exhausted → the task stays
+        // Backlog with the BudgetExhausted flag (a label on the task —
+        // the observable marker the spec calls for), cleared on the
+        // successful spawn of a later cycle.
+        if let Err(reason) =
+            crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string()).await
+        {
+            // Flag the FRESHEST row (same stale-snapshot defense as the
+            // claim below): persisting the snapshot taken at
+            // list_by_status could revert a concurrent status change
+            // (e.g. a cancellation) while merely adding the label.
+            match state.tasks.find_by_id(&task.id).await {
+                Ok(Some(current))
+                    if current.status == TaskStatus::Backlog
+                        && !current.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL) =>
+                {
+                    let mut flagged = current;
+                    flagged.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
+                    flagged.updated_at = now;
+                    let _ = state.tasks.update(&flagged).await;
+                    tracing::info!(
+                        task_id = %task.id,
+                        workspace_id = %repo.workspace_id,
+                        reason = %reason,
+                        "signal-chain: budget exhausted; task flagged and left Backlog"
+                    );
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // Defense in depth against a concurrent API mutation inside this
+        // cycle's await window: the `task` snapshot predates the repo /
+        // ordering / budget awaits above, and claiming by whole-row
+        // persisting that snapshot would silently overwrite a task that
+        // was cancelled, completed, or edited in the meantime (the same
+        // re-read-after-lock defense the orchestrator loop applies before
+        // decomposition). Only a still-Backlog Implementation task may be
+        // claimed from the freshest row.
+        let task = match state.tasks.find_by_id(&task.id).await {
+            Ok(Some(current))
+                if current.status == TaskStatus::Backlog
+                    && current.task_type == Some(TaskType::Implementation) =>
+            {
+                current
+            }
+            Ok(Some(current)) => {
+                tracing::debug!(
+                    task_id = %task.id,
+                    task_status = ?current.status,
+                    "signal-chain: task changed during the spawn cycle; skipping"
+                );
+                continue;
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "signal-chain: task disappeared during the spawn cycle; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "signal-chain: task re-read before claim failed: {e}"
+                );
+                continue;
+            }
+        };
+
+        // Claim: Backlog → InProgress so no concurrent cycle (or the 30 s
+        // loop re-entering) can double-spawn this task. The background
+        // retry task keeps the claim fresh (each attempt touches the task)
+        // so the stale-claim recovery never re-claims mid-retry.
+        let mut claimed = task.clone();
+        if let Err(e) = claimed.transition_status(TaskStatus::InProgress) {
+            tracing::warn!(task_id = %task.id, "signal-chain: worker claim failed: {e}");
+            continue;
+        }
+        claimed.updated_at = now;
+        // Clear the budget flag: this cycle is spending budget on the task.
+        claimed.labels.retain(|l| l != BUDGET_EXHAUSTED_LABEL);
+        if let Err(e) = state.tasks.update(&claimed).await {
+            tracing::warn!(task_id = %task.id, "signal-chain: worker claim persist failed: {e}");
+            continue;
+        }
+
+        // First spawn attempt synchronously in the cycle (its effect —
+        // agent record, worktree, task assignment — is the cycle's
+        // observable outcome); the Phase 7 retry backoffs (1s/5s/30s) run
+        // off-cycle in the background so they never hold the cycle lock.
+        // The claim above is the concurrency guard for both.
+        let state = Arc::clone(state);
+        let repo = repo.clone();
+        let task = claimed;
+        match try_spawn_worker(&state, &repo, &task, 0).await {
+            WorkerSpawnOutcome::Launched => {}
+            WorkerSpawnOutcome::Blocked(reason) => {
+                release_claim(&state, &task, &reason).await;
+            }
+            WorkerSpawnOutcome::LaunchFailed(reason) => {
+                tokio::spawn(async move {
+                    retry_worker_spawn(state, repo, task, reason).await;
+                });
+            }
+        }
+    }
+}
+
+/// Crash recovery for claimed Implementation tasks (agent-runtime.md §1
+/// Phase 4/7; review F2, task-118). A task left InProgress by a dead
+/// process — e.g. a server crash during the spawn-retry backoff, when the
+/// last attempt's agent is already `Failed` so the stale-agent detector
+/// has no Active agent to reap — would be stranded forever: the worker
+/// scan selects only Backlog, and the orchestrator stale-claim recovery
+/// deliberately skips Implementation tasks. Such claims are released back
+/// to Backlog through the domain's dedicated `Task::release_claim` edge
+/// (the only InProgress→Backlog route), so a later cycle re-spawns them.
+///
+/// A claim held by an **Active** agent is never released: task rows are
+/// not touched while a worker runs (only the claim and the completion
+/// transition write them), so task age alone must not requeue live work.
+/// A crashed-but-still-Active agent is first reaped by the stale-agent
+/// detector (heartbeat timeout → Dead), after which the next cycle
+/// releases the orphaned claim here.
+async fn recover_stale_worker_claims(state: &Arc<AppState>) {
+    let now = crate::api::now_secs();
+    let stale_before = now.saturating_sub(SCHEDULER_CLAIM_STALENESS_SECS);
+    let claimed = match state.tasks.list_by_status(&TaskStatus::InProgress).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("signal-chain: stale worker-claim scan failed: {e}");
+            return;
+        }
+    };
+    for task in claimed
+        .into_iter()
+        .filter(|t| t.task_type == Some(TaskType::Implementation))
+        .filter(|t| t.updated_at <= stale_before)
+    {
+        // An Active agent holds the claim — never release it from under a
+        // live worker.
+        if let Some(aid) = task.assigned_to.as_ref() {
+            if let Ok(Some(a)) = state.agents.find_by_id(aid).await {
+                if a.status == AgentStatus::Active {
+                    continue;
+                }
+            }
+        }
+        tracing::warn!(
+            task_id = %task.id,
+            agent_id = ?task.assigned_to,
+            "signal-chain: stale worker claim with no active agent; releasing to Backlog (crash recovery)"
+        );
+        release_claim(state, &task, "stale worker claim (crash recovery)").await;
+    }
+}
+
+/// Resolve a task's repo, warning once for unresolvable rows (a Backlog
+/// task whose repo vanished would otherwise retry-scan forever silently).
+async fn resolve_task_repo(state: &Arc<AppState>, task: &Task) -> Option<Repository> {
+    if task.repo_id.as_str().is_empty() {
+        return None;
+    }
+    match state.repos.find_by_id(&task.repo_id).await {
+        Ok(Some(repo)) => Some(repo),
+        Ok(None) => {
+            tracing::warn!(
+                task_id = %task.id,
+                repo_id = %task.repo_id,
+                "signal-chain: worker task has no resolvable repo; leaving Backlog"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task.id, "signal-chain: repo lookup failed: {e}");
+            None
+        }
+    }
+}
+
+/// All `depends_on` tasks resolved: Done or Cancelled.
+async fn depends_on_satisfied(state: &Arc<AppState>, task: &Task) -> bool {
+    for dep_id in &task.depends_on {
+        match state.tasks.find_by_id(dep_id).await {
+            Ok(Some(dep)) => {
+                if !matches!(dep.status, TaskStatus::Done | TaskStatus::Cancelled) {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        dep_id = %dep_id,
+                        dep_status = ?dep.status,
+                        "signal-chain: dependency incomplete; worker spawn deferred"
+                    );
+                    return false;
+                }
+            }
+            Ok(None) => {
+                // A deleted dependency can never complete — treat as
+                // satisfied rather than blocking the task forever.
+                tracing::warn!(
+                    task_id = %task.id,
+                    dep_id = %dep_id,
+                    "signal-chain: depends_on task missing; treating as resolved"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, "signal-chain: dependency lookup failed: {e}");
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The task's `order` is the next to run: no incomplete task in the same
+/// repo + decomposition group (parent_task_id) with a strictly lower
+/// order. Tasks without an order never block ordered siblings.
+async fn order_is_next(state: &Arc<AppState>, task: &Task) -> bool {
+    let Some(order) = task.order else {
+        return true;
+    };
+    let siblings = match state.tasks.list_by_repo(&task.repo_id).await {
+        Ok(t) => t,
+        Err(_) => return true, // cannot determine ordering — do not starve the task
+    };
+    for sib in siblings {
+        if sib.id == task.id {
+            continue;
+        }
+        if sib.parent_task_id != task.parent_task_id {
+            continue;
+        }
+        let Some(sib_order) = sib.order else {
+            continue;
+        };
+        if sib_order < order && !matches!(sib.status, TaskStatus::Done | TaskStatus::Cancelled) {
+            tracing::debug!(
+                task_id = %task.id,
+                blocking_task_id = %sib.id,
+                blocking_order = sib_order,
+                "signal-chain: lower-order sibling incomplete; worker spawn deferred"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// Effective per-repo agent limit: `Repository.max_agents` →
+/// `Workspace.max_agents_per_repo` → None (unlimited) — agent-runtime.md
+/// §1 Phase 4 / §4 Cascade fallback chain.
+async fn effective_max_agents(state: &Arc<AppState>, repo: &Repository) -> Option<u32> {
+    if let Some(max) = repo.max_agents {
+        return Some(max);
+    }
+    state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|ws| ws.max_agents_per_repo)
+}
+
+/// Count Active worker agents scoped to a repo. Workers link repos via
+/// their worktree records (only orchestrators carry `repo_id` directly),
+/// so the count is the number of distinct agents with a worktree in the
+/// repo whose status is Active.
+async fn count_active_agents_for_repo(
+    state: &Arc<AppState>,
+    repo_id: &Id,
+) -> anyhow::Result<usize> {
+    let worktrees = state.worktrees.find_by_repo(repo_id).await?;
+    let mut agent_ids: Vec<Id> = Vec::new();
+    for wt in worktrees {
+        if !agent_ids.contains(&wt.agent_id) {
+            agent_ids.push(wt.agent_id);
+        }
+    }
+    let mut active = 0;
+    for aid in agent_ids {
+        if let Ok(Some(a)) = state.agents.find_by_id(&aid).await {
+            if a.status == AgentStatus::Active {
+                active += 1;
+            }
+        }
+    }
+    Ok(active)
+}
+
+/// The system principal the scheduler spawns workers as. Same shape as
+/// the global-token auth path (auth.rs): agent_id "system", no user row,
+/// no JWT claims — ABAC checks bypass for it, and spawn-side tenant
+/// containment treats it as the bootstrap principal.
+fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
+    crate::auth::AuthenticatedAgent {
+        agent_id: "system".to_string(),
+        user_id: None,
+        roles: vec![gyre_domain::UserRole::Admin],
+        tenant_id: crate::auth::system_principal_tenant(),
+        jwt_claims: None,
+        bearer_token: None,
+        deprecated_token_auth: false,
+        impersonation: None,
+    }
+}
+
+/// Outcome of one worker spawn attempt.
+#[derive(Debug)]
+enum WorkerSpawnOutcome {
+    /// The agent process launched on the compute target.
+    Launched,
+    /// Spawning is blocked by a precondition (budget, task/repo state) —
+    /// release the claim, no retry.
+    Blocked(String),
+    /// `ComputeTarget::spawn_process()` failed — retry with backoff.
+    LaunchFailed(String),
+}
+
+/// Retry a failed worker spawn, applying the Phase 7 spawn-failure policy:
+/// up to 3 retries with exponential backoff (1s / 5s / 30s), then the task
+/// is Blocked, the orchestrator notified, and a priority-1 notification
+/// created for workspace admins. Attempt 0 already failed (`reason`) —
+/// this loop covers attempts 1..=3.
+pub(crate) async fn retry_worker_spawn(
+    state: Arc<AppState>,
+    repo: Repository,
+    task: Task,
+    first_reason: String,
+) {
+    let max_attempts = SPAWN_RETRY_BACKOFF_SECS.len();
+    let mut reason = first_reason;
+    for attempt in 1..=max_attempts {
+        let backoff = SPAWN_RETRY_BACKOFF_SECS[attempt - 1];
+        tracing::warn!(
+            task_id = %task.id,
+            attempt,
+            backoff_secs = backoff,
+            reason = %reason,
+            "signal-chain: worker spawn failed; retrying with backoff"
+        );
+        // Keep the claim fresh so the stale-claim recovery (60 s) never
+        // re-claims a task whose retry is still sleeping.
+        touch_task(&state, &task.id).await;
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+
+        match try_spawn_worker(&state, &repo, &task, attempt).await {
+            WorkerSpawnOutcome::Launched => return,
+            WorkerSpawnOutcome::Blocked(blocked) => {
+                release_claim(&state, &task, &blocked).await;
+                return;
+            }
+            WorkerSpawnOutcome::LaunchFailed(r) => reason = r,
+        }
+    }
+    final_spawn_failure(&state, &repo, &task, &reason).await;
+}
+
+/// One spawn attempt through the shared spawn core. On launch failure the
+/// just-created agent record is torn down (Failed + token removed + budget
+/// counter released) so a failed attempt leaves no orphaned Active agent.
+async fn try_spawn_worker(
+    state: &Arc<AppState>,
+    repo: &Repository,
+    task: &Task,
+    attempt: usize,
+) -> WorkerSpawnOutcome {
+    // Unique per attempt: a failed attempt's agent record keeps its name.
+    // Char-boundary-safe prefix (task ids are server-generated UUIDs, but
+    // the repo invariant forbids fixed byte-index slicing on principle).
+    let id_prefix: String = task.id.as_str().chars().take(8).collect();
+    let name = format!("worker-{id_prefix}-a{attempt}");
+    let branch = task
+        .branch
+        .clone()
+        .unwrap_or_else(|| format!("task/{id_prefix}"));
+    let req = crate::api::spawn::SpawnAgentRequest {
+        name,
+        repo_id: repo.id.to_string(),
+        task_id: task.id.to_string(),
+        branch,
+        parent_id: task.parent_task_id.as_ref().map(|p| p.to_string()),
+        compute_target_id: None, // system spawn: workspace/tenant resolution only
+        disconnected_behavior: None,
+        loop_config: None,
+        agent_type: None,
+        conversation_sha: None,
+    };
+    match crate::api::spawn::spawn_agent_core(
+        state,
+        req,
+        &scheduler_system_auth(),
+        "task scheduler (agent-runtime.md §1 Phase 4)",
+    )
+    .await
+    {
+        Ok(resp) if resp.process_launched => WorkerSpawnOutcome::Launched,
+        Ok(resp) => {
+            let reason =
+                "compute target spawn_process failed (agent-runtime.md §1 Phase 7)".to_string();
+            teardown_failed_spawn(state, &Id::new(&resp.agent.id), repo).await;
+            WorkerSpawnOutcome::LaunchFailed(reason)
+        }
+        // Budget exhausted mid-flight (race between the pre-check and the
+        // spawn core's own check): release the claim with the flag set.
+        Err(crate::api::error::ApiError::TooManyRequests(reason)) => {
+            WorkerSpawnOutcome::Blocked(reason)
+        }
+        Err(e) => WorkerSpawnOutcome::LaunchFailed(format!("{e:?}")),
+    }
+}
+
+/// Tear down the agent record a failed launch left behind: Failed status,
+/// token removed, budget counter released.
+async fn teardown_failed_spawn(state: &Arc<AppState>, agent_id: &Id, repo: &Repository) {
+    if let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await {
+        let _ = agent.transition_status(AgentStatus::Failed);
+        let _ = state.agents.update(&agent).await;
+    }
+    let _ = state
+        .kv_store
+        .kv_remove("agent_tokens", agent_id.as_str())
+        .await;
+    crate::api::budget::decrement_active_agents(state, &repo.workspace_id.to_string()).await;
+}
+
+/// Release a worker claim (precondition blocked mid-flight, after the
+/// claim was taken — e.g. workspace budget exhausted between the
+/// scheduler's pre-check and the spawn core's own check). The task
+/// returns to Backlog via `Task::release_claim` — the domain's ONLY
+/// InProgress→Backlog edge, reserved for this system-side release — so
+/// agent-runtime.md §1 Phase 4 step 3 ("task stays Backlog with a
+/// BudgetExhausted flag") holds on this path exactly as on the
+/// pre-check path, and the next cycle's Backlog scan re-spawns the
+/// task once the precondition clears.
+async fn release_claim(state: &Arc<AppState>, task: &Task, reason: &str) {
+    // Re-read the freshest row: the claim snapshot predates the spawn
+    // attempt's awaits, and releasing a task that was cancelled,
+    // completed, or otherwise mutated in the meantime must not
+    // overwrite that change.
+    let Ok(Some(mut t)) = state.tasks.find_by_id(&task.id).await else {
+        return;
+    };
+    if t.status != TaskStatus::InProgress {
+        tracing::debug!(
+            task_id = %task.id,
+            task_status = ?t.status,
+            reason,
+            "signal-chain: worker claim already changed; not releasing"
+        );
+        return;
+    }
+    let now = crate::api::now_secs();
+    if let Err(e) = t.release_claim(now) {
+        tracing::error!(
+            task_id = %task.id,
+            reason,
+            "signal-chain: could not release worker claim to Backlog: {e}"
+        );
+        return;
+    }
+    // Budget-blocked releases carry the flag so the observable marker
+    // matches the pre-check path (spawn core reasons: "workspace budget
+    // exceeded: ..." / "tenant budget exceeded: ...").
+    if (reason.starts_with("workspace budget") || reason.starts_with("tenant budget"))
+        && !t.labels.iter().any(|l| l == BUDGET_EXHAUSTED_LABEL)
+    {
+        t.labels.push(BUDGET_EXHAUSTED_LABEL.to_string());
+    }
+    if let Err(e) = state.tasks.update(&t).await {
+        tracing::error!(
+            task_id = %task.id,
+            reason,
+            "signal-chain: persisting released worker claim failed: {e}"
+        );
+        return;
+    }
+    tracing::info!(
+        task_id = %task.id,
+        reason,
+        "signal-chain: worker claim released to Backlog; a later cycle re-spawns"
+    );
+}
+
+/// Bump a task's updated_at so the stale-claim recovery window restarts.
+/// Shared with the Ralph loop's re-spawn retry ladder, which must keep its
+/// claim fresh across the same 1s/5s/30s backoff sleeps this module's own
+/// retry ladder touches through.
+pub(crate) async fn touch_task(state: &Arc<AppState>, task_id: &Id) {
+    if let Ok(Some(mut t)) = state.tasks.find_by_id(task_id).await {
+        t.updated_at = crate::api::now_secs();
+        let _ = state.tasks.update(&t).await;
+    }
+}
+
+/// All spawn retries exhausted (agent-runtime.md §1 Phase 7 "Spawn
+/// failure"): task Blocked, the failed attempt's agent already Failed,
+/// orchestrator notified via TaskBlocked, priority-1 notification created
+/// for workspace admins ("Compute target unavailable: {target}").
+async fn final_spawn_failure(state: &Arc<AppState>, repo: &Repository, task: &Task, reason: &str) {
+    let now = crate::api::now_secs();
+    let mut blocked = task.clone();
+    let _ = blocked.transition_status(TaskStatus::Blocked);
+    blocked.updated_at = now;
+    let _ = state.tasks.update(&blocked).await;
+
+    // TaskBlocked → repo orchestrator inbox (spawning one when none is
+    // live — same routing as SpecApproved).
+    crate::ralph_loop::notify_task_blocked(
+        state,
+        &blocked,
+        Some(repo),
+        format!("worker spawn failed after all retries: {reason}"),
+    )
+    .await;
+
+    // Priority-1 notification for workspace admins.
+    notify_compute_target_unavailable(state, repo, &blocked, reason).await;
+    tracing::error!(
+        task_id = %blocked.id,
+        repo_id = %repo.id,
+        reason,
+        "signal-chain: worker spawn failed after all retries; task Blocked"
+    );
+}
+
+/// Priority-1 `ComputeTargetUnavailable` notification for workspace admins
+/// (agent-runtime.md §1 Phase 7 "Spawn failure": "priority-1 notification
+/// created for workspace admins"). Recipients: workspace Owner/Admin
+/// members (same resolution as the budget notifications). Shared by the
+/// scheduler's first-spawn retry ladder ([`final_spawn_failure`]) and the
+/// Ralph loop's re-spawn retry ladder — the spawn-failure policy is not
+/// path-scoped.
+pub(crate) async fn notify_compute_target_unavailable(
+    state: &Arc<AppState>,
+    repo: &Repository,
+    task: &Task,
+    reason: &str,
+) {
+    let target_name = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|ws| ws.compute_target_id.map(|ct| ct.to_string()))
+        .unwrap_or_else(|| "local".to_string());
+    let mut recipients: Vec<Id> = Vec::new();
+    if let Ok(members) = state
+        .workspace_memberships
+        .list_by_workspace(&repo.workspace_id)
+        .await
+    {
+        recipients.extend(
+            members
+                .into_iter()
+                .filter(|m| {
+                    matches!(
+                        m.role,
+                        gyre_domain::WorkspaceRole::Owner | gyre_domain::WorkspaceRole::Admin
+                    )
+                })
+                .map(|m| m.user_id),
+        );
+    }
+    let title = format!("Compute target unavailable: {target_name}");
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state.as_ref(),
+            repo.workspace_id.clone(),
+            user_id,
+            gyre_common::NotificationType::ComputeTargetUnavailable,
+            title.clone(),
+            "default",
+            Some(
+                serde_json::json!({
+                    "task_id": task.id.to_string(),
+                    "repo_id": repo.id.to_string(),
+                    "reason": reason,
+                    "target": target_name,
+                })
+                .to_string(),
+            ),
+            Some(task.id.to_string()),
+            Some(repo.id.to_string()),
+            "task",
+            None,
+        )
+        .await;
+    }
+}
+
+/// Ensure a live repo orchestrator exists for a failure notification
+/// (agent-runtime.md §1 Phase 7: "if no orchestrator is active, the
+/// server spawns one to process the failure"). Returns None when one
+/// cannot be ensured (budget, spawn failure) — the caller falls back to a
+/// workspace-destined message.
+pub async fn ensure_repo_orchestrator_for_failure(
+    state: &Arc<AppState>,
+    repo: &Repository,
+) -> Option<Agent> {
+    if let Ok(Some(existing)) = find_live_repo_orchestrator(state, repo).await {
+        return Some(existing);
+    }
+    match crate::api::orchestrator::spawn_repo_orchestrator_core(
+        state,
+        &repo.id.to_string(),
+        crate::api::orchestrator::SpawnOrchestratorRequest::default(),
+        "system",
+    )
+    .await
+    {
+        Ok((agent, _token, _launch)) => Some(agent),
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: could not spawn repo orchestrator for failure routing: {e:?}"
+            );
+            None
+        }
+    }
 }
 
 /// Spawn a repo orchestrator for the repo if none is live (task-093 core:
@@ -1687,19 +2410,32 @@ mod tests {
             );
         }
 
-        // The scheduler must not touch Implementation tasks: re-running the
-        // cycle leaves the sub-tasks Backlog (they are Phase 4's path).
-        let before = tasks.len();
+        // Phase 4 (task-118): the SAME cycle now claims Implementation
+        // sub-tasks and spawns worker agents for them — the decomposition
+        // above and the worker spawn below run in one scheduler cycle, so
+        // a just-decomposed spec flows straight to an agent.
         scheduler_run_once(&state).await.unwrap();
         let after = state.tasks.list().await.unwrap();
-        assert_eq!(before, after.len(), "no new tasks on second cycle");
-        assert!(
-            after
-                .iter()
-                .filter(|t| t.task_type == Some(TaskType::Implementation))
-                .all(|t| t.status == TaskStatus::Backlog),
-            "implementation tasks stay Backlog for the worker-spawn path"
+        let sub = after
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Implementation))
+            .expect("implementation sub-task exists");
+        assert_eq!(
+            sub.status,
+            TaskStatus::InProgress,
+            "implementation sub-task claimed by the Phase 4 worker path"
         );
+        assert!(
+            sub.assigned_to.is_some(),
+            "implementation sub-task assigned to a spawned worker agent"
+        );
+        let worker = state
+            .agents
+            .find_by_id(sub.assigned_to.as_ref().unwrap())
+            .await
+            .unwrap()
+            .expect("worker agent record exists");
+        assert_eq!(worker.current_task_id, Some(sub.id.clone()));
     }
 
     // Phase 2 coordination processing: the scheduler runs the repo
@@ -1740,6 +2476,635 @@ mod tests {
 
     // The scheduler ignores tasks without a task_type (pre-approval
     // push-hook tasks) — they stay Backlog untouched.
+
+    // ── Phase 4 (task-118): worker agent spawning ──────────────────────────
+
+    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
+    async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
+        let mut t = Task::new(Id::new(id), "Implement thing", 0);
+        t.task_type = Some(TaskType::Implementation);
+        t.workspace_id = Id::new("ws-1");
+        t.repo_id = Id::new("r-1");
+        t.spec_path = Some("specs/system/auth.md".to_string());
+        state.tasks.create(&t).await.unwrap();
+        t
+    }
+
+    /// Phase 4 acceptance: the scheduler detects a Backlog Implementation
+    /// task and spawns a worker agent for it mechanically — claim to
+    /// InProgress, agent record created and assigned, worktree provisioned.
+    /// (The process launch itself is best-effort in this environment; the
+    /// spawn attempt's durable effects are what the scheduler owns.)
+    #[tokio::test]
+    async fn scheduler_spawns_worker_for_implementation_task() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-1").await;
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "Phase 4 claims the Implementation task"
+        );
+        let worker_id = after
+            .assigned_to
+            .as_ref()
+            .expect("task assigned to spawned worker");
+        let worker = state
+            .agents
+            .find_by_id(worker_id)
+            .await
+            .unwrap()
+            .expect("worker agent record exists");
+        assert_eq!(worker.current_task_id, Some(task.id.clone()));
+        assert_eq!(worker.workspace_id, Id::new("ws-1"));
+        let wts = state.worktrees.find_by_agent(&worker.id).await.unwrap();
+        assert!(
+            wts.iter().any(|wt| wt.task_id.as_ref() == Some(&task.id)),
+            "worker has a worktree provisioned for the task"
+        );
+    }
+
+    /// Phase 4 precondition: Archived repos never spawn workers — the task
+    /// stays Backlog (queuing, not rejection; unarchiving resumes).
+    #[tokio::test]
+    async fn scheduler_skips_archived_repo() {
+        let state = chain_state().await;
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+        let task = impl_task(&state, "impl-arch").await;
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Backlog, "archived repo defers");
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+    }
+
+    /// Phase 4 ordering: a task whose depends_on dependency is incomplete
+    /// stays Backlog; completing the dependency unblocks it.
+    #[tokio::test]
+    async fn scheduler_defers_until_depends_on_complete() {
+        let state = chain_state().await;
+        let mut dep = Task::new(Id::new("dep-1"), "Dependency", 0);
+        dep.task_type = Some(TaskType::Implementation);
+        dep.workspace_id = Id::new("ws-1");
+        dep.repo_id = Id::new("r-1");
+        state.tasks.create(&dep).await.unwrap();
+
+        let mut task = Task::new(Id::new("impl-dep"), "Dependent", 0);
+        task.task_type = Some(TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        task.repo_id = Id::new("r-1");
+        task.depends_on.push(dep.id.clone());
+        state.tasks.create(&task).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Backlog, "dependent task defers");
+        assert!(after.assigned_to.is_none());
+
+        // Resolve the dependency (Done) — the next cycle spawns. The
+        // first cycle spawned the dependency ITSELF (it is an eligible
+        // Backlog Implementation task), so walk it to Done from whichever
+        // state that spawn left it in — a direct Backlog→InProgress
+        // transition would be rejected as an invalid same-state edge when
+        // the claim already happened.
+        let mut done = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
+        if done.status == TaskStatus::Backlog {
+            done.transition_status(TaskStatus::InProgress).unwrap();
+        }
+        if done.status == TaskStatus::InProgress {
+            done.transition_status(TaskStatus::Review).unwrap();
+        }
+        done.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.update(&done).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "dependent task spawns once its dependency is Done"
+        );
+    }
+
+    /// Phase 4 ordering: among ordered siblings of one decomposition group,
+    /// only the next `order` value runs; the later one queues.
+    #[tokio::test]
+    async fn scheduler_defers_lower_order_sibling() {
+        let state = chain_state().await;
+        let parent = Id::new("deleg-1");
+        let mut first = Task::new(Id::new("ord-0"), "First", 0);
+        first.task_type = Some(TaskType::Implementation);
+        first.workspace_id = Id::new("ws-1");
+        first.repo_id = Id::new("r-1");
+        first.parent_task_id = Some(parent.clone());
+        first.order = Some(0);
+        state.tasks.create(&first).await.unwrap();
+
+        let mut second = Task::new(Id::new("ord-1"), "Second", 0);
+        second.task_type = Some(TaskType::Implementation);
+        second.workspace_id = Id::new("ws-1");
+        second.repo_id = Id::new("r-1");
+        second.parent_task_id = Some(parent.clone());
+        second.order = Some(1);
+        state.tasks.create(&second).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let first_after = state.tasks.find_by_id(&first.id).await.unwrap().unwrap();
+        let second_after = state.tasks.find_by_id(&second.id).await.unwrap().unwrap();
+        assert_eq!(first_after.status, TaskStatus::InProgress, "order 0 runs");
+        assert_eq!(
+            second_after.status,
+            TaskStatus::Backlog,
+            "order 1 queues behind the incomplete order-0 sibling"
+        );
+    }
+
+    /// Phase 4 precondition: max_agents. The repo override queues the task
+    /// when the repo already runs its limit of Active agents; the
+    /// workspace-level fallback applies when the repo has no override.
+    #[tokio::test]
+    async fn scheduler_queues_at_max_agents() {
+        let state = chain_state().await;
+
+        // Seed one Active agent with a worktree in r-1 (workers link repos
+        // via worktrees).
+        let mut existing = Agent::new(Id::new("busy-1"), "busy-worker", 0);
+        existing.transition_status(AgentStatus::Active).unwrap();
+        existing.workspace_id = Id::new("ws-1");
+        state.agents.create(&existing).await.unwrap();
+        state
+            .worktrees
+            .create(&gyre_domain::AgentWorktree::new(
+                Id::new("wt-busy"),
+                existing.id.clone(),
+                Id::new("r-1"),
+                None,
+                "task/branch",
+                "/tmp/wt-busy",
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Repo override: limit 1 (already taken).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.max_agents = Some(1);
+        state.repos.update(&repo).await.unwrap();
+        let task = impl_task(&state, "impl-max").await;
+
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "task queued at the repo max_agents limit (no 429, no claim)"
+        );
+        assert!(after.assigned_to.is_none());
+
+        // Workspace fallback: repo override cleared, workspace limit 1.
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.max_agents = None;
+        state.repos.update(&repo).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.max_agents_per_repo = Some(1);
+        state.workspaces.update(&ws).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "task queued at the workspace max_agents_per_repo fallback"
+        );
+
+        // The queued task spawns once the slot frees (agent completes).
+        let mut idle = state
+            .agents
+            .find_by_id(&existing.id)
+            .await
+            .unwrap()
+            .unwrap();
+        idle.transition_status(AgentStatus::Idle).unwrap();
+        state.agents.update(&idle).await.unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "queued task spawns when an agent completes and frees the slot"
+        );
+    }
+
+    /// Phase 4 precondition: workspace budget. An exhausted budget leaves
+    /// the task Backlog with the BudgetExhausted flag (label), and the flag
+    /// clears when a later cycle spawns the task.
+    #[tokio::test]
+    async fn scheduler_flags_budget_exhausted() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-budget").await;
+
+        // Exhaust the workspace budget: zero concurrent agents allowed.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: Some(0),
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Backlog, "task stays Backlog");
+        assert!(
+            after.labels.iter().any(|l| l == "budget-exhausted"),
+            "task carries the BudgetExhausted flag: {:?}",
+            after.labels
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+
+        // Budget restored: the next cycle spawns the task and clears the flag.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: None,
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::InProgress, "task spawns");
+        assert!(
+            !after.labels.iter().any(|l| l == "budget-exhausted"),
+            "budget flag cleared on spawn"
+        );
+    }
+
+    /// Review finding (task-118 repair round): the worker-claim RELEASE
+    /// path — budget exhausted AFTER the claim was taken, the race
+    /// between the scheduler's pre-check and the spawn core's own check
+    /// (a concurrent REST spawn consuming the last slot inside the
+    /// cycle's await window, or budget exhaustion during the 1s/5s/30s
+    /// retry backoff) — must actually release the claim. The pre-fix
+    /// code routed InProgress→Review→InProgress→Backlog, but the domain
+    /// transition table has no edge into Backlog, so the final
+    /// transition was always rejected and nothing was persisted: the
+    /// task was stranded InProgress forever (the worker scan selects
+    /// only Backlog; the stale-claim recovery skips Implementation
+    /// tasks; no API transition can requeue). The fix releases via the
+    /// domain's dedicated `Task::release_claim` edge — the only
+    /// InProgress→Backlog route — so Phase 4 step 3 ("task stays Backlog
+    /// with a BudgetExhausted flag") holds on this path exactly as on
+    /// the pre-check path, and a later cycle re-spawns the task.
+    #[tokio::test]
+    async fn budget_exhausted_mid_flight_releases_claim_and_respawns() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-midflight").await;
+
+        // Claim as the scheduler does — the race this test pins is
+        // everything that happens AFTER this point.
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        state.tasks.update(&claimed).await.unwrap();
+
+        // Exhaust the workspace budget inside the claim's window: the
+        // spawn core's own check now fails where the pre-check passed.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: Some(0),
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        match try_spawn_worker(&state, &repo, &claimed, 0).await {
+            WorkerSpawnOutcome::Blocked(reason) => {
+                release_claim(&state, &claimed, &reason).await;
+            }
+            other => panic!("expected the mid-flight budget block, got {other:?}"),
+        }
+
+        // The claim is actually released: Backlog (not stranded
+        // InProgress) with the BudgetExhausted flag.
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "mid-flight budget block releases the claim to Backlog"
+        );
+        assert!(
+            after.labels.iter().any(|l| l == "budget-exhausted"),
+            "released claim carries the BudgetExhausted flag: {:?}",
+            after.labels
+        );
+
+        // Budget restored: a later cycle re-spawns the task — the
+        // pre-fix bug was that it never could.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: None,
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let respawned = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            respawned.status,
+            TaskStatus::InProgress,
+            "a later cycle re-spawns the released task"
+        );
+        assert!(
+            !respawned.labels.iter().any(|l| l == "budget-exhausted"),
+            "budget flag cleared on the re-spawn"
+        );
+    }
+
+    /// Crash recovery for claimed Implementation tasks (review F2,
+    /// task-118): a stale InProgress claim whose agent is not Active —
+    /// e.g. a server crash during the spawn-retry backoff, when the last
+    /// attempt's agent is already Failed so the stale-agent detector has
+    /// no Active agent to reap — is released to Backlog (the worker scan
+    /// selects only Backlog, so it would otherwise be stranded forever),
+    /// and a later cycle re-spawns it with a fresh worker.
+    #[tokio::test]
+    async fn stale_worker_claim_released_and_respawned() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-stale").await;
+
+        // Claim as the scheduler does; the crash left the last attempt's
+        // agent Failed and the task row stale.
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        claimed.assigned_to = Some(Id::new("agent-dead"));
+        claimed.updated_at = 0; // far in the past → stale
+        state.tasks.update(&claimed).await.unwrap();
+        let mut dead = Agent::new(Id::new("agent-dead"), "worker-stale", 0);
+        dead.transition_status(AgentStatus::Active).unwrap();
+        dead.transition_status(AgentStatus::Failed).unwrap();
+        dead.workspace_id = Id::new("ws-1");
+        state.agents.create(&dead).await.unwrap();
+
+        // An incomplete dependency holds the released task in Backlog for
+        // the assertion (the same cycle would otherwise re-spawn it
+        // immediately — proven by the second phase below).
+        let mut dep = Task::new(Id::new("dep-stale"), "Dependency", 0);
+        dep.task_type = Some(TaskType::Implementation);
+        dep.workspace_id = Id::new("ws-1");
+        dep.repo_id = Id::new("r-1");
+        state.tasks.create(&dep).await.unwrap();
+        let mut gated = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        gated.depends_on = vec![dep.id.clone()];
+        state.tasks.update(&gated).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "stale claim with a dead agent is released to Backlog (crash recovery)"
+        );
+
+        // Dependency complete: a later cycle re-spawns the released task
+        // with a FRESH worker (the dead agent does not keep the claim).
+        // The first cycle spawned the dependency ITSELF (it is an eligible
+        // Backlog Implementation task), so walk it to Done from whichever
+        // state that spawn left it in — the same walk
+        // scheduler_defers_until_depends_on_complete uses; a direct
+        // →Done transition is invalid from Backlog and InProgress alike.
+        let mut done = state.tasks.find_by_id(&dep.id).await.unwrap().unwrap();
+        if done.status == TaskStatus::Backlog {
+            done.transition_status(TaskStatus::InProgress).unwrap();
+        }
+        if done.status == TaskStatus::InProgress {
+            done.transition_status(TaskStatus::Review).unwrap();
+        }
+        done.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.update(&done).await.unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let respawned = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            respawned.status,
+            TaskStatus::InProgress,
+            "the released task is re-spawned by a later cycle"
+        );
+        assert_ne!(
+            respawned.assigned_to,
+            Some(Id::new("agent-dead")),
+            "a fresh worker takes over the released claim"
+        );
+    }
+
+    /// The stale worker-claim recovery never releases a claim held by an
+    /// ACTIVE agent: task rows are not touched while a worker runs, so
+    /// task age alone must not requeue live work under its agent.
+    #[tokio::test]
+    async fn stale_worker_claim_with_active_agent_is_kept() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-live").await;
+
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        claimed.assigned_to = Some(Id::new("agent-live"));
+        claimed.updated_at = 0; // stale by age — but the agent is live
+        state.tasks.update(&claimed).await.unwrap();
+        let mut live = Agent::new(Id::new("agent-live"), "worker-live", 0);
+        live.transition_status(AgentStatus::Active).unwrap();
+        live.workspace_id = Id::new("ws-1");
+        state.agents.create(&live).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "a claim held by an Active agent is never released"
+        );
+        assert_eq!(after.assigned_to, Some(Id::new("agent-live")));
+    }
+
+    /// Phase 7 spawn-failure policy: when ComputeTarget::spawn_process()
+    /// fails on every attempt, the server retries 3 times with exponential
+    /// backoff (1s/5s/30s), then marks the task Blocked, the failed
+    /// attempts' agents Failed, notifies the repo orchestrator with a
+    /// TaskBlocked message, and creates the priority-1 notification for
+    /// workspace admins. Deterministic launch failure: the workspace's
+    /// compute target is a Kubernetes target — `kubectl apply` cannot
+    /// succeed without a cluster in any test environment.
+    #[tokio::test(start_paused = true)]
+    async fn worker_spawn_failure_retries_then_blocks() {
+        let state = chain_state().await;
+
+        // A workspace admin to receive the priority-1 notification.
+        state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                Id::new("mem-1"),
+                Id::new("admin-user"),
+                Id::new("ws-1"),
+                gyre_domain::WorkspaceRole::Admin,
+                Id::new("inviter"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Kubernetes compute target assigned to the workspace: spawn_process
+        // runs `kubectl apply`, which fails without a cluster.
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-k8s"),
+            Id::new("t1"),
+            "k8s-unreachable",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "image": "gyre-agent:latest" });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let task = impl_task(&state, "impl-fail").await;
+        let task_id = task.id.clone();
+        // Claim as the scheduler would.
+        let mut claimed = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        claimed.transition_status(TaskStatus::InProgress).unwrap();
+        state.tasks.update(&claimed).await.unwrap();
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("r-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        retry_worker_spawn(
+            state.clone(),
+            repo,
+            claimed.clone(),
+            "attempt 0 failed (test seeding)".to_string(),
+        )
+        .await;
+
+        // Task Blocked after all retries.
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Blocked,
+            "task Blocked after 3 failed retries"
+        );
+
+        // Four attempts (0-3) each left a Failed agent behind.
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        let workers: Vec<_> = agents
+            .iter()
+            .filter(|a| a.current_task_id == Some(task_id.clone()))
+            .collect();
+        assert_eq!(
+            workers.len(),
+            SPAWN_RETRY_BACKOFF_SECS.len(),
+            "one agent record per retry attempt (attempts 1-3; attempt 0 is              the seeded failure this test resumes from)"
+        );
+        assert!(
+            workers.iter().all(|a| a.status == AgentStatus::Failed),
+            "every failed attempt's agent is Failed"
+        );
+
+        // Priority-1 notification for the workspace admin.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("admin-user"), None, None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.iter().any(|n| {
+                n.notification_type == gyre_common::NotificationType::ComputeTargetUnavailable
+                    && n.priority_rank == 1
+            }),
+            "priority-1 ComputeTargetUnavailable notification created: {notifs:?}"
+        );
+
+        // TaskBlocked message on the bus, routed to the repo orchestrator
+        // the failure path ensured (spawned on demand when none was live).
+        // Directed (orchestrator-inbox) delivery is invisible to
+        // list_by_workspace by the port contract, so collect both tiers.
+        let ws_msgs =
+            crate::ralph_loop::collect_task_blocked_messages(&state, &Id::new("ws-1")).await;
+        assert!(
+            ws_msgs
+                .iter()
+                .any(|m| m.payload.as_ref().and_then(|p| p["task_id"].as_str())
+                    == Some(task.id.as_str())),
+            "TaskBlocked message emitted for the blocked task: {ws_msgs:?}"
+        );
+    }
+
     #[tokio::test]
     async fn scheduler_ignores_untyped_tasks() {
         let state = chain_state().await;

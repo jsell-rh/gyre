@@ -234,7 +234,11 @@ class CrashTest(unittest.TestCase):
         execution.log.write_text('agent completed')
         weakened = body.replace('not-started', 'ready-for-review').replace('Reject foreign tenants.', 'Allow every tenant.')
         receipt = {'task_body': weakened, 'valid': True, 'head': 'candidate', 'base': 'base', 'branch': 'private', 'agent_exit': 0}
-        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt):
+        # This unit isolates contract rejection; source-progress and Git
+        # ancestry are exercised against real repositories in efficiency tests.
+        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt), \
+                patch('pipeline.stages.checkout',return_value=self.store.directory), \
+                patch.object(execution,'command',return_value=subprocess.CompletedProcess([],0,'source.rs\n','')):
             result, updates, _ = implement(execution, self.store.task('task-001'))
         self.assertEqual(result['task_body'], body)
         self.assertEqual(updates['repair']['category'], 'contract')
