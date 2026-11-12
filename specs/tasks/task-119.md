@@ -3,7 +3,7 @@ title: "Implement budget enforcement cascade"
 spec_ref: "agent-runtime.md §4 Budget Enforcement"
 depends_on:
   - task-118
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-runtime.md §4. Budget Enforcement"
   - "agent-runtime.md §Cascade"
@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -104,67 +104,3 @@ From §5 (Agent Prompt Structure): Describes the three-section prompt assembly (
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Prompt Structure) in full. Existing budget code: `gyre-server/src/api/budget.rs` and `gyre-domain/src/budget.rs`. Agent usage reporting: `POST /api/v1/agents/:id/usage` in `gyre-server/src/api/spawn.rs`. BudgetWarning/BudgetExhausted message kinds: `gyre-common/src/message.rs`. Compute target kill: grep for `kill_process` in server. MCP prompt delivery: `gyre-server/src/mcp.rs` — look for `system://persona` or `system://context`. Background jobs: grep for `tokio::spawn` or `interval` in `gyre-server/src/main.rs` or `lib.rs`.
-
-## Shipped
-
-agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) implemented in production code — no stubs, no audit-only
-paths. The cascade, enforcement levels, tracking, reset, and prompt
-structure shipped in commit 4bfdf85b8; review-round repairs in 7bdc60603
-(BudgetExhausted inbox delivery, repo concurrent/lifetime override
-enforcement, priority-7 spec reconciliation, persona-only
-`system://persona`) and bfb2dc3d (repo lifetime override bounded by the
-effective tenant/workspace ceiling).
-
-This round (29d1a961) repaired the verification-gate findings from the
-failed checks run on candidate 08235796 — no behavior changes, gate
-hygiene only:
-
-### Repairs
-
-- **rustfmt:** the task-touched files were reformatted (`cargo fmt`
-  touched only files inside the task diff, verified via git status);
-  `cargo fmt --check` is now clean.
-- **clippy::double_must_use** (gyre-ports/budget_usage.rs): the trait
-  carries the sibling-port `#[allow(clippy::double_must_use)]` above
-  `#[async_trait]` (same pattern as compute.rs, storage.rs,
-  budget_call.rs).
-- **clippy::too_many_arguments** (api/budget.rs `notify_budget_level`,
-  8/7): the config/usage/pct/exhausted/agent_id/repo_id arguments are
-  bundled into a `BudgetLevelNotice<'a>` struct; the signature is now
-  `(state, workspace_id, &BudgetLevelNotice)` and all three call sites
-  (beyond-limit, 100%, 80% branches) construct it.
-- **clippy::needless_borrow** (api/spawn.rs): `state` is passed directly
-  (deref coercion from `&Arc<AppState>`) to `check_spawn_budget` /
-  `check_repo_spawn_budget` instead of `&state`.
-- **enforcement-marker placement:** rustfmt's reflow moved the
-  `// enforcement:ok` exemption off the `enforce_workspace_budget(`
-  statement line, tripping check-inert-enforcement; the call now fits on
-  one line (hoisted `ws`/`agent`/`repo` locals) with the marker riding
-  the statement line, so `cargo fmt --check` and
-  `check-inert-enforcement.sh` pass simultaneously.
-
-### Test evidence
-
-No new tests this round (no behavior changed — the task's regression
-tests from the prior rounds stand: effective-ceiling validation,
-lifetime-override bounding/rebinding, 80%/100%/beyond-limit enforcement,
-grace kill, compute minutes, rolling reset). Sandbox probes, all exit 0:
-`cargo fmt --check`, `cargo check -p gyre-ports -p gyre-domain`,
-`cargo check -p gyre-server`, `cargo clippy -p gyre-ports`,
-`cargo clippy -p gyre-server --lib`, and the full gate-script set the
-failed verification ran (arch, ABAC registry/exempt handlers, MCP write
-tools, migrations, dead message kinds, byte-slice, relative-path,
-fail-open-ref, mem-port contracts, fabricated-scope, lossy-secret,
-scope-literal, inert-enforcement, forged-scope, forwarded-header,
-in-memory stores, unbounded HTTP). Evidence:
-/tmp/stage/review-evidence/task119-verification-repair.md.
-
-gyre-server test compilation exceeds this sandbox's 4 GiB budget (build
-wrapper refuses), so the independent verifier must run:
-
-```
-cargo test -p gyre-server --lib lifetime
-cargo test -p gyre-server --lib repo_budget
-cargo test --all
-```
