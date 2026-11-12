@@ -728,7 +728,9 @@ pub async fn assemble_workspace_concept_projection(
 /// default branch. Returns an empty vector when the repo has no manifest
 /// or the manifest is unparseable — a repo without a manifest simply
 /// defines no predefined concepts.
-async fn manifest_concepts(repo: &gyre_domain::Repository) -> Vec<crate::spec_registry::ConceptDef> {
+async fn manifest_concepts(
+    repo: &gyre_domain::Repository,
+) -> Vec<crate::spec_registry::ConceptDef> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let yaml = crate::spec_registry::read_git_file(
         &git_bin,
@@ -3920,7 +3922,11 @@ specs:
         // The manifest defines exactly one concept — the browser listing
         // must surface its name and description verbatim.
         let concepts = json["concepts"].as_array().unwrap();
-        assert_eq!(concepts.len(), 1, "exactly the manifest concept: {concepts:?}");
+        assert_eq!(
+            concepts.len(),
+            1,
+            "exactly the manifest concept: {concepts:?}"
+        );
         assert_eq!(concepts[0]["name"].as_str().unwrap(), "Authentication");
         assert_eq!(
             concepts[0]["description"].as_str().unwrap(),

@@ -5697,7 +5697,7 @@ mod tests {
                 seed_match: "substring".to_string(),
             },
             &nodes,
-            &vec![],
+            &[],
             None,
         );
         assert!(result.contains("n1"), "JwtAuthProvider contains 'auth'");
@@ -5747,7 +5747,7 @@ mod tests {
                 seed_match: "substring".to_string(),
             },
             &nodes,
-            &vec![],
+            &[],
             None,
         );
         assert!(result.matched.is_empty());
