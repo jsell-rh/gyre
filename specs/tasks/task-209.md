@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,52 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code on this branch; the
-implementation shipped in earlier rounds and is intact in the merged tree
-(base merge 69db66ef). This round repairs the single review finding (F1)
-against checkpoint 45400ce after that merge.
-
-### This round: review F1 — 'ComputeTargetUnavailable' toggle omission
-
-- **Behavior**: the profile notification-preferences toggle list covered
-  39 of 40 canonical `NotificationType` variants;
-  'ComputeTargetUnavailable' (Priority-1 inbox type, emitted by
-  signal_chain.rs and ralph_loop.rs) had no toggle and no locale label, so
-  a human could not disable it. Fixed by extracting the canonical id list
-  into `web/src/lib/notification-types.js` (imported by
-  UserProfile.svelte), adding the missing id after 'MergeQueueEscalation'
-  (enum declaration order) and its `user_profile.notif_types` label
-  ("Compute Target Unavailable") to `web/src/locales/en.json`. The profile
-  now offers all 40 toggles and saves them via the backend PUT, which
-  already accepts the canonical `as_str()` name (users.rs normalizes
-  through `NotificationType::parse`).
-- **Test evidence** (`web/src/__tests__/UserProfile.test.js`): the toggle
-  test no longer hardcodes the implementation's count — it asserts
-  `NOTIF_TYPE_IDS.length === 40` (the gyre-common enum variant count)
-  against the shared canonical list, checks the list has no duplicates,
-  checks the rendered checkbox count equals the list, spot-checks the new
-  'Compute Target Unavailable' label, and the save-payload test asserts
-  'ComputeTargetUnavailable' is included. Full web suite: 109 files,
-  2185 passed / 41 skipped (pre-existing skips), exit 0. Focused run:
-  UserProfile.test.js 27/27 passed. No Rust code changed this round, so
-  no additional server test scope beyond the standard full suite is
-  required of the verifier.
-- **Mechanical guard**: new `scripts/check-notification-toggle-coverage.sh`
-  (wired into pre-commit and CI as a hard gate) diffs the
-  `NotificationType` enum variants against the shared toggle ids and the
-  locale labels, failing on a missing toggle, a missing/stray label, or a
-  stray parse alias. Kill-tested: removing the id or the label from the
-  repaired tree fails the script with a directed message; the repaired
-  tree passes (40/40, labels in lockstep). This closes the "mirrored
-  count cannot catch the omission" defect in the original test.
-- **Environment note for remote verification**: this sandbox has mawk and
-  no gawk, so the pre-existing `check-notification-audience.sh`,
-  `check-notification-priority.sh`, and `check-notification-test-coverage.sh`
-  exit nonzero here on both the repaired and the unmodified base tree
-  (gawk dialect); CI's ubuntu-latest gawk is unaffected. The new toggle
-  coverage script uses only sed/grep/python3 and runs clean here. Evidence:
-  /tmp/stage/review-evidence/task-209-f1-repair.log.
