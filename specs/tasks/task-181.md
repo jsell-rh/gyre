@@ -2,7 +2,7 @@
 title: "Risk Map — heat map overlay on architecture canvas"
 spec_ref: "system-explorer.md §7"
 depends_on: [task-178]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "system-explorer.md §7. Risk Map"
 commits: ["69b388d0e504dc8bb374af836675c142c651e310"]
