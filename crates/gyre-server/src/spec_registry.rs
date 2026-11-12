@@ -205,54 +205,12 @@ pub struct GateConfig {
     pub stack_hash: Option<String>,
 }
 
-/// Normalize a spec path to the manifest's canonical identity: relative to
-/// `specs/`, with no leading `specs/` prefix (the same form `sync_spec_ledger`
-/// uses when it prefixes entries with `specs/` and `GET /api/v1/specs/:path`
-/// accepts).
-fn normalize_spec_rel_path(path: &str) -> &str {
-    path.strip_prefix("specs/").unwrap_or(path)
-}
-
-/// Resolve the manifest `SpecEntry` for a changed file path from a git diff
-/// (e.g. `specs/system/foo.md`). For renames, callers pass the NEW path —
-/// the manifest at the pushed HEAD describes where the spec lives now.
-pub fn manifest_entry_for_path<'a>(
-    manifest: &'a SpecManifest,
-    path: &str,
-) -> Option<&'a SpecEntry> {
-    let rel = normalize_spec_rel_path(path);
-    manifest
-        .specs
-        .iter()
-        .find(|e| normalize_spec_rel_path(&e.path) == rel)
-}
-
-/// Parse YAML text into a SpecManifest.
-pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
-    serde_yaml::from_str(yaml)
-}
-
-/// Read and parse `specs/manifest.yaml` from a git commit.
-///
-/// Returns `None` when the manifest is absent or unparseable. Callers use
-/// this to resolve per-spec approval policy (agent approvers, attestation
-/// constraints) at approval time (spec-registry.md §9).
-pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
-    let parsed = parse_manifest(&yaml);
-    match parsed {
-        Ok(m) => Some(m),
-        Err(e) => {
-            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
-            None
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Ledger types (runtime state tracked per spec)
 // ---------------------------------------------------------------------------
+
+// NOTE: the in-memory store aliases in this section are legacy debt grandfathered
+// in scripts/in-memory-state-stores-exemptions.txt at frozen line coordinates.
 
 // ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
 
@@ -298,6 +256,56 @@ pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections
         .await
         .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Manifest reading and path resolution (used by the ledger sync and
+// the spec lifecycle hooks)
+// ---------------------------------------------------------------------------
+
+/// Normalize a spec path to the manifest's canonical identity: relative to
+/// `specs/`, with no leading `specs/` prefix (the same form `sync_spec_ledger`
+/// uses when it prefixes entries with `specs/` and `GET /api/v1/specs/:path`
+/// accepts).
+fn normalize_spec_rel_path(path: &str) -> &str {
+    path.strip_prefix("specs/").unwrap_or(path)
+}
+
+/// Resolve the manifest `SpecEntry` for a changed file path from a git diff
+/// (e.g. `specs/system/foo.md`). For renames, callers pass the NEW path —
+/// the manifest at the pushed HEAD describes where the spec lives now.
+pub fn manifest_entry_for_path<'a>(
+    manifest: &'a SpecManifest,
+    path: &str,
+) -> Option<&'a SpecEntry> {
+    let rel = normalize_spec_rel_path(path);
+    manifest
+        .specs
+        .iter()
+        .find(|e| normalize_spec_rel_path(&e.path) == rel)
+}
+
+/// Parse YAML text into a SpecManifest.
+pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
+    serde_yaml::from_str(yaml)
+}
+
+/// Read and parse `specs/manifest.yaml` from a git commit.
+///
+/// Returns `None` when the manifest is absent or unparseable. Callers use
+/// this to resolve per-spec approval policy (agent approvers, attestation
+/// constraints) at approval time (spec-registry.md §9).
+pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
+    let parsed = parse_manifest(&yaml);
+    match parsed {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
