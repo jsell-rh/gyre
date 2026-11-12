@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,82 +71,3 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 ## Agent Instructions
 
 Read `system-explorer.md` §4 "Concept Views" for the full specification. The concept API endpoints are already registered in `mod.rs` — check `GET /repos/:id/graph/concept/:name` and `GET /workspaces/:id/graph/concept/:name` response shapes in `graph.rs`. The canvas is built in task-178 — check `ExplorerView.svelte` for the SVG node rendering and how to apply opacity/highlight styles. The in-view filter panel is also in task-178. For ad-hoc concept saving, use the existing explorer-views CRUD endpoints (`POST /workspaces/:id/explorer-views`). The view spec grammar `concept` field is defined in `ui-layout.md` §4 Data Layer.
-
-## Shipped
-
-Concept views (system-explorer.md §4) on the task-178 canvas substrate,
-covering all three interaction modes and both data-source mechanisms,
-with the round-1 review findings repaired.
-
-### Behavior
-
-- **Concept browser (manifest mechanism):** `GET /repos/:id/graph/concepts`
-  and `GET /workspaces/:id/graph/concepts` list a repo's (or workspace
-  union of) manifest-defined concepts; the in-view filter panel's Concepts
-  section shows a "Predefined" subsection (manifest concepts,
-  projection-backed) alongside "Discovered" (substring). Selecting a
-  predefined concept fetches its `GET /repos/:id/graph/concept/:name`
-  projection and activates the concept view.
-- **Canvas concept emphasis:** concept nodes keep full draw opacity and gain
-  a highlighted border; everything else fades to background at 0.15 —
-  drawn, never removed. Edges between concept nodes are highlighted
-  (accent color + alpha floor + thickness); other edges dim with their
-  endpoints. Active concept shows as a clearable control-bar chip.
-- **Ad-hoc concepts:** Shift+Click multi-select + right-click → "Create
-  concept" opens a naming dialog; saving persists the grouping as an
-  explorer view (`POST /workspaces/:id/explorer-views`) whose ViewQuery
-  concept scope seeds exactly the selected nodes.
-- **LLM concept exploration:** the `explorer-generate` prompt template
-  and the hardcoded fallback route "show me everything related to X"
-  questions to `data.concept` with a worked example.
-- **Substring mechanism (review finding 1, repaired):** the ViewSpec
-  `data.concept` field is a case-insensitive substring search on node
-  name/qualified_name (ui-layout.md §4 Data Layer), not an exact seed
-  name. `viewSpecToViewQuery` now translates it to a concept scope with
-  `seed_match: 'substring'` — a new ViewQuery grammar field (default
-  `'exact'`, documented in view-query-grammar.md, validated in
-  gyre-common, implemented in the server resolver) — and all three
-  concept-scope evaluation surfaces (ExplorerCanvas
-  `queryMatchedWithDepth`, `view-query-scope.js` `resolveScopeNodes`,
-  gyre-domain `view_query_resolver`) seed EVERY node whose
-  name/qualified_name contains the seed. The Ask concept path
-  (`data.concept: 'auth'` over a graph with no node named "auth") now
-  fades the canvas to the matched nodes instead of resolving to a null
-  scope (undimmed full graph). `data.depth: 0` pins `expand_depth: 0`
-  (matched nodes only) per ui-layout.md §4.
-- **Saved-concept round trip (review finding 2, repaired):** the reload
-  path classifies the stored explorer-view document by grammar via the
-  new `viewDocumentToQuery` — a ViewQuery-shaped spec (the exact document
-  the Create-concept dialog persists; the server accepts and stores both
-  grammars) is applied with its concept scope intact instead of being
-  flattened to `{scope:{type:'all'}}` by the ViewSpec translator.
-  Selecting a saved ad-hoc concept from the view selector now re-applies
-  the grouping.
-
-### Test evidence
-
-- `web/src/__tests__/ExplorerConceptViews.test.js` (8 tests): concept
-  browser listing; manifest-concept fade pinned against actual canvas
-  draw output; end-to-end Ask flow (generate SSE → ViewSpec
-  `data.concept: 'auth'` → canvas fade, matched nodes boosted to full
-  opacity, non-concept tree groups at 0.15×, annotation rendered);
-  saved-ad-hoc-concept reload round trip (view selector → concept scope
-  re-applied, fade + annotation); multi-select → right-click → dialog →
-  save asserting the persisted ViewQuery spec; dialog validation/error
-  paths; edge-emphasis draw-path tests.
-- `web/src/__tests__/generated-view.test.js` (17 tests): substring
-  translation (`seed_match: 'substring'`), depth-0 pinning, the Ask-path
-  translation + `resolveScopeNodes` end-to-end probe scenario,
-  `viewDocumentToQuery` round trip (deep-copy, ViewSpec translation,
-  non-object rejection).
-- `web/src/__tests__/view-query-scope.test.js` (16 tests): substring
-  seed matching (all-matches seeding, edge expansion from substring
-  seeds, no-match null, exact default when `seed_match` is absent).
-- Rust: `cargo test -p gyre-domain concept` — 10 unit + 2 integration
-  tests pass, including the new substring seed tests (all-matches,
-  expansion, unmatched-seed warning) and `seed_match` validation;
-  `cargo test -p gyre-common view_query` — 5 pass.
-- Regression suites re-run green: ExplorerGeneratedViews,
-  ExplorerViewNavigableArchitecture, ExplorerViewLayoutRenderers,
-  ExplorerCanvas, filter-categories, view-query-validator,
-  ExplorerDefaultViews (268 tests total across those files).
