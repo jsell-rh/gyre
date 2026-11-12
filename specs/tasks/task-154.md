@@ -2,13 +2,13 @@
 title: "Implement search query language (quoted phrases, faceted filtering)"
 spec_ref: "search.md §Query Language"
 depends_on: [task-153]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "search.md §Query Language"
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -90,29 +90,3 @@ From `search.md` §Query Language:
 - The parser should be forgiving: malformed facets (e.g., `type:` with no value) should be ignored, not cause errors
 - Look at how `view_query.rs` in `gyre-domain` parses its query grammar for a reference pattern
 - The existing `entity_type` and `workspace_id` query params on the search endpoint should remain as backward-compatible shortcuts — they're equivalent to `type:{value}` and `workspace:{value}` in the query string
-
-## Shipped
-
-The §Query Language grammar ships as production code across the stack:
-the pure parser (`crates/gyre-domain/src/search_query.rs`: terms,
-quoted phrases, facets with AND-across/OR-within composition, and
-`since:`/`until:` relative `7d` and absolute `2026-03-01` time bounds),
-the port protocol (`crates/gyre-ports/src/search.rs` carries the parse
-plus the caller's resolved access scope), all three SearchPort adapters
-(SQLite FTS5, PostgreSQL, in-memory), the REST handler
-(`GET /api/v1/search?q=`), and the MCP `gyre_search` tool. Every
-query-language query executes inside the caller's task-203 access
-scope; the `entity_type`/`workspace_id` params remain narrowing
-shortcuts. Parser and integration tests live in `gyre-domain`
-(`search_query`), `gyre-server` (`mcp_search_query_language`, REST
-search tests), and `tests/search_wiring.rs`.
-
-### Repair round (2c3eff661)
-
-The verification round flagged changed-line rustfmt violations in the
-SQLite search filter builder, the facets handler, and the search wiring
-test. Commit `2c3eff661` applies rustfmt's layout — formatting only,
-no behavior change. Evidence: `python3 scripts/check-rustfmt-diff.py
-199c1bb78f53f27088c54a0929b5605e7302e874` now reports "changed lines
-clean (13 Rust files checked)"; `cargo test -p gyre-domain search_query`
-passes 25/25; `cargo check -p gyre-server --tests` finishes clean.
