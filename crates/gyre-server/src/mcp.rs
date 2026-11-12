@@ -3881,6 +3881,7 @@ mod tests {
                 "ws-a",
                 Some("repo-1"),
                 "repo_orchestrator",
+                "repo-orchestrator",
             )
             .unwrap();
         state
@@ -3928,6 +3929,7 @@ mod tests {
                 "ws-a",
                 None,
                 "workspace_orchestrator",
+                "workspace-orchestrator",
             )
             .unwrap();
         state

@@ -939,11 +939,7 @@ async fn set_workspace_and_tenant_from_repo(
     ctx: &mut AttributeContext,
     repo_id: &str,
 ) {
-    match state
-        .repos
-        .find_by_id(&gyre_common::Id::new(repo_id))
-        .await
-    {
+    match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
         Ok(Some(repo)) => {
             if !ctx.has("resource.workspace_id") {
                 ctx.set("resource.workspace_id", repo.workspace_id.to_string());
