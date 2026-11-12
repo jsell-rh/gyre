@@ -291,7 +291,6 @@ pub(crate) async fn kill_agent(
     killed_by: &str,
     revoke_reason: &str,
 ) -> Result<(), ApiError> {
-
     let id = agent.id.to_string();
     if agent.status == AgentStatus::Dead {
         return Ok(());
@@ -419,7 +418,15 @@ pub async fn admin_kill_agent(
         .user_id
         .map(|u| u.to_string())
         .unwrap_or_else(|| auth.agent_id.clone());
-    kill_agent(&state, &agent, "force-killed by admin", false, &killed_by, "admin_kill").await?;
+    kill_agent(
+        &state,
+        &agent,
+        "force-killed by admin",
+        false,
+        &killed_by,
+        "admin_kill",
+    )
+    .await?;
 
     // Block the agent's current task.
     if let Some(task_id) = &agent.current_task_id {

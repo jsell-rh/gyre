@@ -13,9 +13,11 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use gyre_common::{Id, NotificationType};
 use gyre_common::message::{Destination, MessageKind};
-use gyre_domain::{Agent, AgentStatus, BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};
+use gyre_common::{Id, NotificationType};
+use gyre_domain::{
+    Agent, AgentStatus, BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{new_id, now_secs};
@@ -468,11 +470,7 @@ async fn save_enforcement_marker(state: &AppState, key: &str, marker: &Enforceme
     let Ok(raw) = serde_json::to_string(marker) else {
         return;
     };
-    if let Err(e) = state
-        .kv_store
-        .kv_set(BUDGET_ENFORCEMENT_NS, key, raw)
-        .await
-    {
+    if let Err(e) = state.kv_store.kv_set(BUDGET_ENFORCEMENT_NS, key, raw).await {
         tracing::warn!(entity = %key, "failed to persist budget enforcement marker: {e}");
     }
 }
@@ -562,9 +560,6 @@ async fn emit_budget_warn(state: &AppState, ws_id: &Id, agents: &[Agent], usage_
             )
             .await;
     }
-    if agents.is_empty() {
-        return;
-    }
 }
 
 /// Emit `MessageKind::BudgetExhausted` to each active agent in the workspace.
@@ -618,10 +613,7 @@ async fn create_budget_reassignment_task(state: &AppState, agent: &Agent) {
         now,
     );
     task.workspace_id = agent.workspace_id.clone();
-    task.repo_id = agent
-        .repo_id
-        .clone()
-        .unwrap_or_else(|| Id::new(""));
+    task.repo_id = agent.repo_id.clone().unwrap_or_else(|| Id::new(""));
     task.parent_task_id = Some(task_id.clone());
     task.priority = gyre_domain::TaskPriority::High;
     task.description = Some(format!(
@@ -1370,19 +1362,11 @@ mod tests {
             .await
             .unwrap();
 
-        let mut task = Task::new(
-            gyre_common::Id::new("task-enf-1"),
-            "implement feature",
-            0,
-        );
+        let mut task = Task::new(gyre_common::Id::new("task-enf-1"), "implement feature", 0);
         task.transition_status(TaskStatus::InProgress).ok();
         state.tasks.create(&task).await.unwrap();
 
-        let mut agent = Agent::new(
-            gyre_common::Id::new("agent-enf-1"),
-            "worker-enf",
-            0,
-        );
+        let mut agent = Agent::new(gyre_common::Id::new("agent-enf-1"), "worker-enf", 0);
         agent.transition_status(AgentStatus::Active).ok();
         agent.workspace_id = ws_id;
         agent.spawned_by = Some("spawner-user".to_string());
@@ -1482,7 +1466,11 @@ mod tests {
             inbox.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>()
         );
         let notifs = budget_notifications(&state, "ws-enf-warn").await;
-        assert_eq!(notifs.len(), 1, "spawner must get one AgentBudgetWarning notification");
+        assert_eq!(
+            notifs.len(),
+            1,
+            "spawner must get one AgentBudgetWarning notification"
+        );
         assert_eq!(
             notifs[0].notification_type,
             gyre_common::NotificationType::AgentBudgetWarning
@@ -1544,16 +1532,21 @@ mod tests {
         )
         .await;
 
-        assert_eq!(count_messages(&state, "ws-enf-below", "budget_warning").await, 0);
-        assert_eq!(count_messages(&state, "ws-enf-below", "budget_exhausted").await, 0);
-        assert!(budget_notifications(&state, "ws-enf-below").await.is_empty());
+        assert_eq!(
+            count_messages(&state, "ws-enf-below", "budget_warning").await,
+            0
+        );
+        assert_eq!(
+            count_messages(&state, "ws-enf-below", "budget_exhausted").await,
+            0
+        );
+        assert!(budget_notifications(&state, "ws-enf-below")
+            .await
+            .is_empty());
         assert!(
-            agent_inbox(&state, "agent-enf-1")
-                .await
-                .iter()
-                .all(|m| {
-                    m.kind.as_str() != "budget_warning" && m.kind.as_str() != "budget_exhausted"
-                }),
+            agent_inbox(&state, "agent-enf-1").await.iter().all(|m| {
+                m.kind.as_str() != "budget_warning" && m.kind.as_str() != "budget_exhausted"
+            }),
             "below-threshold usage must not deliver budget messages to the agent inbox"
         );
         let agent = state
@@ -1638,21 +1631,26 @@ mod tests {
             .find_by_agent(&gyre_common::Id::new("agent-enf-1"))
             .await
             .unwrap();
-        assert_eq!(wts.len(), 1, "budget kill must preserve the worktree record");
+        assert_eq!(
+            wts.len(),
+            1,
+            "budget kill must preserve the worktree record"
+        );
 
         // Reassignment task created, referencing the killed agent's task.
         let tasks = state.tasks.list().await.unwrap();
         let reassignment = tasks
             .iter()
-            .find(|t| {
-                t.parent_task_id.as_ref() == Some(&gyre_common::Id::new("task-enf-1"))
-            })
+            .find(|t| t.parent_task_id.as_ref() == Some(&gyre_common::Id::new("task-enf-1")))
             .expect("reassignment task must be created for the killed agent's task");
         assert_eq!(
             reassignment.title,
             "Agent hit budget limit on task-enf-1, needs reassignment or budget increase"
         );
-        assert_eq!(reassignment.workspace_id, gyre_common::Id::new("ws-enf-kill"));
+        assert_eq!(
+            reassignment.workspace_id,
+            gyre_common::Id::new("ws-enf-kill")
+        );
 
         // Spawner was notified of the escalation.
         assert!(!budget_notifications(&state, "ws-enf-kill").await.is_empty());
@@ -1749,7 +1747,10 @@ mod tests {
 
         super::record_budget_usage(&state, "ws-enf-pause", 1100, 0.0).await;
         let handle = super::check_and_enforce_budget_with_grace(&state, "ws-enf-pause", 0).await;
-        assert!(handle.is_none(), "QueuePause must not schedule a kill timer");
+        assert!(
+            handle.is_none(),
+            "QueuePause must not schedule a kill timer"
+        );
 
         // The workspace repo's merge queue is paused via the shared
         // merge-processor pause state.
@@ -1844,14 +1845,19 @@ mod tests {
     fn budget_enforcement_action_serde_round_trips() {
         for (action, name) in [
             (gyre_domain::BudgetEnforcementAction::Warn, "warn"),
-            (gyre_domain::BudgetEnforcementAction::GracefulStop, "graceful_stop"),
+            (
+                gyre_domain::BudgetEnforcementAction::GracefulStop,
+                "graceful_stop",
+            ),
             (gyre_domain::BudgetEnforcementAction::HardKill, "hard_kill"),
-            (gyre_domain::BudgetEnforcementAction::QueuePause, "queue_pause"),
+            (
+                gyre_domain::BudgetEnforcementAction::QueuePause,
+                "queue_pause",
+            ),
         ] {
             let s = serde_json::to_string(&action).unwrap();
             assert_eq!(s, format!("\"{name}\""));
-            let back: gyre_domain::BudgetEnforcementAction =
-                serde_json::from_str(&s).unwrap();
+            let back: gyre_domain::BudgetEnforcementAction = serde_json::from_str(&s).unwrap();
             assert_eq!(back, action);
         }
         // BudgetConfig round-trips the optional field in both states.
@@ -1862,9 +1868,10 @@ mod tests {
         let round: gyre_domain::BudgetConfig =
             serde_json::from_str(&serde_json::to_string(&with_action).unwrap()).unwrap();
         assert_eq!(round.enforcement_action, with_action.enforcement_action);
-        let default_round: gyre_domain::BudgetConfig =
-            serde_json::from_str(&serde_json::to_string(&gyre_domain::BudgetConfig::default()).unwrap())
-                .unwrap();
+        let default_round: gyre_domain::BudgetConfig = serde_json::from_str(
+            &serde_json::to_string(&gyre_domain::BudgetConfig::default()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(default_round.enforcement_action, None);
     }
 

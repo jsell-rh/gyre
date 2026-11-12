@@ -92,10 +92,7 @@ impl BudgetRepository for SqliteStorage {
                 max_cost_per_day: c.max_cost_per_day,
                 max_concurrent_agents: c.max_concurrent_agents.map(|v| v as i32),
                 max_agent_lifetime_secs: c.max_agent_lifetime_secs.map(|v| v as i64),
-                enforcement_action: c
-                    .enforcement_action
-                    .as_ref()
-                    .map(enforcement_action_to_db),
+                enforcement_action: c.enforcement_action.as_ref().map(enforcement_action_to_db),
                 updated_at: now,
             };
             diesel::insert_into(budget_configs::table)
@@ -191,7 +188,10 @@ mod tests {
         };
         storage.set_config(key, &config).await.unwrap();
         let back = storage.get_config(key).await.unwrap().unwrap();
-        assert_eq!(back.enforcement_action, Some(BudgetEnforcementAction::HardKill));
+        assert_eq!(
+            back.enforcement_action,
+            Some(BudgetEnforcementAction::HardKill)
+        );
         assert_eq!(back.max_tokens_per_day, Some(1000));
 
         // Overwrite with the default (None) — upsert must clear the column.

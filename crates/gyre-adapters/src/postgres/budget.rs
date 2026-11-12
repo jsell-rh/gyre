@@ -92,10 +92,7 @@ impl BudgetRepository for PgStorage {
                 max_cost_per_day: c.max_cost_per_day,
                 max_concurrent_agents: c.max_concurrent_agents.map(|v| v as i32),
                 max_agent_lifetime_secs: c.max_agent_lifetime_secs.map(|v| v as i64),
-                enforcement_action: c
-                    .enforcement_action
-                    .as_ref()
-                    .map(enforcement_action_to_db),
+                enforcement_action: c.enforcement_action.as_ref().map(enforcement_action_to_db),
                 updated_at: now,
             };
             diesel::insert_into(budget_configs::table)
