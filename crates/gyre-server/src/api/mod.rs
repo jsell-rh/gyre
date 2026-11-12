@@ -345,6 +345,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(merge_requests::get_diff),
         )
         .route(
+            "/api/v1/merge-requests/:id/spec",
+            get(merge_requests::get_spec),
+        )
+        .route(
             "/api/v1/merge-requests/:id/attestation",
             get(merge_requests::get_attestation),
         )
