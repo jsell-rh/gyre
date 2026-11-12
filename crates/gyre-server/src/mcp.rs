@@ -6487,6 +6487,7 @@ mod tests {
                     max_cost_per_day: Some(50.0),
                     max_concurrent_agents: Some(4),
                     max_agent_lifetime_secs: Some(3_600),
+                    enforcement_action: None,
                 },
             )
             .await
