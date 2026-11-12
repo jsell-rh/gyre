@@ -4005,7 +4005,9 @@ pub fn test_state_with_jj_and_git_ops(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None, None);
+    let mut state = test_state_inner(
+        git_ops, workspaces, policies, ws_store, None, None, None, None,
+    );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
@@ -4146,7 +4148,9 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None, None)
+    test_state_inner(
+        git_ops, workspaces, policies, ws_store, None, None, None, None,
+    )
 }
 /// Shared builder for all in-memory test states. Callers supply the git ops
 /// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
