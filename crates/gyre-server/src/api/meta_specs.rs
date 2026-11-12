@@ -2277,8 +2277,7 @@ async fn authorize_meta_spec_delete(
             // A missing scope_id fails closed: no caller's tenant scope
             // matches the empty string, so a dangling row is undeletable.
             let scope_tenant = ms.scope_id.as_deref().unwrap_or("");
-            if !auth.roles.contains(&gyre_domain::UserRole::Admin)
-                || auth.tenant_id != scope_tenant
+            if !auth.roles.contains(&gyre_domain::UserRole::Admin) || auth.tenant_id != scope_tenant
             {
                 crate::rbac::record_rbac_denied(
                     &state,

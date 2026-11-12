@@ -10,8 +10,8 @@ use gyre_ports::{
 };
 use std::sync::Arc;
 
-use super::PgStorage;
 use super::audit::AuditEventRow;
+use super::PgStorage;
 use crate::schema::{user_notification_preferences, user_tokens};
 
 // ─── User Notification Preferences ──────────────────────────────────────────

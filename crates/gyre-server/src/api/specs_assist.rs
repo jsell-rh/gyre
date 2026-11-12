@@ -1444,7 +1444,16 @@ mod tests {
         );
         let system_notifs = state
             .notifications
-            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, &[], 100, 0)
+            .list_for_user(
+                &Id::new("system"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(

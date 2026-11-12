@@ -1846,8 +1846,7 @@ mod tests {
         let json = body_json(resp).await;
         // The stored (and echoed) preference carries the canonical name.
         assert_eq!(
-            json["preferences"][0]["notification_type"],
-            "SpecApprovalRequested",
+            json["preferences"][0]["notification_type"], "SpecApprovalRequested",
             "alias must be normalized before storing: {json:?}"
         );
 
