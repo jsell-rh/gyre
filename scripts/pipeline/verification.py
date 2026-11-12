@@ -13,6 +13,22 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
             ['npm', 'test', '--', '--no-file-parallelism']]
 
 
+POLICY_FILES=('pipeline-verify.py','dev-static-gate.py','check-rustfmt-diff.py',
+              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py',
+              'pipeline-build-env.py','pipeline-cache.py','dev-cargo-clean.py','pipeline-usage.py')
+
+
+def policy(store, bundle=None, image=None):
+    """Hash the actual uploaded verifier, rather than a later host revision."""
+    image=image or store.setting('fullsend_image',json.loads((ROOT/'.fullsend/toolchain.json').read_text())['worker_image'])
+    if '@sha256:' not in image:return None
+    files={name:hashlib.sha256(((bundle/name) if bundle else (ROOT/'scripts'/name)).read_bytes()).hexdigest() for name in POLICY_FILES}
+    gate=(bundle/'checks.sh').read_bytes() if bundle else (ROOT/'scripts/dev-check.sh').read_text().replace('/tmp/gyre','/sandbox/workspace/checkout').encode()
+    files['checks.sh']=hashlib.sha256(gate).hexdigest()
+    files['worker.yaml']=hashlib.sha256(((bundle/'worker-policy.yaml') if bundle else ROOT/'.fullsend/policies/worker.yaml').read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps({'image':image,'commands':COMMANDS,'files':files},sort_keys=True).encode()).hexdigest()
+
+
 def deadline_error():
     error=Attention('Verification exhausted its deadline; inspect retained logs or raise the budget before retrying the same build')
     error.category='verification_timeout'
@@ -104,6 +120,8 @@ def run(execution, path, identity, probe=None):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
+        (bundle/'worker-policy.yaml').write_bytes((ROOT/'.fullsend/policies/worker.yaml').read_bytes())
+        assigned_policy=policy(store,bundle,image)
         timeout=store.setting('verification_timeout',14400)
         job = identity | {'image': image, 'timeout_seconds':timeout, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
                           'cache_enabled':store.setting('build_cache_enabled',True),'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
@@ -121,7 +139,7 @@ def run(execution, path, identity, probe=None):
         store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
         try:
             created = execution.os('sandbox', 'create', '--name', name, '--from', image,
-                                  '--policy', str(ROOT / '.fullsend/policies/worker.yaml'),
+                                  '--policy', str(bundle / 'worker-policy.yaml'),
                                   '--provider', store.setting('verification_provider', 'github'), '--no-auto-providers',
                                   *resources,
                                   '--label', 'gyre.dev/pipeline=' + store.setting('owner'),
@@ -196,6 +214,7 @@ def run(execution, path, identity, probe=None):
                     validate_receipt(receipt, identity, [probe] if probe is not None else None)
                     if receipt.get('passed') and probe is None and not isinstance(receipt.get('publication'),dict):
                         raise Retry('verification receipt lacks the rebuilt artifact publication')
+                    receipt['policy'] = assigned_policy
                     receipt['sandbox'] = name
                     (execution.directory / 'remote-verification.json').write_text(json.dumps(receipt))
                     if receipt.get('passed') and probe is None:
