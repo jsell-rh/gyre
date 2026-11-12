@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "1bb43f4549e52579717139242acdb78ee82c6d37"]
 ---
 
 ## Spec Excerpt
@@ -107,7 +107,7 @@ graph queries, and the accountability patrol.
   and documented in both SQL adapters), plus indexes on `source_repo_id`,
   `source_path`, and `target_path`; registered in `schema.rs`.
 - `SpecLinkEntry` (in `gyre-domain::spec_links`, re-exported by
-  `gyre-server::spec_registry`) gained `source_sha: String`, populated in
+  `gyre-server::spec_registry`) carries `source_sha: String`, populated in
   `sync_spec_ledger` from the source spec's real blob SHA at HEAD (reused
   from the manifest SHA map, never a placeholder).
 - New port `gyre_ports::SpecLinkRepository` (`list_all`,
@@ -123,6 +123,28 @@ graph queries, and the accountability patrol.
 - Boot: `load_spec_links_into_store` (lib.rs, called from `build_state` and
   the mem constructor) populates the hot cache from `list_all`; read failure
   is logged at error level rather than masquerading as an empty graph.
+- Link row ids are scoped by declaring repo (`spec_link_id`), so two repos
+  carrying the same spec path never collide in the durable table.
+
+### Verification-gate repair (this round, commit 1bb43f454)
+
+The prior verification round failed `check-in-memory-state-stores.sh`: the
+move of `SpecLinkType`/`SpecLinkEntry` into gyre-domain shifted the legacy
+`SpecLedger`/`SpecApprovalHistory` aliases (spec_registry.rs:218/220 →
+196/198) and the renumbered exemption entries were rejected as new
+forbidden exemptions. Fixed by removing both aliases from production code —
+the ledger and approval history are already port-backed
+(`SpecLedgerRepository` / `SpecApprovalEventRepository` via `store!`);
+`SpecLedger` survives only as a test-module fixture, `SpecApprovalHistory`
+was dead code. Their exemption entries were deleted (pure removal) and
+`FROZEN_EXEMPTION_COUNT` lowered 5 → 2 per the script's documented
+remediation flow. The production 4-tuple carrier in `sync_spec_ledger` was
+also replaced with a named `StaleInboundLink` struct (deleting three stale
+spec_registry tuple-carrier exemption entries), and the mem.rs/git_http.rs
+tuple-carrier entries staled by the base merge were renumbered to their
+current lines so `check-unnamed-tuple-carriers.sh` passes on this branch
+(that check fails on the assignment base itself — pre-existing upstream
+drift, not introduced here).
 
 ### Test evidence
 
@@ -145,42 +167,15 @@ graph queries, and the accountability patrol.
   convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-### Repair history (condensed)
+### Probe evidence (this round)
 
-- 6ab2e89cc: completed the rebase onto assignment base cfeefbda (module
-  lists, `git_http.rs` `process_spec_lifecycle`, migration renumbered to
-  `000061` to avoid a Diesel version collision, drifted frozen-exemption
-  line keys renumbered with no count growth).
-- 3b67c204: repaired two test-target compile errors the rebase left behind
-  (`signal_chain.rs` SpecLinkEntry fixture missing `source_sha`;
-  `cli_starter_manifest_round_trips_through_ledger_sync` still on the
-  pre-task 11-arg `sync_spec_ledger` signature).
-- Earlier rounds (053d36d8, 2736e818, 9e91c2c8): verification-gate findings
-  fixed for real (fabricated-scope exemption removed by fixing the code,
-  missing `#[tokio::test]` on the parity test restored, migration renumbered
-  at the fefde294 rebase).
-
-### This round (contract restore, no source change)
-
-The executor restored the assigned task document (checkboxes unchecked,
-`commits:` emptied, Shipped stripped) while keeping the production fix on
-the branch. Verified the fix is intact and re-ran focused probes at HEAD
-f0cad141 (evidence: `/tmp/stage/review-evidence/probes-round4.txt`):
-
-- `cargo check -p gyre-server --tests` (SKIP_WEB_BUILD=1) — clean.
-- `cargo test -p gyre-adapters spec_link` — ok, 5 passed / 0 failed.
-- `cargo test -p gyre-adapters migrations_create_tables` — ok.
-- `scripts/check-arch.sh`, `check-migration-versions.sh`,
-  `check-migration-sql-portability.sh`, `check-task-commit-attribution.sh`
-  — PASS (attribution verified after restoring the frontmatter list).
-
-### Verifier-owned probes (must run post-merge)
-
-- `cargo test -p gyre-server --lib spec_registry::` — includes the four
-  section-closing tests plus the repaired
-  `cli_starter_manifest_round_trips_through_ledger_sync`.
-- `cargo test -p gyre-server --lib signal_chain::` — the repaired
-  SpecLinkEntry fixture site.
-- `cargo test -p gyre-server --lib mem::spec_link`.
-- `cargo test --all` + `scripts/check-arch.sh` (full suite owned by
-  verification per the assignment).
+Executed locally (see controller review-evidence artifacts):
+`check-in-memory-state-stores.sh` PASS (the previously failing gate),
+`check-unnamed-tuple-carriers.sh` PASS, `check-arch.sh` PASS,
+`cargo check -p gyre-server --tests` PASS (lib + test cfg),
+`cargo test -p gyre-adapters spec_link` 5/5 PASS,
+`cargo test -p gyre-adapters migrations` 3/3 PASS. The build wrapper defers
+`cargo test -p gyre-server` to the independent verifier; the required
+probes are recorded in review-evidence/deferred-verifier-tests.txt
+(`cargo test --all`, plus focused `spec_registry`, `spec_link_staleness`,
+`spec_link`, and `mem::spec_link_contract_tests` runs).
