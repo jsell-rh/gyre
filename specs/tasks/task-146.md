@@ -137,31 +137,36 @@ pub struct AnalyticsEvent {
   analytics tests authenticate via `build_router` + Bearer token now that
   the handler verifies the caller.
 
-### Verification repair: rustfmt + clippy on changed lines
+### Verification repair: merge resolution + duplicate migration version (round d88b80e7)
 
-- Verification of candidate c5e9ffd failed `checks.sh` on two mechanical
-  findings only (behavioral checks and the web build passed):
-  `clippy::needless_borrow` at `spawn.rs:2128` (`&state` where `state` is
-  already `&Arc<AppState>` — now passes `state` directly) and rustfmt
-  drift on the seed closures of the analytics scope-filter/daily tests
-  (now `cargo fmt`-clean).
-- Re-verified in-sandbox with the verifier's own diff scripts:
-  `check-rustfmt-diff.py` and `check-clippy-diff.py` clean against both
-  the immediate parent (2 Rust files) and the assignment base 4a203a06
-  (full 30-file task surface).
+- Verification of candidate f235da67 failed `checks.sh` on one finding
+  only: duplicate Diesel migration version `20261008000061` — task-146's
+  `2026-10-08-000061_analytics_scope_columns` and task-163's
+  `2026-10-08-000061_dep_breaking_policies` (from merged base 7e9b3cfe)
+  both renumbered to 000061 after independent 000060 collisions. Only
+  one migration runs per version (alphabetically first wins), so the
+  analytics scope columns would be silently dropped on fresh databases.
+- Fix: renumbered `analytics_scope_columns` to the next unused sequence
+  `2026-10-08-000062_analytics_scope_columns` (content unchanged);
+  `scripts/check-migration-versions.sh` and
+  `scripts/check-migration-sql-portability.sh` now pass.
+- Merge conflict in `specs/coverage/SUMMARY.md` (TOTAL row) resolved by
+  regenerating the summary from the merged coverage matrices via
+  `scripts/update-coverage-summary.sh`.
+- Earlier verification rounds already closed rustfmt/clippy drift on the
+  changed analytics lines (f301cff2c).
 
 ### Test evidence
 
-- In-sandbox (this round, shared target dir via the build wrapper):
-  `cargo clippy -p gyre-server --all-targets` finished clean on changed
-  lines (full compile proof of lib + tests); `cargo fmt -- --check` clean;
-  `check-rustfmt-diff.py` and `check-clippy-diff.py` clean against both
-  HEAD^1 and assignment base 4a203a06; `cargo test -p gyre-domain
-  analytics` (3 passed); `cargo test -p gyre-adapters analytics`
-  (13 passed); all 18 scripts/check-*.sh mechanical gates pass.
+- In-sandbox (this round, shared target dir via the build wrapper, head
+  dae9a8df): `cargo check -p gyre-server` and `--tests` finished with 0
+  errors (the merge type-checks); `cargo test -p gyre-domain analytics`
+  (3 passed); `cargo test -p gyre-adapters analytics` (13 passed); all
+  20 `scripts/check-*.sh` mechanical gates pass, including
+  `check-migration-versions.sh` (evidence:
+  /tmp/stage/review-evidence/task-146-round3-merge-migration-repair.md).
 - Server test binaries exceed this sandbox's 4 GiB build budget — the
   independent verifier must run:
   `cargo test -p gyre-server --lib api::analytics`,
   `cargo test -p gyre-server --lib api::audit`, and
-  `cargo test -p gyre-server --test api_integration analytics`
-  (evidence: /tmp/stage/review-evidence/task-146-verification-repair.md).
+  `cargo test -p gyre-server --test api_integration analytics`.
