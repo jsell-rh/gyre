@@ -19,8 +19,8 @@ use gyre_ports::{
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2412,6 +2412,80 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Repo access overrides (user-management.md §Repo Access)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::RepoAccessOverride;
+use gyre_ports::RepoAccessOverrideRepository;
+
+#[derive(Default)]
+pub struct MemRepoAccessOverrideRepository {
+    store: Arc<Mutex<HashMap<String, RepoAccessOverride>>>,
+}
+
+#[async_trait]
+impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
+    async fn create(&self, o: &RepoAccessOverride) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: create fails when an override for the same
+        // (repo_id, user_id) pair already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if store
+            .values()
+            .any(|e| e.repo_id == o.repo_id && e.user_id == o.user_id)
+        {
+            return Err(anyhow::anyhow!(
+                "repo access override for user {} on repo {} already exists",
+                o.user_id,
+                o.repo_id
+            ));
+        }
+        store.insert(o.id.to_string(), o.clone());
+        Ok(())
+    }
+
+    async fn find_by_repo_and_user(
+        &self,
+        repo_id: &Id,
+        user_id: &Id,
+    ) -> Result<Option<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.repo_id == *repo_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, repo_id: &Id, user_id: &Id) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        let key = store
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .map(|e| e.id.to_string());
+        match key {
+            Some(k) => {
+                store.remove(&k);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -3456,6 +3530,35 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// In-memory `TenantMetaSpecSetRepository` — same contract as
+/// `MemMetaSpecSetRepository`, keyed by tenant id. Kept in a separate store
+/// so a tenant and a workspace that happen to share an id string never
+/// shadow each other's set (mirrors the two DB tables).
+#[derive(Default)]
+pub struct MemTenantMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl TenantMetaSpecSetRepository for MemTenantMetaSpecSetRepository {
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(tenant_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(tenant_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemRolloutPolicyRepository ──────────────────────────────────────────────
 
 #[derive(Default)]
@@ -4197,6 +4300,7 @@ fn test_state_inner(
         personas: Arc::new(MemPersonaRepository::default()),
         policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
@@ -4221,6 +4325,7 @@ fn test_state_inner(
             &meta_spec_binding_store,
         ))),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        tenant_meta_spec_sets: Arc::new(MemTenantMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),

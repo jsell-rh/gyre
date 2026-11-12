@@ -19,6 +19,8 @@ def configuration(store):
         'Pauses triage, implementation, review and verification; cleanup and PR observation continue.', ['false', 'true'])
     add('verification_slots', 'Reserved verification slots', store.setting('verification_slots', 1), live,
         help='0–1000, within total capacity. Effective reserve clamps to capacity minus one; existing workers finish.')
+    add('worker_memory_max_gib', 'Worker memory ceiling (GiB)', store.setting('worker_memory_max_gib',6), 'New allocations', 'choice',
+        '4 GiB default. With ceiling 6, an authoritative OOM permits a 6 GiB retry for the same task stage and requirements generation. One CPU/build job; running allocations are unchanged.', ['4','6'])
     limits = store.setting('limits', {})
     for stage, label in [('triage', 'Triage'), ('assess', 'Spec assessment'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
         add('limit.' + stage, label + ' concurrency', limits.get(stage, ''), live,
@@ -63,6 +65,10 @@ def save_configuration(store, request):
             value = text == 'true'
         elif key.startswith('limit.') and not text:
             value = None
+        elif key == 'worker_memory_max_gib':
+            if text not in ('4','6'):
+                raise ValueError('worker memory ceiling must be 4 or 6 GiB')
+            value = int(text)
         else:
             if not text.isascii() or not text.isdecimal():
                 raise ValueError('enter a whole number')
