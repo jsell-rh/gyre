@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["bb5e82ee3c480fcad524fedd4a4f7eac40016399", "4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["bb5e82ee3c480fcad524fedd4a4f7eac40016399", "4fb14234ce9a576709e6763e5db4a0699b300635", "6ba91450cdb7ba224dfa3c23993f6924ddf2eeb2", "e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "696079ca13af3949aa2a676cbb81315f10cc797c", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "de2d46d4fe14cdf4c0c18eae77873e463ecc740c"]
 ---
 
 ## Spec Excerpt
@@ -113,6 +113,17 @@ feed-ready). Storage failures return 500, not an empty finding list.
   tests), so the asserts prove real emission rather than silent
   skip-on-unresolvable. Test-side only; the production emit path is unchanged
   and sound for real workspaces.
+- **Verification 1449c437** (commit `de2d46d4f`, on merge base `3af80bd21`):
+  the checks.sh clippy gate flagged
+  `spec_lifecycle_patrol.rs:1119: field_reassign_with_default` — the
+  `check3_watched_paths_follow_per_repo_config` test seeded its per-repo
+  config with `Default::default()` plus out-of-initializer field
+  reassignment. Converted to struct-update syntax (the same pattern the test
+  already used for the disabled-repo config). Semantics identical, test-code
+  only; the lint is confirmed absent from a full
+  `cargo clippy -p gyre-server --tests` run at the repaired HEAD (exit 0,
+  zero diagnostics mentioning the module). This was the only failure in that
+  verification run — rustfmt, all shell lint gates, and the web build passed.
 
 ### Test evidence
 
@@ -124,15 +135,15 @@ threshold-tightening proves the checks are not no-ops or inverted) plus 2
 endpoint tests in `api/specs.rs` (flags + persisted escalation; thresholds
 honoured in both directions).
 
-In this sandbox `cargo check -p gyre-server --tests` (exit 0, includes the
-repaired test code), `bash scripts/check-arch.sh`,
-`bash scripts/check-scope-literal-defaults.sh` and
-`bash scripts/check-fabricated-scope-defaults.sh` all pass; gyre-server test
-*execution* is blocked by the build wrapper (4 GiB budget, evidence under
-`/tmp/stage/review-evidence/task-204-repair/`) and is deferred to the
-independent verifier. Required probes: `SKIP_WEB_BUILD=1 cargo test -p
-gyre-server spec_lifecycle_patrol` (the previously failing
-`flags_and_escalates_only_the_accountability_gaps` must now pass with 4
-persisted escalations for ws1), `SKIP_WEB_BUILD=1 cargo test -p gyre-server
-spec_lifecycle_patrol_endpoint`, `SKIP_WEB_BUILD=1 cargo test --all`, and
-`bash scripts/check-arch.sh`.
+At the repaired HEAD (`de2d46d4f`): `cargo fmt --check -p gyre-server`,
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` (exit 0, includes the
+repaired test code), and `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server
+--tests` (exit 0, `field_reassign_with_default` absent, no clippy diagnostics
+in the task-204 module) all pass in this sandbox — evidence under
+`/tmp/stage/review-evidence/task-204-clippy-repair/`. gyre-server test
+*execution* is blocked by the build wrapper (4 GiB budget) and is deferred to
+the independent verifier. Required probes: `SKIP_WEB_BUILD=1 cargo test -p
+gyre-server spec_lifecycle_patrol` (incl. the repaired
+`check3_watched_paths_follow_per_repo_config`),
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server spec_lifecycle_patrol_endpoint`,
+`SKIP_WEB_BUILD=1 cargo test --all`, and `bash scripts/check-arch.sh`.
