@@ -4002,7 +4002,10 @@ mod tests {
                 body: "the merge queue ordering rules".to_string(),
                 workspace_id: None,
                 repo_id: None,
-                tenant_id: None,
+                // Caller is the global test token (Admin, tenant "default") —
+                // §Access Scoping makes the tenant boundary fail-closed, so
+                // the docs must carry the caller's tenant to be visible.
+                tenant_id: Some("default".to_string()),
                 facets: in_progress,
                 updated_at: None,
             })
@@ -4019,7 +4022,7 @@ mod tests {
                 body: "merge the queue then ordering".to_string(),
                 workspace_id: None,
                 repo_id: None,
-                tenant_id: None,
+                tenant_id: Some("default".to_string()),
                 facets: done,
                 updated_at: None,
             })
