@@ -22,6 +22,7 @@
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
   import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
+  import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -350,6 +351,65 @@
    *  annotation UI and can be cleared from the manual query editor). */
   function clearGeneratedLayout() {
     activeLayout = 'graph';
+    // A flow template names the view (activeSavedViewName) — dismissing the
+    // layout clears that name so the selector label returns to the base view.
+    activeSavedViewName = null;
+  }
+
+  // ── Predefined flow templates (system-explorer.md §5 Flow Traces) ────
+  // "Predefined flows for common operations (agent spawn, MR merge, spec
+  // approval)" — curated entry points in the View selector's "Trace flows"
+  // section. Each template's expected call path is matched against the
+  // current graph; the flow layout then renders that path, animated with
+  // the captured gate trace of a matching MR when one exists (particles
+  // only appear for spans that actually traverse the path — never
+  // fabricated). Custom flows remain the canvas's trace-from-node action.
+
+  /** Find a gate trace backing a flow template: reuse the trace already
+   *  loaded for this repo, else the most recent traced MR in the workspace
+   *  matching the template (pickTraceMr), else the MR trace fetch fails —
+   *  all lookups are best-effort, a template without trace data renders as
+   *  a static structural path. */
+  async function resolveFlowTemplateTrace(template) {
+    if (traceData?.spans?.length > 0) return traceData;
+    const wsId = scope?.workspaceId;
+    if (!wsId) return null;
+    const mrs = await api
+      .workspaceMergeRequests(wsId, { has_trace: true, limit: 10 })
+      .catch(() => null);
+    const mr = pickTraceMr(template, Array.isArray(mrs) ? mrs : []);
+    if (!mr) return null;
+    const trace = await api.mrTrace(mr.id).catch(() => null);
+    return trace?.spans?.length > 0 ? trace : null;
+  }
+
+  /** Apply a predefined flow template: match its expected call path against
+   *  the loaded graph, scope the flow layout to the match, and animate the
+   *  backing gate trace when one exists. */
+  async function applyFlowTemplate(template) {
+    viewSelectOpen = false;
+    const match = matchFlowTemplate(template, effectiveGraph?.nodes ?? []);
+    if (match.matchedNodeIds.length === 0) {
+      showToast(`No nodes in this graph match the ${template.label} — select a repo whose graph covers it.`, { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    activeSavedViewName = template.label;
+    activeViewSpec = null;
+    activeLayout = 'flow';
+    activeViewQuery = flowTemplateQuery(template, match);
+    pushInteraction({ action: 'query', detail: `flow-template:${template.id}` });
+    const trace = await resolveFlowTemplateTrace(template);
+    if (trace) {
+      traceData = trace;
+      explorerLens = 'evaluative';
+      tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+    } else {
+      // No captured trace for this flow — the expected path still renders
+      // (structural lens), it just does not animate.
+      explorerLens = 'structural';
+      showToast(`No captured gate trace for the ${template.label} — showing the expected call path without animation.`, { type: 'info' });
+    }
   }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
@@ -2410,6 +2470,22 @@
                   >{view.name}</button>
                 {/each}
               {/if}
+              <!-- Predefined flow templates (system-explorer.md §5 Flow
+                   Traces): curated traces for common operations, applied via
+                   applyFlowTemplate onto the flow layout. -->
+              <div class="view-select-section">Trace flows</div>
+              {#each FLOW_TEMPLATES as tpl (tpl.id)}
+                <button
+                  class="view-select-option"
+                  class:active={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  role="option"
+                  aria-selected={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  onclick={() => void applyFlowTemplate(tpl)}
+                  data-testid={`view-option-flow-${tpl.id}`}
+                  title={tpl.description}
+                  type="button"
+                >{tpl.label}</button>
+              {/each}
               <div class="view-select-divider" role="presentation"></div>
               <button
                 class="view-select-option view-select-generate"

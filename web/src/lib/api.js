@@ -106,6 +106,15 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
+  // Workspace-scoped MR list (GET /workspaces/:id/merge-requests). Supports
+  // `has_trace` + `limit` (HSI §3 MR ID discovery for flow-layout
+  // trace_source) — the has_trace filter uses the same get_by_mr lookup
+  // GET /merge-requests/:id/trace serves, so the list cannot drift from
+  // what the trace endpoint returns.
+  workspaceMergeRequests: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/workspaces/${workspaceId}/merge-requests${qs ? '?' + qs : ''}`);
+  },
   mergeRequest: (id) => request(`/merge-requests/${id}`),
   mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
@@ -671,10 +680,19 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
-  // Server does not have POST /specs/assist — only POST /repos/:id/specs/assist.
-  // Return a failed Response so callers fall through gracefully.
-  specsAssistGlobal: (_body) =>
-    Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
+  // Workspace-scoped meta-spec assist (ui-layout.md §9 State 1 chat): same
+  // SSE {diff, explanation} protocol as specsAssist, but no repo — the
+  // effective content is the in-editor draft (or the stored registry prompt
+  // when only meta_spec_id is given).
+  metaSpecsAssist: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/meta-specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Spec save with optimistic-concurrency conflict handling (HSI §7).
   // On 409 (stale base_sha), resolves to { conflict: <body> } instead of
   // throwing, so callers can render the conflict resolution dialog.
