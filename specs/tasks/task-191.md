@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["2d587b736f06f23daea33f4f54c30fda67767fe9"]
 ---
 
 ## Spec Excerpt
@@ -74,20 +74,20 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 
 ## Shipped
 
-Budget enforcement is now real end-to-end (platform-model.md §5 Enforcement
+Budget enforcement is real end-to-end (platform-model.md §5 Enforcement
 Behavior): the task-190 counters drive the specced actions on every usage
-recording.
+recording. This round resolved the rebase onto base 3af80bd21 (merge commit
+`2d587b736`) and re-verified the merged result.
 
 ### Enum + persistence
 
 `BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause, serde
-snake_case) lives in `gyre-domain/src/budget.rs` and is re-exported.
-`BudgetConfig.enforcement_action: Option<...>` (None = spec default: 80% Warn,
-100% GracefulStop) is threaded through migration `000058` (portable
-`ALTER TABLE ... ADD COLUMN enforcement_action TEXT`), the SQLite and Postgres
-`budget_configs` row mappings, and the budget API (`SetBudgetRequest` /
-`BudgetResponse`). Overwriting a config with the field absent clears the
-column (upsert).
+snake_case) lives in `gyre-domain/src/budget.rs`, re-exported.
+`BudgetConfig.enforcement_action: Option<...>` (None = spec default: 80%
+Warn, 100% GracefulStop) is threaded through migration
+`2026-10-10-000058_budget_enforcement_action` (portable SQL), the SQLite and
+Postgres `budget_configs` row mappings, and the budget API
+(`SetBudgetRequest` / `BudgetResponse`, PUT/GET round-trip tested).
 
 ### Enforcement path
 
@@ -97,107 +97,76 @@ threshold logic):
 
 - Computes the higher utilization across `max_tokens_per_day` /
   `max_cost_per_day` (None and zero limits guarded).
-- **≥ 80%, < 100%:** emits `MessageKind::BudgetWarning` per active agent
-  (both a workspace-feed copy and a **Directed `Destination::Agent`
-  copy** so the agent's MCP poll channel — `messages.list_after`,
-  `GET /api/v1/agents/:id/messages` — actually receives it) and one
-  `NotificationType::BudgetWarning` (priority 7) per unique spawner via
-  `notifications::notify`. No kill.
+- **≥ 80%, < 100%:** emits `MessageKind::BudgetWarning` per active agent —
+  both a workspace-feed copy and a Directed `Destination::Agent` copy so the
+  agent MCP poll channel (`messages.list_after`,
+  `GET /api/v1/agents/:id/messages`) actually receives it. No kill.
 - **≥ 100%:** default `GracefulStop` — emits `MessageKind::BudgetExhausted`
-  per active agent (workspace feed + Directed agent copy, so the agent
-  learns to hand off within the grace), then a `tokio::spawn` grace timer
-  (default 60s,
-  injectable via `check_and_enforce_budget_with_grace` so tests use 0).
-  After the grace, still-`Active` agents are killed through the shared
-  `kill_agent` helper extracted from `admin_kill_agent` (admin handler
-  migrated to it — clean cutover): transition to `Dead`, process kill,
-  budget active-agent counter decremented (only when the agent held an
-  `Active` slot — no double release), **worktree/branch records preserved**,
-  and a reassignment task `"Agent hit budget limit on {task-id}, needs
+  per active agent (feed + directed copies), then a `tokio::spawn` grace
+  timer (default 60s, injectable via `check_and_enforce_budget_with_grace`;
+  tests use 0). After the grace, still-`Active` agents are killed through
+  the shared `kill_agent` helper extracted from `admin_kill_agent` (admin
+  handler migrated to it — clean cutover): transition to `Dead`, process
+  kill, budget active-agent counter decremented (only when the agent held
+  an Active slot), **worktree/branch records preserved**, and a
+  reassignment task `"Agent hit budget limit on {task-id}, needs
   reassignment or budget increase"` created (`parent_task_id`-linked, High
   priority) plus an `AgentEscalation` notification to the spawner.
 - Overrides: `HardKill` kills inline (no timer); `QueuePause` pauses every
-  workspace repo's merge queue via the existing merge-processor pause
-  mechanism (kv `merge_queue_pause` + `MergeQueuePaused` event) without
-  killing; `Warn` at 100% warns only.
+  workspace repo's merge queue via the merge-processor pause mechanism (kv
+  `merge_queue_pause` + `MergeQueuePaused` event) without killing; `Warn`
+  at 100% warns only.
 - Emission is driven solely by computed utilization and de-duplicated per
   daily period via a persisted kv marker (`budget_enforcement` namespace)
-  keyed to `period_start` — after the midnight counter reset the thresholds
-  can fire again; repeated tool calls never re-spam.
+  keyed to `period_start`; after the midnight reset the thresholds can fire
+  again.
+
+### Spawner/admin notifications (single path)
+
+Inbox notifications for the same threshold crossings route through
+`maybe_notify_budget_threshold` (user-management.md §Notification Entity):
+`AgentBudgetWarning` (the taxonomy's canonical name for the spec's
+BudgetWarning) to the agent's spawner plus workspace Admins, and
+`AgentBudgetExhausted` to the spawner plus the workspace Owner — per-user
+per-period de-duplicated via `has_active_notification`, with structured
+body and deep link. It runs in `record_llm_call_usage` right after
+`check_and_enforce_budget`, so message emission (agent channel) and inbox
+notification (human channel) both fire from the one usage-recording funnel
+and a spawner is never notified twice for one crossing.
+
+### Rebase resolution (base 3af80bd21, merge commit 2d587b736)
+
+- Upstream renamed `NotificationType::BudgetWarning` →
+  `AgentBudgetWarning` (taxonomy unification); task-191 code and tests now
+  use the canonical name.
+- The plain `notify()` to spawners inside `emit_budget_warn` was removed in
+  favor of the upstream rich path (same recipients + dedup; the plain
+  notify carried no entity_ref so it could not be de-duplicated and would
+  have double-notified the spawner). `MessageKind` emission is unchanged.
+- Upstream's `budget_threshold_notifications_fire_once_per_period` test
+  kept; verified non-interfering with enforcement (its fixture agent stays
+  Idle, so `active_workspace_agents` is empty; mem `list_by_workspace`
+  excludes `Destination::Agent` copies so message counts are unaffected).
+- Four upstream `BudgetConfig` test initializers in `signal_chain.rs`
+  gained `enforcement_action: None` (new optional field, spec default).
 
 ### Test evidence
 
-`cargo test -p gyre-server --lib api::budget` — 17 pass,
-including the acceptance tests that fail if enforcement is removed: 85%
-warning (message + notification, agent alive, no re-fire on subsequent
-calls, agent-inbox receipt pinned via `messages.list_after`),
-below-threshold silence, ≥100% graceful stop (agent `Dead`,
-counter 0, worktree record intact, reassignment task referencing the task
-id, no re-fire), HardKill inline (no timer), QueuePause (kv pause state
-set, agent alive), cost-limit crossing, serde round-trips, and
-API/SQLite persistence. Post-merge with base cd4c04fe (merge commit
-`bf2c1a998`, evidence in
-`/tmp/stage/review-evidence/task-191-merge-cd4c04fe-evidence.md`):
-admin kill tests 36 pass (35 prior + 1 new upstream, including
-`admin_kill_emits_lifecycle_audit_events` pinning token revocation with
-reason `admin_kill` and the `AgentKilled` audit attribution),
-`signal_chain` 19 and `secret_rotation` 8 pass (kill path now also
-revokes task-scoped secrets), `cargo check` across gyre-server /
-gyre-adapters / gyre-cli / gyre-domain --all-targets is clean,
-and `check-arch.sh`, the migration-version and migration-portability
-checks, and the other relevant mechanical check scripts pass. The
-full-suite runs (server lib 1492) and clippy cited below predate this
-merge; full workspace gates are owned by verification.
-
-### Review repair (finding 2441b169079c4baab45e073159c02136)
-
-Budget messages were emitted `Destination::Workspace` only, so the agent
-MCP poll channel (which filters `to_type == "agent"`) never delivered
-them — the agent had no way to learn it should hand off within the grace
-period. `emit_budget_warn` / `emit_budget_exhausted` now emit both a
-workspace-feed copy and a `Destination::Agent(agent.id)` copy per active
-agent (the dual-destination pattern already used by
-`constraint_check.rs`), with identical payloads. Thresholds, per-period
-de-dup, grace timer, kill path, and spawner notifications are unchanged;
-the dispatch consumer is a no-op drain and WS delivery already ignores
-agent-directed messages, so the extra copies have no side effects beyond
-the agent inbox.
-
-### Rebase resolution (merges of bases fefde294 and cd4c04fe)
-
-Two assignment-base merges were resolved by folding upstream
-`admin_kill_agent` additions INTO the shared `kill_agent` helper (no
-fork of the kill/decrement/notify sequence):
-
-- **fefde294:** audit hardening (auth extractor for `killed_by`
-  attribution, PID capture + attested-PID fallback for the `AgentKilled`
-  event, `revoke_agent_token`, `emit_killed`). The admin handler passes
-  the caller identity and `"admin_kill"` (upstream test asserts this
-  exactly); budget enforcement passes `"budget_enforcement"` /
-  `"budget_kill"`.
-- **cd4c04fe** (merge commit `bf2c1a998`, evidence in
-  `/tmp/stage/review-evidence/task-191-merge-cd4c04fe-evidence.md`):
-  (1) `emit_telemetry` became `async` upstream — the helper now `.await`s
-  it, keeping the parameterized `reason` description; (2) upstream added
-  `revoke_agent_task_secrets` (Platform Model §7 teardown) inline in the
-  admin handler — folded into the helper after `revoke_agent_token`, so
-  admin AND budget kills revoke task-scoped ephemeral secrets, matching
-  that function's "every path that ends an agent run" contract. Two
-  `BudgetConfig` test initializers in the upstream `signal_chain.rs`
-  gained `enforcement_action: None` (spec default — no semantics change).
-
-The budget migration `2026-10-10-000058_budget_enforcement_action` does
-not collide with other `000058`-suffixed migrations (Diesel versions
-include the date prefix; `check-migration-versions.sh` passes).
-
-### Notes for review
-
-- `record_llm_call_usage` now takes `&Arc<AppState>` (needed to hand the
-  grace timer a `'static` state); all five call sites already passed `&state`
-  from an `Arc`, and `mcp.rs handle_spec_assist` was widened to `&Arc` — no
-  behavior change.
-- Enforcement is workspace-level (per the task plan); tenant/repo-level
-  configurability remains unthreaded (repo-level `budget` field is absent —
-  coverage row 5 note).
-- Shared subject with task-119 (agent-runtime §4): this is the canonical
-  enforcement path; task-119 should consume `check_and_enforce_budget`.
+Sandbox probes (evidence: `/tmp/stage/review-evidence/task191-rebase-resolution.md`):
+`cargo check -p gyre-server` and `cargo check -p gyre-server --lib --tests`
+PASS (the latter caught and confirmed the signal_chain.rs initializer
+fix); `cargo check -p gyre-adapters -p gyre-cli -p gyre-domain --tests`
+PASS; `check-arch.sh`, migration-version, dead-message-kinds, ABAC
+registry/exempt-handler, MCP write-tool, byte-slice, relative-path,
+fail-open-ref, mem-port-contract, fabricated-scope, lossy-secret,
+scope-literal, inert-enforcement, in-memory-state, and unbounded-HTTP
+checks all PASS. gyre-server test *execution* is blocked by the sandbox
+build wrapper (4 GiB cap) and must run in the independent verifier:
+`cargo test -p gyre-server --lib api::budget` (task-191 acceptance tests:
+85% warn with message + notification + no kill + no re-fire,
+below-threshold silence, ≥100% graceful stop with Dead + counter 0 +
+worktree intact + reassignment task, HardKill inline, QueuePause kv state,
+cost-limit crossing, serde round-trips, API persistence, plus the upstream
+threshold-notification test), `api::admin` (kill_agent cutover),
+`signal_chain`, and `notifications`. `cargo build --all` and full gates are
+owned by verification.
