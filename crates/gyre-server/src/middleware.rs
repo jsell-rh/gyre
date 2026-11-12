@@ -303,6 +303,7 @@ mod tests {
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
+            tenant_meta_spec_sets: base.tenant_meta_spec_sets.clone(),
             rollout_policies: base.rollout_policies.clone(),
             messages: base.messages.clone(),
             message_dispatch_tx: base.message_dispatch_tx.clone(),

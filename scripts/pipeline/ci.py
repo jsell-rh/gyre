@@ -56,6 +56,17 @@ def verification_ready(store, task, base=None):
             and ci.get('status') in ('passed','policy_pending','artifact_refresh'))
 
 
+def completed_refresh(store, task, verified, previous, observation):
+    """Do not discard a successful refresh by rediscovering its old CI failure."""
+    marker=task['data'].get('ci_refresh') or {}
+    return (observation.get('status')=='environment_refresh'
+        and marker.get('candidate')==verified.get('candidate')==task['data'].get('candidate')
+        and marker.get('published_head')==previous['head']
+        and marker.get('generation')==task['generation']
+        and marker.get('failure_signature')==observation.get('failure_signature')
+        and includes_base(store,verified['base'],observation['target_base']))
+
+
 def generated_conflict(execution, task, receipt, base):
     """Reproduce conflict paths using Git only; never allocate a sandbox/model."""
     from .stages import checkout

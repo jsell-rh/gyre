@@ -41,6 +41,8 @@ def source(store):
         reconcile(store, path, revision)
         from pipeline.repair_budget import reconcile_generated
         reconcile_generated(store)
+        from pipeline.integration import resolve_upstream_assessments
+        resolve_upstream_assessments(store,path,revision)
         store.set_setting('observed_main', revision)
         return revision
 

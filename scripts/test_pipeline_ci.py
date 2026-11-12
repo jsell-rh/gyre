@@ -263,7 +263,8 @@ class CIReconciliationTests(unittest.TestCase):
                                       {'status':'environment_refresh','target_base':target,'failure_signature':'e'*64})
         self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
         self.store._current(ident,claim['token'])
-        self.assertEqual(self.store.integration_lane()['task'],'task-001')
+        self.assertIsNone(self.store.integration_lane())
+        self.store._current(ident,claim['token'])
 
     def test_shared_repair_creation_is_atomic_across_observers(self):
         import concurrent.futures,threading

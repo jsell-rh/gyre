@@ -654,6 +654,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    tenant_meta_spec_sets (tenant_id) {
+        tenant_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     rollout_policies (workspace_id) {
         workspace_id -> Text,
         json -> Text,
@@ -756,6 +764,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     tenants,
     messages,
     meta_spec_sets,
+    tenant_meta_spec_sets,
     budget_call_records,
     user_workspace_state,
     gate_traces,
