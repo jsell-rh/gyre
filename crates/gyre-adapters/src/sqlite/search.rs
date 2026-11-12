@@ -855,16 +855,14 @@ mod tests {
 
         // Trimmed-empty prefix matches every title — must yield nothing.
         for blank in ["", "   "] {
-            assert!(
-                storage
-                    .suggest(SearchQuery {
-                        query: blank.to_string(),
-                        ..unscoped("")
-                    })
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(storage
+                .suggest(SearchQuery {
+                    query: blank.to_string(),
+                    ..unscoped("")
+                })
+                .await
+                .unwrap()
+                .is_empty());
         }
     }
 

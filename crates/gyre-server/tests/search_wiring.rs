@@ -486,9 +486,7 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
         "scoped suggest must return only ws-a titles: {body}"
     );
     assert!(
-        suggestions
-            .iter()
-            .all(|s| s["entity_id"] != "b-doc"),
+        suggestions.iter().all(|s| s["entity_id"] != "b-doc"),
         "suggest leaked a workspace-b title: {body}"
     );
 

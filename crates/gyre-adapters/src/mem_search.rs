@@ -617,16 +617,14 @@ mod tests {
 
         // Empty / whitespace-only prefix: no suggestions.
         for blank in ["", "   "] {
-            assert!(
-                adapter
-                    .suggest(SearchQuery {
-                        query: blank.to_string(),
-                        ..tenant_query("")
-                    })
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(adapter
+                .suggest(SearchQuery {
+                    query: blank.to_string(),
+                    ..tenant_query("")
+                })
+                .await
+                .unwrap()
+                .is_empty());
         }
     }
 
@@ -659,10 +657,7 @@ mod tests {
 
         // Blank query: whole-accessible-set aggregation (admin shape here —
         // unscoped within the test tenant).
-        let all = adapter
-            .facet_counts(tenant_query(""))
-            .await
-            .unwrap();
+        let all = adapter.facet_counts(tenant_query("")).await.unwrap();
         assert_eq!(all["type"]["task"], 3);
         assert_eq!(all["type"]["mr"], 1);
         assert_eq!(all["workspace"]["ws-a"], 1);

@@ -326,54 +326,56 @@ impl SearchPort for PgStorage {
 
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
-        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
-            let mut conn = pool.get().context("get db connection")?;
-            if query.query.trim().is_empty() {
-                return Ok(vec![]);
-            }
-            // websearch_to_tsquery applies implicit AND between terms (spec
-            // §Simple Search default) and tolerates punctuation without a
-            // syntax error. entity_type/workspace_id filters and the
-            // §Access Scoping constraints (tenant + accessible workspace/repo
-            // sets) are WHERE clauses evaluated by the index query itself,
-            // never post-filtered, so result counts cannot leak inaccessible
-            // documents. ts_headline wraps matches in ** markers, mirroring
-            // the FTS5 adapter.
-            let mut q = diesel::sql_query(SEARCH_BASE_SQL).into_boxed();
-            q = q.bind::<Text, _>(query.query.clone());
-            let mut n = 2;
+        Ok(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+                let mut conn = pool.get().context("get db connection")?;
+                if query.query.trim().is_empty() {
+                    return Ok(vec![]);
+                }
+                // websearch_to_tsquery applies implicit AND between terms (spec
+                // §Simple Search default) and tolerates punctuation without a
+                // syntax error. entity_type/workspace_id filters and the
+                // §Access Scoping constraints (tenant + accessible workspace/repo
+                // sets) are WHERE clauses evaluated by the index query itself,
+                // never post-filtered, so result counts cannot leak inaccessible
+                // documents. ts_headline wraps matches in ** markers, mirroring
+                // the FTS5 adapter.
+                let mut q = diesel::sql_query(SEARCH_BASE_SQL).into_boxed();
+                q = q.bind::<Text, _>(query.query.clone());
+                let mut n = 2;
 
-            let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
-            q = q.sql(scope_sql);
-            for bind in scope_binds {
-                q = match bind {
-                    ScopeBind::Text(v) => q.bind::<Text, _>(v),
-                    ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
-                };
-            }
-            q = q
-                .sql(format!(" ORDER BY rank DESC LIMIT ${n}"))
-                .bind::<BigInt, _>(query.limit as i64);
+                let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
+                q = q.sql(scope_sql);
+                for bind in scope_binds {
+                    q = match bind {
+                        ScopeBind::Text(v) => q.bind::<Text, _>(v),
+                        ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+                    };
+                }
+                q = q
+                    .sql(format!(" ORDER BY rank DESC LIMIT ${n}"))
+                    .bind::<BigInt, _>(query.limit as i64);
 
-            let rows = q.load::<TsRow>(&mut conn)?;
+                let rows = q.load::<TsRow>(&mut conn)?;
 
-            Ok(rows
-                .into_iter()
-                .map(|r| {
-                    // ts_rank is already a higher-is-better relevance in [0,1).
-                    let facets = serde_json::from_str(&r.metadata).unwrap_or_default();
-                    SearchResult {
-                        entity_type: r.entity_type,
-                        entity_id: r.entity_id,
-                        title: r.title,
-                        snippet: r.snip,
-                        score: r.rank,
-                        facets,
-                    }
-                })
-                .collect())
-        })
-        .await??)
+                Ok(rows
+                    .into_iter()
+                    .map(|r| {
+                        // ts_rank is already a higher-is-better relevance in [0,1).
+                        let facets = serde_json::from_str(&r.metadata).unwrap_or_default();
+                        SearchResult {
+                            entity_type: r.entity_type,
+                            entity_id: r.entity_id,
+                            title: r.title,
+                            snippet: r.snip,
+                            score: r.rank,
+                            facets,
+                        }
+                    })
+                    .collect())
+            })
+            .await??,
+        )
     }
 
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()> {
