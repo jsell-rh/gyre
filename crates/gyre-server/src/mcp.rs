@@ -3848,6 +3848,7 @@ mod tests {
                 repo_id: repo.map(|r| r.to_string()),
                 tenant_id: Some("default".to_string()),
                 facets: std::collections::HashMap::new(),
+                updated_at: None,
             };
         state
             .search
@@ -4001,6 +4002,7 @@ mod tests {
                 body: "the merge queue ordering rules".to_string(),
                 workspace_id: None,
                 repo_id: None,
+                tenant_id: None,
                 facets: in_progress,
                 updated_at: None,
             })
@@ -4017,6 +4019,7 @@ mod tests {
                 body: "merge the queue then ordering".to_string(),
                 workspace_id: None,
                 repo_id: None,
+                tenant_id: None,
                 facets: done,
                 updated_at: None,
             })
