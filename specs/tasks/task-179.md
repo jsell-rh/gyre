@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
-commits: ["f3e7ed8af3d08409f971e4f5e562cbeae8e1d524"]
+commits: ["f3e7ed8af3d08409f971e4f5e562cbeae8e1d524", "9699c18b08d0fac4a246e94929e8c074b4e0a790"]
 ---
 
 ## Spec Excerpt
@@ -97,10 +97,9 @@ tests that exercise the real implementation.
   coverage / tests).
 - `MoldableTraitView.svelte` — crate, methods with signatures and
   per-method call-site counts, implementations with crate attribution, and
-  Dependents with per-dependent call-site counts. Gap closed: dependents now
-  include every caller of the trait's methods (previously only direct
-  callers of the trait node itself, which the extractor rarely emits).
-- `MoldableEndpointView.svelte` — route method + path now read from the
+  Dependents with per-dependent call-site counts. Dependents include every
+  caller of the trait's methods plus direct callers of the trait node.
+- `MoldableEndpointView.svelte` — route method + path read from the
   RoutesTo edge metadata (`{"path":…,"method":…}` — the extractor's
   canonical location per rust_extractor.rs; doc_comment is the fallback),
   handler file:line, request/response body shapes, the handler call-flow
@@ -128,28 +127,53 @@ already owns the progressive Preview / Full preview / Publish workflow, and
 duplicating it inside the read-oriented spec view would fork that flow.
 Progressive preview itself is §3 (task-186) territory.
 
+### Field-type resolution repair (commit 9699c18b0)
+
+The first review round found the field-type clickability was computed from
+`field.qualified_name.split('::').pop()` — the FIELD NAME under the real
+extractor convention, so the row rendered `status : status` and produced
+no clickable link. Fixed by replacing `findFieldTypeNode()` with
+`resolveFieldType(field, nodes, edges)` in model.js:
+
+1. Primary source: the DependsOn edge every extractor emits from the field
+   node to the exact type node (rust_extractor.rs, go_extractor.rs,
+   typescript_extractor.rs, python_extractor.rs).
+2. Fallback: identifiers parsed from the doc_comment type annotation
+   (Option/Vec/Result/… wrappers and language primitives skipped), matched
+   against type/interface/trait nodes by name or qualified_name suffix
+   (`::Name` / `.Name` — the python/typescript/go extractors use
+   dot-separated qualified names).
+
+`MoldableTypeView.svelte` now renders `: <annotation>` from doc_comment
+(plain text when no node resolves — primitives/external types) and
+navigates to the resolved type node on click. The test fixture was
+rewritten to the real extractor convention (qualified_name
+`domain::User::status`, doc_comment `TaskStatus`, DependsOn edge) and
+asserts the annotation is the TYPE, so it fails against the old
+field-name logic; a second test covers the no-edge doc_comment fallback
+(`Option<Agent>` → the Agent type node).
+
 ### Test evidence
 
 Focused web probes only (locked `npm ci`; repo's locked vitest).
 
-- Initial round (batches 1–5, 566 tests, all passing; logs retained in the
-  controller's review-evidence directory): `MoldableViews.test.js` (new,
-  22 tests — model unit tests on the real functions, per-view rendering
-  with mock graph data, clickable reference navigation, agent-provenance
-  callback, spec content/history/assertions against a mocked api,
-  NodeDetailPanel routing by node type) plus `NodeDetailPanel.test.js`
-  (60), and every ExplorerView/NodeDetailPanel-adjacent suite (484 more:
-  NavigableArchitecture, Scope, WorkspaceGraph, DrillUrl, LensUrl,
-  DefaultViews, responsive, ViewEvents, Shortcuts, LayoutRenderers,
-  LivenessWiring, GeneratedViews, LargeGraph, AppShell, RepoMode,
-  WorkspaceHome*, DetailPanel, ExplorerCanvas*, ExplorerChat, canvas-state).
-  No Svelte compile warnings from the new components.
-- Repair round (contract restore only; no product change): re-ran the
-  focused probe at the repaired head — `npx vitest run
+- Feature round (f3e7ed8af, 566 tests passing, logs retained in the
+  controller's review-evidence directory): `MoldableViews.test.js` (new —
+  model unit tests on the real functions, per-view rendering with mock
+  graph data, clickable reference navigation, agent-provenance callback,
+  spec content/history/assertions against a mocked api, NodeDetailPanel
+  routing by node type) plus `NodeDetailPanel.test.js` (60), and every
+  ExplorerView/NodeDetailPanel-adjacent suite (484 more).
+- Repair round (9699c18b0): `npx vitest run
   src/__tests__/MoldableViews.test.js src/__tests__/NodeDetailPanel.test.js`
-  → 2 files, 82/82 tests passed, exit 0. Confirmed `git diff
-  f3e7ed8af..HEAD -- web/src web/tests docs/ui.md` is empty, i.e. the
-  shipped code is unchanged since the reviewed feature commit.
+  → 2 files, 83/83 tests passed, exit 0; `npx vitest run
+  src/__tests__/ExplorerCanvasDrillDown.test.js` (real `Parent.field`
+  fixture) → 3/3, exit 0. Direct probe of `resolveFieldType` against the
+  reviewer's exact scenario (field `status`, qualified_name
+  `domain::Task::status`, doc_comment `TaskStatus`, DependsOn edge) resolves
+  TaskStatus via the edge and via the doc_comment fallback, renders
+  `String` as non-clickable plain text, and unwraps `Option<Id>` to the Id
+  type node (evidence: /tmp/stage/review-evidence/field-type-probe-output.txt).
 
 No Rust changes: the knowledge-graph API (`GET /repos/:id/graph`) already
 exposes every field the views consume (GraphNode/GraphEdge in
