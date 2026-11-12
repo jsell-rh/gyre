@@ -164,7 +164,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees; POST: JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |
 | `DELETE` | `/api/v1/repos/{id}/worktrees/{wt_id}` | Delete worktree |
-| `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/tasks/{task-id}` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6); returns **429** if workspace or tenant budget limits are exceeded (`max_concurrent_agents`, `max_tokens_per_day`, `max_cost_per_day`) (M22.2) |
+| `POST` | `/api/v1/agents/spawn` | Spawn agent: create record, generate token, provision worktree, assign task; writes `refs/agents/{id}/head` and `refs/tasks/{task-id}` (M13.6); JWT bearers are evaluated against the target repo's ABAC policy before spawning — returns 403 if no policy matches (G6); returns **429** if workspace or tenant budget limits are exceeded (`max_concurrent_agents`, `max_tokens_per_day`, `max_cost_per_day`) (M22.2). Optional `persona_slug` request field binds a persona (resolved repo → workspace → tenant, must be approved — 400 otherwise), persists it as the agent's `persona_id`, and injects the four §4.3 system prompts into the container env as `GYRE_PROMPT_*`; the response carries `meta_spec_set_sha` (SHA-256 of the assembled meta-spec prompt set — required tenant/workspace meta-specs plus spec bindings — null when the set is empty) (platform-model.md §4.3, agent-runtime.md §2) |
 | `POST` | `/api/v1/agents/{id}/complete` | Complete agent: open MR, mark task done, clean up worktree; writes `refs/agents/{id}/snapshots/{n}` snapshot ref (M13.6); **idempotent** — returns 202 on double-complete; agent token revoked on success (M13.7) |
 | `POST` | `/api/v1/workspaces/{id}/orchestrator/spawn` | Spawn the workspace orchestrator (platform-model §3, task-093): one live workspace orchestrator per workspace - **409** when one is already active; returns agent + scope-bound JWT (`workspace_id`, `orchestrator_type=workspace_orchestrator`); no task, no worktree; auto-restart via stale-agent detector; body `{name?, parent_id?}` |
 | `POST` | `/api/v1/repos/{id}/orchestrator/spawn` | Spawn the repo orchestrator for a repo (task-093): one live repo orchestrator per repo - **409** when one is already active for that repo; JWT bearer evaluated against repo ABAC policy (403 on no match); returns agent + scope-bound JWT (`workspace_id`, `repo_id`, `orchestrator_type=repo_orchestrator`); death escalates an `Escalation` message to the live workspace orchestrator; body `{name?, parent_id?}` |
@@ -442,7 +442,7 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discover and call Gyre capabilities as MCP tools.
 
 **Endpoints:**
-- `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`. Requires authentication.
+- `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`. Requires authentication.
 - `GET /mcp/sse` — SSE stream of typed AG-UI activity events. Requires authentication.
 
 **Available tools** (from `tools/list`):
@@ -483,6 +483,15 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
 | `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
 | `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
+
+**Available prompts** (from `prompts/list`, platform-model.md §4.3) — the four system prompts, also injected into the agent container environment at spawn time as `GYRE_PROMPT_*` (see docs/agent-protocol.md):
+
+| Prompt | Arguments | Description |
+|---|---|---|
+| `system://persona` | `slug` (optional) | The agent's persona prompt. Without `slug`, the persona bound to the calling agent (`persona_id`); with `slug`, nearest-scope-wins resolution (repo → workspace → tenant). Only approved personas resolve. Requires an agent identity. |
+| `system://protocol` | — | Interaction norms, Ralph loop definition, escalation rules (static platform norms). |
+| `system://context` | `task_id` (optional) | Current task (title, spec ref, description), worktree info, repo info. Without `task_id`, the task bound to the calling agent. Requires an agent identity. |
+| `system://constraints` | — | Budget limits + remaining budget, agent lifetime cap, and scope boundaries for the calling agent. Requires an agent identity. |
 
 Example MCP `initialize` call:
 ```json
