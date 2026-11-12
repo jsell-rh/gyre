@@ -45,3 +45,11 @@ Large gyre-server builds/test compilation must run in the independent verifier,
 after the model exits, to fit the hard 4 GiB budget. Use cargo check for server
 type checking and focused tests of smaller explicit packages. Record the server
 tests the verifier must execute. Do not bypass the build wrapper.
+
+Generated `web/dist/` is owned by the deterministic verifier, not implementation
+or review. It may intentionally match the upstream bundle in this checkpoint.
+Review the authored frontend source and tests. Do not reject for stale/missing
+bundle regeneration, generated merge conflicts, or lack of an agent-run build.
+The verifier rebuilds remotely after integration, runs all checks, commits the
+resulting assets, and binds publication to that exact tested tree. Record any
+pure generated-output observation separately; real source defects remain blocking.
