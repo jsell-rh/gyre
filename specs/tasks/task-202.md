@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["f38e8ad07f5081342ffcc2dc6ee30e956b72bce9", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
 ---
 
 ## Spec Excerpt
@@ -66,9 +66,14 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 
 All 10 searchable entity types from search.md §Searchable Entities are
 indexed with real content and the specced indexed fields and facets, and
-the admin reindex endpoint performs a true full rebuild from domain
-storage. Original production code lives in commits `80f13a70`/`309fc7dd`;
-later commits repair review/verification findings (see Repair history).
+`POST /api/v1/admin/search/reindex` performs a true full rebuild from
+domain storage. The original production implementation lives in commits
+`80f13a70`/`309fc7dd` (plus review/verification repairs `3e223c8a`,
+`e2583917`, `2faf26af2`, `3dc6cdcc5`, `b522dd5cd`, `b316bc37f`). This
+round is a rebase repair: merge commit `f38e8ad07` integrates the branch
+with updated main (3af80bd21) whose spawn-path refactor and shared
+workspace-store test wiring conflicted with the task-202 changes; every
+conflict was resolved keeping both sides.
 
 ### Behavior
 
@@ -80,90 +85,70 @@ later commits repair review/verification findings (see Repair history).
   date-range facets, etc.). Best-effort `index`/`deindex` helpers keep
   search failures from failing the entity write.
 - **Write paths** call `SearchPort::index` synchronously: task
-  create/update/transition (`api/tasks.rs`), MR create/status
-  (`api/merge_requests.rs`, including review submission), agent create and
-  spawn (`api/agents.rs`, `api/spawn.rs`), persona create/update
+  create/update/transition (`api/tasks.rs`), MR create/status and review
+  submission (`api/merge_requests.rs`), agent create/spawn/status
+  (`api/agents.rs`, `api/spawn.rs`), persona create/update
   (`api/personas.rs`, delete also de-indexes), activity events at every
   analytics emit path (`api/analytics.rs`, `api/tasks.rs`,
   `api/merge_requests.rs`, `api/spawn.rs`, `api/orchestrator.rs`,
-  `merge_processor.rs` — every emit site derives `workspace_id`/`repo_id`
-  from the entity in hand so write-path activity events are
-  workspace/repo-filterable exactly like reindexed ones), and audit events
-  (`api/audit.rs`, `container_audit.rs`, `procfs_monitor.rs`).
+  `merge_processor.rs` — each emit site derives `workspace_id`/`repo_id`
+  from the entity in hand), and audit events (`api/audit.rs`,
+  `container_audit.rs`, `procfs_monitor.rs`).
 - **Spec pushes** (`git_http.rs`): after the ledger sync, spec content is
   extracted from the pushed git blob and indexed as `body` with the
   ledger's linked task/MR ids appended (the specced `links` field) and
   `approval_status`/`scope`/`owner` facets.
-- **Commit pushes** (`git_http.rs`): message + author are read from the git
-  object store and indexed with `branch`/`agent_id`/`date` facets.
-- **Code search (files)** is eventually consistent per spec: a
+- **Commit pushes** (`git_http.rs`): message + author are read from the
+  git object store and indexed with `branch`/`agent_id`/`date` facets.
+- **Code search (files)** is eventually consistent per spec: the
   `search_code_index` job registered in the existing `JobRegistry` walks
-  the default branch (`git ls-tree -r -l`), skips binaries (NUL sniff) and
-  blobs over 1 MiB, and indexes real file content with a `language` facet.
-  It is triggered on default-branch pushes and runs hourly.
+  the default branch (`git ls-tree -r -l`), skips binaries (NUL sniff)
+  and blobs over 1 MiB, and indexes real file content with a `language`
+  facet. It is triggered on default-branch pushes and runs hourly
+  (alongside main's new `meta_spec_stale_pin_check` job — both are
+  registered and spawned).
 - **Real full reindex**: `POST /api/v1/admin/search/reindex` calls the
-  coordinator, which clears the index first (port `reindex_all` contract)
-  and then rebuilds from every domain repository (spec ledger + git blobs,
-  tasks, MRs + reviews, agents, personas, activity events, audit events,
-  agent-commit mappings, repo file trees), returning the true document
-  count. The count is idempotent across runs and drops stale docs.
-- **Postgres schema reconciliation**: the widened 4-column upsert conflict
-  target is backed by an idempotent init-path upgrade
-  (`upgrade_search_index_pk` in `postgres/search.rs`) that reconciles the
-  live PK from `information_schema` — a deployment initialized under
-  task-201 no longer hits SQLSTATE 42P10 on every upsert. The pure
-  decision logic (`pk_upgrade_sql`) is unit-tested without a live PG
-  instance.
+  coordinator, which clears the index first and then rebuilds from every
+  domain repository (spec ledger + git blobs, tasks, MRs + reviews,
+  agents, personas, activity events, audit events, agent-commit
+  mappings, repo file trees), returning the true document count.
+
+### Rebase-repair specifics (f38e8ad07)
+
+- `api/spawn.rs`: main split the monolithic spawn path into
+  `launch_agent_process` + `register_spawned_agent`/`SpawnBackend`;
+  task-202's activity-event scope facets and search indexing were ported
+  into the refactored `spawn_agent_core` (the analytics emit after the
+  launch), and `monitor_spawned_agent_exit`'s `AuditCtx` construction
+  gained the `search` field task-202 added to `container_audit`.
+- `mem.rs`: unified `test_state_inner` on main's `ws_store` param plus
+  task-202's `search` override param (8 args); all test-state helpers
+  (`test_state`, `test_state_with_jj_ops`, `test_state_with_search`,
+  `test_state_failing_trust`, `test_state_with_jj_and_git_ops`) aligned;
+  test states keep the search-sync decorated repositories mirroring
+  production wiring.
+- `api/agents.rs`, `api/personas.rs`, `api/search.rs`, `jobs.rs`,
+  `main.rs`: both sides' features preserved (secret revocation,
+  persona-approval notifications, suggest/facets endpoints, both
+  background jobs).
 
 ### Test evidence
 
-Latest full run at `b316bc37f` (evidence in
-`/tmp/stage/review-evidence/task-202-links-repair.txt`; earlier rounds in
-`task-202-repair-round3.txt`, `task-202-rebase-merge.txt`,
-`task-202-ci-repair.txt`):
-
-- `cargo test -p gyre-server --lib search_indexer` — 7 passed, including
-  `full_reindex_rebuilds_all_entity_types_from_real_storage`, which seeds
-  all 10 entity types plus a poisoned stale doc against a real SQLite FTS5
-  backend, asserts the true count, idempotency, stale-doc removal, and
-  per-type retrieval including spec-by-body-content, spec-by-linked-id,
-  and commit-by-message. The push-path spec test
-  (`index_repo_specs_indexes_linked_ids_from_ledger`) asserts the ledger's
-  linked ids are indexed on push; both link assertions were verified to
-  FAIL with the link append reverted (mutation check).
-- `cargo test -p gyre-server --lib api::tasks` — 7 passed, including the
-  regression test `task_transition_activity_event_is_workspace_scoped`,
-  which drives the real HTTP router against a real SQLite FTS5 backend and
-  asserts the write-path-indexed activity event is findable via the
-  workspace filter with populated workspace/repo facets.
-- `cargo test -p gyre-server --lib api::spawn` (38), `api::merge_requests`
-  (33), `merge_processor` (67), `api::orchestrator` (6),
-  `--test search_wiring` (1), `gyre-adapters --lib postgres::search` (5)
-  and `--lib search` (18) — all passed.
-- Gates against base `fefde2946`: `check-rustfmt-diff.py` exit 0,
-  `check-clippy-diff.py` exit 0 (changed lines clean), `check-arch.sh`,
-  `check-migration-versions.sh`, and `check-inert-enforcement.sh` passed.
-
-Full-workspace `cargo test --all`, all-target Clippy, and GitHub CI are
-deferred to verification per assignment scope. Note for verification: a
-pre-existing deny-level `clippy::never_loop` error in
-`crates/gyre-domain/src/rust_extractor.rs:1071` (upstream commit `d7940e85`,
-present at this branch's base) fails any workspace clippy run regardless
-of this task; it is untouched here and owned by that code's task.
-
-### Repair history
-
-- `3dc6cdcc` (round-2/3 review): activity-event scope facets on write
-  paths; Postgres search_index PK reconciliation.
-- `4bdcd763e`/`2faf26af2` (merge repair): rebase onto upstream `fefde2946`
-  — kept the `search_code_index` job alongside upstream's new jobs, merged
-  `test_state_inner` to the widened signature, delegated
-  `compress_details_before` on `IndexingAuditRepository`, dropped the
-  task-077 exemption pins that upstream's task-095 repair made obsolete.
-- `b522dd5cd` (round-4 CI): rustfmt drift (`cargo fmt --all`) and two
-  changed-line clippy errors (`needless_borrow` in `api/spawn.rs`,
-  `too_many_arguments` on `commit_document`) — no behavior change.
-- `b316bc37f` (round-5 review): the spec `links` indexed field —
-  `SpecLedgerEntry.linked_tasks`/`linked_mrs` were never in the spec
-  document, so `?q=<linked id>` returned no spec; they are now appended to
-  the spec body in both `index_repo_specs` and `reindex_all`.
+- This round (sandbox, build-wrapper constrained):
+  - `cargo check --workspace --all-targets` — clean (no errors/warnings).
+  - `cargo test -p gyre-adapters search` — 23/23 passed (SQLite FTS5,
+    mem, and Postgres PK-upgrade adapter suites).
+  - `bash scripts/check-arch.sh` — passed.
+  - Evidence: `/tmp/stage/review-evidence/task-202-rebase-repair.txt`.
+- Deferred to the independent verifier (gyre-server codegen exceeds the
+  sandbox's 4 GiB model+build budget):
+  - `cargo test -p gyre-server --lib search_indexer` — includes
+    `full_reindex_rebuilds_all_entity_types_from_real_storage` (seeds
+    spec-by-blob-content, commit-by-message, task, MR, review, agent,
+    persona, activity/audit events, and file docs against a real SQLite
+    FTS5 backend; poisons the index with a stale doc; asserts every type
+    is retrievable and the stale doc is dropped).
+  - `cargo test -p gyre-server --test search_wiring` — FTS5 port wiring
+    through the real router (`/api/v1/search`, `/suggest`, `/facets`,
+    admin reindex).
+  - `cargo test --all` and remaining CI gates.
