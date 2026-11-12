@@ -158,7 +158,10 @@ describe('Explorer default views selector (HSI §3)', () => {
     renderRepoScope();
     const options = await viewOptions();
     expect(options.map((t) => t.textContent.trim())).toEqual([
-      'Boundary', 'Spec Realization', 'Change', 'System Trace', 'Generate view…',
+      'Boundary', 'Spec Realization', 'Change', 'System Trace',
+      // Trace flows section (system-explorer.md §5 predefined flows)
+      'Agent spawn flow', 'MR merge flow', 'Spec approval flow',
+      'Generate view…',
     ]);
     const boundary = options.find((t) => t.textContent === 'Boundary');
     expect(boundary.getAttribute('aria-selected')).toBe('true');

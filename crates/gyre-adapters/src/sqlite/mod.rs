@@ -244,6 +244,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "tenant_meta_spec_sets",
             "rollout_policies",
             "gate_traces",
             "trace_spans",
