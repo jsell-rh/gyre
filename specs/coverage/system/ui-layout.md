@@ -2,7 +2,7 @@
 
 **Spec:** [`system/ui-layout.md`](../../system/ui-layout.md)
 **Last audited:** 2026-09-29
-**Coverage:** 1/38
+**Coverage:** 2/38
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -42,7 +42,7 @@
 | 34 | Item Structure | 3 | task-assigned | task-175 | Priority badge, accordion |
 | 35 | Action Buttons per Item Type | 3 | task-assigned | task-175 | 10 priority levels |
 | 36 | 8. Briefing Layout | 2 | task-assigned | task-175 | Narrative sections |
-| 37 | 9. Meta-specs Preview Loop Layout | 2 | task-assigned | task-176 | 3-state preview workflow |
+| 37 | 9. Meta-specs Preview Loop Layout | 2 | implemented | task-176 | 3-state preview workflow via the shared EditorSplit (§2) in meta-spec context, mounted by the MetaSpecs workspace view: State 1 target-spec checkbox selector + Preview/Publish; State 2 locked editor showing the pending-changes diff vs the published registry prompt (LCS line diff, +/- markers, add/remove summary) + per-spec ◐/✓ progress + Cancel Preview (button and Esc); State 3 Architecture (default)/Code Diff tabs rendering the real PreviewResponse fields, Iterate returns to editing with results retained, Publish → registry PUT resets approval to Pending. Preview runs against the real POST/GET /workspaces/:id/meta-specs/preview endpoints. Verified via MetaSpecs.test.js + EditorSplit.test.js + lineDiff.test.js (2026-10-11) |
 | 38 | 10. Rendering Technology | 2 | task-assigned | task-177 | SVG canvas + engines |
 | 39 | Canvas Rendering | 3 | task-assigned | task-177 | SVG, auto-filter thresholds |
 | 40 | Layout Engines | 3 | task-assigned | task-177 | ELK, d3-force, d3-scale |
