@@ -152,6 +152,7 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/gates/:gate_id", "gate", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/gate-chain", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
