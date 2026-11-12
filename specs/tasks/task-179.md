@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: complete
 coverage_sections:
   - "system-explorer.md §2. Moldable Views"
-commits: ["d655e87ae975d70c4515f120be5ada986aaefcf9", "9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524"]
+commits: ["d655e87ae975d70c4515f120be5ada986aaefcf9", "9699c18b08d0fac4a246e94929e8c074b4e0a790", "f3e7ed8af3d08409f971e4f5e562cbeae8e1d524", "ee5a6e10e30f408fc5609d802663fe848e8b8780"]
 ---
 
 ## Spec Excerpt
