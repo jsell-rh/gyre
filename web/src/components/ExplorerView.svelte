@@ -21,7 +21,7 @@
   // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
-  import { viewSpecToViewQuery } from '../lib/generated-view.js';
+  import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -1329,8 +1329,9 @@
   // dropdown opens; best-effort (a failed fetch keeps the current list).
   // Both scopes are merged by id, mirroring the socket's ListViews: the
   // repo-scoped records carry the stored ViewQuery directly, the
-  // workspace-scoped records carry a ViewSpec (translated via
-  // viewSpecToViewQuery).
+  // workspace-scoped records carry a stored document in EITHER grammar
+  // (ViewSpec — generated views; ViewQuery — ad-hoc concept groupings),
+  // translated via viewDocumentToQuery.
   let savedViewsRefreshing = false;
   async function refreshSavedViews() {
     if (savedViewsRefreshing) return;
@@ -1352,7 +1353,7 @@
         byId.set(r.id, {
           ...r,
           is_system: r.is_system ?? r.is_builtin ?? false,
-          query: r.query ?? (r.spec ? viewSpecToViewQuery(r.spec) : null),
+          query: r.query ?? (r.spec ? viewDocumentToQuery(r.spec) : null),
         });
       }
       explorerSavedViews = [...byId.values()];

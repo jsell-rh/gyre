@@ -2417,31 +2417,41 @@
       return matched.size > 0 ? matched : null;
     }
 
-    // Concept scope: start from seed nodes, expand along edges
+    // Concept scope: start from seed nodes, expand along edges.
+    // seed_match 'substring' (the ViewSpec data.concept mechanism,
+    // ui-layout.md §4): every node whose name/qualified_name contains the
+    // seed (case-insensitive) is a seed. Default 'exact': the seed names
+    // one node by name/qualified_name/id (ad-hoc groupings, grammar
+    // examples).
     if (scope.type === 'concept') {
       const seeds = scope.seed_nodes ?? [];
+      const substring = String(scope.seed_match ?? 'exact') === 'substring';
       const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
       const maxDepth = scope.expand_depth ?? 2;
       const dir = scope.expand_direction ?? 'both';
       const dm = new Map();
 
       for (const seedName of seeds) {
-        const seedNode = nodes.find(n =>
-          n.name === seedName || n.qualified_name === seedName || n.id === seedName
-        );
-        if (!seedNode || dm.has(seedNode.id)) continue;
-        dm.set(seedNode.id, 0);
-        const q = [{ id: seedNode.id, depth: 0 }];
-        while (q.length > 0) {
-          const { id, depth } = q.shift();
-          if (depth >= maxDepth) continue;
-          for (const nb of (adjacency.get(id) ?? [])) {
-            if (dm.has(nb.targetId)) continue;
-            if (!expandEdges.has(nb.edgeType)) continue;
-            if (dir === 'outgoing' && nb.reverse) continue;
-            if (dir === 'incoming' && !nb.reverse) continue;
-            dm.set(nb.targetId, depth + 1);
-            q.push({ id: nb.targetId, depth: depth + 1 });
+        const seedNodes = substring
+          ? nodes.filter(n =>
+              String(n.name ?? '').toLowerCase().includes(seedName.toLowerCase()) ||
+              String(n.qualified_name ?? '').toLowerCase().includes(seedName.toLowerCase()))
+          : [nodes.find(n => n.name === seedName || n.qualified_name === seedName || n.id === seedName)].filter(Boolean);
+        for (const seedNode of seedNodes) {
+          if (dm.has(seedNode.id)) continue;
+          dm.set(seedNode.id, 0);
+          const q = [{ id: seedNode.id, depth: 0 }];
+          while (q.length > 0) {
+            const { id, depth } = q.shift();
+            if (depth >= maxDepth) continue;
+            for (const nb of (adjacency.get(id) ?? [])) {
+              if (dm.has(nb.targetId)) continue;
+              if (!expandEdges.has(nb.edgeType)) continue;
+              if (dir === 'outgoing' && nb.reverse) continue;
+              if (dir === 'incoming' && !nb.reverse) continue;
+              dm.set(nb.targetId, depth + 1);
+              q.push({ id: nb.targetId, depth: depth + 1 });
+            }
           }
         }
       }

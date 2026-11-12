@@ -409,6 +409,140 @@ describe('ExplorerView — concept views (system-explorer.md §4)', () => {
     }, { timeout: 5000 });
   });
 
+  it('Ask input handles concept questions via LLM: a data.concept ViewSpec fades the canvas to the substring-matched nodes', async () => {
+    // "Show me everything related to authentication" → the generate
+    // endpoint returns a ViewSpec with data.concept 'auth'. No node in
+    // GRAPH is NAMED 'auth' — the concept must resolve through
+    // case-insensitive SUBSTRING matching (ui-layout.md §4 Data Layer),
+    // seeding every node whose name/qualified_name contains 'auth'
+    // (auth-domain, tokens, JwtAuthProvider, TokenStore) and fading the
+    // rest to background. Exact seed matching resolves nothing here —
+    // the canvas would stay undimmed (the bug this test pins).
+    const sseText = [
+      'event: complete',
+      'data: ' + JSON.stringify({
+        view_spec: {
+          name: 'Authentication system',
+          data: { concept: 'auth', node_types: [], edge_types: [], depth: 0 },
+          layout: 'graph',
+          explanation: 'Everything related to authentication.',
+        },
+        explanation: 'Everything related to authentication.',
+      }),
+      '',
+    ].join('\n');
+    fn('generateExplorerView').mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(sseText),
+    });
+    renderRepoScope();
+    await waitForCanvas();
+
+    await waitFor(() => {
+      expect(labelAlphaMap().get('shipping-domain')).toBeGreaterThan(0);
+    }, { timeout: 5000 });
+    await waitForCanvasSettled();
+    const baseline = labelAlphaMap();
+
+    // Switch the chat column to Generated Views (the Ask flow) and ask a
+    // concept question.
+    await fireEvent.click(document.querySelector('.chat-mode-tab:nth-child(2)'));
+    const input = await waitFor(() => document.querySelector('.gen-input'));
+    await waitFor(() => expect(input.disabled).toBe(false));
+    await fireEvent.input(input, { target: { value: 'Show me everything related to authentication' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(fn('generateExplorerView')).toHaveBeenCalledWith(
+        'ws-1',
+        expect.objectContaining({ question: 'Show me everything related to authentication' })
+      );
+    }, { timeout: 5000 });
+
+    // The translated concept view applied: the unrelated shipping package
+    // fades to background (drawn at the query dim factor, not removed);
+    // the auth package (substring-matched nodes inside) keeps full
+    // opacity. Tree groups without matches dim to 0.15 (queryNodeOpacity).
+    await waitFor(
+      () => {
+        const faded = labelAlphaMap();
+        expect(faded.get('shipping-domain'), 'non-concept node must stay drawn').toBeDefined();
+        expect(faded.get('shipping-domain') / baseline.get('shipping-domain')).toBeCloseTo(0.15, 5);
+      },
+      { timeout: 5000 }
+    );
+    const faded = labelAlphaMap();
+    // Matched nodes are boosted to FULL draw opacity (queryNodeOpacity ≥ 0.8
+    // → Math.max with the zoom-faded base) — emphasis, not just unfaded.
+    expect(faded.get('auth-domain')).toBeCloseTo(1.0, 2);
+
+    // The LLM explanation renders as the query annotation.
+    await waitFor(() => {
+      expect(document.querySelector('.query-annotation')?.textContent).toContain('Everything related to authentication.');
+    });
+  });
+
+  it('reloading a saved ad-hoc concept applies its grouping (saved-view round trip)', async () => {
+    // The exact document saveConceptDialog persists (ViewQuery grammar —
+    // the server stores and re-serves it verbatim). Selecting it from the
+    // view selector must apply the concept scope, not flatten it to the
+    // full graph.
+    fn('explorerViews').mockResolvedValue([
+      {
+        id: 'wv-auth-core',
+        name: 'Auth core',
+        description: 'Ad-hoc concept grouping 2 nodes',
+        is_builtin: false,
+        spec: {
+          scope: {
+            type: 'concept',
+            seed_nodes: ['JwtAuthProvider', 'TokenStore'],
+            expand_edges: [],
+            expand_depth: 0,
+            expand_direction: 'both',
+          },
+          emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+          zoom: 'fit',
+          annotation: { title: 'Concept: Auth core', description: '2 grouped nodes' },
+        },
+      },
+    ]);
+    renderRepoScope();
+    await waitForCanvas();
+
+    await waitFor(() => {
+      expect(labelAlphaMap().get('shipping-domain')).toBeGreaterThan(0);
+    }, { timeout: 5000 });
+    await waitForCanvasSettled();
+    const baseline = labelAlphaMap();
+
+    // Open the view selector — the dropdown fetches the saved views via
+    // REST and translates the stored document.
+    const selector = document.querySelector('[data-testid="explorer-view-selector"]');
+    await fireEvent.click(within(selector).getByRole('button', { name: /view selector/i }));
+    const menu = selector.querySelector('.view-select-menu');
+    expect(menu).toBeTruthy();
+    const saved = await within(menu).findByTestId('view-option-saved');
+    expect(saved.textContent).toContain('Auth core');
+
+    const framesBefore = frameCount;
+    await fireEvent.click(saved);
+    await labelsOfNextRedraw(framesBefore);
+
+    // The saved concept grouping applied: shipping fades to background,
+    // auth (the grouped nodes' package) is boosted to full draw opacity.
+    const faded = labelAlphaMap();
+    expect(faded.get('shipping-domain'), 'non-concept node must stay drawn').toBeDefined();
+    expect(faded.get('shipping-domain') / baseline.get('shipping-domain')).toBeCloseTo(0.15, 5);
+    expect(faded.get('auth-domain')).toBeCloseTo(1.0, 2);
+    // The saved view's annotation renders (proof the concept document —
+    // not a fallback scope — was applied).
+    await waitFor(() => {
+      expect(document.querySelector('.annotation-title')?.textContent).toBe('Concept: Auth core');
+    });
+  });
+
   it('create-concept dialog requires a name and surfaces save errors', async () => {
     renderRepoScope(TWO_LEAF_GRAPH);
     await waitForCanvas();
