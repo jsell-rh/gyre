@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
+commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd"]
 ---
 
 ## Spec Excerpt
@@ -93,76 +93,40 @@ From `search.md` §Query Language:
 
 ## Shipped
 
-The §Query Language grammar (simple terms, quoted phrases, faceted
-filtering, `since:`/`until:` time bounds) ships as real production code
-across the domain parser, the port protocol, all three SearchPort
-adapters, the REST handler, and the MCP `gyre_search` tool — and this
-round rebases that work onto main's task-203 access scoping so both
-features hold simultaneously: every query-language query is executed
-inside the caller's access scope, never beside it.
+The §Query Language grammar ships as production code across the stack:
+the pure parser (`crates/gyre-domain/src/search_query.rs`: terms,
+quoted phrases, facets with AND-across/OR-within composition, and
+`since:`/`until:` relative `7d` and absolute `2026-03-01` time bounds),
+the port protocol (`crates/gyre-ports/src/search.rs` carries the parse
+plus the caller's resolved access scope), all three SearchPort adapters
+(SQLite FTS5, PostgreSQL, in-memory), the REST handler
+(`GET /api/v1/search?q=`), and the MCP `gyre_search` tool. Every
+query-language query executes inside the caller's task-203 access
+scope; the `entity_type`/`workspace_id` params remain narrowing
+shortcuts. Parser and integration tests live in `gyre-domain`
+(`search_query`), `gyre-server` (`mcp_search_query_language`, REST
+search tests), and `tests/search_wiring.rs`.
 
-### This round — rebase onto task-203 (merge commit `dbe510212`)
+### This round — repair review finding (compile fix)
 
-Main's task-203 (access scoping) and this branch's task-154 (query
-language) both rewrote the same SearchPort surface, so the rebase
-conflicts were resolved by combining the semantics, not picking a side:
+The rebase of the query language onto task-203's access scoping left
+three E0063 errors in the gyre-server lib test target: the task-203
+test helper `mcp_search_is_access_scoped_to_the_agent_token` was
+missing the new `updated_at` field, and both `SearchDocument` literals
+in the new `mcp_search_query_language` test were missing `tenant_id`
+— so the MCP query-language acceptance test had never compiled. Fixed
+by completing the three initializers (commit `5ace1b3ac`).
 
-- `SearchQuery` (crates/gyre-ports/src/search.rs) carries both the
-  query-language parse (`parsed`) and the caller's resolved scope
-  (`tenant_id`, `accessible_workspace_ids`, `accessible_repo_ids`).
-  `SearchQuery::parse` starts fail-closed — no tenant, empty accessible
-  sets — and the REST/MCP handlers attach the auth-derived scope via the
-  new `with_scope` builder. Scope is never taken from the query string;
-  the `entity_type`/`workspace_id` params/facets remain narrowing
-  filters that can only intersect the accessible set.
-- `facet_counts` keeps task-203's non-`Option` signature: a blank query
-  aggregates the caller's whole accessible set (the `/search/facets`
-  contract), while any text/facet/shortcut filter restricts the
-  aggregation to the same filtered match set `search()` uses (task-154's
-  semantics). The `Option<SearchQuery>` whole-index shape from the
-  pre-rebase branch was dropped — `None`-means-whole-index would leak
-  cross-tenant counts.
-- All three adapters compose scope AND query-language filters as WHERE
-  clauses of the index query itself, never post-filtered: the mem
-  adapter folds both into one `scope_visible` predicate; the SQLite
-  adapter pushes a new `build_scope` into the existing `WhereBuilder`
-  next to `build_filters`; the PG adapter does the same with
-  `PgWhereBuilder` (the boxed-query `scope_filter_sql` machinery was
-  removed in favor of the single builder, with `s.*`-aliased SQL kept so
-  PG accepts the scope clauses). Entity indexing keeps task-154's
-  `updated_at` timestamp inside task-203's tenant-deriving `index_doc`
-  wrapper.
+Evidence (this sandbox): `/tmp/stage/bin/cargo check -p gyre-server
+--lib --tests` → exit 0, no errors (all test targets compile, including
+`tests/search_wiring.rs`). Saved under
+`/tmp/stage/review-evidence/task-154-cargo-check.txt`.
 
-### Test evidence (focused probes, logs in /tmp/stage/review-evidence)
+### Verifier must run
 
-- `cargo test -p gyre-adapters --lib search` — 33 passed: both the
-  task-154 query-language suite (phrases vs scattered terms, facet
-  AND-across/OR-within, `since:`/`until:` relative + absolute,
-  facet-only browse, malformed queries, facet_counts honoring query
-  filters) and the task-203 access-scoping suite (tenant boundary,
-  accessible workspace/repo sets, empty-set fail-closed,
-  client-workspace_id-cannot-widen, facet-count and suggest leak
-  guards).
-- `cargo test -p gyre-adapters --lib postgres::search` — 6 passed: the
-  four `s.tsv @@ q` SQL-shape regression tests plus the two adapted
-  scope-shape tests (`scope_clauses_are_s_prefixed_index_query_filters`,
-  `empty_accessible_set_compiles_to_no_rows`).
-- `cargo test -p gyre-adapters --lib` (full suite) — 479 passed, 0
-  failed; `cargo test -p gyre-domain --lib` — 499 passed (parser tests
-  included).
-- `cargo check -p gyre-server --test search_wiring` — compiles clean.
+- `cargo test -p gyre-server --lib mcp_search`
+- `cargo test -p gyre-server --test search_wiring`
+- `cargo test -p gyre-domain search_query`
 
-### Verifier must run (blocked here by the 4 GiB server-build guard)
-
-- `cargo test -p gyre-server --test search_wiring` — the HTTP
-  integration leg: phrase adjacency (`q=%22count quokkas%22`),
-  facet narrowing, facet-vs-param precedence, `since:` bounds, and
-  (from task-203) scope-filtered search/suggest/facets over the real
-  middleware stack.
-
-### Standing caveats (unchanged by this round)
-
-- The PG runtime leg has no in-repo test harness; SQL-shape tests plus
-  remote verification against live PG remain the evidence path.
-- `specs/coverage/system/search.md` rows 3–8 and 16 describe tasks
-  201/202/203/155 and were not touched by this task's scope.
+(server test compilation is deferred to the verifier per the 4 GiB
+budget constraint)
