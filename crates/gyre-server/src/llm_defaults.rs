@@ -55,6 +55,23 @@ Instruction: {{instruction}} \
 For new specs (empty content), use only \"add\" operations.\n\
 Respond with valid JSON only, no markdown code fences.";
 
+/// Fallback system prompt for the workspace-scoped meta-spec assist
+/// (ui-layout.md §9 State 1 chat). Same response contract as
+/// PROMPT_SPECS_ASSIST so the editor's shared SSE parser and Accept/Edit/
+/// Dismiss suggestion blocks work unchanged.
+pub const PROMPT_META_SPECS_ASSIST: &str = "You are a meta-spec editing assistant. \
+You are working on meta-spec of kind '{{meta_spec_kind}}' named '{{meta_spec_name}}'. \
+\n\nCurrent meta-spec prompt content:\n{{meta_spec_content}}\n\n\
+Instruction: {{instruction}} \
+\n\nRespond with a JSON object containing two fields:\n\
+1. \"diff\": an array of edit operations, each with:\n\
+   - \"op\": one of \"add\", \"remove\", or \"replace\"\n\
+   - \"path\": a markdown section header (e.g. \"## Error Handling\") or line range (e.g. \"L15-L22\")\n\
+   - \"content\": the text content (empty string for remove operations)\n\
+2. \"explanation\": a brief explanation of what changes were made and why.\n\n\
+For new meta-specs (empty content), use only \"add\" operations.\n\
+Respond with valid JSON only, no markdown code fences.";
+
 /// Fallback system prompt for explorer view generation (HSI §3 Generated
 /// Views). The user's question is passed as the user prompt (never injected
 /// here). The user prompt additionally carries server-derived context the

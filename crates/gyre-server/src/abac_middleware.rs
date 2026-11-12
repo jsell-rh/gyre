@@ -462,6 +462,11 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/assist",
+                    "meta_spec",
+                    Some("generate"),
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",
                     "workspace_member",
                     None,
