@@ -1070,9 +1070,18 @@ mod tests {
             .await
             .unwrap();
         let names_200: Vec<String> = at_200.iter().map(|n| n.name.clone()).collect();
-        assert!(names_200.contains(&"fn_early".to_string()), "early exists at 200");
-        assert!(names_200.contains(&"fn_gone".to_string()), "gone existed at 200 (deleted later)");
-        assert!(!names_200.contains(&"fn_late".to_string()), "late did not exist at 200");
+        assert!(
+            names_200.contains(&"fn_early".to_string()),
+            "early exists at 200"
+        );
+        assert!(
+            names_200.contains(&"fn_gone".to_string()),
+            "gone existed at 200 (deleted later)"
+        );
+        assert!(
+            !names_200.contains(&"fn_late".to_string()),
+            "late did not exist at 200"
+        );
         assert_eq!(names_200.len(), 2);
 
         let at_500 = GraphPort::list_nodes_at(&s, &Id::new(repo), 500)
@@ -1080,7 +1089,10 @@ mod tests {
             .unwrap();
         let names_500: Vec<String> = at_500.iter().map(|n| n.name.clone()).collect();
         assert!(names_500.contains(&"fn_early".to_string()));
-        assert!(!names_500.contains(&"fn_gone".to_string()), "gone was deleted at 300, not present at 500");
+        assert!(
+            !names_500.contains(&"fn_gone".to_string()),
+            "gone was deleted at 300, not present at 500"
+        );
         assert!(!names_500.contains(&"fn_late".to_string()));
         assert_eq!(names_500.len(), 1);
 
@@ -1135,7 +1147,10 @@ mod tests {
             .unwrap();
         let ids_200: Vec<String> = at_200.iter().map(|e| e.id.to_string()).collect();
         assert!(ids_200.contains(&"e_stable".to_string()));
-        assert!(ids_200.contains(&"e_gone".to_string()), "edge deleted at 250 existed at 200");
+        assert!(
+            ids_200.contains(&"e_gone".to_string()),
+            "edge deleted at 250 existed at 200"
+        );
         assert!(!ids_200.contains(&"e_late".to_string()));
         assert_eq!(ids_200.len(), 2);
 
@@ -1143,7 +1158,11 @@ mod tests {
             .await
             .unwrap();
         let ids_500: Vec<String> = at_500.iter().map(|e| e.id.to_string()).collect();
-        assert_eq!(ids_500, vec!["e_stable".to_string()], "only the stable edge at 500");
+        assert_eq!(
+            ids_500,
+            vec!["e_stable".to_string()],
+            "only the stable edge at 500"
+        );
     }
 
     #[tokio::test]
