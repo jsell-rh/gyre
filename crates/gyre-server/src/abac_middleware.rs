@@ -91,6 +91,11 @@ pub struct RouteResourceMapping {
     pub resource_type: &'static str,
     /// Override the action for this route (e.g. "spawn", "approve").
     pub action_override: Option<&'static str>,
+    /// Per-method action overrides, consulted before `action_override`.
+    /// Needed when one pattern serves multiple methods that need distinct
+    /// ABAC actions (e.g. PUT = "transfer_ownership" but DELETE = "delete"
+    /// on the workspace member route).
+    pub method_action_overrides: &'static [(&'static str, &'static str)],
     /// If true, this route is exempt from ABAC evaluation.
     pub exempt: bool,
 }
@@ -105,6 +110,21 @@ impl RouteResourceMapping {
             pattern,
             resource_type,
             action_override,
+            method_action_overrides: &[],
+            exempt: false,
+        }
+    }
+
+    const fn api_with_method_actions(
+        pattern: &'static str,
+        resource_type: &'static str,
+        method_action_overrides: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        Self {
+            pattern,
+            resource_type,
+            action_override: None,
+            method_action_overrides,
             exempt: false,
         }
     }
@@ -114,8 +134,24 @@ impl RouteResourceMapping {
             pattern,
             resource_type: "exempt",
             action_override: None,
+            method_action_overrides: &[],
             exempt: true,
         }
+    }
+
+    /// Resolve the ABAC action for a request on this route: method-scoped
+    /// overrides first, then the pattern-wide override, then the HTTP
+    /// method mapping.
+    fn resolve_action(&self, method: &Method) -> &'static str {
+        if let Some((_, action)) = self
+            .method_action_overrides
+            .iter()
+            .find(|(m, _)| m.eq_ignore_ascii_case(method.as_str()))
+        {
+            return action;
+        }
+        self.action_override
+            .unwrap_or_else(|| method_to_action(method))
     }
 }
 
@@ -145,6 +181,17 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/mirror", "repo", Some("write")),
                 RouteResourceMapping::api(REPOS_ID_ROUTE, "repo", None),
+                // Repo access overrides (user-management.md §Repo Access).
+                // PUT/DELETE on the override route evaluate as the repo
+                // "admin" action (override management is an admin
+                // capability); GET keeps its method-derived action.
+                RouteResourceMapping::api_with_method_actions(
+                    "/api/v1/repos/:id/access-overrides/:user_id",
+                    "repo",
+                    &[("PUT", "admin"), ("DELETE", "admin")],
+                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/access-overrides", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/access/:user_id", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/branches", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/diff", "repo", None),
@@ -358,6 +405,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                RouteResourceMapping::api("/api/v1/admin/orphaned-workspaces", "admin", None),
                 // Admin user impersonation (identity-security.md §Impersonation).
                 // Request/end are admin-only (`admin` resource →
                 // builtin-admin-only-deny rejects non-Admin roles); the
@@ -479,10 +527,22 @@ impl ResourceResolver {
                     "workspace_member",
                     None,
                 ),
-                RouteResourceMapping::api(
+                // PUT (role change incl. ownership transfer) evaluates as the
+                // "transfer_ownership" action (user-management.md §Ownership
+                // Transfer & Reclamation); DELETE keeps "delete".
+                RouteResourceMapping::api_with_method_actions(
                     "/api/v1/workspaces/:id/members/:user_id",
                     "workspace_member",
-                    None,
+                    &[("PUT", "transfer_ownership")],
+                ),
+                // Spec-named alias route (user-management.md §API:
+                // `PUT .../members/{user_id}/role`) — mirrors the member
+                // route's action resolution so both paths enforce the same
+                // policy evaluation.
+                RouteResourceMapping::api_with_method_actions(
+                    "/api/v1/workspaces/:id/members/:user_id/role",
+                    "workspace_member",
+                    &[("PUT", "transfer_ownership")],
                 ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
@@ -1232,6 +1292,72 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 810: workspace Owner/Admin members manage workspace
+        // membership (user-management.md §Workspace Membership: Admin —
+        // "Manage members"; Owner — full workspace control). Gates the
+        // "transfer_ownership" action (role changes, including ownership
+        // transfer / TenantAdmin reassignment) and member removal on the
+        // workspace_member resource. `subject.workspace_role` is resolved
+        // from the real membership store by the middleware; callers without
+        // a membership don't match and fall through to the default-deny.
+        Policy {
+            id: Id::new("builtin-workspace-member-management"),
+            name: "builtin:workspace-member-management".to_string(),
+            description: "Workspace Owner/Admin members may manage workspace membership \
+                 (role changes, ownership transfer, member removal)"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 810,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                ]),
+            }],
+            actions: vec!["transfer_ownership".to_string(), "delete".to_string()],
+            resource_types: vec!["workspace_member".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Priority 809: workspace Owner/Admin members manage per-repo access
+        // overrides (user-management.md §Repo Access: the Admin role carries
+        // repo `admin`). Gates the repo "admin" action, which the override
+        // management route resolves to; no other repo route produces that
+        // action, so this does not broaden repo deletion/update.
+        Policy {
+            id: Id::new("builtin-repo-access-override-management"),
+            name: "builtin:repo-access-override-management".to_string(),
+            description: "Workspace Owner/Admin members may manage per-repo access overrides"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 809,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                ]),
+            }],
+            actions: vec!["admin".to_string()],
+            resource_types: vec!["repo".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 700: Agent role → allow read + write + agent lifecycle actions.
         Policy {
             id: Id::new("builtin-agent-scoped-access"),
@@ -1624,18 +1750,17 @@ pub async fn abac_middleware(
     // (scripts/check-abac-route-registry.sh fails the build if a registered
     // /api/v1/ route has no entry here — keep it that way; an unregistered
     // route means NO policy evaluation).
-    let (resource_type, action_override, exempt) =
-        match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
-            Some(m) => (m.resource_type, m.action_override, m.exempt),
-            None => {
-                // No policy evaluation, but the call is still attributed
-                // when made under an impersonation token
-                // (identity-security.md §Impersonation).
-                let req =
-                    record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
-                return next.run(req).await;
-            }
-        };
+    let mapping = RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern));
+    let (resource_type, exempt) = match mapping {
+        Some(m) => (m.resource_type, m.exempt),
+        None => {
+            // No policy evaluation, but the call is still attributed
+            // when made under an impersonation token
+            // (identity-security.md §Impersonation).
+            let req = record_impersonated_passthrough(state.clone(), req, "abac-unresolved").await;
+            return next.run(req).await;
+        }
+    };
 
     // ABAC-exempt routes pass through immediately — after impersonation
     // attribution, so an impersonated read of the target's private
@@ -1666,8 +1791,12 @@ pub async fn abac_middleware(
     let req = Request::from_parts(parts, body);
 
     // Resolve action (needed by the scoped-token allow-list below and by
-    // policy evaluation).
-    let action = action_override.unwrap_or_else(|| method_to_action(&method));
+    // policy evaluation): method-scoped overrides, then pattern-wide
+    // override, then the HTTP method mapping.
+    let action = match mapping {
+        Some(m) => m.resolve_action(&method),
+        None => method_to_action(&method),
+    };
 
     // System token bypasses ABAC entirely. `is_system_principal()` (not an
     // agent_id string match): API-key/JWT auth sets agent_id from the user's
