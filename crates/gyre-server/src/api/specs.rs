@@ -731,11 +731,9 @@ pub async fn approve_spec(
                 // Populate meta_spec_set_sha from the workspace's current
                 // meta-spec set (§2.2). When no set is configured, remains
                 // empty string (graceful fallback).
-                let meta_spec_set_sha = crate::compute_meta_spec_set_sha(
-                    state.meta_spec_sets.as_ref(),
-                    &gyre_common::Id::new(&workspace_id),
-                )
-                .await;
+                let meta_spec_set_sha =
+                    crate::compute_meta_spec_set_sha(&state, &gyre_common::Id::new(&workspace_id))
+                        .await;
 
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
@@ -2048,8 +2046,7 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha =
-        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),
@@ -2458,6 +2455,8 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
         };
         state.repos.create(&repo).await.unwrap();
 
@@ -4999,11 +4998,44 @@ specs:
             .await
             .unwrap();
 
-        // Seed a meta-spec set for the workspace.
-        let meta_set_json = r#"{"workspace_id":"ws-meta-test","personas":{"security":{}}}"#;
+        // Seed the workspace (the effective-set resolution reads the workspace
+        // record to find its tenant for §8 inheritance) and a canonical
+        // meta-spec set for it.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new(ws_id),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "meta-test".to_string(),
+                slug: "meta-test".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Autonomous,
+                llm_model: None,
+                created_at: 1_700_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        let meta_set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: ws_id.to_string(),
+            personas: [(
+                "security".to_string(),
+                crate::api::meta_specs::MetaSpecPinnedEntry {
+                    path: "meta/security.md".to_string(),
+                    sha: "a1b2c3".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
         state
             .meta_spec_sets
-            .upsert(&gyre_common::Id::new(ws_id), meta_set_json)
+            .upsert(&gyre_common::Id::new(ws_id), &meta_set_json)
             .await
             .unwrap();
 

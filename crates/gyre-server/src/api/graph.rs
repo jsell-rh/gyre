@@ -2954,6 +2954,8 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
         };
         state.repos.create(&foreign_repo).await.unwrap();
 
@@ -3088,6 +3090,8 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
         };
         state.repos.create(&repo).await.unwrap();
         ("ws-briefing".to_string(), "repo-1".to_string())
@@ -3961,6 +3965,8 @@ specs:
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
         };
         state.repos.create(&repo2).await.unwrap();
 
@@ -4103,6 +4109,8 @@ specs:
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
         };
         state.repos.create(&repo2).await.unwrap();
         let mut a2 = gyre_domain::Agent::new(Id::new("agent-r2"), "worker-2", 2000);

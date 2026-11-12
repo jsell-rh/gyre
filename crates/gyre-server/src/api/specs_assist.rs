@@ -559,6 +559,37 @@ pub async fn assist_spec(
     ))
 }
 
+/// Git blob SHA of `content` as stored at `spec_path` on `branch`.
+///
+/// Primary path: `git rev-parse <branch>:<path>` via the spec registry
+/// (handles any object format). Fallback when git is unavailable: derive the
+/// SHA-1 git blob id directly from the content just written to the branch —
+/// a blob id is sha1("blob <len>\0<content>") over the exact bytes
+/// `write_file` stored, so it matches what rev-parse returns for the same
+/// content (the same value `git hash-object` prints for those bytes).
+///
+/// Never returns "": an empty spec_sha is a fail-open that pushes the Inbox
+/// approve action onto a legacy fallback which approves the pre-edit ledger
+/// version — a no-op masked by an "Approved" success message.
+async fn spec_blob_sha(
+    git_bin: &str,
+    repo_path: &str,
+    branch: &str,
+    spec_path: &str,
+    content: &str,
+) -> String {
+    match crate::spec_registry::get_blob_sha(git_bin, repo_path, branch, spec_path).await {
+        Some(sha) => sha,
+        None => {
+            use sha1::{Digest, Sha1};
+            let mut hasher = Sha1::new();
+            hasher.update(format!("blob {}\0", content.len()).as_bytes());
+            hasher.update(content.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+    }
+}
+
 /// POST /api/v1/repos/:id/specs/save
 ///
 /// Commits a spec change to a `spec-edit/<slug>-<uuid>` feature branch and
@@ -655,6 +686,51 @@ pub async fn save_spec(
             .await
             .map_err(ApiError::Internal)?;
 
+        // task-175 review F1: the SpecPendingApproval cards created by the
+        // first save carry that save's blob SHA in their body, and the Inbox
+        // approve action submits body.spec_sha — approve_spec only records
+        // the approval when it matches the ledger's post-merge current_sha.
+        // Leaving the first save's SHA in place would make every Approve
+        // click on this card record an approval for content that never
+        // becomes current: the card shows "Approved" while the spec stays
+        // Pending, permanently. Refresh the unresolved cards' body with the
+        // blob SHA of the content just appended (resolved cards keep their
+        // historical body — an audit record of what was actually acted on).
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let blob_sha = spec_blob_sha(
+            &git_bin,
+            &repo.path,
+            &mr.source_branch,
+            &req.spec_path,
+            &req.content,
+        )
+        .await;
+        let refreshed_body = serde_json::json!({
+            "spec_path": req.spec_path,
+            "spec_sha": blob_sha,
+            "mr_id": mr.id.to_string(),
+            "mr_title": mr.title.clone(),
+            "branch": mr.source_branch.clone(),
+            "repo_id": repo.id.to_string(),
+        })
+        .to_string();
+        if let Err(e) = state
+            .notifications
+            .update_body_by_entity_ref(
+                mr.id.as_str(),
+                NotificationType::SpecApprovalRequested.as_str(),
+                &refreshed_body,
+            )
+            .await
+        {
+            // Non-fatal — the commit is already on the MR branch; the card
+            // body going stale is logged, not silently swallowed.
+            tracing::warn!(
+                mr_id = %mr.id,
+                "failed to refresh spec-pending-approval notification body: {e}"
+            );
+        }
+
         return Ok((
             StatusCode::OK,
             Json(SpecSaveResponse {
@@ -714,26 +790,87 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec approval requested" notification (user-management.md
-    // §Notification Entity + HSI §2/§8).
-    // user_id is "system" — real per-user fan-out requires workspace membership
-    // which is outside this task's scope.
-    let notif_id = new_id();
-    let mut notif = Notification::new(
-        notif_id,
-        repo.workspace_id.clone(),
-        Id::new("system"),
-        NotificationType::SpecApprovalRequested,
-        format!("Spec pending approval: {}", req.spec_path),
-        &tenant_id,
-        now as i64,
-    );
-    notif.source.entity_type = "mr".to_string();
-    notif.source.entity_id = mr_id.to_string();
-    notif.source.repo_id = Some(repo.id.clone());
-    // Non-fatal — MR is created even if notification fails.
-    if let Err(e) = state.notifications.create(&notif).await {
-        tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8 P2,
+    // user-management.md §Notification Entity).
+    //
+    // Fan out to every workspace Admin/Developer/Owner member — these are the
+    // roles allowed to approve (reject_spec allows Admin/Developer). When the
+    // workspace has no eligible members, fall back to "system" so the global
+    // admin token's Inbox still shows the pending approval.
+    //
+    // The body carries everything the Inbox inline actions need:
+    //   spec_path — for GET /specs/:path and the reject endpoint
+    //   spec_sha  — the git blob SHA of the spec content on the MR branch
+    //               (the version the human is approving; matches the ledger's
+    //               current_sha semantics from sync_spec_ledger)
+    //   mr_id / branch / repo_id — for the MR quick links
+    //
+    // The structured source (entity_type "mr", entity_id = MR id) carries the
+    // same source entity the legacy body fields describe, for the
+    // notification-entity deep-link surface.
+    //
+    // See spec_blob_sha for how the SHA is derived (git rev-parse with a
+    // content-derived fallback — never "", which is a fail-open).
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let blob_sha = spec_blob_sha(
+        &git_bin,
+        &repo.path,
+        &branch_name,
+        &req.spec_path,
+        &req.content,
+    )
+    .await;
+    let notif_body = serde_json::json!({
+        "spec_path": req.spec_path,
+        "spec_sha": blob_sha,
+        "mr_id": mr_id.to_string(),
+        "mr_title": mr.title.clone(),
+        "branch": branch_name.clone(),
+        "repo_id": repo.id.to_string(),
+    })
+    .to_string();
+
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(&repo.workspace_id)
+        .await
+        .unwrap_or_default();
+    let mut recipients: Vec<Id> = members
+        .iter()
+        .filter(|m| {
+            use gyre_domain::WorkspaceRole;
+            matches!(
+                m.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            )
+        })
+        .map(|m| m.user_id.clone())
+        .collect();
+    if recipients.is_empty() {
+        // No eligible members — deliver to the system account so the
+        // global-admin Inbox still surfaces the pending approval.
+        recipients.push(Id::new("system"));
+    }
+
+    for uid in recipients {
+        let notif_id = new_id();
+        let mut notif = Notification::new(
+            notif_id,
+            repo.workspace_id.clone(),
+            uid.clone(),
+            NotificationType::SpecApprovalRequested,
+            format!("Spec pending approval: {}", req.spec_path),
+            &tenant_id,
+            now as i64,
+        );
+        notif.body = Some(notif_body.clone());
+        notif.source.entity_type = "mr".to_string();
+        notif.source.entity_id = mr_id.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
+        // Non-fatal — MR is created even if notification fails.
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
+        }
     }
 
     Ok((
@@ -987,6 +1124,138 @@ mod tests {
             .expect("SpecApprovalRequested notification must be created");
         assert_eq!(spec_notif.priority_rank, 2);
         assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
+        // HSI §8 P2: the body must carry the structured fields the Inbox
+        // inline actions consume (approve SHA, MR diff fetch, quick links).
+        let body: serde_json::Value =
+            serde_json::from_str(spec_notif.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_path"], "specs/system/vision.md");
+        assert_eq!(body["mr_id"], mr_id);
+        assert_eq!(body["repo_id"], repo_id);
+        // HSI §8 P2 / task-175 F3: spec_sha must be the blob SHA of the exact
+        // content the human is approving — never "" (the old fail-open wrote
+        // an empty SHA when git was unavailable, pushing the Inbox approve
+        // action onto a legacy fallback that approves the pre-edit version).
+        // The expected value was produced by `git hash-object` over the exact
+        // saved content — an external anchor, not mirrored logic: a blob id
+        // is sha1("blob <len>\0<content>").
+        assert_eq!(body["spec_sha"], "8035a51635f85a1fa9452e01964fbbd9f01179d4");
+        // No workspace members in the test state — the system fallback
+        // recipient keeps the approval visible in the global-admin Inbox.
+        assert_eq!(spec_notif.user_id, Id::new("system"));
+    }
+
+    #[tokio::test]
+    async fn save_spec_fans_out_approval_notification_to_eligible_members() {
+        use gyre_domain::{Repository, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        // Repo record only — the notification fan-out runs after the MR is
+        // persisted but before any git-dependent assertion; git writes go
+        // through NoopGitOps so the branch/blob lookups are inert.
+        let ws_id = Id::new("ws-fanout");
+        let repo = Repository::new(
+            Id::new("repo-fanout"),
+            ws_id.clone(),
+            "fanout",
+            "/tmp/gyre-nonexistent-fanout-repo",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        // Two eligible members (Admin, Developer) and one ineligible (Viewer).
+        for (uid, role) in [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-dev", WorkspaceRole::Developer),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ] {
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    Id::new(format!("membership-{uid}")),
+                    Id::new(uid),
+                    ws_id.clone(),
+                    role,
+                    Id::new("inviter"),
+                    0,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let caller = AuthenticatedAgent {
+            agent_id: "user-admin".to_string(),
+            user_id: Some(Id::new("user-admin")),
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let req = SpecSaveRequest {
+            spec_path: "specs/system/fanout.md".to_string(),
+            content: "# Fanout\n".to_string(),
+            message: "edit".to_string(),
+            base_sha: None,
+            overwrite: false,
+        };
+        let resp = save_spec(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("repo-fanout".to_string()),
+            caller,
+            Json(req),
+        )
+        .await
+        .expect("save_spec should succeed");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Eligible members each get exactly one notification; the Viewer
+        // gets none; the system fallback is not used when members exist.
+        for uid in ["user-admin", "user-dev"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 100, 0)
+                .await
+                .unwrap();
+            let approvals: Vec<_> = notifs
+                .iter()
+                .filter(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+                .collect();
+            assert_eq!(
+                approvals.len(),
+                1,
+                "user {uid} must get exactly one SpecApprovalRequested notification"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(approvals[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["spec_path"], "specs/system/fanout.md");
+            assert_eq!(body["repo_id"], "repo-fanout");
+        }
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-viewer"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.is_empty(),
+            "Viewer must not receive approval notifications"
+        );
+        let system_notifs = state
+            .notifications
+            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            system_notifs.is_empty(),
+            "system fallback must not be used when eligible members exist"
+        );
     }
 
     #[tokio::test]
@@ -1063,6 +1332,102 @@ mod tests {
         let json2 = body_json(resp2).await;
         assert_eq!(json2["branch"].as_str().unwrap(), branch1);
         assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id1);
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_refreshes_notification_spec_sha() {
+        // task-175 review F1: the append-to-existing-MR path used to return
+        // early without refreshing the SpecPendingApproval card's body, so it
+        // kept the FIRST save's blob SHA. The Inbox approve action submits
+        // body.spec_sha and approve_spec only records the approval when it
+        // matches the ledger's post-merge current_sha — a stale SHA makes
+        // every Approve click record an approval for content that never
+        // becomes current (card shows "Approved", spec stays Pending).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let create_body = serde_json::json!({
+            "name": "spec-edit-stale-sha",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let do_save = |content: &'static str| {
+            let body = serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": content,
+                "message": "edit",
+            });
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        };
+
+        let resp1 = do_save("# Vision v1").await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let mr_id = json1["mr_id"].as_str().unwrap().to_string();
+
+        // First save's card carries the v1 blob SHA
+        // (`git hash-object` over "# Vision v1").
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let card = notifs
+            .iter()
+            .find(|n| {
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
+            })
+            .expect("SpecApprovalRequested card after first save");
+        let body: serde_json::Value = serde_json::from_str(card.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "98537aa01f28c720793d8f199d221ebd97c3bff3");
+
+        // Second save appends to the same MR — the card must be refreshed in
+        // place (still exactly one card for this MR), carrying the v2 blob SHA
+        // (`git hash-object` over "# Vision v2"), not the stale v1 SHA.
+        let resp2 = do_save("# Vision v2").await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id);
+
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let cards: Vec<&gyre_common::Notification> = notifs
+            .iter()
+            .filter(|n| {
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
+            })
+            .collect();
+        assert_eq!(
+            cards.len(),
+            1,
+            "append must refresh the existing card, not create a duplicate"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(cards[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "1a862bdc192b340de10c4e0cd259c1c60c4cca11");
+        assert_eq!(body["mr_id"], mr_id);
     }
 
     #[tokio::test]
