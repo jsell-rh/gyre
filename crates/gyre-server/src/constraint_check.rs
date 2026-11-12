@@ -1243,8 +1243,7 @@ pub(crate) async fn build_agent_context(
     // The agent runs in this workspace, so its meta-spec set is the workspace's
     // current set. If no set is configured, the SHA is empty (correctly fails
     // against a non-empty input SHA, indicating the set has changed).
-    let meta_spec_set_sha =
-        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), workspace_id).await;
+    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(state, workspace_id).await;
 
     // Workload attestation: populate container_id, image_hash, and stack_hash
     // from the KV-cached workload attestation record if available.
@@ -1973,14 +1972,40 @@ mod tests {
     ) -> String {
         let ws_id = Id::new(workspace_id);
 
-        // Store a meta-spec set for the workspace.
-        let meta_set_json = r#"{"workspace_id":"ws-1","personas":{}}"#;
+        // The workspace row must exist: the effective-set resolution reads
+        // it to find the workspace's tenant (§8 inheritance).
         state
-            .meta_spec_sets
-            .upsert(&ws_id, meta_set_json)
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: ws_id.clone(),
+                tenant_id: Id::new("default"),
+                name: format!("ws-{workspace_id}"),
+                slug: workspace_id.to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Autonomous,
+                llm_model: None,
+                created_at: 1_700_000_000,
+                compute_target_id: None,
+            })
             .await
             .unwrap();
-        let sha = meta_spec_sha(meta_set_json);
+
+        // Store a meta-spec set for the workspace (canonical serialization —
+        // the SHA is computed over the effective set's serialization).
+        let meta_set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: workspace_id.to_string(),
+            ..Default::default()
+        };
+        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
+        state
+            .meta_spec_sets
+            .upsert(&ws_id, &meta_set_json)
+            .await
+            .unwrap();
+        let sha = meta_spec_sha(&meta_set_json);
 
         // Store agent persona in KV (same key as build_agent_context reads).
         state
@@ -2356,11 +2381,36 @@ mod tests {
         let state = crate::mem::test_state();
         let ws_id = Id::new("ws-ctx-1");
 
-        // Store a meta-spec set for the workspace.
-        let meta_set_json = r#"{"workspace_id":"ws-ctx-1","personas":{},"principles":[],"standards":[],"process":[]}"#;
+        // The workspace row must exist (effective-set resolution reads the
+        // workspace's tenant for §8 inheritance).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: ws_id.clone(),
+                tenant_id: Id::new("default"),
+                name: "ws-ctx-1".to_string(),
+                slug: "ws-ctx-1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Autonomous,
+                llm_model: None,
+                created_at: 1_700_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Store a meta-spec set for the workspace (canonical serialization).
+        let meta_set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: "ws-ctx-1".to_string(),
+            ..Default::default()
+        };
+        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
         state
             .meta_spec_sets
-            .upsert(&ws_id, meta_set_json)
+            .upsert(&ws_id, &meta_set_json)
             .await
             .unwrap();
 
