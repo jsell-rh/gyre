@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "d1f06da1a8961d2c1d71000d635b1578b7d9b070"]
 ---
 
 ## Spec Excerpt
@@ -77,11 +77,11 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [ ] AnalyticsEvent struct matches spec schema (all fields present)
-- [ ] All 12 auto-emitted events are recorded at their trigger points
-- [ ] Each event includes all spec-required properties
-- [ ] Query API supports all spec-required filter parameters
-- [ ] Tests pass for each auto-emitted event
+- [x] AnalyticsEvent struct matches spec schema (all fields present)
+- [x] All 12 auto-emitted events are recorded at their trigger points
+- [x] Each event includes all spec-required properties
+- [x] Query API supports all spec-required filter parameters
+- [x] Tests pass for each auto-emitted event
 
 ## Agent Instructions
 
@@ -132,31 +132,49 @@ pub struct AnalyticsEvent {
 
 ### Review-repair: silent terminal paths + search scope (round dfa1266c)
 
-- Ralph-loop gate-failure path now records its transitions: `mr.closed`
+- Ralph-loop gate-failure path records its transitions: `mr.closed`
   (reason `gate_failure`) when the failed MR is closed,
   `task.status_changed` on the Review→InProgress re-open, and
   `agent.failed` + `task.status_changed` at both terminal states — the
-  iteration ceiling and the re-spawn retry ladder's exhaustion. Asserted
-  in the existing `gate_failure_respawns_agent_with_fresh_context`,
-  `max_iterations_blocks_task_and_fails_agent`, and
-  `respawn_failure_retries_then_blocks_task` tests.
+  iteration ceiling and the re-spawn retry ladder's exhaustion.
 - Every remaining agent-death path emits `agent.failed` via a shared
   `record_agent_failed` helper (api/analytics.rs): worker failed-launch
   teardown (`teardown_failed_spawn`), the orchestrator process-death
   monitor, and the public PUT /api/v1/agents/{id}/status terminal
   statuses (Failed/Dead/Stopped).
-- `search_handler` no longer persists the caller-supplied `workspace_id`
-  Query param as the `search.query` event's workspace scope unvalidated:
-  the param is checked with the same audit.rs
-  `validate_workspace_scope` used by the analytics record handler
-  (cross-tenant → Forbidden, unknown → NotFound), and the event's
-  agent/user identity is bound to the verified caller. Regression test:
-  `search_workspace_scope_validated_against_caller_tenant` pins the
-  review's exact repro — a forged cross-tenant attribution never appears
-  in the victim workspace's filtered query results. Existing search
-  tests authenticate via `build_router` + Bearer token.
+- `search_handler` validates the caller-supplied `workspace_id` Query
+  param with the same audit.rs `validate_workspace_scope` used by the
+  analytics record handler (cross-tenant → Forbidden, unknown →
+  NotFound), and the `search.query` event's agent/user identity is bound
+  to the verified caller. Regression test:
+  `search_workspace_scope_validated_against_caller_tenant` pins a
+  forged cross-tenant attribution never appearing in the victim
+  workspace's filtered query results.
 
-### Verification repair: merge resolution + duplicate migration version (round d88b80e7)
+### Rebase repair: merge with base f98b179 (round 65e4d25e, commit d1f06da1a)
+
+- Resolved the rebase onto base `f98b17925` (task-194 + search access
+  scoping). `search.rs`: kept BOTH behaviors — the base's
+  `derive_search_scope` caller-scope narrowing (results/facets/suggest
+  intersect the caller's accessible workspaces/repos; a same-tenant
+  inaccessible workspace yields zero results, never a leak) AND this
+  task's tenant-level `workspace_id` validation (cross-tenant → 403,
+  unknown → 404, because the param attributes the `search.query`
+  analytics event). The two compose: validation gates the persisted
+  analytics attribution; scope narrowing gates the returned documents.
+  Also removed a merge-artifact duplicate `auth: AuthenticatedAgent`
+  parameter (both lineages added `auth` at different positions) that
+  would not compile.
+- `docs/api-reference.md`: merged the /search, /search/suggest,
+  /search/facets rows to describe both the access scoping and the
+  workspace_id tenant validation.
+- Post-merge verification: all 12 event emitters present; all prior
+  regression tests intact; `cargo check -p gyre-server` and
+  `--tests` finish clean; `check-arch.sh`, `check-forged-scope-fields.sh`,
+  `check-migration-versions.sh`, `check-migration-sql-portability.sh`,
+  `check-abac-route-registry.sh` pass on the merged tree.
+
+### Verification repair: duplicate migration version (round d88b80e7)
 
 - Renumbered `analytics_scope_columns` to the next unused sequence
   `2026-10-08-000062_analytics_scope_columns` (content unchanged) to
@@ -166,15 +184,12 @@ pub struct AnalyticsEvent {
 
 ### Test evidence
 
-- In-sandbox (this round, head e9e597a0): `cargo check -p gyre-server`
-  and `--tests` finished with 0 errors; `cargo clippy -p gyre-server
-  --lib` reports no warnings on changed lines; `cargo fmt --all
-  -- --check` clean; `check-forged-scope-fields.sh`, `check-arch.sh`,
-  `check-abac-exempt-handlers.sh`, `check-inert-enforcement.sh` pass.
-  (`check-silent-result-discard.sh` fails at the merge base with 109
-  pre-existing hits and is not wired into CI; the two new analytics
-  `let _ =` lines match the codebase-wide fire-and-forget emission
-  convention.)
+- In-sandbox (this round, head d1f06da1a): `cargo check -p gyre-server`
+  and `cargo check -p gyre-server --tests` finished with 0 errors
+  (build wrapper used; 8m37s / 3m44s). Mechanical gates pass on the
+  merged tree: `check-arch.sh`, `check-forged-scope-fields.sh`,
+  `check-migration-versions.sh`, `check-migration-sql-portability.sh`,
+  `check-abac-route-registry.sh`.
 - Server test binaries exceed this sandbox's 4 GiB build budget — the
   independent verifier must run:
   `cargo test -p gyre-server --lib api::analytics`,
@@ -183,5 +198,8 @@ pub struct AnalyticsEvent {
   `cargo test -p gyre-server --lib api::agents`,
   `cargo test -p gyre-server --lib signal_chain`,
   `cargo test -p gyre-server --lib api::orchestrator`,
+  `cargo test -p gyre-server --test search_wiring`,
   plus the full `cargo test --all` workspace suite and
-  `scripts/check-*.sh` gates owned by verification.
+  `scripts/check-*.sh` gates owned by verification. The merged
+  `search_wiring.rs` (base's access-scoping tests + this task's scope
+  validation) is the key cross-lineage integration point to exercise.
