@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: ["a2b86d834da6710c12e34301c96434d2bd4a414f", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
+commits: ["bbd72bc37ffd0bd4b286171ad73d236fca06c64b", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "a2b86d834da6710c12e34301c96434d2bd4a414f", "3056a7edd757b9d36b4e7c0e485951bc715755fd"]
 ---
 
 ## Spec Excerpt
@@ -81,42 +81,43 @@ Read `specs/system/user-management.md` §Team Management. Existing team endpoint
 
 ### Entity + storage
 
-- `Team` (gyre-domain/src/team.rs) carries every spec field: `slug` (workspace-unique, URL-safe) and `lead` (user id), plus `validate_slug` (1–64 chars `[a-z0-9-]`, no edge/consecutive `-`; explicit invalid slugs → 400, never silently rewritten) and `sanitize_slug` (name → slug derivation; 400 when nothing URL-safe remains). `member_ids` is gone from the entity — membership is the spec's `TeamMembership { team_id, user_id, added_at }`, persisted in a new `team_memberships` table (composite PK).
-- Migration `2026-11-13-000062_team_slug_lead_membership` (portable SQL, runs on SQLite + PostgreSQL): adds `slug`/`lead` to `teams` (backfill: slug ← team id, stable/unique/URL-safe; lead ← workspace Owner), creates `idx_teams_workspace_slug` (unique per workspace) and `team_memberships`, drops the superseded `member_ids` JSON column (it was never writable through any endpoint — no membership endpoints existed — so it was always `'[]'`).
-- `TeamRepository` port gains `find_by_slug`, `add_member` (fails on duplicate membership), `remove_member` (idempotent), `list_members` (ordered by `added_at`), `list_for_user`. All three adapters implement the duplicate contracts: SQLite/PG via the unique index/composite PK with stable error labels, mem via in-code guards (check-mem-port-contracts passes). `delete` removes memberships with the team in every adapter.
+- `Team` (gyre-domain/src/team.rs) carries every spec field: `slug` (workspace-unique, URL-safe; `validate_slug`/`sanitize_slug` — explicit invalid slugs are 400, never silently rewritten) and `lead` (user id, validated against real workspace membership). Membership is the spec's `TeamMembership { team_id, user_id, added_at }`, persisted in a `team_memberships` table (composite PK).
+- Migration `2026-11-13-000062_team_slug_lead_membership` (portable SQLite + PostgreSQL SQL): adds `slug`/`lead` to `teams` (backfilled: slug ← team id, lead ← workspace Owner), unique `idx_teams_workspace_slug`, `team_memberships`; drops the superseded never-writable `member_ids` JSON column.
+- `TeamRepository` port gains `find_by_slug`, `add_member` (fails on duplicate), `remove_member` (idempotent), `list_members` (ordered by `added_at`), `list_for_user`; all adapters enforce the duplicate contracts (mem in code, SQLite/PG via indexes with stable error labels).
 
 ### API (gyre-server/src/api/users.rs)
 
-- Team CRUD endpoints now authenticate, scope to the caller's tenant (`load_workspace_scoped`), gate on Owner/Admin/TenantAdmin (`can_manage_membership`), and verify the path's workspace owns the team (cross-workspace team id → 404; previously `update`/`delete` ignored the workspace entirely). Create/update validate `lead` against real workspace membership (non-member → 400) and reject slug collisions → 409.
-- New endpoints (user-management.md §API > Teams): `POST /api/v1/workspaces/:id/teams/:team_id/members` (member must be a workspace member — teams never expand access beyond workspace membership — else 400; duplicate → 409; returns `added_at`) and `DELETE .../members/:user_id` (idempotent 204). Routes registered in `api/mod.rs` with ABAC resolver entries in `abac_middleware.rs`.
+- Team CRUD + membership endpoints authenticate, scope to the caller's tenant (`load_workspace_scoped`), gate on Owner/Admin/TenantAdmin, and verify the path's workspace owns the team (cross-workspace team id → 404). `lead` is validated against workspace membership (400), slug collisions → 409. New `POST .../teams/:team_id/members` (duplicate → 409, returns `added_at`) and `DELETE .../members/:user_id` (idempotent 204); routes registered with ABAC resolver entries.
 
 ### Integration points (user-management.md §Team Management)
 
-- **Notification routing (`team:slug`)**: `resolve_team_members` (notifications.rs) parses `team:{slug}` references and resolves them to real member ids via `find_by_slug` + `list_members`; unresolvable references log and skip — never fabricate recipients. Wired into the `SpecApprovalRequested` emitter (specs_assist save flow): when the spec's registry manifest names a team in `human_approvers`, its members receive the approval card in addition to the role-based fan-out.
-- **Spec ownership (`team:slug` approvers)**: `resolve_new_approval_status` (api/specs.rs) expands `team:{slug}` entries in a manifest's `human_approvers` into the approver-id strings those members' human approvals record, before the pure §9 resolver runs. A team member's approval approves the spec; a non-member's does not; an unresolvable team reference fails closed (stays Pending). spec-registry.md manifest schema documents the entry form.
-- **Budget reporting by team**: `GET /api/v1/workspaces/:id/budget/by-team` (api/budget.rs, ABAC-registered) aggregates the workspace's real `BudgetCallRecord` audit trail: agent-caused records attribute to the agent's spawning user (via the agents store), then to every team that user belongs to; records with no attributable user are reported under `unattributed` rather than dropped.
-- **Default reviewers** ("MRs in repos owned by team X") is NOT implemented: no spec models a repo→team ownership association (the `Repository` entity has no team field and no spec defines one), so there is nothing to auto-assign against. This needs a modeled repo-team ownership link first and remains open for a future task — noted here rather than faked.
+- **Notification routing (`team:slug`)**: `resolve_team_members` (notifications.rs) resolves `team:{slug}` references to real member ids via `find_by_slug` + `list_members`; unresolvable references log and skip — never fabricate recipients. Wired into the `SpecApprovalRequested` emitter (specs_assist save flow).
+- **Spec ownership (`team:slug` approvers)**: `resolve_new_approval_status` (api/specs.rs) expands `team:{slug}` entries in a manifest's `human_approvers` into the approver-id forms members' approvals record, before the pure §9 resolver runs.
+- **Budget reporting by team**: `GET /api/v1/workspaces/:id/budget/by-team` aggregates real `BudgetCallRecord` audit rows through team membership; unattributable records are reported under `unattributed`, not dropped.
+- **Default reviewers** is NOT implemented: no spec models a repo→team ownership association (the `Repository` entity has no team field), so there is nothing to auto-assign against. Noted here rather than faked; needs a modeled repo-team ownership link first.
 
-### Verification repair (this round)
+### Verification repair (this round, commit `3056a7edd`)
 
-The prior verification round (`fb5e572b7f6e411db321da679d58562e`, `bash /tmp/stage/checks.sh`) failed solely on `check-rustfmt-diff.py`: changed lines in the team-management files needed formatting. All other gates in that log passed (clippy changed-lines clean, arch/ABAC/migration/mem-contract/attribution checks OK, web build succeeded). Commit `a2b86d834` applies `rustfmt --edition 2021 --config skip_children=true` to the ten flagged files — formatting only, no semantic changes — and `python3 scripts/check-rustfmt-diff.py 199c1bb78f53f27088c54a0929b5605e7302e874` now reports "changed lines clean (15 Rust files checked)" (evidence: /tmp/stage/review-evidence/task-122/rustfmt-gate.txt). `SKIP_WEB_BUILD=1 cargo check -p gyre-domain -p gyre-adapters -p gyre-server` passes after the reformat (evidence: /tmp/stage/review-evidence/task-122/cargo-check.txt).
+The prior verification round (`cargo test --all`, candidate `fea1a77e9`) failed three gyre-server tests — the first full-suite execution of this task's server tests (sandbox build budget had deferred them). Root causes and fixes:
+
+- `api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — `expand_team_approvers` dropped an unresolvable `team:nonexistent` reference, leaving an **empty** `human_approvers` list, which the §9 resolver treats as "any human may approve" — a fail-open (lead's approval → Approved). Fix: an unresolvable reference (or a team with no members) is kept verbatim in the approver list; no approval records a `team:...` approver id, so the resolver can never match it — the spec stays Pending, fail-closed.
+- `api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — the test's repo record pointed at a path `NoopGitOps` never initialized on disk (git spawn → NotFound), and `git commit-tree` lacked an author identity in the test environment. Fix (test helper `commit_to_bare_repo_head`): `git init --bare` the recorded path when missing and pass explicit author/committer identity to `commit-tree`. Also fixed a real routing bug this exposed: the save flow matched manifest entries against the raw client-facing `specs/...` path, while manifest paths are stored relative to `specs/` — team routing never matched. The handler now normalizes (same strip the conflict check uses), so `team:slug` manifest approvers receive the approval card.
+- `api::users::tests::team_crud_slug_lead_and_membership_flow` — duplicate team membership let the adapter's duplicate guard bubble up as 500. Fix: `add_team_member` pre-checks `list_members` and returns 409 (mirroring `reject_duplicate_slug`); the adapter guard remains as the race backstop.
 
 ### Test evidence
 
-Implementation history: `bbd72bc37` (production code), `abaee5ea1` (unused-import cleanup), `a2b86d834` (rustfmt repair). The executor merged base `199c1bb78` (task-203 search scoping) as `f0b06a8cb`; the team production files are byte-identical to `bbd72bc37` after the merge apart from the rustfmt pass.
+Executed in this sandbox (stage build wrapper; gyre-server test execution exceeds the 4 GiB budget and is deferred to the verifier):
 
-Executed in this sandbox (via the stage build wrapper):
+- `cargo check -p gyre-server --all-targets` — clean (includes all test targets).
+- `cargo clippy -p gyre-server --all-targets` + changed-line analysis vs base `f98b17925` — 0 warnings/errors on changed lines.
+- Mechanical gates pass: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-mcp-write-tools, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-byte-slice-truncation, check-relative-path-defaults, check-fail-open-ref-resolution, check-fabricated-scope-defaults, check-lossy-secret-conversion, check-scope-literal-defaults, check-inert-enforcement, check-forged-scope-fields, check-forwarded-header-trust, check-in-memory-state-stores, check-unbounded-external-http, check-dead-message-kinds, check-task-commit-attribution, check-rustfmt-diff (base `f98b17925`).
+- Prior rounds (recorded history): `cargo test -p gyre-domain` 478 passed; `cargo test -p gyre-adapters` 475 passed, 6 ignored (team repository + migration 000062 backfill tests green).
 
-- `cargo test -p gyre-domain` — 478 passed, 0 failed (includes team slug validation/derivation and membership struct tests).
-- `cargo test -p gyre-adapters` — full suite 475 passed, 0 failed, 6 ignored (post-merge integration run), including the SQLite `team` repository tests (slug round-trip via `find_by_slug`, duplicate-slug create/update rejection, duplicate-membership rejection, `added_at` ordering, delete-removes-memberships) and `migration_000062_backfills_team_slug_and_lead` (real pre-000062 DB → 000062 alone: slug/lead backfills, unique index rejects duplicates, `member_ids` dropped, composite PK rejects duplicate membership).
-- `cargo check -p gyre-server --all-targets` — clean (includes server test targets).
-- Mechanical gates pass: check-arch, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-abac-route-registry, check-abac-exempt-handlers, check-task-commit-attribution, and now check-rustfmt-diff (this round's repair).
+Verifier must execute (gyre-server, blocked in this sandbox by the build wrapper):
 
-`cargo test --all` remains open: gyre-server test execution exceeds this sandbox's 4 GiB build budget (stage build wrapper restriction — infrastructure, not a code defect). Verifier must run:
-
-- `cargo test -p gyre-server --lib api::users::tests::team` — API flow (slug derivation, lead validation, member add/remove with `added_at`, duplicate slug 409, invalid slug 400, non-member lead/member 400, workspace scoping 404, Developer 403).
-- `cargo test -p gyre-server --lib api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — real git manifest + real team API + real API-key human approvals: team member approves, non-member and unresolvable-team cases stay Pending.
-- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — a Viewer team member (outside the role-based fan-out) receives `SpecApprovalRequested` via `team:platform` routing.
-- `cargo test -p gyre-server --lib api::budget::tests::budget_by_team_aggregates_usage_through_membership` — aggregation + unattributed bucket over real records.
-- `cargo test -p gyre-server --lib mem::team_contract_tests` — mem adapter duplicate guards.
+- `cargo test -p gyre-server --lib api::users::tests::team` — API flow (slug derivation, lead validation, membership add/remove with `added_at`, duplicate membership 409, duplicate slug 409, invalid slug 400, non-member lead/member 400, workspace scoping 404, Developer 403).
+- `cargo test -p gyre-server --lib api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — member approves, non-member stays Pending, unresolvable team fails closed.
+- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — Viewer team member receives `SpecApprovalRequested` via `team:platform` routing.
+- `cargo test -p gyre-server --lib api::budget::tests::budget_by_team_aggregates_usage_through_membership`
+- `cargo test -p gyre-server --lib mem::team_contract_tests`
 - Full `cargo test --all` (CI).
