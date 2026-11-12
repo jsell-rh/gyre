@@ -2125,7 +2125,7 @@ pub(crate) async fn create_mr_for_completion(
             // auto-advance to Review is a production transition and must
             // record, like the HTTP status endpoint and MCP update_task.
             if task.status != pre_transition_status {
-                super::analytics::record_task_status_changed(&state, &task, &pre_transition_status)
+                super::analytics::record_task_status_changed(state, &task, &pre_transition_status)
                     .await;
             }
 

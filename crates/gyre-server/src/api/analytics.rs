@@ -1483,7 +1483,12 @@ mod tests {
         // are pinned by the record_event_* regression tests below.
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
-        let seed = |id: &str, name: &str, agent: Option<&str>, user: Option<&str>, ws: Option<&str>, repo: Option<&str>| {
+        let seed = |id: &str,
+                    name: &str,
+                    agent: Option<&str>,
+                    user: Option<&str>,
+                    ws: Option<&str>,
+                    repo: Option<&str>| {
             gyre_domain::AnalyticsEvent::new(
                 gyre_common::Id::new(id),
                 name,
@@ -1639,17 +1644,16 @@ mod tests {
         // multi-workspace aggregation coverage seeds at the storage level.
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
-        let seed =
-            |id: &str, name: &str, agent: &str, ws: &str, ts: u64| {
-                gyre_domain::AnalyticsEvent::new(
-                    gyre_common::Id::new(id),
-                    name,
-                    Some(agent.to_string()),
-                    serde_json::json!({}),
-                    ts,
-                )
-                .with_scope(None, None, Some(&gyre_common::Id::new(ws)), None)
-            };
+        let seed = |id: &str, name: &str, agent: &str, ws: &str, ts: u64| {
+            gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(id),
+                name,
+                Some(agent.to_string()),
+                serde_json::json!({}),
+                ts,
+            )
+            .with_scope(None, None, Some(&gyre_common::Id::new(ws)), None)
+        };
         for (id, ts) in [("g-1", 100u64), ("g-2", 101)] {
             state
                 .analytics
