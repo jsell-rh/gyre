@@ -2,8 +2,9 @@ use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
     merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
-    siem, spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
-    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
+    seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
+    spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -56,6 +57,10 @@ async fn main() -> Result<()> {
     // Seed built-in meta-specs on first startup (agent-runtime spec §2).
     seed_builtin_meta_specs(&state).await;
 
+    // Seed the four built-in personas at tenant level (platform-model.md §2).
+    // Idempotent per tenant: existing slug+Tenant-scope personas are kept.
+    seed_builtin_personas(&state).await;
+
     // Load persisted retention policies from KV (or seed defaults on first
     // boot) before the job registry registers the nightly cleanup handler.
     state.retention_store.init(state.kv_store.clone()).await;
@@ -74,6 +79,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly stale-pin detection: specs pinning old meta-spec versions get
+    // priority-6 MetaSpecDrift notifications (agent-runtime.md §2).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_stale_pin_check".to_string(),
+        Arc::clone(&state),
+    );
+
     // Secret expiry check every 5 minutes (platform-model.md §7, task-098).
     jobs::spawn_job(
         Arc::clone(&state.job_registry),
@@ -89,6 +102,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Impersonation TTL expiry sweep (identity-security.md §Impersonation) —
+    // ends sessions past their TTL, emitting ImpersonationEnded.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "impersonation_expiry".to_string(),
+        Arc::clone(&state),
+    );
+
     // Log compression (observability.md §Log Retention & Compression) —
     // daily by default, configurable via GYRE_LOG_COMPRESSION_INTERVAL.
     jobs::spawn_job(
@@ -97,7 +118,21 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Trust suggestion check (HSI §2 Trust Suggestions) — daily per
+    // workspace: 0 gate failures + 0 reverted MRs in 30 days suggests the
+    // next trust level to Admin/Owner members via priority-8
+    // TrustSuggestion notifications. Registered alone this job would only
+    // be manually triggerable; spawn_job is the executing daily loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "trust_suggestion_check".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
+    // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
+    // tasks and run repo orchestrators under per-repo registry locks.
+    signal_chain::spawn_task_scheduler(state.clone());
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
     spawn_presence_eviction(state.clone());

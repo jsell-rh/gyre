@@ -129,6 +129,10 @@ impl ExplorerSessionRegistry {
 
     /// Register a new session for `user`, evicting (signalling) the oldest
     /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
+    ///
+    /// A `max` of 0 is treated as 1: the registering session itself is always
+    /// admitted (with a literal 0 the eviction loop would `remove(0)` from an
+    /// empty slot list and panic the connection handler on every connect).
     pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
         let session_id = self
             .next_session_id
@@ -137,7 +141,7 @@ impl ExplorerSessionRegistry {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let slots = sessions.entry(user.to_string()).or_default();
         // Evict oldest sessions if at the limit.
-        while slots.len() >= max {
+        while slots.len() >= max.max(1) {
             let evicted = slots.remove(0);
             info!(
                 user = %user,
@@ -162,6 +166,17 @@ impl ExplorerSessionRegistry {
                 sessions.remove(user);
             }
         }
+    }
+
+    /// Number of live sessions for `user` (tests).
+    #[cfg(test)]
+    fn live_count(&self, user: &str) -> usize {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(user)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 }
 
@@ -781,6 +796,13 @@ async fn handle_explorer_session(
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
 
+                // Whether a user Message arrived while the agent was running.
+                // Such a message cannot be processed (the session is busy and the
+                // minimum message interval cannot have elapsed), so it must be
+                // answered with the rate-limit error once the run finishes —
+                // never silently dropped.
+                let mut message_during_run = false;
+
                 // Run the agent loop with conversation history, while
                 // concurrently listening for Cancel messages on the WebSocket.
                 // This allows the user to cancel a slow query mid-flight.
@@ -834,8 +856,17 @@ async fn handle_explorer_session(
                                                 debug!(user = %auth.agent_id, "Queuing message during agent run");
                                                 queued_messages.push(client_msg);
                                             }
+                                            ExplorerClientMessage::Message { .. } => {
+                                                // A user message arrived while the
+                                                // previous one was still being processed.
+                                                // The sender is borrowed by the agent
+                                                // run, so remember it and reply with the
+                                                // rate-limit error after the run completes.
+                                                debug!(user = %auth.agent_id, "Message received during agent run");
+                                                message_during_run = true;
+                                            }
                                             _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
+                                                // Other message types ignored during agent run
                                             }
                                         }
                                     }
@@ -858,6 +889,20 @@ async fn handle_explorer_session(
                     && cache_time.elapsed() > std::time::Duration::from_secs(30)
                 {
                     cache_time = std::time::Instant::now();
+                }
+
+                // A user message arrived while this run was in flight. It was
+                // not processed (and must not trigger a back-to-back agent run),
+                // so answer it with the same rate-limit error the main-loop
+                // check produces. Without this, the message would silently
+                // vanish — the client would never learn it was dropped.
+                if message_during_run {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Please wait before sending another message.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serialize_msg(&err).unwrap_or_default()))
+                        .await;
                 }
 
                 match agent_result {
@@ -4876,5 +4921,106 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
+    }
+
+    // ── ExplorerSessionRegistry ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_registry_evicts_oldest_beyond_cap() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Fill up to the cap: sessions 0, 1, 2.
+        let (id0, _s0) = registry.register(user, 3);
+        let (id1, _s1) = registry.register(user, 3);
+        let (id2, _s2) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+
+        // 4th registration evicts the oldest (id0) and signals its shutdown.
+        let (_id3, _s3) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+        // The evicted session's Notify fires once; a permit is stored, so a
+        // later await on the evicted session's notify resolves immediately.
+        tokio::time::timeout(std::time::Duration::from_secs(1), _s0.notified())
+            .await
+            .expect("evicted session must be signalled");
+        // Live sessions are NOT signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "session 1 must not be signalled"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s2.notified())
+                .await
+                .is_err(),
+            "session 2 must not be signalled"
+        );
+        let _ = (id0, id1, id2);
+    }
+
+    #[tokio::test]
+    async fn session_registry_unregister_frees_slot_and_is_idempotent() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        let (id0, _s0) = registry.register(user, 2);
+        let (_id1, _s1) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Unregistering an unknown ID is a no-op.
+        registry.unregister(user, 999);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Release one slot; a new session now fits without eviction.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 1);
+        let (_id2, s2) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+        // The previously-live session (id1) must not have been signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "live session must not be signalled after an unregister+register"
+        );
+
+        // Double unregister is idempotent.
+        registry.unregister(user, id0);
+        assert_eq!(registry.live_count(user), 2);
+        let _ = s2;
+    }
+
+    #[test]
+    fn session_registry_is_per_instance_not_process_global() {
+        // Two independent registries (one per AppState / test server) must not
+        // evict each other's sessions: this is the regression the integration
+        // binary caught (all 7 tests share the `default:system` user; a
+        // process-global map evicted live sessions across servers).
+        let reg_a = ExplorerSessionRegistry::new();
+        let reg_b = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Both registries fill to the cap concurrently.
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+
+        assert_eq!(reg_a.live_count(user), 3, "registry A keeps its sessions");
+        assert_eq!(reg_b.live_count(user), 3, "registry B keeps its sessions");
+    }
+
+    #[tokio::test]
+    async fn session_registry_zero_cap_admits_registering_session() {
+        // A 0 cap (misconfiguration) must not panic or spin: the registering
+        // session itself is admitted.
+        let registry = ExplorerSessionRegistry::new();
+        let (id, _s) = registry.register("t:a", 0);
+        assert_eq!(registry.live_count("t:a"), 1);
+        assert_eq!(id, 0);
     }
 }

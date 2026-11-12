@@ -251,7 +251,8 @@ async fn notify_workspace_members(
             })
             .to_string(),
         );
-        notif.entity_ref = Some(source_path.to_string());
+        notif.source.entity_type = "spec".to_string();
+        notif.source.entity_id = source_path.to_string();
 
         if let Err(e) = state.notifications.create(&notif).await {
             warn!(
@@ -357,6 +358,8 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
         }
     }
 

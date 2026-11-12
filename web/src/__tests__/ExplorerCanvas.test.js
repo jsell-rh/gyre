@@ -103,16 +103,24 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle and all five filter presets', () => {
+  it('renders toolbar with lens checkbox group and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
-    expect(lensButtons.length).toBe(3);
-    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    // Lens selector is a checkbox group (ui-navigation.md §3): Structural
+    // (always on, locked) + Evaluative (toggle) + Observable (future, locked).
+    const lensChecks = container.querySelectorAll('.lens-group input[type="checkbox"]');
+    expect(lensChecks.length).toBe(3);
+    // Structural/Evaluative wrap in <label>; Observable is a div[role=checkbox]
+    // (keyboard-operable wrapper around the disabled visual input).
+    const lensLabels = Array.from(lensChecks).map((i) => i.closest('.lens-check').textContent.trim());
     expect(lensLabels[0]).toContain('Structural');
     expect(lensLabels[1]).toContain('Evaluative');
     expect(lensLabels[2]).toContain('Observable');
+    expect(lensChecks[0].checked).toBe(true);
+    expect(lensChecks[0].disabled).toBe(true);
+    expect(lensChecks[1].checked).toBe(false);
+    expect(lensChecks[2].disabled).toBe(true);
     // Filter presets (explorer-implementation.md §25 Phase 1)
     const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
     const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
@@ -121,13 +129,13 @@ describe('ExplorerCanvas', () => {
     expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
-  it('renders lens toggle with structural active', () => {
+  it('renders lens checkbox group with structural checked and locked', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn, .tb-btn');
-    const structural = Array.from(lensButtons).find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders minimap', () => {
@@ -939,9 +947,9 @@ describe('ExplorerCanvas — lens switching', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const btns = Array.from(container.querySelectorAll('.tb-btn'));
-    const structural = btns.find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('evaluative lens renders metric selector when trace data exists', () => {
@@ -1600,10 +1608,12 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'structural' },
     });
-    // Both "All" filter and "Structural" lens buttons are active by default
-    const activeButtons = container.querySelectorAll('.tb-btn.active');
-    const texts = [...activeButtons].map(b => b.textContent);
-    expect(texts).toContain('Structural');
+    // Both "All" filter is active and "Structural" lens checkbox is
+    // checked+locked by default
+    expect(container.querySelector('.filter-preset-group .tb-btn-filter.active')?.textContent).toBe('All');
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders evaluative lens with metric buttons', () => {
@@ -1614,17 +1624,19 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is aria-disabled with spec label, click shows banner', async () => {
+  it('observable checkbox is disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const obsBtn = container.querySelector('.tb-btn-observable');
-    expect(obsBtn).toBeTruthy();
+    const obsLabel = container.querySelector('[data-testid="lens-checkbox-observable"]');
+    expect(obsLabel).toBeTruthy();
     // Lens stays disabled (spec: grayed out until production telemetry integration)
-    expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.textContent).toContain('requires production telemetry integration');
-    // Click is reachable (not a native disabled button) and shows the notice banner
-    await fireEvent.click(obsBtn);
+    const obsInput = obsLabel.querySelector('input');
+    expect(obsInput.disabled).toBe(true);
+    expect(obsInput.checked).toBe(false);
+    expect(obsLabel.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (the label intercepts it) and shows the notice banner
+    await fireEvent.click(obsLabel);
     const banner = container.querySelector('.observable-banner');
     expect(banner).toBeTruthy();
     expect(banner.textContent).toContain('OpenTelemetry collector');
@@ -1655,8 +1667,8 @@ describe('ExplorerCanvas — accessibility', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    // Filter presets removed per spec — only lens toggle group remains
-    const lensGroup = container.querySelector('[role="group"][aria-label="Lens toggle"]');
+    // Filter presets removed per spec — only lens checkbox group remains
+    const lensGroup = container.querySelector('[role="group"][aria-label="Lens selector"]');
     expect(lensGroup).toBeTruthy();
   });
 
@@ -2427,10 +2439,9 @@ describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
     expect(structuralPos).not.toBeNull(); // fixture guard: the node is drawn
 
     drawn.length = 0;
-    const evaluativeBtn = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
-    expect(evaluativeBtn).toBeTruthy();
-    await fireEvent.click(evaluativeBtn);
+    const evaluativeCheck = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluativeCheck).toBeTruthy();
+    await fireEvent.click(evaluativeCheck);
     flush();
 
     const evaluativePos = positionOf('create_user');

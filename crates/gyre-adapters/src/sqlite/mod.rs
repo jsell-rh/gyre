@@ -15,6 +15,7 @@ pub mod audit;
 pub mod budget;
 pub mod budget_call;
 pub mod chain_attestation;
+pub mod commit_signature;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
@@ -45,6 +46,7 @@ pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -241,6 +243,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "tenant_meta_spec_sets",
             "rollout_policies",
             "gate_traces",
             "trace_spans",

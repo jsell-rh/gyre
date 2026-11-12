@@ -28,8 +28,11 @@ pub struct CreateTaskRequest {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Option<Vec<String>>,
-    /// Spec path this task implements (e.g. "system/hello-world.md").
+    /// Spec path this task implements (e.g. "system/hello-world.md"). Bare path.
     pub spec_path: Option<String>,
+    /// Pinned approved spec blob this task implements: "path@sha". Optional;
+    /// when absent, decomposition falls back to the ledger's current SHA.
+    pub spec_ref: Option<String>,
     /// Workspace ID to scope this task to.
     pub workspace_id: Option<String>,
     /// Repository ID this task targets.
@@ -78,6 +81,8 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<u32>,
@@ -85,6 +90,8 @@ pub struct TaskResponse {
     pub depends_on: Vec<String>,
     pub workspace_id: String,
     pub repo_id: String,
+    /// Deployment generation — incremented on reassignment (§2.4 replay prevention).
+    pub generation: u32,
 }
 
 impl From<Task> for TaskResponse {
@@ -103,11 +110,13 @@ impl From<Task> for TaskResponse {
             created_at: t.created_at,
             updated_at: t.updated_at,
             spec_path: t.spec_path,
+            spec_ref: t.spec_ref,
             task_type: t.task_type.map(|tt| task_type_str(&tt)),
             order: t.order,
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
             workspace_id: t.workspace_id.to_string(),
             repo_id: t.repo_id.to_string(),
+            generation: t.generation,
         }
     }
 }
@@ -197,6 +206,7 @@ pub async fn create_task(
         .map(Id::new)
         .collect();
     task.spec_path = req.spec_path;
+    task.spec_ref = req.spec_ref;
     if let Some(ws_id) = req.workspace_id {
         task.workspace_id = Id::new(ws_id);
     }
@@ -298,7 +308,13 @@ pub async fn update_task(
         task.priority = parse_task_priority(&p)?;
     }
     if let Some(agent_id) = req.assigned_to {
-        task.assigned_to = Some(Id::new(agent_id));
+        let new_assignee = Id::new(agent_id);
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        if task.assigned_to.as_ref() != Some(&new_assignee) {
+            task.generation = task.generation.saturating_add(1);
+        }
+        task.assigned_to = Some(new_assignee);
     }
     if let Some(branch) = req.branch {
         task.branch = Some(branch);
