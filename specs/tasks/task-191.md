@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["b3dea29003054abbca3c29b2a0ad83f586504d86", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c"]
 ---
 
 ## Spec Excerpt
@@ -76,8 +76,15 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 
 Budget enforcement is real end-to-end (platform-model.md §5 Enforcement
 Behavior): the task-190 counters drive the specced actions on every usage
-recording. This round resolved the rebase onto base 3af80bd21 (merge commit
-`2d587b736`) and re-verified the merged result.
+recording. This round resolved the rebase onto base 7e9b3cfee (merge commit
+`e038b72eb`) and repaired the retained verification findings from round
+ea30174c (rustfmt drift + one clippy `needless_return`) in commit
+`c39c673ce` — behavior-neutral: an orphaned trailing
+`if agents.is_empty() { return; }` left behind in `emit_budget_warn` when
+75adf7def moved the spawner-notification block out to
+`maybe_notify_budget_threshold` was removed, and the task-touched regions
+were reformatted. No thresholds, de-dup markers, grace timer, kill path, or
+notifications changed.
 
 ### Enum + persistence
 
@@ -85,9 +92,11 @@ recording. This round resolved the rebase onto base 3af80bd21 (merge commit
 snake_case) lives in `gyre-domain/src/budget.rs`, re-exported.
 `BudgetConfig.enforcement_action: Option<...>` (None = spec default: 80%
 Warn, 100% GracefulStop) is threaded through migration
-`2026-10-10-000058_budget_enforcement_action` (portable SQL), the SQLite and
-Postgres `budget_configs` row mappings, and the budget API
-(`SetBudgetRequest` / `BudgetResponse`, PUT/GET round-trip tested).
+`2026-10-10-000058_budget_enforcement_action` (portable SQL; Diesel version
+prefix is date-unique so the base-owned `2026-11-08-000058_*` migration does
+not collide — `check-migration-versions.sh` passes), the SQLite and Postgres
+`budget_configs` row mappings, and the budget API (`SetBudgetRequest` /
+`BudgetResponse`, PUT/GET round-trip tested).
 
 ### Enforcement path
 
@@ -134,39 +143,33 @@ body and deep link. It runs in `record_llm_call_usage` right after
 notification (human channel) both fire from the one usage-recording funnel
 and a spawner is never notified twice for one crossing.
 
-### Rebase resolution (base 3af80bd21, merge commit 2d587b736)
+### Rebase resolution (base 7e9b3cfee, merge commit e038b72eb)
 
-- Upstream renamed `NotificationType::BudgetWarning` →
-  `AgentBudgetWarning` (taxonomy unification); task-191 code and tests now
-  use the canonical name.
-- The plain `notify()` to spawners inside `emit_budget_warn` was removed in
-  favor of the upstream rich path (same recipients + dedup; the plain
-  notify carried no entity_ref so it could not be de-duplicated and would
-  have double-notified the spawner). `MessageKind` emission is unchanged.
-- Upstream's `budget_threshold_notifications_fire_once_per_period` test
-  kept; verified non-interfering with enforcement (its fixture agent stays
-  Idle, so `active_workspace_agents` is empty; mem `list_by_workspace`
-  excludes `Destination::Agent` copies so message counts are unaffected).
-- Four upstream `BudgetConfig` test initializers in `signal_chain.rs`
-  gained `enforcement_action: None` (new optional field, spec default).
+- Base brought task-163 (dependency-graph storage/adapters, new
+  `2026-10-08-000061_dep_breaking_policies` migration, specs_assist/scim/
+  llm_defaults changes) and task-176 (web UI + regenerated dist assets).
+  No conflicts with the task-191 surface; `schema.rs` additions from both
+  sides merged cleanly.
+- The earlier 3af80bd21 rebase resolutions still hold in the merged tree:
+  `NotificationType::AgentBudgetWarning` canonical naming, the single
+  rich notification path, and the four `signal_chain.rs` test-fixture
+  `enforcement_action: None` initializers.
 
 ### Test evidence
 
-Sandbox probes (evidence: `/tmp/stage/review-evidence/task191-rebase-resolution.md`):
-`cargo check -p gyre-server` and `cargo check -p gyre-server --lib --tests`
-PASS (the latter caught and confirmed the signal_chain.rs initializer
-fix); `cargo check -p gyre-adapters -p gyre-cli -p gyre-domain --tests`
-PASS; `check-arch.sh`, migration-version, dead-message-kinds, ABAC
-registry/exempt-handler, MCP write-tool, byte-slice, relative-path,
-fail-open-ref, mem-port-contract, fabricated-scope, lossy-secret,
-scope-literal, inert-enforcement, in-memory-state, and unbounded-HTTP
-checks all PASS. gyre-server test *execution* is blocked by the sandbox
-build wrapper (4 GiB cap) and must run in the independent verifier:
-`cargo test -p gyre-server --lib api::budget` (task-191 acceptance tests:
-85% warn with message + notification + no kill + no re-fire,
-below-threshold silence, ≥100% graceful stop with Dead + counter 0 +
-worktree intact + reassignment task, HardKill inline, QueuePause kv state,
-cost-limit crossing, serde round-trips, API persistence, plus the upstream
-threshold-notification test), `api::admin` (kill_agent cutover),
-`signal_chain`, and `notifications`. `cargo build --all` and full gates are
-owned by verification.
+Sandbox probes (evidence: `/tmp/stage/review-evidence/task191-round2-verification-repair.md`):
+`cargo check --workspace` PASS on merge `e038b72eb` + repair (7m13s);
+`cargo fmt -- --check` clean; `cargo test -p gyre-adapters --lib budget`
+PASS (4/4, incl. `enforcement_action_round_trips_through_sqlite`);
+`check-arch.sh`, `check-migration-versions.sh`,
+`check-dead-message-kinds.sh`, `check-in-memory-state-stores.sh`, and
+`check-inert-enforcement.sh` PASS. gyre-server test *execution* is blocked
+by the sandbox build wrapper (4 GiB cap) and must run in the independent
+verifier: `cargo test -p gyre-server --lib api::budget` (task-191
+acceptance tests: 85% warn with message + notification + no kill + no
+re-fire, below-threshold silence, ≥100% graceful stop with Dead + counter
+0 + worktree intact + reassignment task, HardKill inline, QueuePause kv
+state, cost-limit crossing, serde round-trips, API persistence, plus the
+upstream threshold-notification test), `api::admin` (kill_agent cutover),
+`signal_chain`, and `notifications`. `cargo build --all`, all-target
+clippy, and full gates are owned by verification.
