@@ -1,10 +1,10 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-11
+**Last updated:** 2026-11-12
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
-| abac-policy-engine.md | 19 | 2 | 0 | 17 | 0 | 0 | 0% |
+| abac-policy-engine.md | 19 | 2 | 0 | 11 | 6 | 0 | 35% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
@@ -23,7 +23,7 @@
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 0 | 1 | 16 | 100% |
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
-| meta-spec-reconciliation.md | 18 | 7 | 0 | 6 | 5 | 0 | 45% |
+| meta-spec-reconciliation.md | 18 | 7 | 0 | 5 | 6 | 0 | 54% |
 | observability.md | 9 | 0 | 0 | 1 | 5 | 3 | 88% |
 | platform-model.md | 56 | 5 | 0 | 23 | 20 | 8 | 54% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 11 | 0 | 21 | 4 | 0 | 16% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **255** | **164** | **163** | **56%** |
+| **TOTAL** | **802** | **220** | **0** | **248** | **171** | **163** | **57%** |
