@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5", "6d20863c02e07c0a51873fdbb735c61bef80af68"]
 ---
 
 ## Spec Excerpt
@@ -106,21 +106,18 @@ emit_event → dispatcher → bridge → exactly one rank-3 notification). The
 reconciliation wave-completion test drains the bus via the real dispatcher,
 proving the p6 path.
 
-### Rebase repair onto cba416b46 (this round)
+### Verification repair (this round, commit 6d20863c0)
 
-Merged the assigned base cba416b46 (task-118 agent spawning / Ralph loop)
-into the branch, merge commit 95dde8040. Single textual conflict in
-specs/coverage/SUMMARY.md resolved mechanically by regenerating the file with
-scripts/update-coverage-summary.sh from the auto-merged individual coverage
-files — the resulting rows keep the base's upstream coverage numbers
-(merge-dependencies 100%, meta-spec-reconciliation 45%, observability 88%)
-alongside task-162's message-bus closures (message-bus.md 100%). lib.rs,
-mem.rs, and the task-118 files auto-merged cleanly; the implementation above
-is unchanged. Fresh probes at merge commit 95dde8040:
-`cargo check -p gyre-server --tests` clean (9m30s), `cargo test -p gyre-common`
-124 passed, mechanical checks clean (arch, dead-message-kinds,
-mem-port-contracts, inert-enforcement). Gyre-server test compilation remains
-deferred to the independent verifier (4 GiB budget):
-`cargo test -p gyre-server --lib message_dispatcher`, `--lib gate_executor`,
-`--lib notifications`, `--lib reconciliation`, and the full `cargo test --all`
-gate. Evidence: /tmp/stage/review-evidence/rebase-repair.md.
+Durable finding d57f384e (checks.sh exit 1): rustfmt flagged changed lines in
+main.rs (import wrapping) and message_dispatcher.rs (test import order,
+over-long assert_eq). Fixed formatting-only via rustfmt itself — no semantic
+change. Fresh probes at 6d20863c0: `cargo fmt -p gyre-server -- --check`
+clean, `cargo check -p gyre-server` clean (8m15s), `cargo test -p gyre-adapters
+--lib sqlite::message` 33 passed (includes the expire_events /
+expire_acked_inboxes TTL boundary tests), arch / byte-slice /
+relative-path / dead-message-kinds / task-attribution checks pass.
+Gyre-server test compilation remains deferred to the independent verifier
+(4 GiB budget): `cargo test -p gyre-server --lib message_dispatcher`,
+`--lib gate_executor`, `--lib notifications`, `--lib reconciliation`, and the
+full `cargo test --all` gate. Evidence: /tmp/stage/review-evidence/
+verification-repair.md.
