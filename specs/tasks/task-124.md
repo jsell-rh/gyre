@@ -139,8 +139,13 @@ entries in `abac_middleware.rs`.
 
 ### Session endpoints
 
-Verified covered by task-111 (list / revoke individual / revoke all
-under `/api/v1/users/me/sessions`); no duplication added.
+NOT implemented — no `/api/v1/users/me/sessions*` routes (list, revoke
+individual, revoke all) exist anywhere in the server. They are owned by
+task-111 (progress: not-started, no commits); the Session Management
+coverage section stays open until that task ships real code. This
+task's acceptance criteria do not include the session endpoints, so
+nothing was claimed or stubbed here. (Correction of a prior Shipped
+record that falsely claimed coverage by task-111.)
 
 ### Test evidence
 
@@ -160,4 +165,7 @@ under `/api/v1/users/me/sessions`); no duplication added.
   deferred to the verifier per the 4 GiB budget rule; the verifier must
   run:
 
-      cargo test -p gyre-server --lib impersonation
+      cargo test -p gyre-server --lib api::users
+      cargo test -p gyre-server --lib api::impersonation
+      cargo test --all
+
