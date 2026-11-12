@@ -2,7 +2,7 @@
 title: "Enforce access scoping on search (tenant/workspace/repo, index-level filtering)"
 spec_ref: "search.md §Access Scoping"
 depends_on: [task-201]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "search.md §Access Scoping"
 commits: ["dedfeb4fff806a40c611b09af7214ddd1bd5574f", "2cab4181f49133b4a6171045de3dbb9b31057708", "ccf715b8cde79d9bfedebb0302fb9cb806c1e70a", "6bf73593a5b686b16f0b4d8229ad830019874f1b", "790b031dde07c45674902680b69ca91e59133b8f", "f888d61dd5bbf04f9af6d3bd52893cba0a36aac3", "a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
