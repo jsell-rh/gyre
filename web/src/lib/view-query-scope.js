@@ -76,9 +76,17 @@ function governedBy(specPath, nodes, edges) {
 }
 
 /**
- * Concept scope: start from seed nodes (matched by name / qualified_name /
- * id) and expand along the allowed edge types up to the depth, honoring the
- * direction. Mirrors the canvas's concept traversal.
+ * Concept scope: start from seed nodes and expand along the allowed edge
+ * types up to the depth, honoring the direction. Mirrors the canvas's
+ * concept traversal.
+ *
+ * Seed resolution (ui-layout.md §4 "Data source distinction"):
+ *   - seed_match 'exact' (default): a seed names one node by name /
+ *     qualified_name / id.
+ *   - seed_match 'substring': a seed is a case-insensitive substring
+ *     matched against every node's name and qualified_name — EVERY match
+ *     becomes a seed (the ViewSpec `data.concept` mechanism, same
+ *     predicate as the graph endpoint's `?concept=` filter).
  * @param {any} scope
  * @param {any[]} nodes
  * @param {any[]} edges
@@ -86,6 +94,7 @@ function governedBy(specPath, nodes, edges) {
  */
 function conceptScope(scope, nodes, edges) {
   const seeds = scope.seed_nodes ?? [];
+  const substring = String(scope.seed_match ?? 'exact') === 'substring';
   const expandEdges = new Set(
     (scope.expand_edges ?? ['calls']).map((e) => String(e).toLowerCase())
   );
@@ -113,23 +122,34 @@ function conceptScope(scope, nodes, edges) {
   }
 
   const matched = new Set();
+  const queue = [];
   for (const seedName of seeds) {
-    const seedNode = nodes.find(
-      (n) => n.name === seedName || n.qualified_name === seedName || n.id === seedName
-    );
-    if (!seedNode || matched.has(seedNode.id)) continue;
-    matched.add(seedNode.id);
-    const queue = [{ id: seedNode.id, depth: 0 }];
-    while (queue.length > 0) {
-      const { id, depth } = queue.shift();
-      if (depth >= maxDepth) continue;
-      for (const nb of adjacency.get(id) ?? []) {
-        if (matched.has(nb.targetId)) continue;
-        if (dir === 'outgoing' && nb.reverse) continue;
-        if (dir === 'incoming' && !nb.reverse) continue;
-        matched.add(nb.targetId);
-        queue.push({ id: nb.targetId, depth: depth + 1 });
-      }
+    // Resolve the seed to seed node(s): every substring match, or the one
+    // node the seed names exactly.
+    const seedNodes = substring
+      ? nodes.filter(
+          (n) =>
+            String(n.name ?? '').toLowerCase().includes(seedName.toLowerCase()) ||
+            String(n.qualified_name ?? '').toLowerCase().includes(seedName.toLowerCase())
+        )
+      : [nodes.find((n) => n.name === seedName || n.qualified_name === seedName || n.id === seedName)].filter(
+          Boolean
+        );
+    for (const seedNode of seedNodes) {
+      if (matched.has(seedNode.id)) continue;
+      matched.add(seedNode.id);
+      queue.push({ id: seedNode.id, depth: 0 });
+    }
+  }
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift();
+    if (depth >= maxDepth) continue;
+    for (const nb of adjacency.get(id) ?? []) {
+      if (matched.has(nb.targetId)) continue;
+      if (dir === 'outgoing' && nb.reverse) continue;
+      if (dir === 'incoming' && !nb.reverse) continue;
+      matched.add(nb.targetId);
+      queue.push({ id: nb.targetId, depth: depth + 1 });
     }
   }
   return matched;
