@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
@@ -185,53 +185,44 @@ routes, formatting/lint findings, and parent MR/agent id leakage on
 merge-requests/agents child routes — each with killing tests named in the
 commit messages and per-row evidence in the coverage file.
 
-### Rebase repair (merge 2bbd0d4d6, this round)
+### Prior rounds (context)
 
-Merged the new assignment base cba416b46 (task-118: agent spawning,
-implementation phase & Ralph loop) into the branch. The base refactored
-`api/spawn.rs` so first spawn and Ralph-loop re-spawn share
-`launch_agent_process` returning `AgentLaunchResult` (adds the
-`process_launched` spawn-failure flag and §2.4 deployment-generation replay
-prevention). Conflict resolution kept the base's structure verbatim and
-re-applied the task-128-specific worker JWT scoping on top:
-`mint_worker_scoped` (workspace/repo scope, persona-less workers,
-identity-security attestation levels 1–3 from the resolved compute target)
-replaces the base's unscoped `mint_with_workload` pre-mint at the same
-call site; interrogation policy seeding keeps `created_by: Id::new("system")`
-consistent with the task-128 domain `Policy.created_by: Id`. No behavior change
-to either side beyond that re-application. The `specs/coverage/SUMMARY.md`
-conflict was initially resolved by taking the base's numbers wholesale — a
-bookkeeping regression caught by review (the abac-policy-engine.md row read
-`17 assigned / 0 implemented / 0%` while the coverage file itself has 6
-`implemented` rows) — and is fixed this round by running the mechanical
-regenerator `scripts/update-coverage-summary.sh` (see below).
+Rebase merges of successive assignment bases (task-118 spawn refactor,
+cba416b46) re-applied the task-128 worker JWT scoping (`mint_worker_scoped`)
+on top of the base's shared `launch_agent_process`; a SUMMARY.md
+bookkeeping regression from one wholesale-take resolution was caught by
+review and fixed with the mechanical regenerator. Candidate 7c41905 was
+independently approved (record 74488cd42), then reconciled with main at
+91cff7e6f.
 
-Probes at head 2bbd0d4d6 (evidence: /tmp/stage/review-evidence/):
-`cargo test -p gyre-domain` 466/466 passed; `cargo test -p gyre-adapters
---lib policy` 9/9 passed (CRUD roundtrip, built-in delete guard, scope
-filtering); `cargo check -p gyre-server` clean (5m39s);
-`scripts/check-task-commit-attribution.sh` passes with the restored
-commits list. Per the build-budget rule the server test binaries run in
-the independent verifier — the relevant suites are the `policy_engine`
-lib tests (8 operators, 4 value types, dynamic-reference fail-closed
-mutation-kill cases, all five §Policy Examples), the `abac_middleware`
-lib tests (live attribute extraction:
+### Rebase repair (merge db858a534, this round)
+
+The published PR again conflicted with its target: main advanced to
+7e9b3cfee (task-176 Meta-specs Preview Loop, plus task-163 dependency-graph
+storage underneath). Merged 7e9b3cfee into the branch. Only conflict:
+`specs/coverage/SUMMARY.md` TOTAL row — resolved by mechanical regeneration
+(`scripts/update-coverage-summary.sh`), which correctly combines both sides
+per-file rows (task-176's ui-layout row 37 → implemented; task-128's six
+abac-policy-engine implemented rows retained; TOTAL 802/220/0/248/171/163,
+57%). All other paths auto-merged: task-176's source (`abac_middleware.rs`
+route mapping, `api/mod.rs` routes, `specs_assist.rs`, `llm_defaults.rs`,
+web/src) and its verified `web/dist` assets came in from main unchanged; the
+task-128 ABAC implementation is untouched. No production code changed this
+round beyond the merge itself.
+
+Probes at head db858a534 (evidence: /tmp/stage/review-evidence/):
+`cargo check -p gyre-server` clean (7m03s); `cargo test -p gyre-domain`
+466/466 passed; `cargo test -p gyre-adapters --lib policy` 13/13 passed
+(CRUD roundtrip, built-in delete guard, scope filtering, plus task-163's
+policy-adjacent storage tests); `check-abac-route-registry.sh`,
+`check-arch.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`,
+`check-inert-enforcement.sh`, and `check-task-commit-attribution.sh` all
+pass (the last with the restored commits list). Per the build-budget rule
+the server test binaries run in the independent verifier — the relevant
+suites are the `policy_engine` lib tests (8 operators, 4 value types,
+dynamic-reference fail-closed mutation-kill cases, all five §Policy
+Examples), the `abac_middleware` lib tests (live attribute extraction:
 `agent_jwt_claims_reach_live_evaluation`, `persona_attestation_*`,
 `review_scoped_token_*`/`validation_scoped_token_*`, env attribute
 sources, spec-path resource.id), `tests/task134_review_probe.rs`, and the
 `auth` mint_worker_scoped round-trip tests.
-
-### Review repair (this round)
-
-Independent review of candidate 7c41905 confirmed every production-code
-probe still passes and flagged a single bookkeeping defect: the rebase
-merge-resolution regression in `specs/coverage/SUMMARY.md` described
-above. Fix: ran `scripts/update-coverage-summary.sh` and committed the
-regenerated file. The abac-policy-engine.md row now reads
-`| 19 | 2 | 0 | 11 | 6 | 0 | 35% |`, matching both the coverage file's
-own counts (19 rows, 2 `n/a`, 11 `task-assigned`, 6 `implemented` —
-recounted this round) and the branch's pre-merge SUMMARY; the TOTAL row
-moved `256/163/56%` → `250/169/57%` accordingly. The regenerator is
-idempotent at the new head (second run produces no diff). No production
-code changed this round; the verifier suites listed above are unchanged
-and still apply.
