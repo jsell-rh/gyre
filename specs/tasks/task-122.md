@@ -6,8 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits:
-  - "COMMIT_SHA_PLACEHOLDER"
+commits: ["bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
 ---
 
 ## Spec Excerpt
