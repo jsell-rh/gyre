@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["199e47c4a6db536f0c1a729e76cb6becbfac0803", "d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
 ---
 
 ## Spec Excerpt
@@ -108,68 +108,55 @@ Read `specs/system/agent-runtime.md` §4 (Budget Enforcement) and §5 (Agent Pro
 ## Shipped
 
 agent-runtime.md §4 (Budget Enforcement) and §5 (Agent Prompt
-Structure) are implemented in production code. Prior rounds (commits
-4bfdf85b, 7bdc6060, bfb2dc3d, 29d1a961, dc09d695, d00113b) shipped:
-cascade validation (repo ≤ workspace ≤ tenant, effective-limit
-semantics), enforcement levels (80% warning notification + bus event,
-100% BudgetExhausted-to-inbox + 60s grace timer then kill, beyond-limit
-immediate kill; worktree preserved, task InProgress, token revoked,
-AgentKilled audit), tracking (llm_tokens/llm_cost_usd per call,
-compute_minutes charged on every terminal transition from spawned_at
-wall clock, llm_query charged to workspace only), the hourly rolling
-24h reset job recomputed from per-call records, and the three-section
-prompt assembly (GYRE_META_SPEC_PROMPT/SET_SHA +
-GYRE_PROTOCOL_PROMPT + GYRE_ITERATION at spawn; four MCP prompts
-delivering persona/protocol/context/constraints).
+Structure) are implemented in production code:
 
-### This round — rebase repair onto base d31906c5 (merge commit b3b6f502)
+- **Cascade validation** (repo ≤ workspace ≤ tenant, effective-limit
+  semantics; repo `max_agents` ≤ workspace `max_agents_per_repo`,
+  spawn-time enforcement with scheduler queuing).
+- **Enforcement levels**: 80% BudgetWarning notification (priority 7)
+  + bus event; 100% BudgetExhausted-to-inbox + 60s grace timer then
+  kill; beyond-limit immediate kill. Worktree preserved, task stays
+  InProgress, token revoked, AgentKilled audit.
+- **Tracking**: llm_tokens/llm_cost_usd per cred-proxy call,
+  compute_minutes charged on every terminal transition from
+  spawned_at wall clock, llm_query charged to workspace only.
+- **Budget reset**: hourly rolling-24h job recomputed from per-call
+  records (budget_calls port + SQLite/Postgres adapters).
+- **Prompt structure (§5)**: three-section assembly at spawn
+  (GYRE_META_SPEC_PROMPT/SET_SHA + GYRE_PROTOCOL_PROMPT +
+  GYRE_ITERATION) and four MCP prompts (system://persona, ://protocol,
+  ://context, ://constraints) delivering the assembled content;
+  system://persona serves the pinned meta-spec set verbatim from the
+  spawn-time record, never the protocol section.
 
-The candidate and the new base had independently added MCP prompt
-delivery (candidate: agent-runtime §5 meta-spec semantics; base
-task-150: platform-model §4.3 persona-slug semantics). The auto-merge
-kept BOTH, producing duplicate `prompt_definitions()` /
-`handle_prompt_get()` / dispatcher arms / test names in mcp.rs (does
-not compile) plus content conflicts in docs/agent-protocol.md and
-docs/api-reference.md.
+### This round — verification-gate repair (commit 199e47c4)
 
-Resolution, per the spec text (identical in both parents and the
-merge-base): agent-runtime.md §5 amends platform-model.md §4's
-mapping — "system://persona delivers the assembled meta-spec prompt
-set":
-
-- `crates/gyre-server/src/mcp.rs`: kept the candidate's meta-spec
-  prompt handlers and dispatcher arms; removed the base's duplicate
-  persona-slug handlers, arms, and its 10 MCP prompt tests
-  (superseded dispatch semantics). The base's `api/prompts.rs` and
-  `GYRE_PROMPT_*` spawn-time injection are preserved — persona
-  resolution/binding at spawn is unchanged, and the spawn env-dump
-  tests covering it are intact.
-- `crates/gyre-server/src/api/spawn.rs`: corrected a merge-stale
-  comment (GYRE_PROMPT_* content is the platform-model §4.3
-  spawn-injection set; the MCP `system://persona` prompt serves the
-  meta-spec set per agent-runtime §5).
-- `docs/agent-protocol.md` / `docs/api-reference.md`: resolved to
-  document both injected env-var sets and the merged MCP prompt
-  semantics.
-- `specs/coverage/system/platform-model.md`: row 23 reconciled — the
-  MCP persona-slug dispatch was superseded by agent-runtime §5
-  (agent-runtime coverage row 32 tracks the delivered semantics);
-  spawn injection retained.
+The `cargo test --all` verification gate failed on exactly one test:
+`api::spawn::tests::mcp_persona_prompt_serves_meta_spec_section_only`
+(assertion 404 ≠ 200). Root cause: the test posted to `/mcp` on an app
+built from `api_router()`, but `/mcp` is registered on the full server
+router (`build_router`, lib.rs) — the request 404'd at the routing
+layer before reaching the MCP dispatcher. Fixed by routing the
+`prompts/get` call through `build_router` over the same shared
+`AppState` (fixture calls stay on the bare api_router app; the spawned
+agent's JWT is stored in the shared kv `agent_tokens` store, so the
+`AuthenticatedAgent` extractor resolves it and the persona record
+stored at spawn is served).
 
 ### Test evidence
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server
-  --tests` pass after the resolution (duplicate fn/test names from
-  the bad auto-merge fail here). Evidence:
-  `/tmp/stage/review-evidence/task119-rebase-repair.txt`.
-- Mechanical checks pass: check-arch, check-mcp-write-tools,
-  check-abac-route-registry, check-dead-message-kinds,
-  check-mem-port-contracts, check-inert-enforcement,
-  check-task-commit-attribution (merge commit recorded above).
-- The 4 GiB sandbox budget blocks gyre-server test-binary linking;
-  the verifier must run: `cargo test -p gyre-server --lib mcp_prompts`
-  (merged MCP prompt tests incl. persona-without-record truthfulness
-  and protocol content), `cargo test -p gyre-server --lib api::budget`
-  (budget enforcement suite), `cargo test -p gyre-server --lib
-  api::spawn::tests` (prompt-set injection), then `cargo test --all`.
-- rustfmt clean on all changed files.
+- `cargo check -p gyre-server --lib --tests` — clean at this round's
+  head (sandbox blocks gyre-server test compilation under the 4 GiB
+  budget; evidence: /tmp/stage/review-evidence/).
+- All mechanical gate scripts pass at this head (arch, ABAC route
+  registry, exempt handlers, MCP write tools, migrations, dead message
+  kinds, byte-slice, relative paths, fail-open refs, mem port
+  contracts, fabricated scope defaults, lossy secrets, scope literals,
+  inert enforcement, forwarded headers, in-memory stores, unbounded
+  HTTP, migration portability, forged scope fields).
+- Verifier must execute (server tests blocked in sandbox):
+  `cargo test --all` and, focused,
+  `cargo test -p gyre-server --lib api::spawn::tests::mcp_persona_prompt_serves_meta_spec_section_only`.
+- Prior rounds' focused tests (budget cascade, thresholds, grace kill,
+  compute minutes, rolling window, prompt assembly) are unchanged and
+  passed the last full gate run (1862 passed / 1 failed → this fix).
