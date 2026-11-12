@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: ["362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "188b9f9482edeeb0550990fc15761137eef9dc76"]
 ---
 
 ## Spec Excerpt
@@ -58,15 +58,15 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 
 ## Acceptance Criteria
 
-- [ ] Concept browser lists predefined concepts from manifest
-- [ ] Selecting a concept filters canvas to show related nodes
-- [ ] Non-related nodes fade to background (not removed)
-- [ ] Edges between concept nodes highlighted
-- [ ] Active concept shown as filter chip in control bar
-- [ ] Multi-select + right-click → "Create concept" works
-- [ ] Ad-hoc concepts saved as explorer views
-- [ ] Ask input handles concept questions via LLM
-- [ ] Tests pass
+- [x] Concept browser lists predefined concepts from manifest
+- [x] Selecting a concept filters canvas to show related nodes
+- [x] Non-related nodes fade to background (not removed)
+- [x] Edges between concept nodes highlighted
+- [x] Active concept shown as filter chip in control bar
+- [x] Multi-select + right-click → "Create concept" works
+- [x] Ad-hoc concepts saved as explorer views
+- [x] Ask input handles concept questions via LLM
+- [x] Tests pass
 
 ## Agent Instructions
 
@@ -76,7 +76,8 @@ Read `system-explorer.md` §4 "Concept Views" for the full specification. The co
 
 Concept views (system-explorer.md §4) on the task-178 canvas substrate,
 covering all three interaction modes and both data-source mechanisms,
-with the round-1 review findings repaired.
+with the round-1 review findings and the round-1 verification findings
+repaired.
 
 ### Behavior
 
@@ -123,19 +124,28 @@ with the round-1 review findings repaired.
   Selecting a saved ad-hoc concept from the view selector now re-applies
   the grouping.
 
-### Repair: rebase onto the task-176 assignment base
+### Repair: merge onto the task-181 assignment base + verification findings
 
-The candidate branch was rebased onto the current assignment base
-(`7e9b3cfe`, task-176 Meta-specs Preview Loop). The single content
-conflict — `ExplorerView.svelte` import block, task-182's
-`viewDocumentToQuery` import vs. task-176's `flow-templates` import —
-was resolved by keeping both (every symbol is used by the merged file:
-`viewDocumentToQuery` on the saved-concept reload path,
-`pickTraceMr`/`matchFlowTemplate`/`flowTemplateQuery`/`FLOW_TEMPLATES`
-on the flow-template path). No other conflicts; `ExplorerCanvas.svelte`
-and `api.js` auto-merged cleanly. Post-merge, the full focused matrix
-was re-run green on the merged tree (see evidence below), including
-the flow-template suites from the base side.
+The candidate was merged onto the current assignment base (`d31906c5a`,
+task-181 Risk Map). Two content conflicts, both resolved by union where
+the features share a file:
+
+- `ExplorerCanvas.svelte` import block: HEAD's `nodeCategory` import
+  (the merged draw loop classifies fade via the `conceptNodeIds` prop,
+  not `nodeMatchesConcept` container filtering) plus the base's
+  `risk-map.js` import driving the merged-in Risk Map overlay.
+- `docs/ui.md` Architecture Tab: task-181's expanded Risk Map overlay
+  description on the lens-selector bullet, task-182's two-mechanism
+  Concepts section detail on the filter-panel bullet.
+
+Round-1 verification (`bash /tmp/stage/checks.sh`, exit 1) failed on two
+changed-line findings, repaired in `188b9f948`:
+
+- rustfmt: `crates/gyre-server/src/api/graph.rs` (manifest_concepts
+  signature + concepts-listing test assert rewrapped).
+- clippy::useless_vec: `gyre-domain/src/view_query_resolver.rs`
+  substring seed-match tests passed `&vec![]` where `resolve_scope`
+  takes `&[GraphEdge]` — replaced with `&[]`.
 
 ### Test evidence
 
@@ -156,16 +166,17 @@ the flow-template suites from the base side.
 - `web/src/__tests__/view-query-scope.test.js` (15 tests): substring
   seed matching (all-matches seeding, edge expansion from substring
   seeds, no-match null, exact default when `seed_match` is absent).
-- Rust: `cargo test -p gyre-domain concept` — 10 unit + 2 integration
-  tests pass, including the new substring seed tests (all-matches,
-  expansion, unmatched-seed warning) and `seed_match` validation;
-  `cargo test -p gyre-common view_query` — 5 pass.
-- Regression suites re-run green on the merged tree:
-  ExplorerGeneratedViews, ExplorerViewNavigableArchitecture,
-  ExplorerViewLayoutRenderers, ExplorerCanvas, ExplorerCanvas.flow,
-  filter-categories, view-query-validator, ExplorerDefaultViews,
-  canvas-filters, ExplorerViewFlowTemplates, flow-templates — 11
-  files, 300 tests (flow-template suites cover the base-side feature
-  sharing ExplorerView.svelte after the conflict resolution).
-  Evidence: `/tmp/stage/review-evidence/frontend-focused-tests.log`
-  and `rust-focused-tests.log`.
+- Rust: `cargo test -p gyre-domain view_query_resolver` — 145 pass;
+  `cargo test -p gyre-domain concept` — 10 unit + 2 integration pass;
+  `cargo test -p gyre-common view_query` — 5 pass; `cargo check -p
+  gyre-server` clean; `cargo clippy -p gyre-domain --all-targets`
+  reports no useless_vec in view_query_resolver.rs (remaining crate
+  warnings are pre-existing base-code lines outside this task's diff).
+- Focused matrix re-run green on the merged tree: ExplorerConceptViews,
+  ExplorerCanvas, filter-categories, RiskMap (base side),
+  ExplorerCanvas.evaluative-lens (base side), view-query-scope,
+  view-spec, view-query-validator, generated-view, ExplorerCanvas.flow,
+  canvas-filters, ExplorerDefaultViews, ExplorerViewFlowTemplates,
+  flow-templates, ExplorerGeneratedViews — 373 tests. Evidence:
+  `/tmp/stage/review-evidence/frontend-focused-tests.log` and
+  `rust-focused-tests.log`.
