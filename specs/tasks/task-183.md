@@ -2,7 +2,7 @@
 title: "Architectural Timeline — time scrubber for historical architecture views"
 spec_ref: "system-explorer.md §6"
 depends_on: [task-178]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
 commits: ["f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
