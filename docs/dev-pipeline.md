@@ -35,6 +35,28 @@ attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
 ignored. The harness does not change namespace admission policy or cluster
 resources to increase its budget. Running allocations keep their assigned size.
 
+When the scoped runtime observer is configured, new compute admissions also
+respect the namespace's CPU, memory and pod quotas and container maxima. A fresh
+read-only observation accounts for every namespace pod (including other callers),
+supervisor overhead and admitted work not yet visible in Kubernetes. Reservations
+are atomic across dispatcher processes, transfer to sandbox ownership without
+double charging, and fix the assignment's resource size before creation. Quota
+waiting preserves desired slots and does not allocate/delete replacement sandboxes.
+Stale or unavailable capacity observations stop new compute; active workers,
+cleanup and CI observation continue. The cockpit and Configuration show the
+limiting resource. Raising desired slots does not increase platform quotas.
+The verification reserve includes real quota headroom for a ceiling-sized
+verifier, so a large desired slot count cannot let model jobs exhaust a smaller
+namespace envelope and strand the verification queue.
+
+The opt-in **Stress experiment guard** watches new experiment activity. Overlapping
+compute claims, or failures across three tasks in ten minutes (provisioning,
+lost leases, ledger locking, or OOM at the 6 GiB ceiling), pause new admissions
+and record a dashboard alert. Existing workers, cleanup, CI observation, source
+and the desired slot count are retained. Historical failures and ordinary
+candidate defects do not stop the experiment. Re-enabling the guard starts a
+new observation cohort after a structural fix; resume admission separately.
+
 Build commands share one sandbox lock, with one Cargo job and one test thread.
 Agent and verifier environments use the same settings: no incremental Rust
 compilation, no dev/test DWARF symbols, and one mold linker thread. Debug

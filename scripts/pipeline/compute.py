@@ -39,6 +39,17 @@ def profile(store, task, stage):
     return {'cpu':'1','memory':f'{memory}Gi','memory_gib':memory,'build_jobs':1,'build_disk_min_gib':BUILD_DISK_MIN_GIB}
 
 
+def assigned_profile(store, claim):
+    row=store.db.execute('SELECT data FROM resources WHERE name=?',
+                        (store.admission_name(claim['id'],claim['token']),)).fetchone()
+    if row:
+        import json
+        budget=json.loads(row['data']).get('compute')
+        if budget and budget.get('memory') in ('4Gi','6Gi') and budget.get('cpu')=='1' and budget.get('build_jobs')==1:
+            return budget
+    return profile(store,claim['task'],claim['stage'])
+
+
 def record_oom(store, task, stage, observed_gib, evidence):
     from .execution import Attention, Retry
     ceiling = memory_ceiling(store)
