@@ -79,7 +79,11 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `GYRE_AGENT_ID` | Agent UUID | Identity for API calls |
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
-| `GYRE_PROMPT_PERSONA` | _(optional)_ Persona system prompt | `system://persona` (Platform Model §4.3): the resolved persona's prompt, injected only when a persona is bound to the agent (spawn request `persona_slug`, resolved repo → workspace → tenant, must be approved) |
+| `GYRE_META_SPEC_PROMPT` | _(when meta-specs apply)_ | Rendered meta-spec system prompt (agent-runtime.md §5): required tenant + workspace meta-specs and spec-level bindings at pinned versions |
+| `GYRE_META_SPEC_SET_SHA` | _(when meta-specs apply)_ | SHA-256 of the assembled prompt set (provenance; matches the spawn response's `meta_spec_set_sha`) |
+| `GYRE_PROTOCOL_PROMPT` | Protocol section text | System-managed protocol (agent-runtime.md §5): Ralph loop rules, MCP tools, heartbeat, escalation, completion — also served on demand via the MCP `system://protocol` prompt |
+| `GYRE_ITERATION` | `0`, `1`, ... | Ralph-loop iteration for this session (agent-runtime.md §1 Phase 7) |
+| `GYRE_PROMPT_PERSONA` | _(optional)_ | Persona system prompt | Persona prompt (Platform Model §4.3): the resolved persona's prompt, injected only when a persona is bound to the agent (spawn request `persona_slug`, resolved repo → workspace → tenant, must be approved). Note: the MCP `system://persona` prompt serves the assembled meta-spec set per agent-runtime.md §5 |
 | `GYRE_PROMPT_PROTOCOL` | Protocol norms text | `system://protocol` (Platform Model §4.3): interaction norms, Ralph loop definition, escalation rules |
 | `GYRE_PROMPT_CONTEXT` | Task/worktree context text | `system://context` (Platform Model §4.3): current task (title, spec ref, description), worktree branch/path, repo info |
 | `GYRE_PROMPT_CONSTRAINTS` | Constraints text | `system://constraints` (Platform Model §4.3): budget limits + remaining budget, agent lifetime cap, scope boundaries |
