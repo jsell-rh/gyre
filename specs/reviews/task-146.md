@@ -1,0 +1,40 @@
+# Review — task-146 (Complete analytics event schema and auto-emitted events coverage)
+
+Spec: `specs/system/analytics.md` §Event Schema, §Auto-Emitted Events, §Query API, §Query Parameters.
+Candidate: `4a5c676f5cbbd70e00c29f14df8d5ae3de300b9e` (base `3b734b1af744f594ec5d903be242b41ec0f287f2`).
+Verdict: **needs-revision** — one material finding (F1, hardcoded `persona` on `agent.spawned`); everything else verified clean against source and focused probes.
+
+## Probes run (evidence in `/tmp/stage/review-evidence/`)
+
+- `/tmp/stage/bin/cargo test -p gyre-domain analytics` → **3/3 pass**, incl. `analytics_event_matches_spec_schema` (serde round-trip pinning all 9 spec fields).
+- `/tmp/stage/bin/cargo test -p gyre-adapters --lib analytics` → **13/13 pass** against real SQLite, incl. `analytics_query_filtered_all_params` (each scope predicate asserted individually — dropping any one filter fails it) and the `000063_analytics_scope_columns` migration applying cleanly.
+- `/tmp/stage/bin/cargo check -p gyre-server` → clean (server type checking; large test builds deferred to the verifier per the 4 GiB budget rule).
+- All 19 mechanical invariant scripts → exit 0 (`check-arch`, `check-abac-route-registry`, `check-abac-exempt-handlers`, `check-mcp-write-tools`, `check-migration-versions`, `check-migration-sql-portability`, `check-mem-port-contracts`, `check-fabricated-scope-defaults`, `check-inert-enforcement`, `check-forged-scope-fields`, `check-byte-slice-truncation`, `check-scope-literal-defaults`, `check-lossy-secret-conversion`, `check-forwarded-header-trust`, `check-in-memory-state-stores`, `check-unbounded-external-http`, `check-relative-path-defaults`, `check-fail-open-ref-resolution`, `check-dead-message-kinds`). The candidate's edits to `scripts/check-fabricated-scope-defaults.sh` / exemption files are comment-only (no growth; frozen count stays 1).
+- Full base..candidate diff (7370 lines) inspected; every production emit site for all 12 events read at source level.
+
+## Verified working (no findings)
+
+- **Event schema**: `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec fields; `with_scope` populates user/session/workspace/repo. Id-typed fields stored as `Option<String>` matching the storage TEXT columns — documented in the coverage matrix, acceptable.
+- **All 12 auto-emitted events** record at real trigger points with the spec-required properties, verified by reading every emit site: `task.status_changed` (shared `record_task_status_changed` helper: HTTP status endpoint, MCP `update_task`, spawn auto-advance, completion auto-advance, admin kill, stale-abort, spec-reject cancel, repo-archive cancel, ralph-loop re-open/ceiling); `mr.merged` (HTTP transition + queue merge via `emit_mr_merged`, both with looked-up `gate_count` from gate_results and `queue_wait_secs` from queue entry); `mr.closed` (transition, repo-archive, spec-reject, ralph-loop gate-failure close — each with a concrete `reason`); `agent.spawned` (worker spawn, orchestrator spawn, ralph re-spawn); `agent.completed` (HTTP complete + MCP `gyre_agent_complete`); `agent.failed` (shared helper + every kill path: fail/stop endpoints, admin kill, stale-abort, spec-reject, repo-archive, compose teardown, orchestrator death monitor, agent-status API); `merge_queue.processed` (merged + every terminal Failed path through `fail_queue_entry`/`emit_queue_processed_terminal` + circuit-breaker Cancelled as outcome `skipped`); `gate.failed`/`gate.passed` (gate_executor, real `output_snippet`/`duration_secs`); `spec.approved` (specs.rs approval handler with `approver_type`/`approval_mode`); `budget.warning` (80% threshold from `check_spawn_budget` and `record_budget_usage`, with below-threshold negative control); `search.query` (search handler, identity/scope bound to the verified caller).
+- **Query API completeness**: `GET /api/v1/analytics/events` supports `event_name` (exact or trailing-`*` prefix via LIKE on SQLite and Postgres), `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`/`until` (ISO8601 — full parser with offsets/fractional/date-only end-of-day — or unix seconds, inclusive), `limit` (default 100, cap 10_000), and `group_by` ∈ {event_name, agent_id, workspace_id, day} with unsupported fields rejected 400. `GET /count` and `GET /daily` (incl. spec's `?event_name=&days=30` form, since>until rejected) work. Filter implemented identically on SQLite, Postgres, and mem adapters (mem test pins parity with sqlite semantics).
+- **Anti-forgery on the write path** (carried from earlier review rounds, re-verified): `record_event` ignores body `agent_id`/`user_id` and derives them from the verified caller; `workspace_id`/`repo_id` are validated against the caller's tenant (cross-tenant → 403, unknown → 404, inconsistent ws/repo pair → 403) with regression tests asserting the forged event never lands in the victim scope's filtered results. `search.query` applies the same validation.
+- **Migration**: `2026-10-08-000063_analytics_scope_columns` — sequence 000063 is unique in the tree (the 000056–000061 duplicates are pre-existing in the base), and the SQL (`ALTER TABLE ... ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`) is portable to both SQLite and PostgreSQL per `check-migration-sql-portability.sh`.
+- **Tests are real guards**: per-event tests drive the actual HTTP/MCP/merge-queue paths through the real router and assert the persisted event's properties (not response echoes); negative controls exist (failed gate emits no `gate.passed`, below-threshold budget emits nothing, empty search query emits nothing, forged scopes rejected). No self-confirming or assertionless tests found in the analytics surface.
+- **Coverage matrix** updates (`specs/coverage/system/analytics.md` rows 1–5 → implemented) are backed by the code above; sections 6–12 correctly remain task-147.
+
+## Findings
+
+### F1 (blocking) — `agent.spawned` hardcodes `persona: "default-worker"`
+
+`crates/gyre-server/src/api/spawn.rs` (~line 1091) and `crates/gyre-server/src/ralph_loop.rs` (~line 792) emit the spec-required `persona` property as the literal `"default-worker"` even though the actually bound persona is resolved and in scope at both sites:
+
+- `spawn_agent_core` resolves `req.persona_slug` through the repo→workspace→tenant chain into `persona: Option<Persona>` (spawn.rs ~line 568; fail-closed on non-Approved, persisted as `agent.persona_id`, injected into the agent's prompt as `GYRE_PROMPT_PERSONA`), yet the event says `"persona": "default-worker"`.
+- The ralph-loop re-spawn looks the persona up from `agent.persona_id` (ralph_loop.rs ~line 708, fail-closed) for the prompt, then hardcodes the analytics value.
+
+Repro: create an Approved persona with a non-default slug (agent-runtime.md §Bootstrap ships nine, e.g. `spec-reviewer`), spawn a worker with that `persona_slug`, then `GET /api/v1/analytics/events?event_name=agent.spawned` — `properties.persona` is `"default-worker"`, not the bound persona's slug. This is a hardcoded value standing in for a looked-up one (the fakery class the repo goal explicitly bans) and it corrupts the persona-performance decision signals that analytics.md §Decision API is specced to consume ("Is this agent persona performing well?"). The orchestrator spawn path already reports its real persona name, so the worker paths are inconsistent with the candidate's own convention. The per-event test only asserts the property is a non-empty string, so it cannot catch the misattribution.
+
+Fix: report `persona.as_ref().map(|p| p.slug.clone()).unwrap_or_else(|| "default-worker".into())` (or the bound `agent.persona_id`) at both emit sites, and extend the spawn test to spawn with a `persona_slug` and assert the recorded slug.
+
+## Verifier instructions
+
+Beyond the recorded server test list in `/tmp/stage/review-evidence/probe-log.md`, the verifier should re-run the full `cargo test --all` suite after integration; the focused evidence here (gyre-domain, gyre-adapters, cargo check, invariant scripts) supports every claim above except the gyre-server lib tests, which were deferred per the memory budget rule.
