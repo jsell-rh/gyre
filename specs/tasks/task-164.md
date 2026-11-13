@@ -2,7 +2,7 @@
 title: "Dependency graph — CLI commands and UI visualization"
 spec_ref: "dependency-graph.md §CLI"
 depends_on: [task-163]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "dependency-graph.md §CLI"
   - "dependency-graph.md §UI"
