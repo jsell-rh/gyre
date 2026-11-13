@@ -2,7 +2,7 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
 commits: ["af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "6061e726e957e84dd6a66681c2fe1eae2999cae2"]
@@ -123,45 +123,58 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
 provider info) are implemented in production code across the commits
-listed in the frontmatter. This round repairs the CI Clippy failure on
-the PR merge head.
+listed in the frontmatter. This round repairs the dirty merge against
+current main (cd58a166, task-202 search indexing) — merge commit
+eb8f6e97.
 
-### This round: CI repair (Clippy E0061 on the merge ref)
+### This round: rebase repair against main cd58a166
 
-CI run 43395891760 (Clippy) failed at PR head 002881ad. The Clippy job
-runs `scripts/check-clippy-diff.py HEAD^1` on the PR merge ref — the
-merge of the PR head into main 4ec1e526. Main's task-122 team-routing
-work added two in-module test call sites in
-`crates/gyre-server/src/api/specs_assist.rs`
-(`save_spec_notifies_team_members_from_manifest_approvers`) using the
-pre-task-209 7-argument `NotificationRepository::list_for_user` form;
-task-209 added the `exclude_types` parameter to that port (HSI §12
-notification preference filtering). The semantic merge conflict failed
-compilation with E0061. Fixed in a640c67f by passing the explicit
-empty exclude list (`&[]`) at both call sites — the port doc specifies
-`&[]` for surfaces that must see every notification regardless of the
-recipient's toggles, and these tests assert delivery of the
-SpecApprovalRequested card to team members.
+Main's task-202 search-sync wiring hoisted repository construction
+into `let` bindings wrapped in `search_sync`/`search_scope` decorators,
+conlicting textually with task-209's shared mem stores
+(`mem_audit`/`mem_spec_approvals`/`mem_spec_ledger` + `store_shared!`)
+in `lib.rs` and `mem.rs`, and with the gate-override audit write in the
+MR review submission handler. Resolutions (all three in merge commit
+eb8f6e97):
 
-Verified locally on the repaired merge tree (evidence under
-/tmp/stage/review-evidence/):
+- `api/merge_requests.rs`: kept both sides in sequence — the task-209
+  gate-override audit write (one `gate_override` AuditEvent per failed
+  gate on human approval) runs before task-202's review search-index
+  call on the same submitted review.
+- `lib.rs` / `mem.rs`: kept both the task-209 shared stores and the
+task-202 search-wrapped `let` bindings, with one semantic merge: the
+`audit` binding is `search_sync::wrap_audit(store_shared!(...,
+mem_audit), search)` — the decorator wraps the shared mem store
+instead of constructing its own, so audit writes stay indexed AND the
+pure-mem judgment ledger (`MemJudgmentLedgerRepository::with_sources`)
+still aggregates the same store `state.audit` writes through.
+  `wrap_audit::record` delegates to `inner`, so both concerns hold.
 
-- `SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features --
-  -W clippy::all` (the CI invocation, full workspace) → exit 0, no
-  errors or warnings on changed lines
-- `python3 scripts/check-clippy-diff.py 4ec1e526` (exact CI gate
-  against the merge-ref base) → "changed lines clean (42 Rust files)"
-- `python3 scripts/check-rustfmt-diff.py 4ec1e526` → clean
-- `bash scripts/check-arch.sh` → exit 0;
-  `GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh` → exit 0
+Verified on the repaired tree (evidence under
+/tmp/stage/review-evidence/rebase-repair-eb8f6e97.log):
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` →
+  exit 0 (type-checks every test body, including the merged wiring)
+- `cargo test -p gyre-adapters --lib` → 519 passed, 0 failed
+  (includes the 12 `sqlite::user_profile` judgment-ledger /
+  notification-filter tests)
+- `cargo test -p gyre-domain --all-targets` → 515 passed
+- `python3 scripts/check-clippy-diff.py cd58a166` → changed lines
+  clean (59 Rust files)
+- `bash scripts/check-arch.sh` → pass;
+  `bash scripts/check-notification-toggle-coverage.sh` → pass
+  (41 variants, 41 toggles)
+- `scripts/check-tenant-filter.sh` fails with an awk syntax error
+  identically on pure main cd58a166 (mawk 1.3.4 lacks `\s` regex
+  support) — pre-existing environmental, not a code defect; recorded
+  for remote verification.
+
+`web/src` is byte-identical to the verified head f1680d3 (main touched
+no frontend sources); `web/dist` is regenerated by final integration.
 
 Server tests the independent verifier must execute (server test
-compilation is deferred to the verifier per the 4 GiB budget; clippy
---all-targets already type-checked every test body on this tree):
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
-specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers`
-(the two repaired call sites), then the full gates
-`SKIP_WEB_BUILD=1 cargo test --all` and `cd web && npm ci && npm test`.
+compilation deferred per the 4 GiB budget): `SKIP_WEB_BUILD=1 cargo
+test --all` and `cd web && npm ci && npm test`.
 
 ### Implementation (intact on this branch)
 
