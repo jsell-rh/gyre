@@ -9371,7 +9371,16 @@ mod tests {
         // errors are reported clearly to the author, not just the queue).
         let author_notifications = state
             .notifications
-            .list_for_user(&Id::new("author-agent-1"), None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("author-agent-1"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
