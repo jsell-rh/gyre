@@ -463,10 +463,16 @@ async fn spawn_manifest_gate_agent(
     // general-purpose "agent"-scoped token here would leave the gate
     // agent's reviews recorded under a request-body reviewer id, so the
     // persona / min_attestation_level / stack_hash constraints would be
-    // evaluated against an identity the token never verified. The ABAC
-    // reviewer allow-list (plus the /mcp surface, which the allow-list does
-    // not cover) still lets the runtime poll its ReviewRequest, read the MR
-    // diff, and submit its verdict — nothing else. A mint or registration
+    // evaluated against an identity the token never verified. The token
+    // still lets the runtime read the MR diff, fetch the pinned spec, and
+    // submit its verdict; its ReviewRequest arrives via the launch env
+    // (GYRE_MR_ID / GYRE_PERSONA / …) and the /mcp surface
+    // (`gyre_message_poll` derives the inbox from the verified token
+    // subject, so it is inherently own-inbox) — the REST inbox route
+    // (GET /api/v1/agents/{id}/messages) is deliberately NOT on the
+    // reviewer allow-list: its handler has no caller-identity check, so
+    // allowing it would let any review-scoped token drain and clear any
+    // agent's inbox. A mint or registration
     // failure fails the spawn closed: an unscoped fallback token is exactly
     // the hole this closes, and with no gate agent running the gate polls
     // reviews and fails at its timeout (never auto-passes).

@@ -142,6 +142,78 @@ async fn scoped_review_token_denied_outside_allowlist() {
     );
 }
 
+/// Task-195 review repair: a `review:submit`-scoped gate-agent token must
+/// NOT reach the REST agent-inbox route (`GET /api/v1/agents/{id}/messages`).
+/// That handler has no caller-identity check (any authenticated principal
+/// passing ABAC drains and clears the named agent's KV inbox), and the
+/// builtin agent-scoped-access policy (priority 700, resource_types ["*"],
+/// subject.global_role == Agent — the role every agent JWT carries) permits
+/// the read — so were this route on the reviewer allow-list, every
+/// single-purpose gate-agent token could read and destroy any agent's
+/// inbox. The ReviewRequest a manifest gate agent needs is delivered via
+/// its launch env and the /mcp surface (`gyre_message_poll` derives the
+/// inbox from the verified token subject — inherently own-inbox), never
+/// this route. Discriminator: builtin policies are seeded so the agent
+/// role WOULD permit the read; the 403 is attributable solely to the
+/// scoped-token allow-list, and re-adding the route there flips this test
+/// to a draining 200.
+#[tokio::test]
+async fn scoped_review_token_cannot_read_agent_inbox_route() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
+    let app: Router = gyre_server::build_router(state.clone());
+
+    // A distinct victim agent whose inbox the scoped token must not touch.
+    let victim = gyre_domain::Agent::new(
+        gyre_common::Id::new("agent-inbox-victim-1"),
+        "inbox-victim",
+        0,
+    );
+    state.agents.create(&victim).await.unwrap();
+
+    let gate_agent_id = "gate-review-probe-inbox".to_string();
+    let token = state
+        .agent_signing_key
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+        )
+        .unwrap();
+    state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, token.clone())
+        .await
+        .unwrap();
+
+    // GET /api/v1/agents/{victim}/messages with the scoped token: outside
+    // the review allow-list (and deliberately kept off it), so denied even
+    // though the builtin agent-role policy would permit the read.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/agents/agent-inbox-victim-1/messages")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "review-scoped gate-agent token must not read another agent's inbox \
+         (agent_messages has no caller-identity check)"
+    );
+}
+
 /// Git push with a scoped review token must be rejected read-only.
 #[tokio::test]
 async fn scoped_review_token_cannot_push() {
