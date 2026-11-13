@@ -643,16 +643,21 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
 
     // Union, don't replace — but never double-spawn a persona. When a
     // repo-level gate and a manifest gate target the same persona, the
-    // MANIFEST gate wins: it carries the min_attestation_level / stack_hash
-    // constraints the manifest declares for this spec, which the repo-level
-    // gate cannot enforce — skipping the manifest gate instead would let a
-    // no-command repo-level AgentReview gate auto-pass and merge without
-    // them. The manifest gate is not a downgrade of a working repo-level
-    // command gate: it spawns a real gate agent runtime (launched through
-    // the same compute-target machinery `spawn_agent_core` uses, with a
-    // workload attestation — see `launch_gate_agent_runtime`), so the
-    // persona actually reviews either way. The repo-level duplicate for
-    // that persona is skipped, so the persona still runs exactly once.
+    // MANIFEST gate wins: the manifest is the reviewed per-spec policy
+    // artifact (spec-registry.md §16) and carries the
+    // min_attestation_level / stack_hash constraints that gate's reviewer
+    // must satisfy — constraints a repo-level gate cannot enforce. The
+    // alternative (repo-gate-wins) is strictly weaker, not just redundant:
+    // a no-command repo-level AgentReview gate fails closed (it cannot
+    // spawn a reviewer, so a required gate BLOCKS the merge), and a
+    // command-based repo gate runs a reviewer with no attestation
+    // constraints at all. Either way nothing is lost by skipping the
+    // repo-level duplicate: the manifest gate spawns a real gate agent
+    // runtime (launched through the same compute-target machinery
+    // `spawn_agent_core` uses, with a workload attestation — see
+    // `launch_gate_agent_runtime`), so the persona actually reviews, under
+    // the manifest's constraints. The repo-level duplicate for that
+    // persona is skipped, so the persona still runs exactly once.
     let manifest_personas: std::collections::HashSet<&str> = manifest_gates
         .iter()
         .map(|mg| mg.persona.as_str())
@@ -4499,11 +4504,15 @@ specs:
     #[tokio::test]
     async fn trigger_gates_manifest_gate_wins_over_repo_gate_for_same_persona() {
         // Review R2: when a repo-level gate and a manifest gate target the
-        // same persona, the MANIFEST gate wins — it carries the
-        // min_attestation_level / stack_hash constraints the manifest
-        // declares, which the repo-level gate cannot enforce. Skipping the
-        // manifest gate instead would let this no-command repo-level
-        // AgentReview gate auto-pass and merge without the constraints.
+        // same persona, the MANIFEST gate wins — the manifest is the
+        // reviewed per-spec policy artifact (spec-registry.md §16) and
+        // carries the min_attestation_level / stack_hash constraints the
+        // reviewer must satisfy, which a repo-level gate cannot enforce.
+        // The repo-gate-wins alternative here would not silently merge:
+        // this repo-level gate has no command, so it fails closed (cannot
+        // spawn a reviewer) and would BLOCK the merge — but a command-based
+        // repo gate would run an unconstrained reviewer. Manifest-wins runs
+        // the persona review under the manifest's constraints instead.
         let state = test_state();
         let _dir = setup_manifest_mr(
             &state,
@@ -4514,7 +4523,9 @@ specs:
         .await;
 
         // Repo-level gate already covering the security persona, with NO
-        // command — the legacy configuration whose stub auto-passes.
+        // command — under repo-gate-wins this configuration fails closed
+        // (it cannot spawn a reviewer), not auto-passes; manifest-wins
+        // replaces it with the constrained persona review.
         let repo_gate = QualityGate {
             id: Id::new("repo-gate-security"),
             repo_id: Id::new("repo-mg-2"),
