@@ -3,10 +3,10 @@ title: "Implement spec enforcement validation tests for attack/drift prevention"
 spec_ref: "agent-gates.md §Part 2 What This Prevents"
 depends_on:
   - task-139
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
-commits: ["0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
+commits: ["f4b7f15195215cd8695e682404343ea4f1db325a", "0de2f4e4cb9b591e951718aa7bba459e77479152", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b"]
 ---
 
 ## Spec Excerpt
@@ -134,29 +134,36 @@ that had no merge-level coverage (`require_spec_ref`,
 rejection with a clear reason, author notification, and a positive control
 that merges.
 
-### Verification repair (this round, commit `0de2f4e4`)
+### Rebase repair (this round, commit `0c052944`)
 
-Durable finding: `cargo test --all` at candidate `9b9954f1` failed in
-`git_http::tests::push_persona_change_updates_entity_resets_approval_and_notifies_owner`
-("owner must be notified") under full-suite parallel load. Root cause is
-a test race, not a product defect: the post-receive persona job creates
-the approval task (step 3) and notifies the owner (step 4) sequentially in
-one spawned task, and the test polled for the task but checked the owner
-inbox exactly once. Fixed by polling the inbox with the same 30s deadline
-pattern used for the task (`wait_for_notification`); the content
-assertions are unchanged.
+Durable finding: published PR 817 conflicted with current main (merge
+state DIRTY). Resolved the merge of `f7f5f59` (task-125 teams/notifications
+API, which added a `repo_id` filter to `NotificationStore::list_for_user`)
+into this branch:
+
+- `git_http.rs` conflict: kept the candidate's polling
+  `wait_for_notification` helper (the race fix from `0de2f4e4`) and
+  adapted it to the new 8-arg port signature, discarding the incoming
+  single-check inline listing that reintroduced the race.
+- `merge_processor.rs`: the auto-merge had reformatted the task-145
+  `require_spec_ref` unit test's `list_for_user` call to the new arity but
+  dropped the `repo_id` argument (compile error caught by `cargo check`);
+  filled in the missing `None`.
+
+All other files merged cleanly; `tests/spec_enforcement.rs` itself is
+byte-identical to the approved candidate.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --lib --tests` on this branch's head (after
-  the base merge and the race fix): clean — lib, unit tests, and
-  `tests/spec_enforcement.rs` all type-check against the merged base
-  (evidence: `/tmp/stage/review-evidence/cargo-check.txt`).
+- `cargo check -p gyre-server --lib --tests` on this round's head
+  (`0c052944`): clean — lib, unit tests, and `tests/spec_enforcement.rs`
+  all type-check against the merged base (evidence:
+  `/tmp/stage/review-evidence/cargo-check-merge-resolution.txt`).
 - Full `cargo test --all` on the prior candidate `9b9954f1` (same test
   tree plus the race present): 1974/1975 passed; the single failure is the
   race fixed in `0de2f4e4`, i.e. the spec-enforcement suite itself passed
   in that run.
-- Server test compilation is deferred to the independent verifier per the
+- Server test execution is deferred to the independent verifier per the
   build-budget constraint. The verifier must execute:
   - `cargo test -p gyre-server --test spec_enforcement`
   - `cargo test -p gyre-server --lib merge_processor`
