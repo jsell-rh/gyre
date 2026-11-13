@@ -2,7 +2,7 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
 commits: ["733f1bd6aa2cd179c662c5a057764acb1f972065", "04df217adba0528df3e0a54538c793bb9b0ec0e6", "e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "ef9680cd63c187c1b0912590e12dec3fa8b1a6fd"]
@@ -111,39 +111,36 @@ result into a `meta_spec_drift` node field;
 `web/src/components/MergeQueueGraph.svelte` renders the ⚠ badge with
 tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
 
-### Rebase repair round — merge of current main 603cc2f7 (task-183)
+### Rebase repair round — merge of current main b9487b1b (task-182)
 
-The published PR (head 5b85bc88) conflicted with current main (merge
-state DIRTY). This round merges main 603cc2f7 (task-183 architectural
-timeline: point-in-time graph, wave/provenance labels in
-`reconciliation.rs`, graph port/adapter changes, timeline UI) into the
-branch as merge commit 74439bfa. The only source file touched by both
-sides was `reconciliation.rs` (plus `docs/api-reference.md` and
-`web/dist`); the resolution preserves both: main's wave-identity and
-meta-spec provenance labels (`recon-wave:`, `meta-spec:`) and the task-159
-§9 drift block (`META_SPEC_DRIFT_GATE_ID`, `MetaSpecDrift`,
-`mr_meta_spec_drift`) coexist in the merged tree. `merge_processor.rs`,
-`merge_policy.rs`, `api/workspaces.rs`, `abac_middleware.rs` and
-`api/mod.rs` were untouched by main — the retained gate wiring is
-byte-identical to the approved head. Main's `Cargo.toml` change (`time`
-parsing feature) is additive. `web/dist` conflicts resolved to the
-assignment-base build; regenerated assets are restored/republished by
-the executor and final integration. All 11 previously attributed
-product commits are ancestors of the merged head; the `commits:`
-frontmatter re-records them plus the merge commit (the restored contract
-blanked the list, failing
+The published PR (head 3e724333) conflicted with current main (merge
+state DIRTY). This round merges main b9487b1b (task-182 Concept Views:
+view-query grammar/resolver, graph concepts endpoints with their ABAC
+mappings, Explorer UI and dist) into the branch as merge commit
+f8076591. No source file was touched by both sides — all six task-159
+files (`reconciliation.rs`, `merge_processor.rs`, `merge_policy.rs`,
+`api/workspaces.rs`, `api/merge_deps.rs`, `MergeQueueGraph.svelte`) are
+byte-identical to the approved head 3e724333, and the `merge-policy`
+ABAC mapping coexists with main's new `graph/concepts` mappings.
+Conflicts were confined to `web/dist`, resolved to the assignment-base
+build (identical to main b9487b1b); regenerated assets are
+restored/republished by the executor and final integration. The
+`commits:` frontmatter re-records the attributed product commits (the
+restored contract had blanked the list, failing
 `scripts/check-task-commit-attribution.sh` scoping).
 
 ### Test evidence
 
-In-sandbox (4 GiB budget), this round on the merged tree (evidence:
-/tmp/stage/review-evidence/task-159-rebase-repair.txt):
-`cargo check -p gyre-server` passes (7m 35s, via the build wrapper);
-`cargo check -p gyre-server --tests` passes (3m 11s — the merge touched
-`reconciliation.rs` including its test module, so the merged test code
+In-sandbox (4 GiB budget), this round on the merged tree f8076591
+(evidence: /tmp/stage/review-evidence/task-159-rebase-repair-2.txt):
+`cargo check -p gyre-server` passes (8m 12s, via the build wrapper);
+`cargo check -p gyre-server --tests` passes (3m 37s — the merge brings
+main's task-182 server changes, so the merged tree including test code
 is type-checked); `npx vitest run
 src/__tests__/MergeQueueGraph.test.js` — 29/29 pass (drift badge +
-tooltip). `cargo test -p gyre-server` is owned by the independent
+tooltip); `scripts/check-abac-route-registry.sh` — pass;
+`scripts/check-task-commit-attribution.sh` — pass after the frontmatter
+re-record. `cargo test -p gyre-server` is owned by the independent
 verifier (server test compilation exceeds the sandbox budget with the
 model resident) — the verifier must run the recorded server probes
 (all test names confirmed present in the merged tree):
@@ -157,6 +154,6 @@ model resident) — the verifier must run the recorded server probes
 
 These cover the acceptance criteria (match → no warning, mismatch → §9
 warning, warn-only proceeds, strict policy hard-blocks, no-attestation
-skip, gate-result idempotency, queue-starvation regression), and main's
-task-183 tests (`reconciliation.rs` wave-label block, timeline vitest
-suite) are preserved for the verifier's full run.
+skip, gate-result idempotency, queue-starvation regression). Main's
+task-182 tests (`ExplorerConceptViews.test.js`, view-query suites) are
+preserved in the merged tree for the verifier's full run.
