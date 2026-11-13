@@ -2,7 +2,7 @@
 title: "Architectural Timeline — time scrubber for historical architecture views"
 spec_ref: "system-explorer.md §6"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
 commits: ["b7666c450c7dc70983886653e3b1956200dc48df", "f793571c271a16432ba5dda02865ce2258a39996", "c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f", "f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "eabc1f5c1849b9b2e7100647f5cd45b14a746ff7"]
@@ -83,8 +83,10 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 ## Shipped
 
 The Architectural Timeline (system-explorer.md §6) is implemented on a
-real point-in-time graph API, with both review-repair findings (F1, F2)
-closed in b7666c450.
+real point-in-time graph API. This round resolved the rebase against
+current main (`4dc0eb9`, task-139 forge enforcement policies) via merge
+commit `f89cfe9b`, preserving the retained implementation intact on top
+of main's spec-policy surface.
 
 ### Behavior
 
@@ -104,43 +106,43 @@ closed in b7666c450.
   superseded positions resolve null; late out-of-order responses are
   refused by ExplorerView). Ghost overlays: forward ghosts (added since,
   green dotted), backward ghosts (removed since, red dotted with
-  strikethrough, recovered from ArchitecturalDelta records), modified
-  highlights (yellow). Key moments derive from real payloads: spec
-  approvals, milestone completions, structural changes, and
-  reconciliation events (the `reconciliation_completed` payload carries
-  `specs: [{name, version}]` provenance labels for the narrative).
+  strikethrough, keyed by the historical node's real id when the `?at=`
+  reconstruction resurrects it), modified highlights (yellow). Key
+  moments derive from real payloads: spec approvals, milestone
+  completions, structural changes, and reconciliation events (the
+  `reconciliation_completed` payload carries `specs: [{name, version}]`
+  provenance labels for the narrative); colliding markers stack
+  vertically so every narrative stays reachable.
 
-### Review repair (b7666c450)
+### Rebase resolution (f89cfe9b)
 
-- **F1 — backward ghosts now render on the canvas.**
-  `computeTimelineGhostOverlays` keys each remove ghost by the
-  historical node's REAL id when the server `?at=` reconstruction
-  resurrects it in the scrubbed-time graph (synthetic
-  `removed:<qualified_name>` remains only as the client-side-filter
-  fallback). ExplorerCanvas resolves remove ghosts through
-  `layoutNodeMap.get(ghost.id)`, so the red-dotted outline +
-  strikethrough previously never drew for timeline ghosts.
-- **F2 — colliding reconciliation markers are no longer discarded.**
-  The key-moment dedupe now runs within event type (same-type moments
-  within 1 index still merge), and markers sharing a track position
-  stack vertically (10 px steps) so both stay visible and clickable —
-  a reconciliation wave completing right after its tasks land a large
-  structural delta is the expected collision, and its narrative was
-  previously unreachable.
+- Merged main `4dc0eb9` (task-139: `require_signed_approval` spec
+  policy, migration 000059, gate/merge-processor enforcement) into this
+  branch. Overlap was limited to `docs/api-reference.md` (both sides'
+  route docs combined) and `web/dist` (taken from main; regenerated
+  assets are owned by the executor/remote integration). No source file
+  required semantic reconciliation — task-183 and task-139 touch
+  disjoint Rust modules.
 
 ### Test evidence
 
-- `web/src/__tests__/timeline-utils.test.js` — remove-ghost id keying
-  (real id from the historical graph; synthetic-id fallback), delta
-  stats, fetcher race/debounce.
-- `web/src/__tests__/TimelineScrubber.test.js` — collision fixture
-  (reconciliation + structural moment at the same index): both markers
-  render, stack vertically, and the reconciliation narrative is
-  reachable by click; same-type moments still dedupe.
-- `web/src/__tests__/ExplorerCanvas.test.js` — rendering-level F1
-  regression: rendering the canvas with the exact overlay set
-  `computeTimelineGhostOverlays` produces for a historical scrub
-  position draws the `[4, 4]` red-dotted outline followed by the
-  solid-red strikethrough (fails on the pre-fix synthetic id).
-- Full frontend suite: 111 files, 2263 passed / 41 skipped
-  (`npm test`, vitest).
+- `cargo test -p gyre-adapters --lib graph::tests` — 22 passed on the
+  merged tree, including `list_nodes_at_reconstructs_point_in_time` and
+  `list_edges_at_reconstructs_point_in_time` (SQL existed-at filters).
+- `npx vitest run` on `TimelineScrubber.test.js`, `timeline-utils.test.js`,
+  `ExplorerCanvas.test.js` — 226 passed (remove-ghost id keying and
+  red-dotted strikethrough stroke sequence, marker-collision stacking
+  and reconciliation-narrative reachability, fetcher race/debounce,
+  delta stats); `RepoSettings.test.js` (main's task-139 surface) — 64
+  passed, confirming the merge did not regress main's frontend.
+- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports -p gyre-domain`
+  — clean on the merged tree.
+- Mechanical checks on the merged tree: `check-arch.sh`,
+  `check-abac-route-registry.sh`, `check-migration-versions.sh`,
+  `check-mem-port-contracts.sh` — all pass.
+- Deferred to independent verifier (gyre-server test codegen exceeds
+  the sandbox build budget): `cargo test -p gyre-server --lib
+  api::graph::tests` — covers `repo_graph_at_returns_point_in_time_graph`
+  (HTTP `?at=` suite: epoch + RFC3339 forms, 400 on invalid, resurrected
+  soft-deleted nodes) and `test_mem_list_nodes_at_and_edges_at_contract`
+  (mem adapter existed-at contract).
