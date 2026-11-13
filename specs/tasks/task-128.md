@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["b0ddcc4ece0906d90bb46d682ed1123f472a19d9", "9e06a9d3dac428631eab2b69c13bdc5719eba0ac", "35f090dfac66db4afa8c4e2df562ad12667a521a", "19883086799ffc176645bed2f3831144f2701d05", "16e740051d3f7e5a54c4b3c0c11f8d8b10034e8c", "7502a9eec991513e7e31d51b12fa00a3e6bf77e1", "5327b8daaa10dc4f9768b2be6498c00c36602ab4", "8d5494e942495e37544806afdec8f1b93009c08b", "d779f1e8912e3711d35d9b1353ef72e5a3390eb7", "29ad56fb6bb5bb7a27302272753228cb6c902de2"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -122,62 +122,3 @@ Conditions support dynamic references (e.g., `"$resource.repo_id"`) for comparin
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Core Concepts through §Policy Examples. Existing ABAC: `gyre-server/src/abac.rs`, `abac_middleware.rs`, `policy_engine.rs`. Existing Policy domain: `gyre-domain/src/policy.rs`. Existing Policy port: `gyre-ports/src/policy.rs`. Existing Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Auth context: `gyre-server/src/auth.rs` for how subject attributes are extracted from JWTs. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
-
-## Shipped
-
-ABAC policy engine core, retained from the task-128 branch head
-(bf6a1f6e via cb8b17f5) and rebased onto current main: the `Policy`
-entity with `PolicyScope` (Tenant/Workspace/Repo), `PolicyEffect`
-(Allow/Deny), `immutable`/`built_in` flags, `Condition` with all 8
-`ConditionOp` variants and the 4 `ConditionValue` variants, dynamic
-`$resource.*`/`$subject.*` references resolved at evaluation time,
-the `PolicyRepository` port with CRUD + scope-chain listing, SQLite
-and mem adapters with migration, and Subject/Resource/Environment
-attribute extraction in the middleware (auth context, memberships,
-teams, entity lookup, request path, socket peer, budget and merge-queue
-state). `subject.workspace_role` and the other membership-keyed names
-are sourced exclusively from the membership store — a JWT claim never
-defines them.
-
-### Verification repair (this round, b0ddcc4ec)
-
-`cargo test --all` (attempt 2b8a0747) failed one test:
-`developer_jwt_can_generate_on_llm_endpoints` (task-171 regression)
-expected 200 for a Developer on the four LLM `generate` endpoints but
-got 403. Root cause: the task-171 fixture satisfied
-`subject.workspace_role` only through the JWT `workspace_role` claim,
-which the retained task-128 model intentionally ignores (anti-forgery:
-claim content is caller-chosen; enforced by
-`workspace_role_claim_cannot_spoof_membership_attribute`). Repair:
-the test now seeds the real attribute sources — workspace `some-ws`,
-repo `some-repo` parented by it (so the repo-addressed LLM routes
-backfill `resource.workspace_id` via `set_workspace_and_tenant_from_repo`),
-and pre-created users for both JWT subjects holding Developer/Viewer
-memberships in `some-ws`. Assertions unchanged: Developer 200 on all
-four endpoints, Viewer 403 on briefing/ask — both callers hold the
-global Developer role, so the denial still proves the Allow is scoped
-to the workspace membership role. Also corrected the stale
-`developer-generate-access` builtin comment that described
-`workspace_role` as claim-sourced.
-
-### Test evidence
-
-- `cargo check -p gyre-server --lib --tests` — clean on the repaired
-  tree (exit 0, 8m58s, via /tmp/stage/bin/cargo).
-- The fixture mechanism is the same one proven by the passing task-128
-  attribute tests in the failed run (1922 passed): membership-sourced
-  `subject.workspace_role` on workspace routes
-  (`membership_workspace_role_denies_write_for_workspace_viewer`) and
-  the repo→workspace backfill chain
-  (`set_workspace_and_tenant_from_repo`, code-verified: seeded repo
-  lookup sets `resource.workspace_id`, which the membership block reads).
-
-### Verifier must run (gyre-server test compilation exceeds the
-in-sandbox 4 GiB budget — blocked by the build wrapper)
-
-- `cargo test -p gyre-server --lib abac` — the merged ABAC suite,
-  including the repaired `developer_jwt_can_generate_on_llm_endpoints`
-  and the task-128 attribute tests (`membership_*`, `agent_jwt_*`,
-  `env_budget_remaining_*`, `env_main_health_*`, `spec_*`,
-  `persona_entity_*`, `*_claim_cannot_spoof_*`).
-- `cargo test --all` per the task's acceptance criterion.
