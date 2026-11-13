@@ -9,6 +9,7 @@ import {
   discoverConcepts,
   nodeMatchesConcept,
   hiddenNodeIds,
+  conceptNodeIds,
   categoryCounts,
 } from '../lib/filter-categories.js';
 
@@ -98,30 +99,19 @@ describe('hiddenNodeIds', () => {
     expect(hidden.has('fn')).toBe(false); // uncategorized stays visible
   });
 
-  it('hides nodes matching no selected concept', () => {
-    const hidden = hiddenNodeIds(NODES, { concepts: ['auth'] });
-    expect(hidden.has('mod')).toBe(false); // matches "auth"
-    expect(hidden.has('pkg')).toBe(true); // no "auth" in name
+  it('does NOT hide nodes by concept selection — concepts fade, not remove (system-explorer.md §4)', () => {
+    // Task-182: "everything else fades to background" — concept membership
+    // is not visibility. A regression that re-couples concepts to hiding
+    // here silently reverts the concept view to node removal.
+    const hidden = hiddenNodeIds(NODES, { hiddenCategories: [], concepts: ['auth'] });
+    expect(hidden.size).toBe(0);
   });
 
-  it('keeps a node visible when it matches any selected concept', () => {
-    const hidden = hiddenNodeIds(NODES, { concepts: ['auth', 'ledger'] });
-    expect(hidden.has('mod')).toBe(false); // matches "auth"
-  });
-
-  it('combines category and concept filters (intersection)', () => {
-    // Concept-only: nodes matching no selected concept are hidden.
-    const byConcept = hiddenNodeIds(NODES, { concepts: ['auth'] });
-    expect(byConcept.has('mod')).toBe(false); // name "auth" matches
-    expect(byConcept.has('pkg')).toBe(true); // "payment-domain" matches nothing
-
-    // Combined: a node that matches the concept is still hidden when its
-    // category checkbox is unchecked; a matching node in a checked category
-    // stays visible.
+  it('combines with concept selection without interacting (categories hide, concepts fade)', () => {
     const combined = hiddenNodeIds(NODES, { hiddenCategories: ['data'], concepts: ['payment'] });
-    expect(combined.has('struct')).toBe(true); // matches "payment" but data unchecked
-    expect(combined.has('pkg')).toBe(false); // matches, boundaries checked
-    expect(combined.has('trait')).toBe(false); // matches, interfaces checked
+    expect(combined.has('struct')).toBe(true); // data unchecked — hidden
+    expect(combined.has('pkg')).toBe(false); // matches no concept, but concepts never hide
+    expect(combined.has('trait')).toBe(false);
   });
 
   it('returns an empty set when nothing is filtered', () => {
@@ -133,6 +123,40 @@ describe('hiddenNodeIds', () => {
   it('skips deleted nodes', () => {
     const nodes = [{ id: 'x', node_type: 'module', name: 'a', deleted_at: 123 }];
     expect(hiddenNodeIds(nodes, { hiddenCategories: ['boundaries'] }).size).toBe(0);
+  });
+});
+
+describe('conceptNodeIds (concept view emphasis set, task-182)', () => {
+  it('unions the nodes matching any selected concept (substring semantics)', () => {
+    const ids = conceptNodeIds(NODES, ['auth', 'ledger']);
+    expect(ids.has('mod')).toBe(true); // name "auth" matches
+    expect(ids.has('pkg')).toBe(false); // "payment-domain" matches neither
+    expect(ids.has('trait')).toBe(false);
+  });
+
+  it('a node matching any concept is a member (union, not intersection)', () => {
+    const ids = conceptNodeIds(NODES, ['POST', 'ledger']);
+    expect(ids.has('ep')).toBe(true); // POST /payments
+    expect(ids.has('pkg')).toBe(false); // payment-domain matches neither
+    expect(ids.has('mod')).toBe(false); // auth matches neither
+  });
+
+  it('returns an empty set for no concepts or empty input', () => {
+    expect(conceptNodeIds(NODES, []).size).toBe(0);
+    expect(conceptNodeIds(NODES).size).toBe(0);
+    expect(conceptNodeIds(null, ['auth']).size).toBe(0);
+  });
+
+  it('skips deleted nodes', () => {
+    const ids = conceptNodeIds(
+      [
+        { id: 'a', name: 'auth-x', qualified_name: 'auth-x' },
+        { id: 'b', name: 'auth-y', qualified_name: 'auth-y', deleted_at: 5 },
+      ],
+      ['auth']
+    );
+    expect(ids.has('a')).toBe(true);
+    expect(ids.has('b')).toBe(false);
   });
 });
 
