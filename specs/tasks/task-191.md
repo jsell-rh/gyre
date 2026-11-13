@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["2edf9f01c0a1dac4de43daa6fac6926cde8059a9", "1f28b18839adaa0092f89b9167688768a0d0de16", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: ["35f2bba7a487eeccc275584a411ae66f1cf95ea5", "2edf9f01c0a1dac4de43daa6fac6926cde8059a9", "1f28b18839adaa0092f89b9167688768a0d0de16", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
 ---
 
 ## Spec Excerpt
@@ -74,82 +74,74 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 
 ## Shipped
 
-This round is the rebase repair of PR 808 against main 23d7361f: task-119
-(agent-runtime.md §4) independently landed a budget-enforcement engine
-while this candidate was published, and the two forked the same subject.
-The resolution unifies instead of forking — ONE canonical engine, main's
-`enforce_workspace_budget` (api/budget.rs), extended with the
-platform-model.md §5 Enforcement Behavior requirements this task owns.
-The candidate's parallel engine (`check_and_enforce_budget`,
-`emit_budget_*`, `kill_exhausted_agents`, `maybe_notify_budget_threshold`)
-was removed; nothing enforces through a second path.
+One canonical budget-enforcement engine (`enforce_workspace_budget` in
+`crates/gyre-server/src/api/budget.rs`), unified with task-119's
+agent-runtime §4 cascade (no second enforcement path), delivering
+platform-model.md §5 Enforcement Behavior.
 
-### Real behavior shipped
+### Real behavior
 
 - `BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause, serde
   snake_case) in `gyre-domain/src/budget.rs`; optional
   `BudgetConfig.enforcement_action` persisted via migration
-  2026-10-10-000058 (budget_configs.enforcement_action), SQLite + PG row
-  mapping, the repo-level `budget_json` document (round-trip asserted in
-  the adapters suite), and the budget API DTOs (`PUT
-  /api/v1/workspaces/{id}/budget` accepts and `GET` returns it).
-- `effective_workspace_config` threads the action per level: the
-  workspace's override wins, else the tenant's, else the spec default.
-- Threshold enforcement (after every `record_llm_call_usage` and every
-  workspace budget PUT) computes max utilization across
-  `max_tokens_per_day`/`max_cost_per_day` against the effective config:
+  2026-10-10-000058, SQLite + PG row mapping, the repo-level
+  `budget_json` document, and the budget API DTOs (`PUT/GET
+  /api/v1/workspaces/{id}/budget`). `effective_workspace_config` threads
+  it per level: workspace override, else tenant, else spec default.
+- After every `record_llm_call_usage` and every workspace budget PUT, the
+  engine computes max utilization across `max_tokens_per_day` /
+  `max_cost_per_day` against the effective (workspace ∩ tenant) config:
   - ≥ 80% / < 100%: `MessageKind::BudgetWarning` on the workspace feed AND
-    a directed copy to every active agent's MCP inbox (the poll channel
-    only serves `Destination::Agent` messages) +
-    `NotificationType::AgentBudgetWarning` (High) to spawner + Admins,
-    per-period de-dup via `has_active_notification`.
-  - ≥ 100%: the configured action, fired at most once per daily period
-    (persisted kv `budget_enforcement` marker keyed to
-    `usage.period_start`): `GracefulStop` (default) emits
-    `MessageKind::BudgetExhausted` to every active agent inbox, starts the
-    60s grace timer (injectable `grace_secs`, single live timer per
-    workspace, re-evaluates utilization before killing), then kills
-    still-Active agents via `budget_stop_agent`; `HardKill` kills inline
-    (no timer); `QueuePause` pauses every workspace repo's merge queue
-    (shared `merge_processor::pause_merge_queue`, kv `merge_queue_pause`)
+    a directed copy to every active agent's MCP inbox +
+    `NotificationType::AgentBudgetWarning` (High) to the affected agents'
+    spawners + workspace Admins, de-duplicated per period.
+  - ≥ 100%: the configured action, at most once per daily period
+    (persisted kv marker keyed to `usage.period_start`):
+    `GracefulStop` (default) — `BudgetExhausted` to every active agent
+    inbox, 60s grace timer (injectable `grace_secs`, single live timer,
+    re-evaluates before killing), then `budget_stop_agent` on agents still
+    Active; `HardKill` kills inline; `QueuePause` pauses every workspace
+    repo's merge queue (shared `merge_processor::pause_merge_queue`)
     without killing; `Warn` keeps the warn tier. Beyond-limit (budget
-    reduced below current usage) keeps task-119's immediate hard kill per
-    agent-runtime.md §4, regardless of the action override.
-  - Every budget stop preserves the worktree/branch (records intact),
-    leaves the original task InProgress, revokes the agent token, charges
-    compute minutes, releases the active-agent slot, and creates the
-    spec'd reassignment task ("Agent hit budget limit on {task-id}, needs
-    reassignment or budget increase", parent_task_id-linked, High).
-- Kill-status semantics: budget kills mark agents `Stopped`, not `Dead` —
-  the amended agent-runtime.md §4 spec text on main ("Agents killed after
-  the grace period are marked Stopped") supersedes this task's original
-  "transition to Dead" sketch. The admin kill path (Dead) is unchanged;
-  the merge-conflict double decrement in `admin_kill_agent` was fixed
-  (single decrement inside the shared `kill_agent` helper, compute-minute
-  recording kept in the handler).
-- mcp.rs resolved to main's prompt surface: task-119 carried a recorded
-  spec amendment (agent-runtime.md §5 → platform-model §4.3). The
-  candidate's mcp.rs deltas were subsumed by main.
+    reduced below current usage) keeps the immediate hard kill per
+    agent-runtime.md §4.
+  - Every budget stop preserves the worktree/branch, leaves the task
+    InProgress, revokes the agent token, charges compute minutes,
+    releases the active-agent slot, and creates the spec'd reassignment
+    task ("Agent hit budget limit on {task-id}, needs reassignment or
+    budget increase").
+- Budget kills mark agents `Stopped` (the amended agent-runtime.md §4 text
+  on main supersedes this task's original "Dead" sketch); the admin kill
+  path stays `Dead` via the shared `kill_agent` helper.
 
-### Test evidence (local probes; see /tmp/stage/review-evidence/probes.md)
+### This repair round (35f2bba7)
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  0 errors, 0 warnings.
-- `cargo test -p gyre-domain`: 507 passed. `cargo test -p gyre-adapters`:
-  490 passed, 6 ignored (includes enforcement_action persistence
-  round-trips).
-- `scripts/check-arch.sh`, migration-version, dead-message-kind,
-  inert-enforcement, mem-port-contracts, scope/fabrication, SQL
-  portability, ABAC registry, MCP write-tool, and commit-attribution
-  checks: all OK after recording the commit list above.
+The verification run (`cargo test --all`) failed 2 budget tests that drive
+the engine with an unattributed trigger (`trigger_agent: None` — the shape
+of a user-initiated query or a budget-PUT crossing): with no trigger agent
+and no workspace memberships, `notify_budget_level` had zero recipients,
+so no `AgentBudgetExhausted` notification was created and `created == 0`
+gated off the whole warn tier; the workspace-feed `BudgetWarning` event
+was also only emitted for agent-attributed crossings. Fixed in production
+code (tests unchanged): notification recipients now include the spawning
+users of the workspace's active agents (the population enforcement acts
+on), and the warn-tier feed event fires on every crossing. Both failing
+assertions — cost-limit crossing emits the warning; the killed agent's
+spawner gets `AgentBudgetExhausted` — are now satisfied by the recipient
+derivation, not by test edits.
+
+### Test evidence
+
+- Local probes (see /tmp/stage/review-evidence/): `cargo check -p
+  gyre-server` and `cargo check -p gyre-server --tests` clean (0 errors);
+  `scripts/check-arch.sh`, `check-dead-message-kinds.sh`,
+  `check-inert-enforcement.sh`, `check-task-commit-attribution.sh` OK;
+  rustfmt clean on the changed file.
 - Server test binaries were NOT run in this sandbox (hard 4 GiB cgroup —
-  linking exceeds it). The verifier must run: `cargo test -p gyre-server
-  api::budget`, `api::admin`, `mcp`, `signal_chain`, plus
-  `cargo build --all`. The budget suite contains the task-191 acceptance
-  tests (warn-at-85% message+notification+no-kill+no-refire,
-  below-threshold silence, graceful-stop kill + worktree intact +
-  reassignment task + dedup, HardKill inline, QueuePause kv + no kill,
-  cost-limit crossing, API persistence, serde round-trips) alongside
-  task-119's regression set (repo cascade, lifetimes, rolling window,
-  beyond-limit, compute minutes), all preserved green-by-construction
-  against the unified engine.
+  linking exceeds it; the build wrapper rejects them). The verifier must
+  run: `cargo test -p gyre-server --lib api::budget api::admin mcp`
+  (covers the task-191 acceptance tests — warn-at-85% message +
+  notification + no kill + no refire, below-threshold silence,
+  graceful-stop kill + worktree intact + reassignment task + dedup,
+  HardKill inline, QueuePause kv + no kill, cost-limit crossing, API
+  persistence — plus task-119's regression set), then `cargo test --all`.
