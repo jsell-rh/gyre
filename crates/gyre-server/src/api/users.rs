@@ -2827,7 +2827,7 @@ mod tests {
         owner.tenant_id = Some(Id::new("t-1"));
         state.users.create(&owner).await.unwrap();
 
-        let membership = WorkspaceMembership::new(
+        let mut membership = WorkspaceMembership::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(owner_id.clone()),
             Id::new(ws_id.clone()),
@@ -2835,6 +2835,11 @@ mod tests {
             Id::new("system"),
             now,
         );
+        // Mirror production (`create_workspace`): the creator's Owner
+        // membership is active from birth, never a pending invitation —
+        // otherwise the ownerless-workspace invariant and the pending-
+        // invitation list both see a phantom second "invitee".
+        membership.accept(now);
         state
             .workspace_memberships
             .create(&membership)
