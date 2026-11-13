@@ -1460,10 +1460,17 @@ async fn merge_atomic_group(
                 "mr_id": updated_mr.id.to_string(),
                 "result": "merged",
                 "atomic_group": group_name,
+                // Scope facets (search.md §Searchable Entities: Activity
+                // Event is filterable by workspace/repo).
+                "workspace_id": updated_mr.workspace_id.to_string(),
+                "repo_id": updated_mr.repository_id.to_string(),
             }),
             now,
         );
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev))
+            .await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
             crate::notifications::notify_mr_merged(
@@ -2411,10 +2418,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     "entry_id": entry.id.to_string(),
                     "mr_id": updated_mr.id.to_string(),
                     "result": "merged",
+                    // Scope facets (search.md §Searchable Entities: Activity
+                    // Event is filterable by workspace/repo).
+                    "workspace_id": updated_mr.workspace_id.to_string(),
+                    "repo_id": updated_mr.repository_id.to_string(),
                 }),
                 now,
             );
             let _ = state.analytics.record(&ev).await;
+            // search.md §Searchable Entities: activity events are indexed on write.
+            crate::search_indexer::index(
+                state,
+                crate::search_indexer::activity_event_document(&ev),
+            )
+            .await;
 
             // Build and store a signed merge attestation bundle (G5).
             let gate_results_snapshot = state
