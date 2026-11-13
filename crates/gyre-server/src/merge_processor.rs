@@ -695,35 +695,54 @@ pub(crate) async fn trip_circuit_breaker(
     let escalation_title =
         format!("MR {mr_id} has failed post-merge validation 3 times{spec_note}");
 
-    // Escalate to humans.
-    let members = state
-        .workspace_memberships
-        .list_by_workspace(&mr.workspace_id)
-        .await
-        .unwrap_or_default();
-    for member in &members {
-        crate::notifications::notify_rich(
-            state,
-            member.workspace_id.clone(),
-            member.user_id.clone(),
-            gyre_common::NotificationType::AgentEscalation,
-            escalation_title.clone(),
-            "default",
-            Some(
-                serde_json::json!({
-                    "repo_id": repo_id,
-                    "mr_id": mr_id,
-                    "spec_ref": mr.spec_ref,
-                    "circuit_breaker": true,
-                })
-                .to_string(),
-            ),
-            Some(mr_id.to_string()),
-            Some(repo_id.to_string()),
-            "mr",
-            None,
-        )
-        .await;
+    // Escalate to humans. Tenant resolved from the MR's workspace — never
+    // a fabricated "default" scope identity (see
+    // scripts/check-fabricated-scope-defaults.sh; review F4 repair). The
+    // recipient set is every workspace member — a superset of the §Who Gets
+    // Notified escalation chain that misses no specced recipient (the
+    // breaker is a workspace-level event with no single agent to resolve
+    // `spawned_by` from).
+    let tenant_id = match state.workspaces.find_by_id(&mr.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            warn!(
+                mr_id,
+                workspace_id = %mr.workspace_id,
+                "circuit breaker: cannot resolve tenant for escalation notifications — skipping notification fan-out"
+            );
+            String::new()
+        }
+    };
+    if !tenant_id.is_empty() {
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&mr.workspace_id)
+            .await
+            .unwrap_or_default();
+        for member in &members {
+            crate::notifications::notify_rich(
+                state,
+                member.workspace_id.clone(),
+                member.user_id.clone(),
+                gyre_common::NotificationType::AgentEscalation,
+                escalation_title.clone(),
+                &tenant_id,
+                Some(
+                    serde_json::json!({
+                        "repo_id": repo_id,
+                        "mr_id": mr_id,
+                        "spec_ref": mr.spec_ref,
+                        "circuit_breaker": true,
+                    })
+                    .to_string(),
+                ),
+                Some(mr_id.to_string()),
+                Some(repo_id.to_string()),
+                "mr",
+                None,
+            )
+            .await;
+        }
     }
 
     // Escalation task: the referenced spec may need revisiting.

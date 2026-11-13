@@ -595,6 +595,64 @@ pub async fn resolve_team_members(
     }
 }
 
+// ─── Spec-owner references (user-management.md §Who Gets Notified) ────────
+
+/// Resolve a spec-owner reference to concrete recipient user ids
+/// (user-management.md §Who Gets Notified: "Spec drift detected" → Spec
+/// owner). Owner refs carry the manifest forms `user:{name}` or
+/// `team:{slug}` (the same forms `human_approvers` uses — see
+/// `expand_team_approvers` in api/specs.rs):
+///
+/// - `team:{slug}` → the team's members (`resolve_team_members`).
+/// - `user:{name}` (or a bare id) → the user matching `name` by user id,
+///   username, or display name — the identifier forms an owner reference
+///   can record. Multiple forms may match different users only when the
+///   workspace genuinely has colliding identifiers; all matches are
+///   returned (never dropped silently), deduplicated.
+///
+/// Returns an empty vec when the reference resolves to nobody — the caller
+/// logs and continues with its other recipients rather than fabricating one.
+pub async fn resolve_owner_ref(state: &AppState, workspace_id: &Id, owner: &str) -> Vec<Id> {
+    if parse_team_ref(owner).is_some() {
+        return resolve_team_members(state, workspace_id, owner)
+            .await
+            .unwrap_or_default();
+    }
+    let name = owner.strip_prefix("user:").unwrap_or(owner);
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let mut resolved: Vec<Id> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |id: Id| {
+        if seen.insert(id.as_str().to_string()) {
+            resolved.push(id);
+        }
+    };
+    // Identifier forms an owner reference can carry: user id, username,
+    // display name (a display-name rename must not orphan the routing).
+    if let Ok(Some(user)) = state.users.find_by_id(&Id::new(name.to_string())).await {
+        push(user.id);
+    }
+    if let Ok(Some(user)) = state.users.find_by_username(name).await {
+        push(user.id);
+    }
+    if let Ok(users) = state.users.list().await {
+        for user in users {
+            if user.display_name == name {
+                push(user.id);
+            }
+        }
+    }
+    if resolved.is_empty() {
+        tracing::warn!(
+            owner,
+            "owner reference does not resolve to any user; skipping owner routing"
+        );
+    }
+    resolved
+}
+
 // ─── SSE fan-out wrapper (user-management.md §API > Notifications) ───────────
 
 /// [`NotificationRepository`] decorator that fans every `create` out to the

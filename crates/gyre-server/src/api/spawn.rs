@@ -2656,32 +2656,49 @@ pub async fn complete_agent(
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        let body_json = serde_json::json!({
-            "agent_id": agent.id.as_str(),
-            "agent_name": &agent.name,
-            "mr_id": mr.id.as_str(),
-            "mr_title": &mr.title,
-            "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
-        })
-        .to_string();
+        // Tenant resolved from the MR's workspace — never a fabricated
+        // "default" scope identity (see
+        // scripts/check-fabricated-scope-defaults.sh; review F4 repair —
+        // fail_agent and notify_mr_reverted already follow this pattern).
+        let tenant_id = match state.workspaces.find_by_id(&mr.workspace_id).await {
+            Ok(Some(ws)) => ws.tenant_id.to_string(),
+            _ => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    workspace_id = %mr.workspace_id,
+                    "complete_agent: cannot resolve tenant for completion notification — skipping"
+                );
+                String::new()
+            }
+        };
+        if !tenant_id.is_empty() {
+            let body_json = serde_json::json!({
+                "agent_id": agent.id.as_str(),
+                "agent_name": &agent.name,
+                "mr_id": mr.id.as_str(),
+                "mr_title": &mr.title,
+                "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
+            })
+            .to_string();
 
-        crate::notifications::notify_rich(
-            state.as_ref(),
-            mr.workspace_id.clone(),
-            Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentCompleted,
-            format!(
-                "Agent '{}' completed — MR '{}' is ready for review",
-                agent.name, mr.title
-            ),
-            "default",
-            Some(body_json),
-            Some(mr.id.to_string()),
-            Some(mr.repository_id.to_string()),
-            "mr",
-            None,
-        )
-        .await;
+            crate::notifications::notify_rich(
+                state.as_ref(),
+                mr.workspace_id.clone(),
+                Id::new(spawned_by.clone()),
+                gyre_common::NotificationType::AgentCompleted,
+                format!(
+                    "Agent '{}' completed — MR '{}' is ready for review",
+                    agent.name, mr.title
+                ),
+                &tenant_id,
+                Some(body_json),
+                Some(mr.id.to_string()),
+                Some(mr.repository_id.to_string()),
+                "mr",
+                None,
+            )
+            .await;
+        }
     }
 
     // TASK-022: If this agent's task was a cascade test, report the result.

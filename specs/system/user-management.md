@@ -460,19 +460,23 @@ pub enum DigestFrequency { Immediate, Hourly, Daily, Off }
 | Security finding (Critical/High) | Workspace Owner + tenant Admin |
 | Invitation | Invited user |
 
-> **Team-lead routing note (amended 2026-11, task-112 review):** The
-> `team lead` recipient in the "Agent escalation to Overseer" and
-> "Breaking change detected" rows requires a lead role on `Team`
-> (platform-model.md §Teams), which the domain model does not yet have —
-> Teams currently carry only `member_ids` with no lead field and no
-> repo→team mapping. Until Teams gain a lead concept (task-122/task-125
-> territory), the interim production routing is the closest available
-> concept, a superset: agent escalations follow the
+> **Team-lead routing note (amended 2026-11, task-112 review; corrected
+> after the 1cae4a25 review round):** `Team` carries a `lead` field
+> (user-management.md §Team Management; migration
+> `2026-11-13-000062_team_slug_lead_membership` backfills it to the
+> workspace Owner), so the lead concept exists. The genuine gap is the
+> **repo→team mapping**: no spec models which team owns a repo, so "the
+> repo's team lead" (Agent escalation row) and "dependent repo team
+> leads" (Breaking change row) cannot be resolved to a `Team.lead` —
+> there is no repo↔team link to resolve through. Until a repo→team
+> ownership mapping lands (task-122's default-reviewers bullet already
+> tracks the same missing association), the interim production routing is
+> the closest available concept, a superset: agent escalations follow the
 > §Notification Routing for Agent Escalations chain (spawning user →
 > workspace Admins if offline → workspace Owners if Urgent), and breaking
 > changes notify all members of the dependent repo's workspace
-> (`process_breaking_changes` in `git_http.rs`). When a lead role lands,
-> narrow both rows to the specced recipients.
+> (`process_breaking_changes` in `git_http.rs`). When the repo→team
+> mapping lands, narrow both rows to the specced recipients.
 
 ### Notification Routing for Agent Escalations
 
