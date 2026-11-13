@@ -1432,8 +1432,9 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         // covers — without this policy, `default-deny` 403s every LLM call
         // for non-Admin users.
         //
-        // Keyed on `subject.workspace_role` (from JWT claims), not the
-        // global role: LLM generation is a workspace-scoped capability
+        // Keyed on `subject.workspace_role` (sourced from the membership
+        // store — never from JWT claims, which are caller-chosen content),
+        // not the global role: LLM generation is a workspace-scoped capability
         // (HSI §1325 "Requires workspace membership"), so a user with a
         // global Developer role but Viewer workspace role must be denied.
         // `briefing/ask` maps to resource_type `workspace` (HSI §1325),
@@ -3192,10 +3193,21 @@ pub mod tests {
     /// `prompts/save`) use `action_override: "generate"`, which no other
     /// builtin Allow covers — a Developer-role JWT would be 403'd on every
     /// LLM call.
+    ///
+    /// Under the task-128 attribute model `subject.workspace_role` is
+    /// sourced ONLY from the membership store — a JWT `workspace_role`
+    /// claim never defines it (see
+    /// `workspace_role_claim_cannot_spoof_membership_attribute`) — so the
+    /// callers carry real memberships in the addressed workspace (the
+    /// tokens still include a `workspace_role` claim, as a real IdP might;
+    /// it is ignored). The repo-parented routes additionally need the repo
+    /// row seeded so entity lookup can backfill `resource.workspace_id`
+    /// from the repo's own workspace.
     #[tokio::test(flavor = "multi_thread")]
     async fn developer_jwt_can_generate_on_llm_endpoints() {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         use axum::routing::post;
+        use gyre_domain::{Repository, User, Workspace, WorkspaceMembership, WorkspaceRole};
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
@@ -3204,6 +3216,81 @@ pub mod tests {
                 .expect("seed built-in policies")
         });
         init_resolver();
+
+        // Addressed scope chain: workspace `some-ws` and repo `some-repo`
+        // (parented by `some-ws`, so the repo-addressed LLM routes resolve
+        // the caller's membership role through the repo's workspace).
+        let ws_id = gyre_common::Id::new("some-ws");
+        state_base
+            .workspaces
+            .create(&Workspace::new(
+                ws_id.clone(),
+                gyre_common::Id::new("tenant-1"),
+                "some-ws".to_string(),
+                "some-ws".to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
+        state_base
+            .repos
+            .create(&Repository::new(
+                gyre_common::Id::new("some-repo"),
+                ws_id.clone(),
+                "some-repo".to_string(),
+                "/repos/some-repo".to_string(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Pre-create the users the JWTs resolve to (external_id = sub)
+        // with their workspace memberships: dev-llm-sub holds the
+        // Developer workspace role, viewer-llm-sub the Viewer role (both
+        // with the global Developer role, so the Viewer denial proves the
+        // Allow is scoped to the workspace role, not global role or mere
+        // membership presence).
+        async fn seed_member(
+            state: &AppState,
+            user_id: &str,
+            external_id: &str,
+            membership_id: &str,
+            workspace_role: WorkspaceRole,
+        ) {
+            let id = gyre_common::Id::new(user_id);
+            let mut user = User::new(id.clone(), external_id, external_id, 0);
+            user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&user).await.unwrap();
+            let membership = WorkspaceMembership::new(
+                gyre_common::Id::new(membership_id),
+                id,
+                gyre_common::Id::new("some-ws"),
+                workspace_role,
+                gyre_common::Id::new("inviter"),
+                0,
+            );
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .unwrap();
+        }
+        seed_member(
+            &state_base,
+            "dev-llm-user",
+            "dev-llm-sub",
+            "m-dev-llm",
+            WorkspaceRole::Developer,
+        )
+        .await;
+        seed_member(
+            &state_base,
+            "viewer-llm-user",
+            "viewer-llm-sub",
+            "m-viewer-llm",
+            WorkspaceRole::Viewer,
+        )
+        .await;
 
         async fn ok_handler() -> StatusCode {
             StatusCode::OK
