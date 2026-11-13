@@ -3517,7 +3517,40 @@ mod tests {
     #[tokio::test]
     async fn ask_explorer_requires_llm_and_membership() {
         // No LLM configured → 503, same as the generate endpoint.
-        let app = app_with_workspace("ws-ask-nollm").await;
+        // `test_state()` wires an echo mock LLM, so the no-LLM path needs
+        // an explicit `llm = None` state (same as `app_no_llm()`).
+        let state = crate::mem::test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-ask-nollm"),
+                Id::new("default"),
+                "ask-nollm",
+                "ask-nollm",
+                0,
+            ))
+            .await
+            .unwrap();
+        // A workspace in another tenant is rejected before any LLM budget
+        // is spent (membership scoping runs first in the handler).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-ask-foreign"),
+                Id::new("other-tenant"),
+                "ask-foreign",
+                "ask-foreign",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut s = (*state).clone();
+        s.llm = None;
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, _body) = post_ask(app.clone(), "ws-ask-foreign", r#"{"question": "q"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
         let (status, body) = post_ask(app, "ws-ask-nollm", r#"{"question": "q"}"#).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "llm_unavailable");

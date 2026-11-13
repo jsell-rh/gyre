@@ -87,6 +87,10 @@ strictly from the knowledge graph context provided. \
 Node types available: {{node_type_summary}} \
 Total nodes: {{node_count}} \
 \
+Knowledge graph context (nodes with provenance, edges, architectural \
+timeline — ground every claim in it): \
+{{graph_context}} \
+\
 Rules: \
 - Ground every claim in the provided context: never invent nodes, specs, commits, or agents. \
 - Cite artifacts inline using tokens: [entity:node:<node id>] for graph nodes, \
