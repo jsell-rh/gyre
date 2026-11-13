@@ -124,6 +124,57 @@ pub(crate) async fn record_agent_failed(
     let _ = state.analytics.record(&ev).await;
 }
 
+/// Record the spec-required `search.query` analytics event (analytics.md
+/// §Auto-Emitted Events: trigger "Full-text search executed", properties
+/// `query_length`, `entity_types`, `result_count`, `duration_ms`).
+///
+/// Every production path that executes a full-text search must call this:
+/// the HTTP search endpoint (api/search.rs) and the MCP `gyre_search`
+/// tool (mcp.rs) are the two — the MCP tool is the autonomous-agent path,
+/// both must record. Identity is bound to the verified caller, never to
+/// client-supplied values, and `workspace_scope` must already be validated
+/// against the caller's tenant by the call site because it is the event's
+/// workspace attribution (task-146 review round 2 rule).
+pub(crate) async fn record_search_query(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    q: &str,
+    results: &[gyre_ports::search::SearchResult],
+    duration_ms: u64,
+    workspace_scope: Option<&Id>,
+) {
+    // Same caller-bound identity rule as `record_event`: agent JWT callers
+    // carry the agent identity, user/API-key callers carry user_id, and
+    // impersonation sessions attribute to the impersonator.
+    let agent_id = if auth.agent_id.is_empty() {
+        None
+    } else {
+        Some(auth.agent_id.clone())
+    };
+    let user_id = auth
+        .impersonation
+        .as_ref()
+        .map(|imp| imp.impersonator_id.clone())
+        .or_else(|| auth.user_id.clone());
+    let mut entity_types: Vec<String> = results.iter().map(|r| r.entity_type.clone()).collect();
+    entity_types.sort();
+    entity_types.dedup();
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "search.query",
+        agent_id,
+        serde_json::json!({
+            "query_length": q.chars().count(),
+            "entity_types": entity_types,
+            "result_count": results.len(),
+            "duration_ms": duration_ms,
+        }),
+        now_secs(),
+    )
+    .with_scope(user_id.as_ref(), None, workspace_scope, None);
+    let _ = state.analytics.record(&ev).await;
+}
+
 #[derive(Deserialize)]
 pub struct CountEventsParams {
     pub event_name: String,

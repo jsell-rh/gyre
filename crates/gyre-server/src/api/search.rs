@@ -145,42 +145,17 @@ pub async fn search_handler(
     // Identity is bound to the verified caller and the workspace scope was
     // validated above (task-146 review round 2) — the event reflects who
     // actually searched and a scope they may legitimately attribute to,
-    // never caller-forged values.
-    {
-        let agent_id = if auth.agent_id.is_empty() {
-            None
-        } else {
-            Some(auth.agent_id.clone())
-        };
-        let user_id = auth
-            .impersonation
-            .as_ref()
-            .map(|imp| imp.impersonator_id.clone())
-            .or_else(|| auth.user_id.clone());
-        let entity_types: Vec<String> = {
-            let mut types: Vec<String> = results.iter().map(|r| r.entity_type.clone()).collect();
-            types.sort();
-            types.dedup();
-            types
-        };
-        let ev = gyre_domain::AnalyticsEvent::new(
-            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
-            "search.query",
-            agent_id,
-            serde_json::json!({
-                "query_length": q.chars().count(),
-                "entity_types": entity_types,
-                "result_count": results.len(),
-                "duration_ms": duration_ms,
-            }),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        )
-        .with_scope(user_id.as_ref(), None, workspace_scope.as_ref(), None);
-        let _ = state.analytics.record(&ev).await;
-    }
+    // never caller-forged values. The MCP gyre_search tool records the
+    // same event through the same helper (task-146 review round 3).
+    super::analytics::record_search_query(
+        &state,
+        &auth,
+        &q,
+        &results,
+        duration_ms,
+        workspace_scope.as_ref(),
+    )
+    .await;
 
     let total = results.len();
     let items = results

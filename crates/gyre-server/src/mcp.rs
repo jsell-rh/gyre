@@ -338,7 +338,7 @@ fn tool_definitions() -> Value {
                             "enum": ["task", "agent", "mr", "spec"],
                             "description": "Filter by entity type (optional)"
                         },
-                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional — can only narrow within the caller's accessible scope)" },
+                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional — can only narrow within the caller's accessible scope; must resolve within the caller's tenant: rejected on cross-tenant or unknown id)" },
                         "limit": { "type": "number", "description": "Max results to return (default 10)" }
                     },
                     "required": ["q"]
@@ -2001,18 +2001,37 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
     } else {
         get_str(args, "entity_type").map(|s| s.to_string())
     };
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+    // Caller-scope validation (task-146 review round 3, same rule as the
+    // HTTP search handler): the workspace_id arg doubles as the
+    // search.query event's workspace attribution — a cross-tenant or
+    // unknown id is rejected instead of letting the caller attribute
+    // events to an arbitrary workspace. When a `workspace:` facet in `q`
+    // overrides the arg as a filter, the arg is still validated because
+    // it still attributes the auto-emitted event.
+    let workspace_scope = match get_str(args, "workspace_id") {
+        Some(w) => {
+            let id = gyre_common::Id::new(w);
+            match crate::api::audit::validate_workspace_scope(state, &id, auth).await {
+                Ok(()) => Some(id),
+                Err(e) => return tool_error(format!("Invalid workspace_id: {e}")),
+            }
+        }
+        None => None,
+    };
     let workspace_id = if parsed.facets.contains_key("workspace") {
         None
     } else {
-        get_str(args, "workspace_id").map(|s| s.to_string())
+        workspace_scope.as_ref().map(|id| id.to_string())
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     // §Access Scoping: scope comes from the agent's authenticated token
     // context, never from client args. The client's `workspace_id` remains a
     // narrowing filter the adapter intersects with the accessible set — it
     // can only narrow, never widen.
     let scope = crate::search_scope::derive_search_scope(state, auth).await;
+    let started = std::time::Instant::now();
     match state
         .search
         .search(gyre_ports::search::SearchQuery {
@@ -2028,6 +2047,21 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
         .await
     {
         Ok(results) => {
+            // search.query analytics event (analytics.md §Auto-Emitted
+            // Events): this MCP tool is the autonomous-agent search path;
+            // the HTTP endpoint is the other. Both record through the same
+            // helper, with identity bound to the verified caller and the
+            // workspace scope validated above.
+            let duration_ms = started.elapsed().as_millis() as u64;
+            crate::api::analytics::record_search_query(
+                state,
+                auth,
+                &q,
+                &results,
+                duration_ms,
+                workspace_scope.as_ref(),
+            )
+            .await;
             let text = if results.is_empty() {
                 format!("No results for '{q}'")
             } else {
@@ -3886,6 +3920,35 @@ mod tests {
         // everything outside the caller's scope, and a client-supplied
         // workspace_id must never widen access.
         let state = test_state();
+        // Real workspace rows: the workspace_id arg is validated against
+        // the caller's tenant before the search runs (task-146 review round
+        // 3, same rule as the HTTP handler), so ws-a/ws-b must exist as
+        // entities — the documents' workspace labels alone no longer
+        // suffice. Seeding them keeps this test's original meaning: a
+        // client-supplied workspace_id that is valid but outside the
+        // agent's token scope narrows to zero results, never widens.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-a"),
+                gyre_common::Id::new("default"),
+                "Workspace A",
+                "ws-a",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-b"),
+                gyre_common::Id::new("default"),
+                "Workspace B",
+                "ws-b",
+                0,
+            ))
+            .await
+            .unwrap();
         let mk =
             |entity_id: &str, ws: &str, repo: Option<&str>| gyre_ports::search::SearchDocument {
                 entity_type: "task".to_string(),
@@ -4005,6 +4068,203 @@ mod tests {
             "workspace scope wrong: {text}"
         );
         assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
+    }
+
+    // ── gyre_search records the search.query analytics event ──────────────
+    // analytics.md §Auto-Emitted Events: the trigger is "Full-text search
+    // executed" — transport-independent. The MCP tool is the
+    // autonomous-agent search path; it must record search.query exactly
+    // like the HTTP endpoint, with caller-bound identity and the same
+    // workspace-scope validation rule. Fails on the old behavior (the MCP
+    // path recorded no event — task-146 review round 3, finding F1).
+    #[tokio::test]
+    async fn gyre_search_records_search_query_analytics_event() {
+        let state = test_state();
+        // Own-tenant and cross-tenant workspaces for the scope-validation
+        // half of the test (same setup as the HTTP handler's regression).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own"),
+                gyre_common::Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        // Index a searchable task through the public API so the search port
+        // has a real document (create_task indexes for search).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "title": "Payment reconciliation engine",
+                            "task_type": "implementation"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Search through the MCP tool (the autonomous-agent path).
+        let (status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "search must succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Found 1 result(s)"), "result wrong: {text}");
+
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_search must record the search.query analytics event"
+        );
+        let ev = &events[0];
+        // Identity is bound to the verified caller (global test token →
+        // the system principal), not a caller-forged value.
+        assert_eq!(ev.agent_id.as_deref(), Some("system"));
+        assert_eq!(ev.event_name, "search.query");
+        assert_eq!(
+            ev.properties["query_length"], 14,
+            "\"reconciliation\" has 14 chars"
+        );
+        assert_eq!(
+            ev.properties["entity_types"],
+            serde_json::json!(["task"]),
+            "entity_types lists the distinct result types"
+        );
+        assert_eq!(ev.properties["result_count"], 1);
+        assert!(
+            ev.properties["duration_ms"].as_u64().is_some(),
+            "duration_ms must be present"
+        );
+
+        // Own-tenant workspace attribution: accepted and recorded.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-own" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "own-tenant workspace filter must be accepted: {json}"
+        );
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].workspace_id.as_deref(), Some("ws-own"));
+
+        // Cross-tenant workspace: rejected — no search, no event, no
+        // forged attribution in the victim scope's filtered results.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-victim" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "cross-tenant workspace_id must be rejected: {json}"
+        );
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2, "rejected search records no event");
+        let events = state
+            .analytics
+            .query_filtered(&gyre_ports::AnalyticsQueryFilter {
+                event_name: Some("search.query".into()),
+                workspace_id: Some("ws-victim".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            0,
+            "forged search event must not appear in the victim workspace's filtered results"
+        );
+
+        // Unknown workspace: rejected too, not a silent attribution.
+        let (_status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 64,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-nope" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "unknown workspace_id must be rejected: {json}"
+        );
     }
 
     #[tokio::test]
