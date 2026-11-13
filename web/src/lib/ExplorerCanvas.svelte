@@ -98,6 +98,7 @@
     onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
     onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
     timelineDeltaStats = null, // { added, removed, modified, byType }
+    timelineReconciliationEvents = [], // workspace reconciliation_completed messages (key moments)
     // HSI §3 Layer 1 gate status — MR gate evaluation records for the current
     // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
     // parent (ExplorerView); only rendered in the Evaluative lens.
@@ -6622,6 +6623,7 @@
       active={timelineActive}
       scrubIndex={timelineScrubIndex}
       {nodes}
+      reconciliationEvents={timelineReconciliationEvents}
       onToggle={onTimelineToggle}
       onScrub={onTimelineScrub}
       onMarkerClick={onTimelineMarkerClick}
