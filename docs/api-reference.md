@@ -149,7 +149,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
-| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes) |
+| `POST/GET` | `/api/v1/merge-requests/{id}/reviews` | Submit / list reviews (approve/request changes). Reviewer identity binding: callers authenticated with an agent token (including `review:submit`-scoped gate agents) submit under their own verified identity. Human callers (user JWT / API key) may use the request-body `reviewer_agent_id` only when it equals their own verified user identity (recording a review for a different reviewer requires an Admin principal); the server's system token keeps the request-body reviewer |
 | `GET` | `/api/v1/merge-requests/{id}/diff` | Get MR diff |
 | `GET` | `/api/v1/merge-requests/{id}/spec` | Get the spec content at the MR's pinned `spec_ref` SHA (**not** HEAD). Returns `{mr_id, spec_ref, spec_path, spec_sha, content}`. 404 when the MR has no `spec_ref` or the pinned blob is unreachable. Consumed by spec-alignment gate agents (agent-gates.md §Integration with Agent Gates) |
 | `GET` | `/api/v1/merge-requests/{id}/gates` | Get quality gate execution results for an MR (M12.1) |
@@ -474,7 +474,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_list_repo_orchestrators` | List live repo orchestrators in the caller's workspace (task-093). Workspace-orchestrator JWT only. |
 | `gyre_cross_repo_task` | Create a cross-repo coordination task scoped to the caller's workspace (task-093). Workspace-orchestrator JWT only. Params: `title` (required), `description`, `priority`, `labels`. |
 | `gyre_decompose_spec` | Decompose a parent task into Implementation subtasks bound to the caller's repo (task-093). Repo-orchestrator JWT only. Params: `parent_task_id` (required), `subtasks` (array of `{title, description?, priority?, order?}`). |
-| `gyre_spawn_worker` | Spawn a worker agent for a task in the caller's repo (task-093). Repo-orchestrator JWT only; delegates to the `/agents/spawn` core. Params: `task_id`, `name`, `branch` (required), plus optional spawn fields. |
+| `gyre_spawn_worker` | Spawn a worker agent for a task in the caller's repo (task-093). Repo-orchestrator JWT only; delegates to the `/agents/spawn` core. Params: `task_id`, `name`, `branch` (required), plus optional spawn fields (`parent_id`, `compute_target_id`, `persona` — bare persona name recorded as the agent's persona, spec-registry.md §16). |
 | `graph_concept` | Search knowledge graph by concept name (manifest-based concept-view projection). Params: `concept` (required), `repo_id` or `workspace_id` (one required). Returns matching nodes and edges. Also callable and listed as `graph.concept` — the HSI §11 parity-table spelling. (HSI §11) |
 | `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. Also callable and listed as `spec.assist` — the HSI §11 parity-table spelling. (HSI §11) |
 
