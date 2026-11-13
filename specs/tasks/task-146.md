@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "e1088342c4f52d501dc18f12b26bcb9a8b93987e"]
 ---
 
 ## Spec Excerpt
@@ -96,68 +96,64 @@ pub struct AnalyticsEvent {
 
 ## Shipped
 
-### Analytics event schema and auto-emitted events
+### Review round 2 F1 repair: server-side group_by aggregation
 
-- `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec
-  fields (`id`, `event_name`, `agent_id`, `user_id`, `session_id`,
-  `workspace_id`, `repo_id`, `properties`, `timestamp`); `with_scope`
-  populates the user/session/workspace/repo scope fields. A serde
-  round-trip test (`analytics_event_matches_spec_schema`) pins the shape
-  against the spec schema.
-- All 12 spec-required auto-emitted events record at their real trigger
-  points with all spec-required properties, each proven by a per-event
-  test: `task.status_changed`, `mr.merged`, `mr.closed`, `agent.spawned`,
-  `agent.completed`, `agent.failed`, `merge_queue.processed`,
-  `gate.failed`, `gate.passed`, `spec.approved`, `budget.warning`,
-  `search.query`.
-- Query API: `POST/GET /api/v1/analytics/events`, `GET /count`,
-  `GET /daily` with the full spec filter set — `event_name` (exact or
-  trailing-`*` prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`,
-  `since`, `until` (ISO8601 or unix seconds), `limit` (default 100, cap
-  10_000), `group_by` — implemented on SQLite, Postgres, and mem
-  adapters.
-- Caller-bound identity: `record_event` derives `agent_id`/`user_id`
-  from the verified caller and validates `workspace_id`/`repo_id`
-  against the caller's tenant; both `search.query` emission paths (the
-  HTTP handler and the MCP `gyre_search` tool) bind the event identity
-  to the caller the same way and validate the `workspace_id`
-  attribution filter against the caller's tenant (cross-tenant and
-  unknown ids are rejected, never silently attributed).
-- Persona/compute-target attribution: `agent.spawned` reports the
-  resolved persona slug and compute target at the worker spawn,
-  orchestrator spawn, and ralph-loop re-spawn sites.
+- **The finding:** `GET /api/v1/analytics/events?group_by=event_name`
+  aggregated the limit-truncated event list (default 100, cap 10_000) in
+  memory, so grouped totals silently disagreed with `/count` on the same
+  question — 150 seeded `mr.merged` events grouped as 100. Analytics is
+  agent-consumable (analytics.md §Purpose), so truncated counts fed
+  wrong data into the autonomous decision loop.
+- **The fix:** new port-level grouped-count query
+  `AnalyticsRepository::count_grouped(filter, group_by)` with an
+  `AnalyticsGroupBy` enum (`EventName`/`AgentId`/`WorkspaceId`/`Day`),
+  implemented on all three adapters:
+  - SQLite/Postgres: SQL `SELECT <key>, COUNT(*) ... GROUP BY ... ORDER BY
+    key LIMIT ?` with the WHERE clause mirroring `query_filtered` exactly
+    (exact or trailing-`*` event_name, scope equality, inclusive
+    since/until); conditional binds via diesel's `into_boxed()` loop-binding
+    pattern.
+  - mem: same filter predicate (factored into a shared
+    `analytics_event_matches_filter` helper so the grouped path cannot
+    drift from `query_filtered`) over the full store, grouped into a
+    BTreeMap.
+  - `limit` bounds the number of returned GROUPS (per the review:
+  "for a grouped response the results are the groups"), never the input
+  to the aggregation; NULL agent/workspace groups under `"(none)"`.
+- **Handler:** `query_events`'s `group_by` branch now delegates to the
+  port (raw-event path unchanged); the in-memory grouping and its
+  now-unused `epoch_day_string` helper are removed.
+- **Rebase repair:** `merge_processor.rs`'s
+  `attestation_abac_deny_blocks_merge` test did not compile after the
+  task-128 rebase (main changed `Policy::created_by` to `Id`);
+  `cargo check -p gyre-server --tests` failed at the assignment base and
+  passes now.
 
-### Rebase reconciliation with main (task-128, this round)
+### Test evidence (this round)
 
-- Resolved the DIRTY merge against main `276918d2` (task-128 ABAC
-  policy engine core). The single conflict — the `spec-links.md` row in
-  `specs/coverage/SUMMARY.md` — was resolved to the candidate's value
-  because main had not changed that row from the merge base and the
-  candidate's value matches the actual merged-tree state of
-  `specs/coverage/system/spec-links.md` (17 rows: 3 n/a, 0 not-started,
-  0 task-assigned, 4 implemented, 10 verified = 100%). Both sides'
-  identical shared row updates were kept; pre-existing summary drift
-  (agent-runtime/search/user-management rows, TOTAL) is identical on
-  both parents and untouched.
-- Main's task-128 changes in the intersection files (spawn.rs,
-  merge_processor.rs, mcp.rs, orchestrator.rs) are additive ABAC/policy
-  work (worker-scoped JWT minting, queue_health attribute, `created_by`
-  String→Id) and compose with the analytics emissions: all 12 event
-  emission-site counts are identical pre- and post-merge, and every
-  analytics emission still sits on its live trigger path.
-- Prior-round reconciliations (task-119 budget cascade, task-139
-  signed-approval spec policies, task-122 team management) are retained
-  in the merged tree unchanged.
+- `cargo test -p gyre-adapters sqlite::analytics` — 15 passed,
+  including the two new tests:
+  `analytics_count_grouped_over_full_filtered_set` (150 events > limit;
+  grouped totals equal `count()`; limit=1 returns one group;
+  `"(none)"` bucket; prefix + workspace filters) and
+  `analytics_count_grouped_by_day` (UTC day buckets).
+- Full `cargo test -p gyre-adapters` — 506 passed, 0 failed.
+- `cargo check -p gyre-server --tests` — passes (failed at base on the
+  merge_processor rebase break).
+- Clippy on changed lines clean (the `QueryableByName` derive's
+  `redundant_field_names` false positive is scoped off with the
+  module-level allow pattern already established in
+  `postgres/search.rs`); `cargo fmt --check` clean; arch, mem-port,
+  inert-enforcement, byte-slice, lossy-secret, relative-path,
+  fabricated-scope, scope-literal, forwarded-header, and unbounded-http
+  mechanical checks all pass.
 
-### Verification evidence
+### Verifier must run (gyre-server tests, too large for the sandbox budget)
 
-- Merged tree type-checks: `SKIP_WEB_BUILD=1 cargo check --all` exit 0.
-- `cargo test -p gyre-domain analytics` exit 0 (3 passed, incl. the
-  spec-schema pin test).
-- `scripts/check-arch.sh`, `scripts/check-abac-route-registry.sh`,
-  `scripts/check-migration-versions.sh` all exit 0 on the merged tree.
-- The per-event gyre-server integration tests (spawn/complete/fail
-  agent, merge/close MR, gate pass/fail, spec approval, task status
-  transition, search, MCP gyre_search) are listed for the independent
-  verifier in `/tmp/stage/review-evidence/probes.log`; the large server
-  test build runs there per the assignment budget rules.
+- `cargo test -p gyre-server --lib api::analytics::tests`
+  (includes the new `query_events_group_by_counts_full_filtered_set`
+  regression: 150 seeded events, grouped total 150 == `/count`, limit=1
+  returns one group, prefix filter keeps full totals)
+- `cargo test -p gyre-server --lib analytics_query_tests::count_grouped_over_full_filtered_set`
+- `cargo test -p gyre-server --lib merge_processor::tests::attestation_abac_deny_blocks_merge`
+  (rebase repair)
