@@ -2492,21 +2492,27 @@ impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Team;
+use gyre_domain::{Team, TeamMembership};
 use gyre_ports::TeamRepository;
 
 #[derive(Default)]
 pub struct MemTeamRepository {
     store: Arc<Mutex<HashMap<String, Team>>>,
+    members: Arc<Mutex<HashMap<(String, String), TeamMembership>>>,
 }
 
 #[async_trait]
 impl TeamRepository for MemTeamRepository {
     async fn create(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the slug is unique within the workspace.
+        if store
+            .values()
+            .any(|t| t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
@@ -2514,28 +2520,100 @@ impl TeamRepository for MemTeamRepository {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
     }
 
-    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+    async fn find_by_slug(&self, workspace_id: &Id, slug: &str) -> Result<Option<Team>> {
         Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|t| t.workspace_id == *workspace_id && t.slug == slug)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+        let mut teams: Vec<Team> = self
             .store
             .lock()
             .await
             .values()
             .filter(|t| t.workspace_id == *workspace_id)
             .cloned()
-            .collect())
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 
     async fn update(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the new slug must not collide with another team's
+        // slug in the same workspace.
+        if store
+            .values()
+            .any(|t| t.id != team.id && t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        // Memberships go with the team.
+        self.members
+            .lock()
+            .await
+            .retain(|(team_id, _), _| team_id != id.as_str());
         Ok(())
+    }
+
+    async fn add_member(&self, membership: &TeamMembership) -> Result<()> {
+        let mut members = self.members.lock().await;
+        let key = (
+            membership.team_id.to_string(),
+            membership.user_id.to_string(),
+        );
+        // Port contract: duplicate membership fails.
+        if members.contains_key(&key) {
+            anyhow::bail!("user is already a member of the team");
+        }
+        members.insert(key, membership.clone());
+        Ok(())
+    }
+
+    async fn remove_member(&self, team_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .remove(&(team_id.to_string(), user_id.to_string()));
+        Ok(())
+    }
+
+    async fn list_members(&self, team_id: &Id) -> Result<Vec<TeamMembership>> {
+        let mut memberships: Vec<TeamMembership> = self
+            .members
+            .lock()
+            .await
+            .values()
+            .filter(|m| m.team_id == *team_id)
+            .cloned()
+            .collect();
+        memberships.sort_by_key(|m| m.added_at);
+        Ok(memberships)
+    }
+
+    async fn list_for_user(&self, workspace_id: &Id, user_id: &Id) -> Result<Vec<Team>> {
+        let store = self.store.lock().await;
+        let members = self.members.lock().await;
+        let mut teams: Vec<Team> = members
+            .values()
+            .filter(|m| m.user_id == *user_id)
+            .filter_map(|m| store.get(m.team_id.as_str()))
+            .filter(|t| t.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 }
 
@@ -6248,5 +6326,76 @@ mod trace_payload_tests {
             .expect("promoted trace's payloads must survive delete_by_mr");
         let input = payload.input.map(|b| String::from_utf8(b).unwrap());
         assert_eq!(input.as_deref(), Some("i"));
+    }
+}
+
+#[cfg(test)]
+mod team_contract_tests {
+    use super::*;
+    use gyre_ports::TeamRepository;
+
+    fn team(id: &str, ws: &str, slug: &str) -> Team {
+        Team::new(
+            Id::new(id),
+            Id::new(ws),
+            "Platform",
+            slug,
+            Id::new("u-lead"),
+            1000,
+        )
+    }
+
+    /// Mirrors sqlite's team contract tests: the mem adapter must enforce
+    /// the port's duplicate constraints in code (it has no schema to lean
+    /// on) — duplicate slug within a workspace on create and update, and
+    /// duplicate team membership.
+    #[tokio::test]
+    async fn mem_team_enforces_duplicate_contracts() {
+        let repo = MemTeamRepository::default();
+
+        repo.create(&team("t-1", "ws-1", "platform")).await.unwrap();
+        let err = repo
+            .create(&team("t-2", "ws-1", "platform"))
+            .await
+            .expect_err("duplicate slug in workspace must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+        // Same slug in another workspace is fine.
+        repo.create(&team("t-3", "ws-2", "platform")).await.unwrap();
+
+        repo.create(&team("t-4", "ws-1", "sre")).await.unwrap();
+        let mut t4 = repo.find_by_id(&Id::new("t-4")).await.unwrap().unwrap();
+        t4.slug = "platform".to_string();
+        let err = repo
+            .update(&t4)
+            .await
+            .expect_err("renaming onto another team's slug must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+
+        repo.add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 2000))
+            .await
+            .unwrap();
+        let err = repo
+            .add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 3000))
+            .await
+            .expect_err("duplicate membership must fail");
+        assert!(format!("{err:#}").contains("already a member"));
+
+        // find_by_slug / list_for_user / delete-with-memberships.
+        assert_eq!(
+            repo.find_by_slug(&Id::new("ws-1"), "platform")
+                .await
+                .unwrap()
+                .unwrap()
+                .id
+                .as_str(),
+            "t-1"
+        );
+        let teams = repo
+            .list_for_user(&Id::new("ws-1"), &Id::new("u-1"))
+            .await
+            .unwrap();
+        assert_eq!(teams.len(), 1);
+        repo.delete(&Id::new("t-1")).await.unwrap();
+        assert_eq!(repo.list_members(&Id::new("t-1")).await.unwrap().len(), 0);
     }
 }
