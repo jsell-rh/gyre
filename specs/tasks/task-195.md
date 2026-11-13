@@ -2,7 +2,7 @@
 title: "Manifest-driven gate selection for MRs referencing a spec"
 spec_ref: "spec-registry.md §16 Agent Gates Integration"
 depends_on: [task-193]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "spec-registry.md §16"
 commits: ["3c2c5462c1bb3cea490cc1033b0bc00d9b319a67", "58f28dfdd06aa5bc6372c737db94297b0d1fed51", "159b7408a12cef7990486878ffa33bf07c880c61", "fac8540c419d5a08a99c9601234ef1154274cad8", "42d995b061382af73d162321b960fede5527ba6b", "d11ffee85d3ccff5158300d113dbf82241aaf7c8", "a3e0a875ab383c2630868139e30837835b4d1a69", "4494a058f44b4c14f26ce39839ff0b952d3939d6", "a65ae04d808bdfb43bfc726a7e591fa7fad93589", "35b4dc9914d8ec050e2e8d6ede0e03e86206d6f9", "bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d"]
