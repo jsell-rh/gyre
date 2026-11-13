@@ -2,10 +2,10 @@
 title: "Conversational Exploration — AI Q&A grounded in knowledge graph"
 spec_ref: "system-explorer.md §8"
 depends_on: [task-171, task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["a3051e834c722f5d417993fd88eae0d83a3d9c1f", "bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "3a1229f9bb023c032f62ee2bf0caf3e26db07e79"]
+commits: ["a3051e834c722f5d417993fd88eae0d83a3d9c1f", "bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "3a1229f9bb023c032f62ee2bf0caf3e26db07e79", "9d5c22fa4a20d88f1a32fcd7c37d0ccc81039944"]
 ---
 
 ## Spec Excerpt
@@ -90,7 +90,8 @@ knowledge-graph → grounded-answer pipeline, shipped across commits
 7737e532 (feature), fa8568c5 (rustfmt/clippy repair), d363ce7d (unknown-kind
 citation tokens preserved literally), a69f76ec (char-based `short_sha` test
 expectation), bdf9f79f (grounded fallback ask prompt; no-LLM test repair),
-and f7cfd96d (rebase repair against main — see below):
+f7cfd96d (first rebase repair, vs. task-183), and 9d5c22fa (second rebase
+repair, vs. task-182 — see below):
 
 - **Backend** — `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
@@ -130,29 +131,29 @@ and f7cfd96d (rebase repair against main — see below):
   membership). Frontend: vitest component tests for panel rendering,
   citation link rendering, follow-up context, and view-spec application.
 
-### Rebase repair (f7cfd96d)
+### Rebase repair (9d5c22fa)
 
-The published PR head (850ece34) conflicted with current main
-(603cc2f, task-183 Architectural Timeline). Merged origin/main into the
-branch; conflicts were confined to generated web/dist assets, resolved
-to the assignment-base (main) versions for remote rebuild. Source
-auto-merges reviewed for semantic coupling: task-183's point-in-time
-graph port methods (`list_nodes_at`/`list_edges_at`) are additive and
-task-187's calls are unchanged; `api/graph.rs` combines the timeline
-`?at=` query with the extracted `run_structural_prediction` core;
-`ExplorerView.svelte`/`api.js` combine timeline scrubber wiring with the
-conversational panel and `explorerAsk` client.
+The published PR head (696feec9) conflicted with current main (b9487b1b,
+task-182 Concept Views). Merged main into the branch; the sole source
+conflict was the import block in `ExplorerView.svelte` — resolved by
+keeping the task-187 `ConversationalExplorer` import and combining the
+`generated-view.js` import to `viewSpecToViewQuery, viewDocumentToQuery`
+(main's concept-view document query helper). All other paths auto-merged;
+semantic coupling reviewed: the ask route stays registered before
+`/:view_id` with its ABAC mapping, `graph.rs` combines concept-view
+grounding with the ask grounding builder, and `ExplorerView.svelte` keeps
+both the conversational panel wiring (lines ~355, ~1566, ~2724, ~3752)
+and main's `viewDocumentToQuery` call site (line ~1535). Generated
+web/dist assets remain at the merge state; remote integration rebuilds
+them.
 
-### Test evidence (merged head f7cfd96d)
+### Test evidence (merged head 9d5c22fa)
 
-- `cargo check -p gyre-server` — exit 0 (full log:
-  `/tmp/stage/review-evidence/task187-rebase/cargo-check.log`).
-- `cd web && npm ci && npx vitest run` on ConversationalExplorer,
-  ExplorerChat-component, TimelineScrubber, timeline-utils,
-  ExplorerCanvas (251 tests) plus ExplorerDefaultViews, ExplorerViewScope,
-  ExplorerViewLivenessWiring, ExplorerViewNavigableArchitecture
-  (30 tests) — all pass (log:
-  `/tmp/stage/review-evidence/task187-rebase/vitest.log`).
+- `cargo check -p gyre-server` — exit 0.
+- `cargo test -p gyre-common -p gyre-domain` — all pass.
+- `cd web && npm ci && npm test` — 113 files, 2299 passed, 41 skipped,
+  including ConversationalExplorer, ExplorerChat, ExplorerConceptViews
+  (main's task-182 suite), and generated-view tests on the merged tree.
 - **Verifier must run** (server test compilation exceeds this sandbox's
   4 GiB budget): `cargo test -p gyre-server --lib api::explorer_views`,
   `cargo test -p gyre-server --lib api::graph`, and the full workspace
