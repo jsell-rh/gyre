@@ -19,6 +19,7 @@ diesel::table! {
         updated_at -> BigInt,
         max_agents -> Nullable<Integer>,
         max_agent_iterations -> Nullable<Integer>,
+        budget_json -> Nullable<Text>,
     }
 }
 
@@ -543,6 +544,7 @@ diesel::table! {
         require_approved_spec -> Integer,
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
+        require_signed_approval -> Integer,
         enforce_manifest -> Integer,
     }
 }
@@ -623,6 +625,7 @@ diesel::table! {
         active_agents -> Integer,
         period_start -> BigInt,
         updated_at -> BigInt,
+        compute_minutes -> BigInt,
     }
 }
 

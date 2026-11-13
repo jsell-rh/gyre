@@ -13,6 +13,14 @@
  *   POST /proxy → explicit proxy: {target_url, method, headers?, body?}
  *   CONNECT    → rejected
  *
+ * Usage reporting (agent-runtime.md §4 "What's Tracked"):
+ *   After each proxied LLM call, token usage is reported back to the gyre
+ *   server via POST $GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/usage
+ *   (Bearer $GYRE_AUTH_TOKEN). The server aggregates per workspace and runs
+ *   the 80%/100%/beyond-limit budget enforcement cascade. Reports are
+ *   best-effort and latency-bounded — a failed report never fails the LLM
+ *   call. Non-LLM responses (no `usage` block) are never reported.
+ *
  * GCE metadata emulator (TCP 8080):
  *   GET /computeMetadata/v1/instance/service-accounts/default/token
  *   → OAuth2 token exchange using GYRE_CRED_GCP_SA_JSON, cached until expiry
@@ -25,12 +33,25 @@ import http from 'http';
 import https from 'https';
 import crypto from 'crypto';
 import fs from 'fs';
+import path from 'path';
 
-const SOCKET_PATH = '/run/gyre/cred.sock';
+const SOCKET_PATH = process.env.GYRE_CRED_SOCK_PATH ?? '/run/gyre/cred.sock';
 const PROXY_TCP_PORT = parseInt(process.env.GYRE_CRED_PROXY_PORT ?? '8765', 10);
 const GCE_METADATA_PORT = parseInt(process.env.GYRE_CRED_GCE_PORT ?? '8080', 10);
 const LOOPBACK = '127.0.0.1';
 const GCP_SCOPES = ['https://www.googleapis.com/auth/cloud-platform'];
+
+// Anthropic API upstream for /v1/* LLM calls. Configurable for
+// Anthropic-compatible gateways; defaults to the public API.
+const ANTHROPIC_BASE = (process.env.GYRE_ANTHROPIC_BASE ?? 'https://api.anthropic.com').replace(/\/+$/, '');
+let anthropicBaseHost = 'api.anthropic.com';
+try { anthropicBaseHost = new URL(ANTHROPIC_BASE).hostname.toLowerCase(); } catch {}
+
+// M27-A destination allowlist for POST /proxy. Read at startup — GYRE_CRED_*
+// vars are scrubbed from process.env once credentials load, so a per-request
+// read would never see a configured value.
+const PROXY_ALLOWED_HOSTS = (process.env.GYRE_CRED_ALLOWED_HOSTS || 'api.anthropic.com,gitlab.com,api.github.com')
+  .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 
 // ── Credential loading ────────────────────────────────────────────────────────
 
@@ -53,6 +74,7 @@ const GITLAB_TOKEN = credentials.get('GITLAB_TOKEN') ?? '';
 const GITHUB_TOKEN = credentials.get('GITHUB_TOKEN') ?? '';
 const GYRE_AUTH_TOKEN = process.env.GYRE_AUTH_TOKEN ?? '';
 const GYRE_SERVER_URL = (process.env.GYRE_SERVER_URL ?? '').replace(/\/$/, '');
+const GYRE_AGENT_ID = process.env.GYRE_AGENT_ID ?? '';
 
 // Parse GCP service account JSON if present
 let gcpServiceAccount = null;
@@ -156,15 +178,21 @@ async function getGcpAccessToken() {
 
 /**
  * Forward a request to targetUrl, injecting the appropriate auth credential.
+ * `timeoutMs` (optional) bounds the wait on the upstream response.
  */
-async function proxyRequest(targetUrl, method, reqHeaders, body) {
+async function proxyRequest(targetUrl, method, reqHeaders, body, timeoutMs) {
   const url = new URL(targetUrl);
   const isHttps = url.protocol === 'https:';
   const transport = isHttps ? https : http;
   const outHeaders = { ...reqHeaders };
 
-  // Credential injection by destination host
-  if (url.hostname === 'api.anthropic.com') {
+  // Credential injection by destination host. The gyre server check comes
+  // first: a usage report to the server must carry the agent token, never an
+  // upstream API key (matters when the Anthropic base is a loopback gateway
+  // in the same address space as the server).
+  if (GYRE_SERVER_URL && targetUrl.startsWith(GYRE_SERVER_URL)) {
+    outHeaders['authorization'] = `Bearer ${GYRE_AUTH_TOKEN}`;
+  } else if (url.hostname === 'api.anthropic.com' || url.hostname === anthropicBaseHost) {
     // Replace any placeholder (proxy-managed) with the real key
     outHeaders['x-api-key'] = ANTHROPIC_API_KEY;
     if (!outHeaders['anthropic-version']) outHeaders['anthropic-version'] = '2023-06-01';
@@ -172,8 +200,6 @@ async function proxyRequest(targetUrl, method, reqHeaders, body) {
     outHeaders['private-token'] = GITLAB_TOKEN;
   } else if (url.hostname === 'api.github.com' || url.hostname.endsWith('.github.com')) {
     outHeaders['authorization'] = `token ${GITHUB_TOKEN}`;
-  } else if (GYRE_SERVER_URL && targetUrl.startsWith(GYRE_SERVER_URL)) {
-    outHeaders['authorization'] = `Bearer ${GYRE_AUTH_TOKEN}`;
   }
 
   const bodyBuf = body
@@ -197,9 +223,156 @@ async function proxyRequest(targetUrl, method, reqHeaders, body) {
       }
     );
     req.on('error', reject);
+    if (timeoutMs) {
+      req.setTimeout(timeoutMs, () => req.destroy(new Error(`upstream request timed out after ${timeoutMs}ms`)));
+    }
     if (bodyBuf) req.write(bodyBuf);
     req.end();
   });
+}
+
+// ── Agent usage reporting (agent-runtime.md §4 "What's Tracked") ────────────
+//
+// The credential proxy reports token usage back to the server after each
+// LLM call via POST /api/v1/agents/:id/usage; the server aggregates per
+// workspace and checks limits on every report (80% warn / 100% graceful stop
+// / beyond-limit hard kill). Reports are best-effort: a failed or slow
+// report never fails the proxied LLM call.
+
+const USAGE_REPORT_TIMEOUT_MS = 10_000;
+
+/**
+ * Anthropic list pricing, USD per million tokens:
+ * [model-substring, input_per_million, output_per_million]. First substring
+ * match wins. Deployments can override or extend via
+ * GYRE_PRICING_JSON='{"claude-<model>":[input,output],...}' (entries take
+ * precedence over the defaults). Unknown models report cost 0.
+ */
+const DEFAULT_PRICING = [
+  ['claude-opus-4-5', 5, 25],
+  ['claude-opus-4-1', 5, 25],
+  ['claude-opus-4', 15, 75],
+  ['claude-sonnet-4-5', 3, 15],
+  ['claude-sonnet-4', 3, 15],
+  ['claude-3-7-sonnet', 3, 15],
+  ['claude-3-5-sonnet', 3, 15],
+  ['claude-3-5-haiku', 0.8, 4],
+  ['claude-3-opus', 15, 75],
+  ['claude-3-haiku', 0.25, 1.25],
+];
+
+let pricingTableCache = null;
+
+function pricingTable() {
+  if (pricingTableCache) return pricingTableCache;
+  const table = [...DEFAULT_PRICING];
+  const raw = process.env.GYRE_PRICING_JSON;
+  if (raw) {
+    try {
+      for (const [prefix, pair] of Object.entries(JSON.parse(raw))) {
+        if (Array.isArray(pair) && pair.length === 2 && pair.every(Number.isFinite)) {
+          table.unshift([prefix, pair[0], pair[1]]);
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`cred-proxy: WARNING — GYRE_PRICING_JSON is not valid JSON: ${e.message}\n`);
+    }
+  }
+  pricingTableCache = table;
+  return table;
+}
+
+/** Model-specific cost in USD for a token pair (0 for unknown models). */
+function estimateCostUsd(model, tokensInput, tokensOutput) {
+  if (!model) return 0;
+  for (const [prefix, inPerM, outPerM] of pricingTable()) {
+    if (model.includes(prefix)) {
+      return (tokensInput * inPerM + tokensOutput * outPerM) / 1e6;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Extract {model, tokens_input, tokens_output} from an Anthropic API
+ * response — JSON or a buffered SSE stream. Returns null when the response
+ * carries no usage block (non-LLM calls), so callers can safely hook every
+ * proxied request and only report actual LLM usage.
+ */
+function extractUsage(requestBody, responseBody, contentType) {
+  let model = null;
+  if (requestBody) {
+    try {
+      model = JSON.parse(requestBody.toString('utf8')).model ?? null;
+    } catch {}
+  }
+  let tokensInput = null;
+  let tokensOutput = null;
+  const applyUsage = (evt) => {
+    const usage = evt.usage ?? evt.message?.usage;
+    if (usage) {
+      if (Number.isFinite(usage.input_tokens)) tokensInput = usage.input_tokens;
+      // SSE message_delta events carry the cumulative output token count,
+      // so the last one seen is the final count.
+      if (Number.isFinite(usage.output_tokens)) tokensOutput = usage.output_tokens;
+    }
+    if (!model && evt.message?.model) model = evt.message.model;
+    if (!model && evt.model) model = evt.model;
+  };
+  const bodyText = responseBody ? responseBody.toString('utf8') : '';
+  if ((contentType ?? '').includes('text/event-stream')) {
+    for (const line of bodyText.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        applyUsage(JSON.parse(line.slice(5).trim()));
+      } catch {}
+    }
+  } else {
+    try {
+      applyUsage(JSON.parse(bodyText));
+    } catch {}
+  }
+  if (tokensInput === null && tokensOutput === null) return null;
+  return { model, tokens_input: tokensInput ?? 0, tokens_output: tokensOutput ?? 0 };
+}
+
+let usageReportConfigWarned = false;
+
+/**
+ * POST one usage report to the gyre server. Best-effort and latency-bounded:
+ * errors (including the server rejecting the report) are logged and
+ * swallowed so budget reporting can never break the LLM call path.
+ */
+async function reportAgentUsage(usage) {
+  if (!GYRE_SERVER_URL || !GYRE_AGENT_ID || !GYRE_AUTH_TOKEN) {
+    if (!usageReportConfigWarned) {
+      usageReportConfigWarned = true;
+      process.stderr.write(
+        'cred-proxy: WARNING — usage reporting disabled (GYRE_SERVER_URL, GYRE_AGENT_ID or GYRE_AUTH_TOKEN missing)\n'
+      );
+    }
+    return;
+  }
+  const payload = JSON.stringify({
+    tokens_input: usage.tokens_input,
+    tokens_output: usage.tokens_output,
+    cost_usd: estimateCostUsd(usage.model, usage.tokens_input, usage.tokens_output),
+  });
+  try {
+    const result = await proxyRequest(
+      `${GYRE_SERVER_URL}/api/v1/agents/${encodeURIComponent(GYRE_AGENT_ID)}/usage`,
+      'POST',
+      { 'content-type': 'application/json' },
+      payload,
+      USAGE_REPORT_TIMEOUT_MS
+    );
+    auditLog('POST', 'gyre-server/agents/usage', result.status);
+    if (result.status >= 400) {
+      process.stderr.write(`cred-proxy: usage report rejected (HTTP ${result.status})\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`cred-proxy: usage report failed: ${err.message}\n`);
+  }
 }
 
 // ── Main proxy request handler ────────────────────────────────────────────────
@@ -232,10 +405,9 @@ async function handleProxy(req, res) {
       return;
     }
     // M27-A: Destination allowlist — reject requests to unlisted hosts.
-    const ALLOWED_HOSTS = (process.env.GYRE_CRED_ALLOWED_HOSTS || 'api.anthropic.com,gitlab.com,api.github.com').split(',').map(h => h.trim().toLowerCase());
     try {
       const targetHost = new URL(target_url).hostname.toLowerCase();
-      if (!ALLOWED_HOSTS.some(h => targetHost === h || targetHost.endsWith('.' + h))) {
+      if (!PROXY_ALLOWED_HOSTS.some((h) => targetHost === h || targetHost.endsWith('.' + h))) {
         auditLog(method, targetHost, 403);
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `host '${targetHost}' not in GYRE_CRED_ALLOWED_HOSTS allowlist` }));
@@ -253,6 +425,14 @@ async function handleProxy(req, res) {
       auditLog(method, logPrefix, result.status);
       res.writeHead(result.status, result.headers);
       res.end(result.body);
+      // agent-runtime.md §4: report LLM usage after the call (best-effort;
+      // only responses carrying a usage block are reported).
+      const usage = extractUsage(
+        typeof body === 'string' ? Buffer.from(body) : null,
+        result.body,
+        result.headers?.['content-type']
+      );
+      if (usage) await reportAgentUsage(usage);
     } catch (err) {
       auditLog(method, logPrefix, 502);
       res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -263,7 +443,7 @@ async function handleProxy(req, res) {
 
   // /v1/* — transparent Anthropic API proxy
   if (req.url.startsWith('/v1/')) {
-    const targetUrl = `https://api.anthropic.com${req.url}`;
+    const targetUrl = `${ANTHROPIC_BASE}${req.url}`;
     const bodyChunks = [];
     for await (const chunk of req) bodyChunks.push(chunk);
     const body = bodyChunks.length ? Buffer.concat(bodyChunks) : null;
@@ -284,6 +464,10 @@ async function handleProxy(req, res) {
       }
       res.writeHead(result.status, resHeaders);
       res.end(result.body);
+      // agent-runtime.md §4: report LLM usage after the call (best-effort;
+      // only responses carrying a usage block are reported).
+      const usage = extractUsage(body, result.body, result.headers?.['content-type']);
+      if (usage) await reportAgentUsage(usage);
     } catch (err) {
       auditLog(req.method, logPrefix, 502);
       res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -356,7 +540,7 @@ function makeGceServer() {
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
-fs.mkdirSync('/run/gyre', { recursive: true });
+fs.mkdirSync(path.dirname(SOCKET_PATH), { recursive: true });
 
 // Unix socket (all proxy routes)
 if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);

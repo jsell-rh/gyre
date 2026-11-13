@@ -248,6 +248,7 @@ mod tests {
             explorer_sessions: Arc::clone(&base.explorer_sessions),
             retention_store: base.retention_store.clone(),
             job_registry: base.job_registry.clone(),
+            budget_grace_in_progress: Arc::clone(&base.budget_grace_in_progress),
             analytics: base.analytics.clone(),
             costs: base.costs.clone(),
             audit: base.audit.clone(),

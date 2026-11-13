@@ -146,6 +146,8 @@ pub async fn create_agent(
             repo_id: agent.repo_id.as_ref().map(|r| r.to_string()),
             tenant_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(now as i64),
         },
     )
     .await;
@@ -878,13 +880,23 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
-        let ev = events
+        let mine: Vec<_> = events
             .iter()
-            .rev()
-            .find(|e| e.resource_id.as_deref() == Some(id.as_str()))
-            .expect("second agent_heartbeat event for hb-pid-agent");
-        assert_eq!(ev.detail["pid"], dead_pid);
-        assert_eq!(ev.detail["pid_alive"], false);
+            .filter(|e| e.resource_id.as_deref() == Some(id.as_str()))
+            .collect();
+        // Two heartbeats were sent for this agent, no more, no fewer.
+        assert_eq!(mine.len(), 2, "two agent_heartbeat events for hb-pid-agent");
+        // Audit queries return newest-first, but equal second-granularity
+        // timestamps tie under the mem adapter's stable sort, so positional
+        // selection is flaky. The first heartbeat was pinned to
+        // (live_pid, true) above; identify the second by its content: it
+        // must carry the dead child's PID. A handler that re-read a stale
+        // attestation would leave no dead-pid event and fail here.
+        let second = mine
+            .iter()
+            .find(|e| e.detail["pid"] == serde_json::json!(dead_pid))
+            .expect("second heartbeat reports the attested dead pid");
+        assert_eq!(second.detail["pid_alive"], false);
     }
 
     #[tokio::test]

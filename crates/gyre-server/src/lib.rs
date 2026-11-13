@@ -259,6 +259,12 @@ pub struct AppState {
     pub retention_store: RetentionStore,
     /// Background job registry.
     pub job_registry: Arc<JobRegistry>,
+    /// Workspaces with a live budget-exhaustion grace timer running
+    /// (agent-runtime.md §4 Enforcement Levels: 100% → 60s grace). Purely
+    /// process-local synchronization — a restart drops the timer, and the
+    /// next usage report re-enters enforcement because usage is still at
+    /// or above the limit. Not durable state; deliberately not port-backed.
+    pub budget_grace_in_progress: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Product analytics event store.
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.
@@ -1245,6 +1251,9 @@ pub fn build_state(
         explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
         analytics: store!(
             dyn AnalyticsRepository,
             mem::MemAnalyticsRepository::default()
@@ -1823,7 +1832,14 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
     });
 }
 
-/// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
+/// Spawn the budget rolling-window background job (agent-runtime.md §4
+/// Budget Reset): runs hourly and re-syncs every entity's token/cost
+/// counters to the per-call records inside the last 24 hours, so
+/// time-based budgets (`max_tokens_per_day`, `max_cost_per_day`) reset on
+/// a rolling window. Replaces the pre-task-119 midnight-UTC counter reset.
+/// The same cycle enforces the per-agent lifetime ceilings
+/// (`max_agent_lifetime_secs`, repo override → effective workspace limit)
+/// so agents that stopped reporting usage are still bounded.
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
         state
@@ -1831,17 +1847,15 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             .mark_scheduled("spawn_budget_reset")
             .await;
         loop {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let secs_until_midnight = 86400 - (now % 86400);
-            tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_midnight)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             let started_at = jobs::now_secs();
-            let result = api::budget::reset_daily_counters(&state).await;
+            let result = api::budget::apply_rolling_24h_window(&state).await;
             if let Err(error) = &result {
-                tracing::error!(%error, "failed to reset budget daily counters");
+                tracing::error!(%error, "failed to apply budget rolling 24h window");
             }
+            // Lifetime enforcement is best-effort alongside the reset —
+            // its failures are logged inside, never fail the job cycle.
+            api::budget::enforce_agent_lifetimes(&state).await;
             state
                 .job_registry
                 .record_cycle("spawn_budget_reset", started_at, &result)
