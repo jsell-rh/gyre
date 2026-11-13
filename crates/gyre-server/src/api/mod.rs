@@ -1,7 +1,6 @@
 pub mod activity;
 pub mod admin;
 pub mod agent_logs;
-pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
