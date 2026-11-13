@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf"]
+commits: ["750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "31157af8bc5592b157fd07d5dab3707a932c512a"]
 ---
 
 ## Spec Excerpt
@@ -123,72 +123,77 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
 provider info) are implemented in production code across the commits
-listed in the frontmatter. This round resolves the DIRTY merge state:
-the published PR head (bbd80c45) conflicted with current main
-(3b734b1af, task-168 repo lifecycle) in generated web/dist assets.
+listed in the frontmatter. This round resolves the DIRTY merge state
+against current main a218b956 (task-198 Spec Links).
 
-### This round: merge reconciliation
+### This round: merge reconciliation (repair 43a915066)
 
-Merge commit a281989a2 brings main 3b734b1af into the branch with
-first parent bbd80c45 (retained implementation). Conflicts were
-confined to generated web/dist assets; they were resolved to main's
-dist output (identical to `git diff --cached 3b734b1af -- web/dist`
-being empty), and final integration rebuilds and publishes those
-assets remotely. No source file needed manual resolution: git
-auto-merged the overlapping source files (mem.rs, schema.rs,
-api/mod.rs) and `cargo check -p gyre-server -p gyre-adapters -p
-gyre-domain --all-targets` (SKIP_WEB_BUILD=1) confirms the merged
-tree type-checks. The task-209 implementation files (users.rs,
-workspaces.rs, merge_requests.rs, meta_specs.rs, user_profile.rs in
-domain/sqlite/postgres) are untouched by the merge.
+Merge commit 31157af8b brings main a218b956 into the branch with first
+parent the retained task-209 implementation. The single conflicted
+source path, `crates/gyre-server/src/lib.rs` (AppState wiring block),
+was resolved by keeping BOTH sides: task-209's shared judgment-ledger
+mem stores (`mem_audit`/`mem_spec_approvals`/`mem_spec_ledger` + the
+`store_shared!` macro) and task-198's `spec_link_repo` +
+`spec_links_store` boot cache load. web/dist conflicts resolved to
+main's committed output; final integration rebuilds and publishes
+those assets remotely. No other source path needed manual resolution.
+
+Verification on the merged tree (see
+/tmp/stage/review-evidence/merge-resolution.md in the assignment
+sandbox):
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` → exit 0
+  (type-checks the server crate and all its in-module test bodies)
+- `cargo test -p gyre-adapters --lib user_profile` → 12 passed, 0 failed
+  (includes all judgment_ledger_* and notification exclude/filter tests)
+- `cargo test -p gyre-adapters --lib audit` → 15 passed, 0 failed
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`,
+  `check-migration-versions.sh`, `check-in-memory-state-stores.sh`,
+  `check-inert-enforcement.sh`, `check-forged-scope-fields.sh` → all
+  exit 0
+- `scripts/check-tenant-filter.sh` fails under this sandbox's mawk
+  1.3.4 with a syntax error — verified identical failure on main
+  a218b956 and pre-merge head 86fac68a; gawk-specific script, not a
+  defect of this branch
+
+Server tests the independent verifier must execute (large server test
+compilation is deferred to the verifier per the 4 GiB budget):
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib`, notably
+`trust_transition_writes_trust_change_audit_event`,
+`human_approval_on_failed_gate_writes_gate_override_event`,
+`disabled_preference_excludes_type_from_inbox_and_count`,
+`get_me_returns_recorded_auth_provider_info`,
+`publish_writes_meta_spec_publish_audit_event`, and the in-module
+`/users/me/judgments?type=` probes in specs.rs/meta_specs.rs; then the
+full gates `cargo test --all` and `cd web && npm ci && npm test`.
 
 ### Implementation (intact on this branch)
 
-- Notification filtering: inbox queries (`get_my_notifications`/`_count`)
-  compute the user's disabled types from `user_notification_preferences`
-  and pass them as `exclude_types` to `list_for_user`, applied by the
-  query before limit/offset; preferences stored under canonical
-  `as_str()` names; profile UI toggles for all 41 canonical variants,
-  guarded by `scripts/check-notification-toggle-coverage.sh`.
-- Judgment ledger: `JudgmentLedgerRepository::list_for_user` (sqlite +
-  postgres) aggregates spec approvals/rejections, gate overrides, trust
-  changes, and meta-spec publishes from real tables with
-  `?workspace_id=` filtering, per-source type filters, reverse-
-  chronological sort, limit/offset after union+sort; write paths emit
-  `gate_override` (human approval on a failed-gate MR), `trust_change`
-  (workspace trust transition), and meta-spec publish attribution audit
-  events; zstd-compressed audit details decompressed on read.
-- Auth provider info: `GET /api/v1/users/me` returns read-only
-  `oidc_issuer` and `last_login_at`.
-- HSI §12 spec amendment: judgment-source tables and `?type=` values
-  (`approval|rejection|gate|trust|meta-spec`) documented in the spec.
-
-### Evidence (/tmp/stage/review-evidence/)
-
-- `cargo-check-alltargets.log` — merged tree type-checks, exit 0.
-- `adapters-user-profile-tests.log` — focused gyre-adapters
-  user_profile suite on the merged tree: 12 passed (aggregation,
-  reverse-chron, workspace filter, type filter, pagination,
-  notification exclude, tokens, login debounce).
-- `domain-tests.log` — gyre-domain: 482 passed.
-- `arch-lint.log`, `abac-registry.log`, `migration-versions.log`,
-  `mem-port-contracts.log`, `toggle-coverage.log` — exit 0 on the
-  merged tree.
-- `tenant-filter-mawk-environmental.log` —
-  `scripts/check-tenant-filter.sh` exits 2 with an awk syntax error in
-  this sandbox (mawk 1.3.4); the identical script fails identically on
-  main 3b734b1af, so this is a gawk-dependent-script vs mawk
-  environment restriction to be covered on the remote verifier, not a
-  defect introduced here.
-
-### Verifier scope (server tests to execute)
-
-`cargo test -p gyre-server` (compilation belongs in the verifier per
-the 4 GiB budget), in particular:
-`api::workspaces::tests::trust_transition_writes_trust_change_audit_event`,
-`api::merge_requests::...::human_approval_on_failed_gate_writes_gate_override_event`,
-`api::users::tests` (get_me oidc_issuer/last_login_at,
-get_my_judgments shape), plus `cd web && npm test`,
-`scripts/check-clippy-diff.py` / `scripts/check-rustfmt-diff.py`
-against the assignment base, and the gawk-dependent lint hooks
-(tenant-filter) on a gawk-equipped runner.
+- Notification filtering: inbox queries (`get_my_notifications`/
+  `_count`) compute the user's disabled types from
+  `user_notification_preferences` and pass them as `exclude_types` to
+  `list_for_user`, applied by the SQL adapter and the mem adapter.
+  Canonical type names are stored (alias normalization), and every
+  canonical `NotificationType` has a UI toggle (review F1/F2 rounds:
+  `ComputeTargetUnavailable`, `WorkspaceOwnerless`).
+- Judgment ledger: `JudgmentType` has `GateOverride` (`as_str()` =
+  `"gate"`); `list_for_user` (SQLite + Postgres parity) aggregates
+  spec approvals/rejections (attributed via the approval-ledger
+  writer key), `audit_events` (`gate_override`, `trust_change`, and
+  meta-spec publish rows, with zstd detail decompression), and
+  `meta_spec_versions` joined to `meta_specs`; workspace filter drops
+  unattributed entries rather than stamping; reverse-chronological
+  with limit/offset after union+sort. HSI §12 was amended to name the
+  concrete source tables and the `approval|rejection|gate|trust|
+  meta-spec` type values.
+- Write paths: trust transitions via `PUT /workspaces/:id` write a
+  `trust_change` audit event (from/to/workspace); human (OIDC JWT,
+  not agent-token) approval review on a failed-gate MR writes one
+  `gate_override` audit event per failed gate (mr_id/gate_type/from/
+  to); meta-spec publish writes a `meta_spec_publish` audit event with
+  publisher attribution.
+- Auth provider info: `GET /users/me` returns read-only
+  `oidc_issuer` and `last_login_at` recorded from login events.
+- Endpoint: `GET /api/v1/users/me/judgments?workspace_id=&type=&since=
+  &limit=&offset=` with per-handler user-scoped auth.
