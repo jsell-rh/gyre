@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -142,91 +142,3 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
-
-## Shipped
-
-### What is implemented (all in the listed commits)
-
-The ABAC evaluation engine and its full surface are in production code:
-
-- **Evaluation engine** (`gyre-server/src/policy_engine.rs`): the
-  10-step flow — subject/resource/action/environment attribute
-  extraction, repo → workspace → tenant policy collection, immutable
-  Deny evaluated first (bypasses priority ordering and cannot be
-  overridden), then priority-DESC ordering with scope specificity as
-  tiebreaker, AND-condition evaluation, first-match-wins with
-  short-circuit, and a `PolicyDecision` audit record per evaluation.
-- **Policy composition** per §Policy Composition: scope precedence
-  (repo > workspace > tenant) at equal priority, higher priority wins
-  regardless of scope, Deny overrides Allow at the same priority+scope,
-  tenant-level `default-deny` catches the rest.
-- **Built-ins**: all seven policies from §Built-In Policies are seeded
-  on startup (`system-full-access`, `tenant-isolation`,
-  `agent-repo-scope`, `workspace-membership-required`,
-  `persona-human-approval`, `builtin:require-human-spec-approval`
-  (immutable, priority 999), `default-deny`). Built-ins cannot be
-  deleted; immutable ones cannot be overridden; trust-preset names
-  (`trust:`/`builtin:` prefix) are protected on update/delete by id.
-- **Performance**: per-scope policy-set cache with invalidation on
-  every policy write (`policy_cache.rs`); membership lookups
-  precomputed in the auth context; benchmark test asserts the <1ms
-  evaluation target.
-- **Audit integration**: every decision is persisted to the
-  `policy_decisions` table and logged (Deny at `warn`, Allow at
-  `debug`); audit-write failures warn via
-  `policy_engine::record_decision_audit` so a dropped decision is
-  distinguishable from "no decisions".
-- **API**: `GET/POST /api/v1/policies`, `GET/PUT/DELETE
-  /api/v1/policies/{id}` (create admin-only, built-ins undeletable),
-  `POST /api/v1/policies/evaluate` (dry-run), `GET
-  /api/v1/policies/decisions` (audit query), `GET
-  /api/v1/policies/effective` (effective permissions), all registered
-  in `api/mod.rs` with ABAC route-registry entries.
-- **Middleware migration**: `abac_middleware.rs` evaluates through the
-  new engine; attestation-gate paths fail closed on store errors
-  (hold-then-requeue on the enforced merge path, warn+skip on the
-  audit-only push path).
-
-Review rounds 1–6 (findings and fixes) are recorded in the earlier
-listed commits; round 6 closed the last seven findings, including
-re-spawn JWT worker-scope claims (`mint_worker_scoped`), reserved-
-prefix protection on policy update/delete, concrete decision resource
-ids, visible audit-write failures, and set-semantics
-`subject.global_role` handling.
-
-### Round 7 (this commit): verification-gate formatting repair
-
-The round-6 checkpoint failed the deterministic formatting gates —
-one trailing-whitespace line (`policy_engine.rs:524`) and rustfmt
-violations on task-129-changed lines in nine files. Because the gate
-truncates each file's violation list at twelve lines, each flagged
-file was fully reformatted with the gate's exact invocation
-(`rustfmt --edition 2021 --config skip_children=true`). Formatting
-only — no behavior change.
-
-### Test evidence
-
-- `python3 scripts/check-rustfmt-diff.py f7f5c59` → "changed lines
-  clean (45 Rust files checked)" (exit 0); `git diff --check` on the
-  branch → no whitespace errors. Evidence saved under
-  `/tmp/stage/review-evidence/`.
-- `cargo check -p gyre-server` passes on the reformatted tree
-  (exit 0, ~6 min).
-- Behavior tests from rounds 1–6 (one per finding, each with a
-  documented killing direction): `respawn_jwt_carries_worker_scope_claims`,
-  `condition_equals_on_list_attribute_uses_set_semantics`,
-  `roleless_caller_gets_no_fabricated_readonly_role`,
-  `decision_records_concrete_resource_id`,
-  `trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
-  `attestation_deny_records_abac_denied_audit_event`,
-  `attestation_abac_fails_closed_on_workspace_store_error`, plus the
-  engine/benchmark/cache/API suites in `policy_engine`,
-  `abac_middleware`, `api::policies`, `merge_processor`,
-  `ralph_loop`, and `git_http` tests.
-
-This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
-compilation is deferred to the independent verifier: the verifier
-must run the tests above (`cargo test -p gyre-server policy_engine
-abac_middleware api::policies merge_processor ralph_loop git_http`
-plus the seven named round-6 tests) — `cargo check -p gyre-server
---tests` type-checks all of them.
