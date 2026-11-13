@@ -30,7 +30,6 @@ pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
-pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
@@ -227,7 +226,7 @@ pub struct AppState {
     /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
     pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
-    /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
+    /// Persists: agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
     /// abac_policies — all keyed by (namespace, key).
     pub kv_store: Arc<dyn KvJsonStore>,

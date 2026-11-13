@@ -468,11 +468,12 @@ async fn spawn_manifest_gate_agent(
     // submit its verdict; its ReviewRequest arrives via the launch env
     // (GYRE_MR_ID / GYRE_PERSONA / …) and the /mcp surface
     // (`gyre_message_poll` derives the inbox from the verified token
-    // subject, so it is inherently own-inbox) — the REST inbox route
-    // (GET /api/v1/agents/{id}/messages) is deliberately NOT on the
-    // reviewer allow-list: its handler has no caller-identity check, so
-    // allowing it would let any review-scoped token drain and clear any
-    // agent's inbox. A mint or registration
+    // subject, so it is inherently own-inbox). The REST inbox route
+    // (GET /api/v1/agents/{id}/messages) is kept off the reviewer
+    // allow-list as least privilege / defense in depth: the routed
+    // handler (messages::poll_messages) does enforce own-inbox for
+    // non-admin callers, but a single-purpose review token has no need
+    // for it. A mint or registration
     // failure fails the spawn closed: an unscoped fallback token is exactly
     // the hole this closes, and with no gate agent running the gate polls
     // reviews and fails at its timeout (never auto-passes).

@@ -144,19 +144,19 @@ async fn scoped_review_token_denied_outside_allowlist() {
 
 /// Task-195 review repair: a `review:submit`-scoped gate-agent token must
 /// NOT reach the REST agent-inbox route (`GET /api/v1/agents/{id}/messages`).
-/// That handler has no caller-identity check (any authenticated principal
-/// passing ABAC drains and clears the named agent's KV inbox), and the
-/// builtin agent-scoped-access policy (priority 700, resource_types ["*"],
-/// subject.global_role == Agent — the role every agent JWT carries) permits
-/// the read — so were this route on the reviewer allow-list, every
-/// single-purpose gate-agent token could read and destroy any agent's
-/// inbox. The ReviewRequest a manifest gate agent needs is delivered via
-/// its launch env and the /mcp surface (`gyre_message_poll` derives the
-/// inbox from the verified token subject — inherently own-inbox), never
-/// this route. Discriminator: builtin policies are seeded so the agent
-/// role WOULD permit the read; the 403 is attributable solely to the
-/// scoped-token allow-list, and re-adding the route there flips this test
-/// to a draining 200.
+/// The route is kept off the reviewer allow-list as least privilege /
+/// defense in depth: a single-purpose review token's ReviewRequest is
+/// delivered via its launch env and the /mcp surface
+/// (`gyre_message_poll` derives the inbox from the verified token
+/// subject — inherently own-inbox), so it has no need for the REST
+/// inbox route. (The handler actually routed at that path,
+/// `messages::poll_messages`, does enforce own-inbox for non-admin
+/// callers; the "no caller-identity check, drain-and-clear" handler
+/// from earlier review rounds was the unrouted legacy `agent_messages`
+/// module, since deleted.) Discriminator: builtin policies are seeded
+/// so the agent role WOULD permit the read; the 403 is attributable
+/// solely to the scoped-token allow-list, and re-adding the route there
+/// flips this test to a 200.
 #[tokio::test]
 async fn scoped_review_token_cannot_read_agent_inbox_route() {
     let state = test_state().await;
@@ -210,7 +210,7 @@ async fn scoped_review_token_cannot_read_agent_inbox_route() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "review-scoped gate-agent token must not read another agent's inbox \
-         (agent_messages has no caller-identity check)"
+         (route is off the reviewer allow-list: least privilege)"
     );
 }
 
