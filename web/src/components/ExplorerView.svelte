@@ -47,6 +47,10 @@
   // a repo node → scope changes to repo). Wired by App.svelte; absent in
   // standalone/test renders where the in-place drill fallback applies.
   const goToRepoCtx = getContext('goToRepo');
+  // App-level detail panel opener — used for agent provenance links in the
+  // moldable views (system-explorer.md §2: "Every agent reference is
+  // clickable → shows provenance"). Absent in standalone/test renders.
+  const openDetailPanelCtx = getContext('openDetailPanel') ?? null;
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
@@ -3022,6 +3026,14 @@
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
+                  repoId={selectedRepoId || null}
+                  onAgentProvenance={(agentId) => {
+                    // Agent references in the moldable views open the agent's
+                    // provenance (full agent detail: conversation SHA, MRs,
+                    // cost, provenance chain).
+                    if (openDetailPanelCtx) openDetailPanelCtx({ type: 'agent', id: agentId });
+                  }}
+                  onEditSpec={(specPath) => openSpecEditor(specPath)}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">
