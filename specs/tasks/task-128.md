@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
