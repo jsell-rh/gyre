@@ -495,6 +495,7 @@ diesel::table! {
         max_cost_per_day -> Nullable<Double>,
         max_concurrent_agents -> Nullable<Integer>,
         max_agent_lifetime_secs -> Nullable<BigInt>,
+        enforcement_action -> Nullable<Text>,
         updated_at -> BigInt,
     }
 }
