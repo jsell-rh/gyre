@@ -655,6 +655,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
+                RouteResourceMapping::exempt("/api/v1/notifications"),
+                RouteResourceMapping::exempt("/api/v1/notifications/unread-count"),
+                RouteResourceMapping::exempt("/api/v1/notifications/mark-all-read"),
+                RouteResourceMapping::exempt("/api/v1/notifications/preferences"),
+                RouteResourceMapping::exempt("/api/v1/notifications/stream"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/read"),
