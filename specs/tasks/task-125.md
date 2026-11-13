@@ -4,11 +4,11 @@ spec_ref: "user-management.md §API > Teams"
 depends_on:
   - task-122
   - task-123
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -86,94 +86,3 @@ From §API > Notifications:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §API > Teams and §API > Notifications. Existing team endpoints: `gyre-server/src/api/users.rs` (create_team, list_teams). Route registration: `gyre-server/src/api/mod.rs` — grep for `/teams/` and `/notifications`. Existing notification endpoints: grep for `get_my_notifications\|get_notification_count\|notification_preferences` in users.rs. SSE implementation pattern: grep for `Sse\|axum::response::sse` in the codebase for existing SSE examples. Notification preferences: `gyre-adapters/src/sqlite/user_profile.rs` may have existing preference storage.
-
-## Shipped
-
-Production work: commit `bc0d0eac` (feat(task-125), original implementation),
-repair commit `e4af712a` (verification-finding repair), and review-repair
-commit `83594b91` (attempt acba40e3 — the two review findings below). The
-assigned task body above is left byte-identical to the assigned contract,
-including the unchecked acceptance criteria — checking those boxes is a
-normative change reserved for the independent reviewer.
-
-### Teams (§API > Teams) — audit only, no code needed
-
-All five specced team endpoints already shipped with task-122 and were
-re-audited against the spec table: `GET/POST /workspaces/:id/teams`,
-`PUT/DELETE /workspaces/:id/teams/:team_id`,
-`POST /workspaces/:id/teams/:team_id/members`,
-`DELETE /workspaces/:id/teams/:team_id/members/:user_id` — authenticating,
-tenant-scoped, gated on Owner/Admin/TenantAdmin, lead validated against real
-workspace membership, 409 on slug collision, cross-workspace team id → 404,
-members limited to workspace members. Covered by task-122's test suite
-(team_crud_slug_lead_and_membership_flow, team_routes_are_workspace_scoped,
-team_management_requires_owner_admin_or_tenant_admin, …).
-
-### Notifications (§API > Notifications) — spec-path surface
-
-- `GET /api/v1/notifications` — caller-scoped listing, limit/offset pagination,
-  filters `?type=`, `?priority=` (case-insensitive; widens to its HSI §8 rank
-  band via `NotificationPriority::rank_band`/`from_level_str`; unknown level →
-  400), `?workspace_id=`, `?repo_id=` — pushed down through
-  `NotificationRepository::list_for_user` into SQLite, PostgreSQL, and mem
-  (real storage filtering, not handler post-filtering), plus pre-existing
-  `?min_priority=&max_priority=` rank filters. Legacy
-  `/users/me/notifications` shares the same implementation.
-- `GET /api/v1/notifications/unread-count` — new `count_unread` port method
-  (SQLite/PG/mem): active (unresolved, undismissed) AND unread rows; optional
-  `?workspace_id=`.
-- `PUT /api/v1/notifications/{id}/read` — spec method on the existing
-  per-handler-auth mark-read handler (POST kept for pre-existing callers).
-- `POST /api/v1/notifications/mark-all-read` — new `mark_all_read` port method
-  (all three adapters): stamps `read_at`, optional `?workspace_id=` sweep,
-  returns `{marked}`, drives unread-count to zero.
-- `GET/PUT /api/v1/notifications/preferences` — spec path for the existing
-  HSI §12 handlers.
-- `GET /api/v1/notifications/stream` — SSE stream (heartbeat keep-alive,
-  per-event user+tenant+optional-workspace filtering in the handler).
-
-### Review repair `83594b91` (attempt acba40e3) — SSE fan-out closure
-
-- **Bare-repo persistence bypass (graph_extraction):** the two push-scoped
-  persistence sites (`ConflictingInterpretations`, `SpecAssertionFailure`)
-  wrote through the raw `NotificationRepository` handed to `DivergencePorts`,
-  so git pushes, mirror syncs, and repo imports stored notifications that
-  never reached the stream. All four production `DivergencePorts` feeders
-  (git_http.rs, mirror_sync.rs, api/repos.rs ×2) now pass
-  `AppState::broadcasting_notifications()` — a `NotificationRepository`
-  decorator (`crates/gyre-server/src/notifications.rs`) whose `create`
-  persists AND broadcasts. `AppState::create_notification` delegates to the
-  same wrapper, so the fan-out now has exactly one implementation and every
-  production emitter routes through it (verified by sweep: the only
-  `notification_broadcast_tx.send` site is the wrapper; the only remaining
-  bare `state.notifications.create` uses are `#[cfg(test)]` seeds).
-- **Lagged stream termination (users.rs):** `notification_stream` treated
-  broadcast `RecvError::Lagged` as channel-closed and silently ended a live
-  subscriber's stream after a >1024-notification burst. `Lagged` now
-  `continue`s (the channel is live; missed messages are gone); only `Closed`
-  ends the stream.
-- **Regression test:** `push_check_notifications_broadcast_to_stream_
-  subscribers` (graph_extraction.rs) drives a real failing-assertion push
-  check through `DivergencePorts` built with the broadcasting wrapper and
-  asserts the notification is both persisted and delivered on a subscribed
-  broadcast receiver — it fails at the broadcast assertion if a feeder ever
-  passes a bare repo again.
-
-### Test evidence
-
-In-sandbox (build wrapper): `cargo check -p gyre-server` and
-`cargo check -p gyre-server --tests` clean; `cargo clippy -p gyre-server
---lib` shows no new warnings (129 before and after; only line-number shifts);
-check-arch, check-mem-port-contracts, check-task-commit-attribution,
-check-assertionless-tests, check-conditional-test-guards,
-check-identical-baselines, check-in-memory-state-stores, and
-check-inert-enforcement all pass. gyre-server test compilation is blocked by
-the 4 GiB build wrapper and belongs to the independent verifier — required
-probes (also recorded in /tmp/stage/review-evidence/task-125-repair-evidence.md):
-
-    cargo test -p gyre-server --lib push_check_notifications_broadcast_to_stream_subscribers
-    cargo test -p gyre-server --lib push_check_creates_priority9_notifications_for_failed_assertions
-    cargo test -p gyre-server --lib notification_stream_delivers_own_notifications_only
-    cargo test -p gyre-server --lib spec_path_notifications_list_with_filters
-    cargo test -p gyre-server --lib graph_extraction::tests
-    cargo test -p gyre-server --lib notifications
