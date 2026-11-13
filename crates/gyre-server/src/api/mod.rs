@@ -99,10 +99,11 @@ use std::sync::Arc;
 use users::{
     add_team_member, create_team, create_token, create_user, delete_team, delete_token,
     dismiss_notification, get_judgments, get_me, get_my_notifications, get_notification_count,
-    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
-    mark_notification_read, mark_notification_unread, remove_member, remove_team_member,
-    resolve_notification, update_me, update_member_role, update_notification_preferences,
-    update_team,
+    get_notification_preferences, get_unread_count, invite_member, list_members,
+    list_my_notifications, list_teams, list_tokens, mark_all_read_notifications,
+    mark_notification_read, mark_notification_unread, notification_stream, remove_member,
+    remove_team_member, resolve_notification, update_me, update_member_role,
+    update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -923,6 +924,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/users/me/notifications/count",
             get(get_notification_count),
         )
+        // Spec paths (user-management.md §API > Notifications). Same handlers
+        // and per-handler scoping as the legacy /users/me routes above.
+        .route("/api/v1/notifications", get(list_my_notifications))
+        .route("/api/v1/notifications/unread-count", get(get_unread_count))
+        .route(
+            "/api/v1/notifications/mark-all-read",
+            post(mark_all_read_notifications),
+        )
+        .route(
+            "/api/v1/notifications/preferences",
+            get(get_notification_preferences).put(update_notification_preferences),
+        )
+        .route("/api/v1/notifications/stream", get(notification_stream))
         .route(
             "/api/v1/notifications/:id/dismiss",
             post(dismiss_notification),
@@ -933,7 +947,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/notifications/:id/read",
-            post(mark_notification_read),
+            // Spec (user-management.md §API > Notifications) names PUT;
+            // POST is kept for the pre-existing clients of the same handler.
+            put(mark_notification_read).post(mark_notification_read),
         )
         .route(
             "/api/v1/notifications/:id/unread",
