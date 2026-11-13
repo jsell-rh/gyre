@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -142,78 +142,3 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
-
-## Shipped
-
-### Round 6: repair the seven review findings from checkpoint a989d27 (commit `3471b92b`)
-
-The engine, CRUD/dry-run/decisions/effective API, builtin seeding,
-caching, and the round-1 through round-5 repairs are in the earlier
-merged commits. Round 6 closes all seven findings of the round-5
-review:
-
-1. **Re-spawn containment (agent-repo-scope).**
-   `relaunch_agent_session` now mints the fresh session JWT via
-   `mint_worker_scoped` — the same worker-scope shape as the first
-   spawn (`workspace_id` + `repo_id` claims, attestation level mirrored
-   from the resolved compute target) — instead of `mint_with_workload`,
-   which hardcoded `repo_id: None`. A re-spawned agent's requests now
-   carry a real `subject.repo_scope`, so the `builtin-agent-repo-scope`
-   containment Deny (750) fires against out-of-scope repos instead of
-   `builtin-agent-scoped-access` (700) granting tenant-wide access.
-2. **Fail-closed attestation gates.** `evaluate_attestation_abac`
-   (enforced merge path) propagates workspace-store and policy-store
-   read errors as `Err`; both merge-path callers requeue the queue entry
-   (hold-then-retry, same semantics as `supervised_trust_hold`) instead
-   of evaluating with a silently missing tenant scope.
-   `evaluate_push_attestation_abac` propagates the same reads; its
-   caller logs a warn and skips the audit-only evaluation on error.
-3. **Reserved-prefix invariant on update/delete.** `update_policy`
-   and `delete_policy` now reject when the STORED policy name carries
-   the `trust:`/`builtin:` prefix, so trust-preset policies (built_in:
-   false, immutable: false) can no longer be disabled, rewritten, or
-   deleted by id — only the atomic, transition-validated
-   `apply_trust_transition` path mutates them.
-4. **§Audit Integration log-level contract + AbacDenied events** on
-   both attestation paths: denials at `warn`, allowances at `debug`, and
-   a Deny emits an `AbacDenied` audit event via the new
-   `record_abac_denied_service` (marked `enforced: true` on the merge
-   gate, `enforced: false` on the audit-only push path).
-5. **Concrete decision resource ids.** `PolicyDecision.resource_id`
-   now records the addressed entity id (`resource.id` from the
-   evaluation context / path extraction; `addressed_resource_id` /
-   `path_resource_id` helpers), falling back to the route pattern only
-   on collection routes.
-6. **Visible audit-write failures.** All six `record_decision` sites go
-   through `policy_engine::record_decision_audit`, which warn-logs on
-   store failure — a dropped decision is distinguishable from "no
-   decisions".
-7. **`subject.global_role` set semantics.** Empty roles leave the
-   attribute unset (fail closed — the fabricated `ReadOnly` that
-   matched `builtin-readonly-get-only` is gone); multi-role callers
-   get a list-valued attribute, and `eval_condition` evaluates
-   Equals/NotEquals on list values with membership semantics. The
-   effective-permissions endpoint's extraction was aligned.
-
-### Test evidence
-
-Seven new focused tests (one per finding, each with a documented
-killing direction): `respawn_jwt_carries_worker_scope_claims`,
-`condition_equals_on_list_attribute_uses_set_semantics`,
-`roleless_caller_gets_no_fabricated_readonly_role`,
-`decision_records_concrete_resource_id`,
-`trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
-`attestation_deny_records_abac_denied_audit_event`, and
-`attestation_abac_fails_closed_on_workspace_store_error` (injects a
-failing workspace store and asserts the `Err`).
-
-This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
-compilation is deferred to the independent verifier per the assignment
-instructions: `cargo check -p gyre-server --tests` (which type-checks
-every new test) passes — evidence in
-`/tmp/stage/review-evidence/`. The verifier must run the seven tests
-above plus the touched-surface suites (`abac_middleware`,
-`merge_processor`, `ralph_loop`, `policy_engine`, `api::policies`,
-`git_http`) — see `review-evidence/README.md` for the exact commands.
-All mechanical repo checks (arch, inert-enforcement, abac-route-registry
-and the other frozen-count scripts) pass.
