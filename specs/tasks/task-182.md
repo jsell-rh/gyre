@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "afd7e164cba686c33acc937fc15b1edd56964997"]
+commits: ["a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "afd7e164cba686c33acc937fc15b1edd56964997", "13b99dd78a2d35b3c60cf3dd653486ffd5fb9708"]
 ---
 
 ## Spec Excerpt
@@ -76,10 +76,9 @@ Read `system-explorer.md` §4 "Concept Views" for the full specification. The co
 
 Concept views (system-explorer.md §4) on the task-178 canvas substrate,
 covering all three interaction modes and both data-source mechanisms.
-This round merged the assignment base `a218b9565` (task-198 Spec Links)
-into the branch; no product code changed — the previously reviewed
-implementation was preserved through the merge and re-verified on the
-merged tree.
+This round repaired the CI failure on the merged tree (see "CI repair"
+below); the previously reviewed implementation was preserved through
+the base merge and re-verified.
 
 ### Behavior
 
@@ -119,39 +118,54 @@ merged tree.
   flattened to `{scope:{type:'all'}}`. Selecting a saved ad-hoc concept
   from the view selector re-applies the grouping.
 
-### This round: merge of assignment base (task-198)
+### CI repair (this round)
 
-The assigned repair was a rebase whose auto-merge left one conflict in
-`docs/api-reference.md`, resolved as merge commit `ce2418944`: the
-base-side task-171 wording for `POST /workspaces/{id}/briefing/ask`
-(history cap, rate limit, `llm_query` budget charge) was kept, together
-with this branch's task-182 concept endpoints (workspace concept
-projection and the `/graph/concepts` browser listing). All source paths
-(graph.rs, abac_middleware.rs, explorer-generate.md) auto-merged
-cleanly; the task-198 spec-links code required no adaptation.
+PR #807 run 43354234804 failed
+`api::graph::tests::list_workspace_graph_concepts_unions_and_dedupes`:
+the workspace concept listing (`list_workspace_graph_concepts`)
+deduped case-insensitive concept names first-wins over
+`list_by_workspace()`, whose iteration order the port does not guarantee
+(the mem adapter returns HashMap order). With case-variant spellings of
+one concept across repos (repo-1 `Authentication`, repo-2
+`authentication`), the surviving spelling depended on adapter iteration
+order — CI got `authentication` where `Authentication` was expected
+(reproduced as a standalone order-flip in
+`/tmp/stage/review-evidence/dedupe_check.rs`). Fixed in `13b99dd7`:
+each case-insensitive name now keeps a deterministic winner — the
+lexicographically smallest (name, description) pair — and the listing
+is sorted, so every adapter returns the same response for the same
+manifest set regardless of iteration order. No spec text changed; the
+test's own contract ("the winner must not matter") is now actually
+satisfied.
 
 ### Test evidence
 
-Focused matrix, run green on the merged tree (HEAD `ce2418944`),
-evidence: `/tmp/stage/review-evidence/focused-merge-round.log`:
+This round (repair commit `13b99dd7`, merged tree at `97b5d097`):
 
-- `web` vitest: ExplorerConceptViews (8 tests) plus the other
-  merge-affected suites (ExplorerViewNavigableArchitecture,
-  filter-categories, generated-view, view-query-scope) — 5 files,
-  74 tests passed. ExplorerConceptViews pins the manifest-concept fade
-  against actual canvas draw output, the end-to-end Ask flow, the
-  saved-ad-hoc-concept reload round trip, the multi-select →
-  right-click → dialog → save persistence assert, and dialog
-  validation/error paths.
-- `cargo check -p gyre-server` — clean.
-- `cargo test -p gyre-common` — 124 pass.
-- `cargo test -p gyre-domain` — 486 pass (478 lib + 8 integration).
-- Mechanical checks (exit 0): check-arch.sh, check-abac-route-registry.sh,
-  check-migration-versions.sh, check-mem-port-contracts.sh.
+- `cargo check -p gyre-server --tests` — clean (this sandbox; full
+  server test builds are deferred to the verifier per the 4 GiB budget).
+- `rustfmt --check` on `crates/gyre-server/src/api/graph.rs` — clean.
+- Standalone order-independence reproduction of the new dedupe (both
+  repo iteration orders → `["Authentication", "Billing"]` with the
+  manifest description): `/tmp/stage/review-evidence/dedupe_check.rs`,
+  exit 0.
+- `scripts/check-task-commit-attribution.sh` — exit 0 with the
+  restored commits frontmatter.
 
-Full workspace suites, architecture checks, all-target Clippy, and
-GitHub CI are owned by the independent verifier. Server tests for the
-verifier: `cargo test -p gyre-server graph_concept`,
-`cargo test -p gyre-server workspace_graph_concept`,
-`cargo test -p gyre-server list_graph_concepts`, plus full gyre-domain
-and gyre-common suites.
+Prior-round evidence on the same implementation (merge round
+`ce2418944`): `web` vitest ExplorerConceptViews (8 tests) plus
+merge-affected suites — 5 files, 74 tests passed, pinning the
+manifest-concept fade against actual canvas draw output, the end-to-end
+Ask flow, the saved-ad-hoc-concept reload round trip, the multi-select →
+right-click → dialog → save persistence assert, and dialog
+validation/error paths; `cargo test -p gyre-common` 124 pass;
+`cargo test -p gyre-domain` 486 pass; mechanical checks (check-arch,
+abac-route-registry, migration-versions, mem-port-contracts) exit 0.
+
+Server tests for the verifier: `cargo nextest run -p gyre-server
+api::graph::tests::` — in particular
+`list_workspace_graph_concepts_unions_and_dedupes` (the repaired
+flake), `workspace_graph_concept_unions_manifest_projections`,
+`list_graph_concepts_returns_manifest_concepts`, and
+`graph_concept_returns_manifest_projection_not_substring` — plus the
+full web suite (`cd web && npm test`).
