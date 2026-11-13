@@ -268,6 +268,12 @@ EnMaaS route. `toolchain.json` pins release archive/binary checksums and the
 public worker image digest. The system's independently installed fullsend is
 not overwritten; modified or mismatched runners are rejected before allocation.
 
+Assignment checkouts clone only the default branch with `blob:none`, then fetch
+the exact assigned candidate and base. Full commit ancestry is retained for
+attribution; unrelated historical attempt branches are excluded. Checkout blobs
+are materialized as needed and no host-local object alternates are copied into
+the sandbox. Remote Git access remains available for historical blob reads.
+
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
 OpenAI-completions model entry and `supportsDeveloperRole: false`. The configured
