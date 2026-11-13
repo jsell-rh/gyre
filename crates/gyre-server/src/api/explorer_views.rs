@@ -3566,6 +3566,7 @@ mod tests {
         assert_eq!(short_sha("abc"), "abc");
         assert_eq!(short_sha(""), "");
         // Multi-byte chars must not panic (fixed byte slicing would).
-        assert_eq!(short_sha("déadbeef"), "déadbe");
+        // First 7 *chars*, not bytes: char-based take, so "déadbee".
+        assert_eq!(short_sha("déadbeef"), "déadbee");
     }
 }
