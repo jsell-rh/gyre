@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,70 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**This round: repair of review finding d6b8a97** (commit
-`5df8f2b1`) — local-mode invitation acceptance issued no credential, so
-the created account could never authenticate. The invitation flow itself
-(entities, ports, SQLite/mem adapters, migrations, 5 tenant endpoints,
-workspace lifecycle, CSPRNG+SHA-256 tokens, expiry job, bulk invite, ABAC
-mappings) is unchanged production code carried from the prior accepted
-rounds through merge `a061aed9`.
-
-### Repair: credential delivery at local-mode acceptance
-
-`POST /api/v1/invite/{token}/accept` now mints the account's **first API
-key in the accept response** (the reviewer's closure option 1, mirroring
-the `POST /api/v1/users` bootstrap pattern — the platform's local
-credential is the API key; there is no password-login path anywhere, and
-the only other unauthenticated mint creates a *new* user, so without this
-the accepted invitee was permanently unable to log in in the spec's
-air-gapped/no-IdP scenario):
-
-- Raw key `gyre_{uuid v4}` (CSPRNG), returned exactly once; only the
-  SHA-256 hash is persisted, in `state.api_keys` — the store the auth
-  extractor consults — so the key authenticates through the real routing
-  chain immediately.
-- Minted only after every side effect succeeded (memberships activated,
-  status Accepted); on mint failure the invitation rolls back to Pending
-  and a retry mints again (the account dedups via the namespace lookup).
-- **Minted only for accounts that exist because of invitation acceptance
-  to that email**: a fresh local-mode create, or the
-  `tenant:{tenant}:email:{email}`-namespaced local account found on
-  re-invite/retry (whose earlier key, if any, never reached the client).
-  A linked **pre-existing** account (SSO Keycloak subject, SCIM,
-  bootstrap `local:{username}`) returns `api_key: null` — token
-  possession must not mint a credential that bypasses the account's
-  existing auth factor. An SSO-claimed local account (external_id
-  re-pointed at the Keycloak subject) also falls in the no-mint arm.
-
-Docs (`docs/api-reference.md` accept-row) and coverage row 5 updated to
-record the credential-delivery behavior.
-
-### Test evidence
-
-New/extended tests in `api::invitations` (all distinguish the repaired
-behavior from the real defect — without the mint, the accept response has
-no key and the tests fail):
-
-- `local_mode_accept_mints_authenticating_api_key` — unauthenticated
-  accept returns `api_key.key` (`gyre_…`, name `invitation`); the key
-  authenticates through `GET /api/v1/users/me` as the new user (id,
-  username, display name, tenant binding), and resolves in
-  `state.api_keys` via its hash only.
-- `reinvite_acceptance_mints_fresh_key_for_existing_local_account` — a
-  second invitation to the same tenant+email delivers a **fresh** key
-  authenticating as the **same** user (no parallel account).
-- `accept_links_existing_sso_user_instead_of_parallel_account`
-  (extended) — linked SSO acceptance returns `api_key: null`.
-
-Sandbox probes (exit 0, source SHAs and logs in
-`/tmp/stage/review-evidence/task-110-repair.md`): `cargo check -p
-gyre-server --tests` (type-checks the new tests), `cargo clippy -p
-gyre-server` (zero findings in invitations.rs), `rustfmt --check` on the
-touched file, `check-arch.sh`, `check-abac-route-registry.sh`,
-`check-mem-port-contracts.sh`. **gyre-server test execution is deferred to
-the independent verifier** (sandbox 4 GiB build cap): run `cargo test -p
-gyre-server --lib api::invitations::` and the full server suite at head
-`5df8f2b1`.
