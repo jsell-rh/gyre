@@ -1027,6 +1027,10 @@ fn short_sha(sha: &str) -> String {
 /// hallucinated citation — it is reduced to its bare id text (readable
 /// prose, no link) and excluded from `entity_refs`, so the UI can never
 /// render a clickable reference to an artifact that does not exist.
+/// A token of an unknown kind is not citation grammar this validator
+/// governs — it is preserved literally (the frontend only links the four
+/// known kinds, so it renders as plain text and can never become an
+/// ungrounded clickable reference).
 /// Validated tokens stay in the text verbatim; the frontend parses the
 /// same token syntax to render them as links.
 fn validate_entity_refs(answer: &str, grounding: &GraphGrounding) -> (String, Vec<EntityRef>) {
@@ -1063,7 +1067,16 @@ fn validate_entity_refs(answer: &str, grounding: &GraphGrounding) -> (String, Ve
                         id: id.to_string(),
                         label: id.to_string(),
                     }),
-                    _ => None,
+                    // Unknown kind: keep the literal token text. The
+                    // frontend regex only links node|spec|commit|agent, so
+                    // this renders as plain prose — never an ungrounded
+                    // clickable reference. (Reducing to the bare id here
+                    // would silently mangle non-citation text.)
+                    _ => {
+                        cleaned.push_str(&rest[start..start + PREFIX.len() + close + 1]);
+                        rest = &after_prefix[close + 1..];
+                        continue;
+                    }
                 };
                 match resolved {
                     Some(r) => {
