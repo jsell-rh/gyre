@@ -2,9 +2,13 @@
      200px collapsible left panel INSIDE the Architecture content area —
      not the app sidebar. Category checkboxes (Boundaries, Interfaces,
      Data, Specs) toggle node visibility on the canvas; the Concepts
-     section lists predefined concepts discovered from the knowledge graph
-     (filter-categories.js) and focuses the canvas on the concept's nodes
-     when toggled. -->
+     section lists the two concept mechanisms of system-explorer.md §4:
+     predefined concepts from the repo's spec manifest (served by
+     GET /repos/:id/graph/concepts — manifest-based projections) and
+     concepts discovered from the knowledge graph (filter-categories.js
+     substring matching). Selecting either fades the canvas to the
+     concept's elements — non-concept nodes dim to background, they are
+     not removed. -->
 <script>
   import { discoverConcepts, categoryCounts } from '../lib/filter-categories.js';
 
@@ -12,6 +16,14 @@
     nodes = [],
     activeCategories = $bindable({ boundaries: true, interfaces: true, data: true, specs: true }),
     activeConcepts = $bindable([]),
+    // Predefined concepts from the spec manifest (task-182,
+    // system-explorer.md §4): [{ name, description }] fetched by the shell
+    // from GET /repos/:id/graph/concepts.
+    manifestConcepts = [],
+    // Name of the active manifest concept (null when none) — single-select,
+    // unlike the multi-select discovered concepts.
+    activeManifestConcept = null,
+    onToggleManifestConcept = () => {},
     onClose = () => {},
   } = $props();
 
@@ -41,6 +53,7 @@
 
   function clearConcepts() {
     activeConcepts = [];
+    if (activeManifestConcept) onToggleManifestConcept(activeManifestConcept);
   }
 </script>
 
@@ -95,23 +108,42 @@
       Concepts
     </button>
     {#if conceptsOpen}
-      {#if concepts.length === 0}
+      {#if manifestConcepts.length === 0 && concepts.length === 0}
         <p class="filter-concepts-empty">No concepts discovered in this graph yet.</p>
       {:else}
-        <div class="filter-concepts" role="group" aria-label="Concepts">
-          {#each concepts as c (c.name)}
-            <button
-              class="filter-concept-chip"
-              class:active={activeConcepts.includes(c.name)}
-              onclick={() => toggleConcept(c.name)}
-              aria-pressed={activeConcepts.includes(c.name)}
-              title={`Focus on the ${c.count} node${c.count === 1 ? '' : 's'} related to ${c.name}`}
-              data-testid={`filter-concept-${c.name}`}
-              type="button"
-            >{c.name} <span class="filter-concept-count">{c.count}</span></button>
-          {/each}
-        </div>
-        {#if activeConcepts.length > 0}
+        {#if manifestConcepts.length > 0}
+          <p class="filter-concepts-subhead">Predefined</p>
+          <div class="filter-concepts" role="group" aria-label="Predefined concepts (manifest)">
+            {#each manifestConcepts as c (c.name)}
+              <button
+                class="filter-concept-chip manifest"
+                class:active={activeManifestConcept === c.name}
+                onclick={() => onToggleManifestConcept(c.name)}
+                aria-pressed={activeManifestConcept === c.name}
+                title={c.description || `Show the ${c.name} concept`}
+                data-testid={`filter-manifest-concept-${c.name}`}
+                type="button"
+              >{c.name}</button>
+            {/each}
+          </div>
+        {/if}
+        {#if concepts.length > 0}
+          <p class="filter-concepts-subhead">Discovered</p>
+          <div class="filter-concepts" role="group" aria-label="Discovered concepts">
+            {#each concepts as c (c.name)}
+              <button
+                class="filter-concept-chip"
+                class:active={activeConcepts.includes(c.name)}
+                onclick={() => toggleConcept(c.name)}
+                aria-pressed={activeConcepts.includes(c.name)}
+                title={`Focus on the ${c.count} node${c.count === 1 ? '' : 's'} related to ${c.name}`}
+                data-testid={`filter-concept-${c.name}`}
+                type="button"
+              >{c.name} <span class="filter-concept-count">{c.count}</span></button>
+            {/each}
+          </div>
+        {/if}
+        {#if activeConcepts.length > 0 || activeManifestConcept}
           <button class="filter-concepts-clear" onclick={clearConcepts} type="button">Clear concepts</button>
         {/if}
       {/if}
@@ -209,6 +241,15 @@
   .filter-section-chevron.open { transform: rotate(90deg); }
 
   .filter-concepts { display: flex; flex-wrap: wrap; gap: 4px; }
+  .filter-concepts-subhead {
+    margin: 4px 0 0;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+  }
+  .filter-concept-chip.manifest { border-style: dashed; }
   .filter-concept-chip {
     display: inline-flex;
     align-items: center;

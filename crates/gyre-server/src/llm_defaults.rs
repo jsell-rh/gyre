@@ -151,7 +151,10 @@ in the explanation that no trace data is available for this concept. \
 - \"hierarchical\" for containment/structure questions (\"what is X made of\", \
 \"show the module tree\"). \
 - \"graph\" for relationship questions (\"what depends on Y\", \"how is X \
-connected to Z\"). \
+connected to Z\") and for concept questions (\"show me everything related to \
+X\", \"what is part of the X concept\") — concept questions set data.concept \
+to the concept term (a case-insensitive substring match over node names and \
+qualified names — the cross-cutting concept view). \
 - \"list\" for enumeration questions (\"list all endpoints\"). \
 \
 When the user message contains a previous view definition, the question is a \
