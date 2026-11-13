@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb"]
 ---
 
 ## Spec Excerpt
@@ -145,63 +145,75 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### Round 5: persist decisions on the supervised-trust-hold and push-time paths (commit `0dc466e7`)
+### Round 6: repair the seven review findings from checkpoint a989d27 (commit `3471b92b`)
 
-The engine, CRUD/dry-run/decisions/effective API, builtin seeding, caching,
-and the round-1 through round-4 repairs (agent-repo-scope containment,
-`?subject=` binding, reserved system identity + policy-allowed global
-token, scope applicability, stale security-model comments) are in the
-earlier commits listed above. Round 5 closes the round-4 review finding
-(360234bd): coverage row 13 claimed `record_decision` on every evaluation
-path, but `evaluate_merge_abac` (the supervised-trust hold) and the
-git_http push-time attestation evaluation only logged — they never
-persisted a PolicyDecision, so the "every evaluation is logged and
-queryable" acceptance criterion was not literally met on those two paths.
+The engine, CRUD/dry-run/decisions/effective API, builtin seeding,
+caching, and the round-1 through round-5 repairs are in the earlier
+merged commits. Round 6 closes all seven findings of the round-5
+review:
 
-**Repair (real recording, not a note correction):**
-
-- `evaluate_merge_abac` now builds and records a PolicyDecision (subject
-  `merge-processor`/`system`, action `merge`, resource `mr`/MR id) after
-  evaluation. An explicit Deny match (the hold) logs at `warn`, everything
-  else at `debug` — the same log-level contract as the middleware.
-- The git_http push-time attestation evaluation was extracted into
-  `evaluate_push_attestation_abac` (identical attribute context, resource
-  scope chain, and engine call as the inline code it replaces) which
-  records its decision (subject `agent`, action `push`, resource
-  `attestation`/repo id) before the existing info log. The push call site
-  carries the documented `// enforcement:ok` exemption because the gate is
-  audit-only by spec (TASK-006 Phase 1) — decision recorded, never
-  enforced, exactly as at base.
-
-Four production `record_decision` call sites now exist: middleware
-requests, `evaluate_merge_abac`, `evaluate_attestation_abac`, and
-`evaluate_push_attestation_abac`. Coverage row 13 cites these real sites
-and the tests below.
+1. **Re-spawn containment (agent-repo-scope).**
+   `relaunch_agent_session` now mints the fresh session JWT via
+   `mint_worker_scoped` — the same worker-scope shape as the first
+   spawn (`workspace_id` + `repo_id` claims, attestation level mirrored
+   from the resolved compute target) — instead of `mint_with_workload`,
+   which hardcoded `repo_id: None`. A re-spawned agent's requests now
+   carry a real `subject.repo_scope`, so the `builtin-agent-repo-scope`
+   containment Deny (750) fires against out-of-scope repos instead of
+   `builtin-agent-scoped-access` (700) granting tenant-wide access.
+2. **Fail-closed attestation gates.** `evaluate_attestation_abac`
+   (enforced merge path) propagates workspace-store and policy-store
+   read errors as `Err`; both merge-path callers requeue the queue entry
+   (hold-then-retry, same semantics as `supervised_trust_hold`) instead
+   of evaluating with a silently missing tenant scope.
+   `evaluate_push_attestation_abac` propagates the same reads; its
+   caller logs a warn and skips the audit-only evaluation on error.
+3. **Reserved-prefix invariant on update/delete.** `update_policy`
+   and `delete_policy` now reject when the STORED policy name carries
+   the `trust:`/`builtin:` prefix, so trust-preset policies (built_in:
+   false, immutable: false) can no longer be disabled, rewritten, or
+   deleted by id — only the atomic, transition-validated
+   `apply_trust_transition` path mutates them.
+4. **§Audit Integration log-level contract + AbacDenied events** on
+   both attestation paths: denials at `warn`, allowances at `debug`, and
+   a Deny emits an `AbacDenied` audit event via the new
+   `record_abac_denied_service` (marked `enforced: true` on the merge
+   gate, `enforced: false` on the audit-only push path).
+5. **Concrete decision resource ids.** `PolicyDecision.resource_id`
+   now records the addressed entity id (`resource.id` from the
+   evaluation context / path extraction; `addressed_resource_id` /
+   `path_resource_id` helpers), falling back to the route pattern only
+   on collection routes.
+6. **Visible audit-write failures.** All six `record_decision` sites go
+   through `policy_engine::record_decision_audit`, which warn-logs on
+   store failure — a dropped decision is distinguishable from "no
+   decisions".
+7. **`subject.global_role` set semantics.** Empty roles leave the
+   attribute unset (fail closed — the fabricated `ReadOnly` that
+   matched `builtin-readonly-get-only` is gone); multi-role callers
+   get a list-valued attribute, and `eval_condition` evaluates
+   Equals/NotEquals on list values with membership semantics. The
+   effective-permissions endpoint's extraction was aligned.
 
 ### Test evidence
 
-Two new tests, one per repaired path, each seeding a real matching policy
-(so the record carries a non-default matched policy — a stub persisting a
-hardcoded decision cannot pass) and asserting the persisted decision via
-the same audit-store surface `GET /api/v1/policies/decisions` reads:
+Seven new focused tests (one per finding, each with a documented
+killing direction): `respawn_jwt_carries_worker_scope_claims`,
+`condition_equals_on_list_attribute_uses_set_semantics`,
+`roleless_caller_gets_no_fabricated_readonly_role`,
+`decision_records_concrete_resource_id`,
+`trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
+`attestation_deny_records_abac_denied_audit_event`, and
+`attestation_abac_fails_closed_on_workspace_store_error` (injects a
+failing workspace store and asserts the `Err`).
 
-- `evaluate_merge_abac_records_decision_to_audit_trail`
-  (merge_processor.rs): seeds an Allow for the merge-processor service
-  identity, asserts the returned EvalResult, then asserts the recorded
-  decision's subject_id/subject_type/action/resource_type/resource_id/
-  decision/matched_policy.
-- `push_attestation_abac_records_decision_to_audit_trail` (git_http.rs):
-  seeds an Allow keyed on `subject.attestation_chain_present`, calls the
-  extracted helper with a real single-root chain, and asserts the same
-  fields on the persisted decision.
-
-Removing either `record_decision` call fails its test
-  (`decisions.len() == 1`). In-sandbox probes: `cargo check -p gyre-server`
-  and `cargo check -p gyre-server --tests` both clean (build wrapper);
-  mechanical checks check-inert-enforcement, check-arch,
-  check-dead-message-kinds, check-mem-port-contracts,
-  check-fabricated-scope-defaults, check-lossy-secret-conversion,
-  check-relative-path-defaults all OK. gyre-server test execution is
-deferred to the independent verifier (4 GiB budget): run
-`cargo test -p gyre-server --lib evaluate_merge_abac_records_decision_to_audit_trail push_attestation_abac_records_decision_to_audit_trail`,
-then the full suite. Evidence: `/tmp/stage/review-evidence/task-129-round5-audit-recording.md`.
+This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
+compilation is deferred to the independent verifier per the assignment
+instructions: `cargo check -p gyre-server --tests` (which type-checks
+every new test) passes — evidence in
+`/tmp/stage/review-evidence/`. The verifier must run the seven tests
+above plus the touched-surface suites (`abac_middleware`,
+`merge_processor`, `ralph_loop`, `policy_engine`, `api::policies`,
+`git_http`) — see `review-evidence/README.md` for the exact commands.
+All mechanical repo checks (arch, inert-enforcement, abac-route-registry
+and the other frozen-count scripts) pass.
