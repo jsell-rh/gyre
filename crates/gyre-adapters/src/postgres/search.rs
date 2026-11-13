@@ -55,18 +55,95 @@ CREATE TABLE IF NOT EXISTS search_index (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at BIGINT NOT NULL DEFAULT 0,
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED,
-    PRIMARY KEY (entity_type, entity_id)
+    -- Scope is part of the identity: a spec/file path is only unique within
+    -- its repo, so same-path documents in different repos must coexist.
+    PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_tsv ON search_index USING gin (tsv);
 ALTER TABLE search_index ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0;
 ";
 
-/// Create the tsvector search table + GIN index on the PG-only init path.
+/// Create the tsvector search table + GIN index on the PG-only init path,
+/// then reconcile the primary key with the current schema (see
+/// [`pk_upgrade_sql`]).
 pub(crate) fn ensure_search_table(conn: &mut PgConnection) -> Result<()> {
     use diesel::connection::SimpleConnection;
     conn.batch_execute(TSVECTOR_DDL)
         .context("create tsvector search_index table")?;
+    upgrade_search_index_pk(conn)?;
     Ok(())
+}
+
+/// task-202 widened the search_index identity from (entity_type, entity_id)
+/// to (entity_type, entity_id, workspace_id, repo_id) and changed the upsert
+/// conflict target to match. `CREATE TABLE IF NOT EXISTS` does not touch an
+/// existing table's constraints, so a deployment initialized under task-201
+/// keeps the 2-column PK — and every `INSERT ... ON CONFLICT (4 cols)` then
+/// fails with SQLSTATE 42P10 ("no unique or exclusion constraint matching
+/// the ON CONFLICT specification"). Indexing is best-effort, so the failure
+/// mode is silent: writes succeed, the index stays empty. Reconcile here,
+/// on the init path, before the new conflict target is ever used.
+fn upgrade_search_index_pk(conn: &mut PgConnection) -> Result<()> {
+    #[derive(QueryableByName)]
+    struct PkRow {
+        #[diesel(sql_type = Text)]
+        constraint_name: String,
+        #[diesel(sql_type = Text)]
+        column_name: String,
+    }
+
+    let rows = diesel::sql_query(
+        "SELECT tc.constraint_name, kcu.column_name
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_name = tc.constraint_name
+          AND kcu.constraint_schema = tc.constraint_schema
+         WHERE tc.table_schema = current_schema()
+           AND tc.table_name = 'search_index'
+           AND tc.constraint_type = 'PRIMARY KEY'
+         ORDER BY kcu.ordinal_position",
+    )
+    .load::<PkRow>(conn)
+    .context("read search_index primary key")?;
+
+    let constraint_name = rows.first().map(|r| r.constraint_name.clone());
+    let pk_cols: Vec<String> = rows.into_iter().map(|r| r.column_name).collect();
+    if let Some(sql) = pk_upgrade_sql(&constraint_name, &pk_cols) {
+        diesel::sql_query(&sql)
+            .execute(conn)
+            .with_context(|| format!("upgrade search_index primary key: {sql}"))?;
+    }
+    Ok(())
+}
+
+/// The primary key search_index must have for the current upsert conflict
+/// target (`ON CONFLICT (entity_type, entity_id, workspace_id, repo_id)`).
+const EXPECTED_SEARCH_INDEX_PK: [&str; 4] = ["entity_type", "entity_id", "workspace_id", "repo_id"];
+
+/// Decide whether the live primary key needs reconciling, returning the
+/// `ALTER TABLE` statement to run (or `None` when it already matches).
+/// Pure — unit-testable without a live PostgreSQL instance.
+///
+/// * No PK at all → add the expected one.
+/// * Old task-201 2-column PK → drop and re-add with scope columns. The old
+///   key is a subset of the new one, so the wider key is already unique; the
+///   scope columns are `NOT NULL` since task-201, so the ADD always applies.
+/// * Anything else (including a wider/custom key that does not match) → also
+///   reconciled to the canonical key, so the conflict target is guaranteed to
+///   find its constraint.
+fn pk_upgrade_sql(constraint_name: &Option<String>, pk_cols: &[String]) -> Option<String> {
+    if pk_cols == EXPECTED_SEARCH_INDEX_PK {
+        return None;
+    }
+    let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let add = "ADD PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)";
+    match constraint_name {
+        Some(name) if !pk_cols.is_empty() => Some(format!(
+            "ALTER TABLE search_index DROP CONSTRAINT {}, {add}",
+            quoted(name)
+        )),
+        _ => Some(format!("ALTER TABLE search_index {add}")),
+    }
 }
 
 // `QueryableByName`'s derive expands to `Self { field: field, … }` with spans
@@ -213,7 +290,7 @@ fn build_scope(query: &SearchQuery, w: &mut PgWhereBuilder) {
 const INSERT_SQL: &str = "
 INSERT INTO search_index (entity_type, entity_id, tenant_id, workspace_id, repo_id, title, body, metadata, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
-ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+ON CONFLICT (entity_type, entity_id, workspace_id, repo_id) DO UPDATE SET
     tenant_id  = EXCLUDED.tenant_id,
     workspace_id = EXCLUDED.workspace_id,
     repo_id    = EXCLUDED.repo_id,
@@ -359,6 +436,65 @@ fn build_filters(query: &SearchQuery, w: &mut PgWhereBuilder) -> (bool, String) 
     (has_text, from_tsq)
 }
 
+/// Compose the `search()` statement from its dynamic parts. The FROM aliases
+/// `search_index` AS `s` because the §Access Scoping clauses pushed by
+/// [`build_scope`] reference `s.*` — an unaliased FROM makes PG reject the
+/// whole query with 42P01 (kept as a function so the SQL-shape tests assert
+/// the invariants against the exact statement the port executes).
+fn search_sql(
+    from_tsq: &str,
+    rank_snip: &str,
+    order: &str,
+    where_sql: &str,
+    limit: &str,
+) -> String {
+    format!(
+        "SELECT s.entity_type,
+                s.entity_id,
+                s.title,
+                {rank_snip},
+                s.metadata::text AS metadata
+         FROM search_index s{from_tsq}{where_sql} {order} LIMIT {limit}"
+    )
+}
+
+/// WHERE construction for `suggest()`: title prefix match plus the
+/// entity_type/workspace_id shortcuts plus §Access Scoping — all inside the
+/// index query, never post-filtered.
+fn suggest_filters(query: &SearchQuery, pattern: String, w: &mut PgWhereBuilder) {
+    let p = w.text(pattern);
+    w.push(format!("s.title ILIKE {p} ESCAPE '\\\\'"));
+    if let Some(et) = &query.entity_type {
+        let p = w.text(et.clone());
+        w.push(format!("s.entity_type = {p}"));
+    }
+    if let Some(ws) = &query.workspace_id {
+        // User-supplied narrowing — intersects with the accessible set, so
+        // it can only narrow, never widen.
+        let p = w.text(ws.clone());
+        w.push(format!("s.workspace_id = {p}"));
+    }
+    build_scope(query, w);
+}
+
+/// Compose the `suggest()` statement (same `s`-alias contract as
+/// [`search_sql`]).
+fn suggest_sql(where_sql: &str, limit: &str) -> String {
+    format!(
+        "SELECT s.entity_type, s.entity_id, s.title
+         FROM search_index s{where_sql} ORDER BY s.title LIMIT {limit}"
+    )
+}
+
+/// Compose the `facet_counts()` statement (same `s`-alias contract as
+/// [`search_sql`]).
+fn facet_sql(from_tsq: &str, where_sql: &str) -> String {
+    format!(
+        "SELECT s.entity_type, s.workspace_id, s.metadata::text
+         FROM search_index s{from_tsq}{where_sql}"
+    )
+}
+
 #[async_trait]
 impl SearchPort for PgStorage {
     async fn index(&self, doc: SearchDocument) -> Result<()> {
@@ -446,15 +582,7 @@ impl SearchPort for PgStorage {
                 )
             };
             let limit = w.bigint(query.limit as i64);
-            let sql = format!(
-                "SELECT s.entity_type,
-                        s.entity_id,
-                        s.title,
-                        {rank_snip},
-                        s.metadata::text AS metadata
-                 FROM search_index s{from_tsq}{} {order} LIMIT {limit}",
-                w.sql()
-            );
+            let sql = search_sql(&from_tsq, &rank_snip, &order, &w.sql(), &limit);
 
             let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
             for param in w.params {
@@ -525,25 +653,9 @@ impl SearchPort for PgStorage {
                 // aliases `search_index` AS `s` because the scope clauses
                 // reference `s.*`.
                 let mut w = PgWhereBuilder::new();
-                let p = w.text(pattern);
-                w.push(format!("s.title ILIKE {p} ESCAPE '\\'"));
-                if let Some(et) = &query.entity_type {
-                    let p = w.text(et.clone());
-                    w.push(format!("s.entity_type = {p}"));
-                }
-                if let Some(ws) = &query.workspace_id {
-                    // User-supplied narrowing — intersects with the accessible
-                    // set, so it can only narrow, never widen.
-                    let p = w.text(ws.clone());
-                    w.push(format!("s.workspace_id = {p}"));
-                }
-                build_scope(&query, &mut w);
+                suggest_filters(&query, pattern, &mut w);
                 let limit = w.bigint(limit as i64);
-                let sql = format!(
-                    "SELECT s.entity_type, s.entity_id, s.title
-                 FROM search_index s{} ORDER BY s.title LIMIT {limit}",
-                    w.sql()
-                );
+                let sql = suggest_sql(&w.sql(), &limit);
                 let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
                 for param in w.params {
                     stmt = match param {
@@ -581,11 +693,7 @@ impl SearchPort for PgStorage {
             let mut w = PgWhereBuilder::new();
             let (_, from_tsq) = build_filters(&query, &mut w);
             build_scope(&query, &mut w);
-            let sql = format!(
-                "SELECT s.entity_type, s.workspace_id, s.metadata::text
-                         FROM search_index s{from_tsq}{}",
-                w.sql()
-            );
+            let sql = facet_sql(&from_tsq, &w.sql());
             let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
             for param in w.params {
                 stmt = match param {
@@ -631,6 +739,61 @@ mod tests {
     //! placeholder contiguity a live PostgreSQL enforces at parse time.
 
     use super::*;
+
+    #[test]
+    fn pk_upgrade_is_noop_when_pk_already_matches() {
+        let cols: Vec<String> = EXPECTED_SEARCH_INDEX_PK
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            pk_upgrade_sql(&Some("search_index_pkey".into()), &cols),
+            None
+        );
+    }
+
+    #[test]
+    fn pk_upgrade_drops_task201_two_column_pk() {
+        // A deployment initialized under task-201 keeps the 2-column PK;
+        // CREATE TABLE IF NOT EXISTS never reconciles it.
+        let cols: Vec<String> = ["entity_type", "entity_id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            pk_upgrade_sql(&Some("search_index_pkey".into()), &cols),
+            Some(
+                "ALTER TABLE search_index DROP CONSTRAINT \"search_index_pkey\", \
+                 ADD PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pk_upgrade_quotes_hostile_constraint_names() {
+        let cols: Vec<String> = ["entity_type", "entity_id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let sql = pk_upgrade_sql(&Some("bad\"name".into()), &cols).unwrap();
+        assert!(
+            sql.contains("DROP CONSTRAINT \"bad\"\"name\""),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn pk_upgrade_adds_when_no_pk_exists() {
+        assert_eq!(
+            pk_upgrade_sql(&None, &[]),
+            Some(
+                "ALTER TABLE search_index \
+                 ADD PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)"
+                    .to_string()
+            )
+        );
+    }
 
     /// A text query MUST emit the `s.tsv @@ q` row filter — the tsquery FROM
     /// fragment alone filters nothing (cross join feeding ts_rank only), so
@@ -780,6 +943,98 @@ mod tests {
             (2..=n).collect::<Vec<_>>(),
             "placeholder numbering must be contiguous 2..={n} in: {sql}"
         );
+    }
+
+    #[test]
+    fn pk_upgrade_reconciles_any_nonmatching_key() {
+        let cols: Vec<String> = ["entity_id", "entity_type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(pk_upgrade_sql(&Some("custom_pk".into()), &cols).is_some());
+    }
+
+    /// Compose a port-method statement with the §Access Scoping filters
+    /// exactly the way `search()`/`suggest()`/`facet_counts()` do, then
+    /// assert the invariants a live PostgreSQL enforces at parse time:
+    ///
+    /// - the scope clauses reference `s.*` columns, so the statement MUST
+    ///   alias `search_index` AS `s` — an unaliased FROM makes PG reject the
+    ///   whole query with 42P01 "missing FROM-clause entry for table \"s\""
+    ///   (the regression this guards: every suggest call 500ing on PG);
+    /// - the tenant boundary is a WHERE clause of the index query itself,
+    ///   never post-filtered;
+    /// - placeholder numbering is contiguous with no gaps or reuse, so every
+    ///   referenced placeholder is one the caller actually binds.
+    fn assert_scope_composable(sql: &str) {
+        assert!(
+            sql.contains("FROM search_index s"),
+            "statement must alias search_index AS `s` (scope clauses reference s.*): {sql}"
+        );
+        assert!(
+            sql.contains("s.tenant_id = $"),
+            "tenant boundary must be a WHERE clause of the index query: {sql}"
+        );
+        let ph = placeholders(sql);
+        let max = ph.iter().copied().max().unwrap_or(0);
+        let mut uniq = ph.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            uniq,
+            (1..=max).collect::<Vec<usize>>(),
+            "placeholder numbering must be contiguous 1..={max} with no reuse in: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_statement_is_a_scoped_index_query() {
+        let q = scoped_query();
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        build_scope(&q, &mut w);
+        let limit = w.bigint(q.limit as i64);
+        let sql = search_sql(
+            &from_tsq,
+            "0.0::float8 AS rank, substr(replace(s.body, chr(10), ' '), 1, 120) AS snip",
+            "ORDER BY s.updated_at DESC",
+            &w.sql(),
+            &limit,
+        );
+        assert!(has_text);
+        assert_scope_composable(&sql);
+    }
+
+    #[test]
+    fn suggest_statement_is_a_scoped_index_query() {
+        let q = scoped_query();
+        let mut w = PgWhereBuilder::new();
+        suggest_filters(&q, "deploy%".to_string(), &mut w);
+        let limit = w.bigint(q.limit as i64);
+        let sql = suggest_sql(&w.sql(), &limit);
+        assert_scope_composable(&sql);
+    }
+
+    #[test]
+    fn facet_statement_is_a_scoped_index_query() {
+        // Text shape: the tsquery join is composed into the same statement.
+        let q = scoped_query();
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        build_scope(&q, &mut w);
+        assert!(has_text);
+        assert_scope_composable(&facet_sql(&from_tsq, &w.sql()));
+
+        // Blank shape (no text): no tsquery parameter, placeholders restart
+        // at $1 — still the `s` alias and contiguous.
+        let mut q = scoped_query();
+        q.query = String::new();
+        q.parsed = gyre_ports::search::parse_query("");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        build_scope(&q, &mut w);
+        assert!(!has_text);
+        assert_scope_composable(&facet_sql(&from_tsq, &w.sql()));
     }
 
     #[test]

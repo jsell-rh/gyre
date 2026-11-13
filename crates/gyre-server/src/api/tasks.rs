@@ -5,9 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus, TaskType};
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::AppState;
@@ -214,32 +213,9 @@ pub async fn create_task(
         task.repo_id = Id::new(repo_id);
     }
     state.tasks.create(&task).await?;
-    // Index for search. Scope fields come from the entity itself (§Access
-    // Scoping): the workspace/repo the task lives in, and the tenant resolved
-    // from the workspace's scope row.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "backlog".to_string());
-    facets.insert("priority".to_string(), task_priority_str(&task.priority));
-    crate::search_scope::index_doc(
-        &state,
-        SearchDocument {
-            entity_type: "task".to_string(),
-            entity_id: task.id.to_string(),
-            title: task.title.clone(),
-            body: task.description.clone().unwrap_or_default(),
-            workspace_id: Some(task.workspace_id.to_string()),
-            repo_id: if task.repo_id.as_str().is_empty() {
-                None
-            } else {
-                Some(task.repo_id.to_string())
-            },
-            tenant_id: None,
-            facets,
-            // Entity's own update time — the since:/until: facets filter on it.
-            updated_at: Some(task.updated_at as i64),
-        },
-    )
-    .await;
+    // Index for search (search.md §Searchable Entities: task facets
+    // status/priority/assigned_to, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -337,6 +313,9 @@ pub async fn update_task(
     }
     task.updated_at = now_secs();
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: task updated -> index updated (status/priority
+    // facets must reflect current values, not create-time ones).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     Ok(Json(TaskResponse::from(task)))
 }
 
@@ -357,6 +336,8 @@ pub async fn transition_task_status(
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: status change -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -389,10 +370,21 @@ pub async fn transition_task_status(
         serde_json::json!({
             "task_id": task.id.to_string(),
             "new_status": req.status,
+            // Scope facets (search.md §Searchable Entities: Activity Event is
+            // filterable by workspace/repo) — derived from the task, never
+            // caller-supplied.
+            "workspace_id": task.workspace_id.to_string(),
+            "repo_id": task.repo_id.to_string(),
         }),
         ts,
     );
     let _ = state.analytics.record(&event).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&event),
+    )
+    .await;
 
     Ok(Json(TaskResponse::from(task)))
 }
@@ -535,6 +527,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Regression (task-202 review): the `task.status_changed` activity event
+    /// emitted on the transition write path must carry its workspace/repo
+    /// scope, so search.md §Searchable Entities' Activity Event workspace/repo
+    /// filters actually match write-path-indexed events (the scope used to be
+    /// dropped at every emit site except the orchestrator spawn path).
+    #[tokio::test]
+    async fn task_transition_activity_event_is_workspace_scoped() {
+        use gyre_ports::search::SearchQuery;
+        use std::sync::Arc;
+
+        // Real SQLite FTS5 backend — the workspace filter is SQL, not a stub.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(db.path().to_str().unwrap()).unwrap();
+        let state = crate::mem::test_state_with_search(
+            Arc::new(storage) as Arc<dyn gyre_ports::SearchPort>
+        );
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a task scoped to a known workspace/repo.
+        let body = serde_json::json!({
+            "title": "Scoped transition probe",
+            "workspace_id": "ws-scope-1",
+            "repo_id": "repo-scope-1",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let id = json["id"].as_str().unwrap().to_string();
+
+        // Transition it — emits and indexes task.status_changed.
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The activity event must be retrievable through the workspace
+        // filter — this is exactly the query that returned nothing when the
+        // emit sites dropped the scope.
+        let results = state
+            .search
+            .search(SearchQuery {
+                query: "task.status_changed".to_string(),
+                parsed: gyre_ports::search::parse_query("task.status_changed"),
+                entity_type: Some("activity_event".to_string()),
+                workspace_id: Some("ws-scope-1".to_string()),
+                limit: 10,
+                tenant_id: String::new(),
+                accessible_workspace_ids: None,
+                accessible_repo_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "activity event must be findable via the workspace filter"
+        );
+        assert_eq!(
+            results[0].facets.get("workspace").map(String::as_str),
+            Some("ws-scope-1")
+        );
+        assert_eq!(
+            results[0].facets.get("repo").map(String::as_str),
+            Some("repo-scope-1")
+        );
     }
 
     #[tokio::test]
