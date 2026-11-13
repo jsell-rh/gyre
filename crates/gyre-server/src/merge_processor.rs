@@ -4367,6 +4367,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -4520,6 +4521,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -4920,6 +4922,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -5636,6 +5639,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -5658,6 +5662,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -5916,6 +5921,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -5966,6 +5972,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -5990,6 +5997,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -6828,6 +6836,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -6932,6 +6941,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7024,6 +7034,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7106,6 +7117,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7159,6 +7171,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7271,6 +7284,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7392,6 +7406,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -7510,6 +7525,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    &[],
                     100,
                     0,
                 )
@@ -7643,6 +7659,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -9366,7 +9383,16 @@ mod tests {
         // errors are reported clearly to the author, not just the queue).
         let author_notifications = state
             .notifications
-            .list_for_user(&Id::new("author-agent-1"), None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("author-agent-1"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -10418,7 +10444,7 @@ mod tests {
         for uid in ["user-admin", "user-owner"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 10, 0)
                 .await
                 .unwrap();
             assert_eq!(notifs.len(), 1, "{uid} must be notified");
@@ -10443,7 +10469,7 @@ mod tests {
         for uid in ["user-dev", "user-viewer"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 10, 0)
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 10, 0)
                 .await
                 .unwrap();
             assert!(

@@ -1594,7 +1594,7 @@ mod tests {
         for uid in ["user-admin", "user-dev"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 100, 0)
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 100, 0)
                 .await
                 .unwrap();
             let approvals: Vec<_> = notifs
@@ -1619,6 +1619,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -1630,7 +1631,16 @@ mod tests {
         );
         let system_notifs = state
             .notifications
-            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("system"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -2673,7 +2683,7 @@ mod tests {
         for uid in ["user-a", "user-b"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, 100, 0)
+                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, &[], 100, 0)
                 .await
                 .unwrap();
             let conflict: Vec<_> = notifs
@@ -2864,6 +2874,7 @@ specs:
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -2886,6 +2897,7 @@ specs:
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )

@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,77 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+HSI §12 profile gaps (notification filtering, judgment ledger, auth
+provider info) are implemented in production code across the commits
+listed in the frontmatter. This round repairs the CI Clippy failure on
+the PR merge head.
+
+### This round: CI repair (Clippy E0061 on the merge ref)
+
+CI run 43395891760 (Clippy) failed at PR head 002881ad. The Clippy job
+runs `scripts/check-clippy-diff.py HEAD^1` on the PR merge ref — the
+merge of the PR head into main 4ec1e526. Main's task-122 team-routing
+work added two in-module test call sites in
+`crates/gyre-server/src/api/specs_assist.rs`
+(`save_spec_notifies_team_members_from_manifest_approvers`) using the
+pre-task-209 7-argument `NotificationRepository::list_for_user` form;
+task-209 added the `exclude_types` parameter to that port (HSI §12
+notification preference filtering). The semantic merge conflict failed
+compilation with E0061. Fixed in a640c67f by passing the explicit
+empty exclude list (`&[]`) at both call sites — the port doc specifies
+`&[]` for surfaces that must see every notification regardless of the
+recipient's toggles, and these tests assert delivery of the
+SpecApprovalRequested card to team members.
+
+Verified locally on the repaired merge tree (evidence under
+/tmp/stage/review-evidence/):
+
+- `SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features --
+  -W clippy::all` (the CI invocation, full workspace) → exit 0, no
+  errors or warnings on changed lines
+- `python3 scripts/check-clippy-diff.py 4ec1e526` (exact CI gate
+  against the merge-ref base) → "changed lines clean (42 Rust files)"
+- `python3 scripts/check-rustfmt-diff.py 4ec1e526` → clean
+- `bash scripts/check-arch.sh` → exit 0;
+  `GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh` → exit 0
+
+Server tests the independent verifier must execute (server test
+compilation is deferred to the verifier per the 4 GiB budget; clippy
+--all-targets already type-checked every test body on this tree):
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
+specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers`
+(the two repaired call sites), then the full gates
+`SKIP_WEB_BUILD=1 cargo test --all` and `cd web && npm ci && npm test`.
+
+### Implementation (intact on this branch)
+
+- Notification filtering: inbox queries (`get_my_notifications`/
+  `_count`) compute the user's disabled types from
+  `user_notification_preferences` and pass them as `exclude_types` to
+  `list_for_user`, applied by the SQL adapter and the mem adapter.
+  Canonical type names are stored (alias normalization), and every
+  canonical `NotificationType` has a UI toggle (review F1/F2 rounds:
+  `ComputeTargetUnavailable`, `WorkspaceOwnerless`).
+- Judgment ledger: `JudgmentType` has `GateOverride` (`as_str()` =
+  `"gate"`); `list_for_user` (SQLite + Postgres parity) aggregates
+  spec approvals/rejections (attributed via the approval-ledger
+  writer key), `audit_events` (`gate_override`, `trust_change`, and
+  meta-spec publish rows, with zstd detail decompression), and
+  `meta_spec_versions` joined to `meta_specs`; workspace filter drops
+  unattributed entries rather than stamping; reverse-chronological
+  with limit/offset after union+sort. HSI §12 was amended to name the
+  concrete source tables and the `approval|rejection|gate|trust|
+  meta-spec` type values.
+- Write paths: trust transitions via `PUT /workspaces/:id` write a
+  `trust_change` audit event (from/to/workspace); human (OIDC JWT,
+  not agent-token) approval review on a failed-gate MR writes one
+  `gate_override` audit event per failed gate (mr_id/gate_type/from/
+  to); meta-spec publish writes a `meta_spec_publish` audit event with
+  publisher attribution.
+- Auth provider info: `GET /users/me` returns read-only
+  `oidc_issuer` and `last_login_at` recorded from login events.
+- Endpoint: `GET /api/v1/users/me/judgments?workspace_id=&type=&since=
+  &limit=&offset=` with per-handler user-scoped auth.
