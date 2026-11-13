@@ -3,7 +3,7 @@ title: "Implement budget enforcement cascade"
 spec_ref: "agent-runtime.md §4 Budget Enforcement"
 depends_on:
   - task-118
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-runtime.md §4. Budget Enforcement"
   - "agent-runtime.md §Cascade"
