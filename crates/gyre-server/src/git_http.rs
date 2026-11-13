@@ -2194,6 +2194,11 @@ async fn process_persona_changes(
                             notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.notifications.create(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
+                            } else {
+                                // Channel fan-out per user-management.md
+                                // §Delivery Channels.
+                                crate::notification_dispatcher::dispatch_to_channels(state, &notif)
+                                    .await;
                             }
                         }
                     }
@@ -7027,6 +7032,25 @@ mod tests {
         // through the inbox.
         let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
         state.users.create(&owner).await.unwrap();
+        // Email channel configured (Immediate, all bands) — the emitter-path
+        // guard below asserts the push-hook notification fans out to it.
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-1"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
 
         // Seed an APPROVED repo-scoped persona whose prompt matches the git
         // state before the push.
@@ -7165,6 +7189,29 @@ mod tests {
         assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
+
+        // Emitter-path guard (task-112 review F1): the persona-push hook's
+        // notification creation must go through the channel dispatcher —
+        // the configured email channel queued an outbox entry. Bounded
+        // poll: the dispatch runs in the post-receive task right after the
+        // record becomes visible.
+        let mut outbox_hit = false;
+        for _ in 0..40 {
+            let outbox = state
+                .kv_store
+                .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+                .await
+                .unwrap();
+            if outbox.iter().any(|(k, _)| k.starts_with("user-1:")) {
+                outbox_hit = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            outbox_hit,
+            "persona-push approval notification must reach the configured email channel"
+        );
     }
 
     /// End-to-end: pushing a NEW persona file registers a fresh

@@ -506,108 +506,152 @@ pub async fn notify_merge_queue_paused(
     }
 }
 
-/// Deliver an "agent budget warning" notification to the agent's spawning
-/// user plus the workspace Admins (user-management.md §Who Gets Notified).
-///
-/// Routing contract only — the emission *trigger* (80% threshold crossing)
-/// is owned by task-191's enforcement helper, which calls this function.
-pub async fn notify_agent_budget_warning(
+/// Emission context for a budget-level notification (user-management.md
+/// §Notification Entity: `AgentBudgetWarning` ≥ 80% of a daily limit,
+/// High; `AgentBudgetExhausted` ≥ 100%, Urgent). Built by the production
+/// trigger — the usage-recording threshold check in api/budget.rs
+/// (`maybe_notify_budget_threshold`), which classifies the level and then
+/// calls the helpers below. The helpers own recipient routing (§Who Gets
+/// Notified budget rows) and per-period de-duplication, so the routing
+/// contract has exactly one implementation.
+pub struct BudgetNotificationContext {
+    pub title: String,
+    pub body: String,
+    /// De-dup scope entity — the workspace whose budget crossed the level.
+    pub entity_ref: String,
+    pub repo_id: Option<String>,
+    /// Budget period start (unix seconds): a user is notified at most once
+    /// per period per level (usage counters increment on every call, so
+    /// without this guard each call past the threshold would re-notify).
+    pub period_start: i64,
+}
+
+/// Recipients for a budget-level notification: the usage's spawning user
+/// (when it is agent-attributed) plus the workspace members holding
+/// `roles`. Deduplicated.
+async fn budget_recipients(
     state: &AppState,
-    agent: &gyre_domain::Agent,
-    usage_pct: f64,
-    tenant_id: &str,
-) {
+    workspace_id: &Id,
+    spawned_by: Option<&Id>,
+    roles: &[WorkspaceRole],
+) -> Vec<Id> {
     let mut recipients: Vec<Id> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    if let Some(sb) = &agent.spawned_by {
-        if seen.insert(sb.clone()) {
-            recipients.push(Id::new(sb.clone()));
+    if let Some(sb) = spawned_by {
+        if seen.insert(sb.as_str().to_string()) {
+            recipients.push(sb.clone());
         }
     }
-    for admin in members_with_roles(state, &agent.workspace_id, &[WorkspaceRole::Admin]).await {
-        if seen.insert(admin.as_str().to_string()) {
-            recipients.push(admin);
+    for member in members_with_roles(state, workspace_id, roles).await {
+        if seen.insert(member.as_str().to_string()) {
+            recipients.push(member);
         }
     }
-    let body = serde_json::json!({
-        "agent_id": agent.id.to_string(),
-        "usage_pct": usage_pct,
-    })
-    .to_string();
-    for user_id in recipients {
+    recipients
+}
+
+/// Shared delivery core for the budget rows: resolve recipients, skip
+/// users already notified this period for this level/entity, deliver via
+/// `notify_rich` (in-app record + channel fan-out).
+async fn notify_budget_level(
+    state: &AppState,
+    workspace_id: &Id,
+    spawned_by: Option<&Id>,
+    ntype: NotificationType,
+    roles: &[WorkspaceRole],
+    tenant_id: &str,
+    ctx: &BudgetNotificationContext,
+) {
+    for user_id in budget_recipients(state, workspace_id, spawned_by, roles).await {
+        let already_notified = state
+            .notifications
+            .has_active_notification(
+                workspace_id,
+                &user_id,
+                ntype.as_str(),
+                &ctx.entity_ref,
+                ctx.period_start,
+            )
+            .await
+            .unwrap_or(false);
+        if already_notified {
+            continue;
+        }
         crate::notifications::notify_rich(
             state,
-            agent.workspace_id.clone(),
+            workspace_id.clone(),
             user_id,
-            NotificationType::AgentBudgetWarning,
-            format!(
-                "Agent '{}' budget warning: {:.0}% of workspace budget used",
-                agent.name, usage_pct
-            ),
+            ntype.clone(),
+            ctx.title.clone(),
             tenant_id,
-            Some(body.clone()),
-            Some(agent.id.to_string()),
-            None,
-            "agent",
+            Some(ctx.body.clone()),
+            Some(ctx.entity_ref.clone()),
+            ctx.repo_id.clone(),
+            "budget",
             None,
         )
         .await;
     }
 }
 
-/// Deliver an "agent budget exhausted" notification to the agent's spawning
-/// user plus the workspace Owner (user-management.md §Who Gets Notified).
-///
-/// Routing contract only — the emission *trigger* (100% threshold) is owned
-/// by task-191's enforcement helper, which calls this function.
+/// Deliver an "agent budget warning" notification to the usage's spawning
+/// user plus the workspace Admins (user-management.md §Who Gets Notified:
+/// budget warning row). Called by the production threshold check in
+/// api/budget.rs when workspace utilization crosses 80% of a daily limit.
+pub async fn notify_agent_budget_warning(
+    state: &AppState,
+    workspace_id: &Id,
+    spawned_by: Option<&Id>,
+    tenant_id: &str,
+    ctx: &BudgetNotificationContext,
+) {
+    notify_budget_level(
+        state,
+        workspace_id,
+        spawned_by,
+        NotificationType::AgentBudgetWarning,
+        &[WorkspaceRole::Admin],
+        tenant_id,
+        ctx,
+    )
+    .await;
+}
+
+/// Deliver an "agent budget exhausted" notification to the usage's spawning
+/// user plus the workspace Owner (user-management.md §Who Gets Notified:
+/// budget exhausted row). Called by the production threshold check in
+/// api/budget.rs when workspace utilization crosses 100% of a daily limit.
 pub async fn notify_agent_budget_exhausted(
     state: &AppState,
-    agent: &gyre_domain::Agent,
+    workspace_id: &Id,
+    spawned_by: Option<&Id>,
     tenant_id: &str,
+    ctx: &BudgetNotificationContext,
 ) {
-    let mut recipients: Vec<Id> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    if let Some(sb) = &agent.spawned_by {
-        if seen.insert(sb.clone()) {
-            recipients.push(Id::new(sb.clone()));
-        }
-    }
-    for owner in members_with_roles(state, &agent.workspace_id, &[WorkspaceRole::Owner]).await {
-        if seen.insert(owner.as_str().to_string()) {
-            recipients.push(owner);
-        }
-    }
-    let body = serde_json::json!({
-        "agent_id": agent.id.to_string(),
-    })
-    .to_string();
-    for user_id in recipients {
-        crate::notifications::notify_rich(
-            state,
-            agent.workspace_id.clone(),
-            user_id,
-            NotificationType::AgentBudgetExhausted,
-            format!("Agent '{}' budget exhausted — agents stopping", agent.name),
-            tenant_id,
-            Some(body.clone()),
-            Some(agent.id.to_string()),
-            None,
-            "agent",
-            None,
-        )
-        .await;
-    }
+    notify_budget_level(
+        state,
+        workspace_id,
+        spawned_by,
+        NotificationType::AgentBudgetExhausted,
+        &[WorkspaceRole::Owner],
+        tenant_id,
+        ctx,
+    )
+    .await;
 }
 
 /// Deliver a "security finding" notification to the workspace Owners plus
 /// the tenant Admins (user-management.md §Who Gets Notified: "Security
 /// finding (Critical/High) → Workspace Owner + tenant Admin").
 ///
-/// Routing contract only — the emission *trigger* (a Critical/High severity
-/// finding from the security gate, agent-gates.md §Gate Failure Feedback
-/// Escalation) is owned by task-137's escalation protocol, which calls this
-/// function. `severity` must be "Critical" or "High" per the routing row —
-/// callers gate lower severities before invoking.
+/// Routing contract for the "security finding" row (§Who Gets Notified:
+/// "Security finding (Critical/High) → Workspace Owner + tenant Admin").
+/// The emission *trigger* — a Critical/High severity finding from the
+/// security gate (agent-gates.md §Gate Failure Feedback Escalation) — is
+/// the security-scanner emitter, a product-wide gap recorded against
+/// task-137; no caller exists yet. `severity` must be "Critical" or
+/// "High" per the routing row — callers gate lower severities before
+/// invoking.
 pub async fn notify_security_finding(
     state: &AppState,
     workspace_id: &Id,
@@ -1307,6 +1351,16 @@ mod tests {
         }
     }
 
+    fn budget_ctx(title: &str) -> BudgetNotificationContext {
+        BudgetNotificationContext {
+            title: title.to_string(),
+            body: serde_json::json!({"usage_pct": 85.0}).to_string(),
+            entity_ref: "ws-1".to_string(),
+            repo_id: None,
+            period_start: 0,
+        }
+    }
+
     #[tokio::test]
     async fn budget_warning_notifies_spawner_and_admins() {
         let state = test_state();
@@ -1314,8 +1368,15 @@ mod tests {
         seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
 
-        let agent = agent_spawned_by(&ws, Some("spawner-1"));
-        notify_agent_budget_warning(&state, &agent, 85.0, "tenant-1").await;
+        let spawner = Id::new("spawner-1");
+        notify_agent_budget_warning(
+            &state,
+            &ws,
+            Some(&spawner),
+            "tenant-1",
+            &budget_ctx("Workspace budget at 85% of the daily limit"),
+        )
+        .await;
 
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
@@ -1345,14 +1406,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budget_level_notifies_each_user_once_per_period() {
+        // The per-period de-dup guard: usage counters increment on every
+        // call, so a second emission within the same period must not
+        // re-notify any recipient.
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+
+        let spawner = Id::new("spawner-1");
+        for _ in 0..2 {
+            notify_agent_budget_warning(
+                &state,
+                &ws,
+                Some(&spawner),
+                "tenant-1",
+                &budget_ctx("Workspace budget at 85% of the daily limit"),
+            )
+            .await;
+        }
+
+        for user in ["spawner-1", "admin-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                notifs.len(),
+                1,
+                "{user} must be notified exactly once per budget period"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn budget_exhausted_notifies_spawner_and_owner() {
         let state = test_state();
         let ws = Id::new("ws-1");
         seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
 
-        let agent = agent_spawned_by(&ws, Some("spawner-1"));
-        notify_agent_budget_exhausted(&state, &agent, "tenant-1").await;
+        let spawner = Id::new("spawner-1");
+        notify_agent_budget_exhausted(
+            &state,
+            &ws,
+            Some(&spawner),
+            "tenant-1",
+            &budget_ctx("Workspace budget exhausted"),
+        )
+        .await;
 
         for user in ["spawner-1", "owner-1"] {
             let notifs = state

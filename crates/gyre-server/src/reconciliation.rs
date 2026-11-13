@@ -1430,6 +1430,9 @@ async fn notify_drift_members(
                 error = %e,
                 "sweep: failed to create MetaSpecDrift notification"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -2934,6 +2937,85 @@ mod tests {
                 .await
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_drift_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the sweep's MetaSpecDrift creation must go
+        // through the channel dispatcher — a configured email channel
+        // queues an outbox entry. Fails if the sweep bypasses
+        // dispatch_to_channels (review finding: fan-out wiring is easy to
+        // drop on new notification-creation paths).
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-chan").await;
+        let repo = make_repo(&state, "repo-chan", "ws-sweep-chan").await;
+
+        let set = make_set("ws-sweep-chan", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-chan", &set).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-chan", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // Admin member with an email channel configured (Immediate, all
+        // bands) — the dispatcher must fan the drift notification out to it.
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("user-chan"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Admin,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_conformance_sweep(&state).await.unwrap();
+
+        // In-app record exists …
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-chan"), Some(&ws.id), None, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift),
+            "expected in-app MetaSpecDrift notification"
+        );
+        // … and the configured email channel fired.
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-chan:")),
+            "sweep drift notification must reach the configured email channel"
         );
     }
 

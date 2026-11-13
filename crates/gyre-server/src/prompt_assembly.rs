@@ -507,6 +507,9 @@ async fn notify_stale_pin(
                 user = %member.user_id,
                 "stale pin detection: failed to create notification: {e}"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -550,6 +553,95 @@ mod tests {
         t.workspace_id = Id::new("ws-1");
         t.spec_path = spec_path.map(String::from);
         t
+    }
+
+    #[tokio::test]
+    async fn stale_pin_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: stale-pin detection's MetaSpecDrift creation
+        // must go through the channel dispatcher — a configured email
+        // channel queues an outbox entry for the notified Admin.
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-chan"),
+            Id::new("tenant-1"),
+            "Channel Guard WS",
+            "chan-ws",
+            1,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-chan"),
+            Id::new("user-chan"),
+            Id::new("ws-chan"),
+            gyre_domain::WorkspaceRole::Admin,
+            Id::new("inviter"),
+            1,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Workspace-scoped meta-spec at v2, bound with a stale pin at v1.
+        let mut ms = make_ms(
+            "chan-ms",
+            "channel-guard",
+            MetaSpecKind::Persona,
+            false,
+            MetaSpecScope::Workspace,
+            Some("ws-chan"),
+        );
+        ms.version = 2;
+        state.meta_specs.create(&ms).await.unwrap();
+        state
+            .meta_spec_bindings
+            .create(&MetaSpecBinding {
+                id: Id::new("b-chan"),
+                spec_id: "specs/chan.md".to_string(),
+                meta_spec_id: ms.id.clone(),
+                pinned_version: 1,
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+
+        detect_stale_pins(&state).await.unwrap();
+
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-chan"), None, None, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift),
+            "expected in-app MetaSpecDrift notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-chan:")),
+            "stale-pin drift notification must reach the configured email channel"
+        );
     }
 
     #[tokio::test]
