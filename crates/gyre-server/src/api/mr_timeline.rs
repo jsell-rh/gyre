@@ -500,10 +500,12 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -680,10 +682,12 @@ mod tests {
             command: None,
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
         let gate_result = GateResult {

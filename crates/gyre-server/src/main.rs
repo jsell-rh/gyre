@@ -79,6 +79,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly code-search file reindex (search.md §Index Updates — file
+    // content is eventually consistent; pushes also trigger the job on
+    // demand via the job registry).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "search_code_index".to_string(),
+        Arc::clone(&state),
+    );
+
     // Hourly stale-pin detection: specs pinning old meta-spec versions get
     // priority-6 MetaSpecDrift notifications (agent-runtime.md §2).
     jobs::spawn_job(
@@ -115,6 +124,17 @@ async fn main() -> Result<()> {
     jobs::spawn_job(
         Arc::clone(&state.job_registry),
         gyre_server::log_compression::JOB_NAME.to_string(),
+        Arc::clone(&state),
+    );
+
+    // Trust suggestion check (HSI §2 Trust Suggestions) — daily per
+    // workspace: 0 gate failures + 0 reverted MRs in 30 days suggests the
+    // next trust level to Admin/Owner members via priority-8
+    // TrustSuggestion notifications. Registered alone this job would only
+    // be manually triggerable; spawn_job is the executing daily loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "trust_suggestion_check".to_string(),
         Arc::clone(&state),
     );
 

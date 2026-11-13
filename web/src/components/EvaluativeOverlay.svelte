@@ -2,6 +2,7 @@
   let {
     evaluativeMetric = 'span_duration',
     traceData = null,
+    hasRiskData = false,
     onMetricChange = () => {},
   } = $props();
 </script>
@@ -12,7 +13,20 @@
     {#each [['span_duration', 'Duration'], ['span_count', 'Spans'], ['error_rate', 'Errors']] as [key, label]}
       <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { onMetricChange(key); }} type="button">{label}</button>
     {/each}
-  {:else}
+  {/if}
+  {#if hasRiskData}
+    <!-- Risk overlay (task-178): heat from GET /repos/:id/graph/risks —
+         churn × complexity per node, fetched when the Evaluative lens is on. -->
+    <button
+      class="tb-btn tb-btn-sm"
+      class:active={evaluativeMetric === 'risk'}
+      onclick={() => { onMetricChange('risk'); }}
+      title="Risk heat from graph/risks (churn × complexity)"
+      data-testid="evaluative-metric-risk"
+      type="button"
+    >Risk</button>
+  {/if}
+  {#if !traceData?.spans?.length && !hasRiskData}
     <span class="eval-no-trace">No trace data — connect OpenTelemetry to see evaluative metrics</span>
   {/if}
 </div>

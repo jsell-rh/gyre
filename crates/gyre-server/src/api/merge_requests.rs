@@ -8,7 +8,6 @@ use gyre_domain::{
     AnalyticsEvent, DependencySource, MergeRequest, MergeRequestDependency, MrStatus, Review,
     ReviewComment, ReviewDecision,
 };
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
@@ -381,22 +380,9 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "open".to_string());
-    facets.insert("repo_id".to_string(), mr.repository_id.to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "mr".to_string(),
-            entity_id: mr.id.to_string(),
-            title: mr.title.clone(),
-            body: format!("{} -> {}", mr.source_branch, mr.target_branch),
-            workspace_id: None,
-            repo_id: Some(mr.repository_id.to_string()),
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: mr facets
+    // status/has_conflicts/author, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
     state
         .emit_event(
             Some(mr.workspace_id.clone()),
@@ -738,6 +724,22 @@ pub(crate) async fn mrs_needing_lineage_reeval(
     selected
 }
 
+/// Enrich a merged-MR response with `merge_commit_sha` / `merged_at` from the
+/// attestation store — the same lookup `GET /merge-requests/:id` performs.
+/// The list endpoints must enrich too: clients resolve merged MRs by
+/// merge-commit SHA from list rows (the Inbox's HSI §8 P5 arbitration matches
+/// the divergence body's commit SHAs against the repo's merged MRs), and a
+/// list row without `merge_commit_sha` made that resolution always fail.
+async fn enrich_merged_attestation(state: &AppState, resp: &mut MrResponse) {
+    if resp.status != "merged" {
+        return;
+    }
+    if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&resp.id).await {
+        resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
+        resp.merged_at = Some(att.attestation.merged_at);
+    }
+}
+
 pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
@@ -765,8 +767,10 @@ pub async fn list_mrs(
         mrs.truncate(cap);
     }
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
-    // Enrich with task_id from agent worktree tracking (best-effort).
+    // Enrich with task_id from agent worktree tracking (best-effort), and
+    // merged rows with their attestation merge-commit SHA.
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -831,6 +835,7 @@ pub async fn list_workspace_mrs(
 
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -854,12 +859,7 @@ pub async fn get_mr(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let mut resp = MrResponse::from(mr);
     // Enrich merged MRs with merge_commit_sha and merged_at from attestation.
-    if resp.status == "merged" {
-        if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&id).await {
-            resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
-            resp.merged_at = Some(att.attestation.merged_at);
-        }
-    }
+    enrich_merged_attestation(&state, &mut resp).await;
     // Enrich with task_id from the authoring agent's worktree tracking.
     if let Some(ref agent_id) = resp.author_agent_id {
         if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
@@ -917,6 +917,8 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+    // search.md §Index Updates: MR reviewed/status changed -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
 
     // HSI §3a trace lifecycle: on merge the gate trace is promoted to
     // attestation (permanent); on close-without-merge it is deleted.
@@ -958,10 +960,19 @@ pub async fn transition_mr_status(
             new_id(),
             "mr.merged",
             mr.author_agent_id.as_ref().map(|id| id.to_string()),
-            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                // Scope facets (search.md §Searchable Entities: Activity
+                // Event is filterable by workspace/repo).
+                "workspace_id": mr.workspace_id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+            }),
             ts,
         );
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev))
+            .await;
     }
 
     Ok(Json(MrResponse::from(mr)))
@@ -1010,24 +1021,50 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
     let mr_id = Id::new(&id);
-    state
+    let mr = state
         .merge_requests
         .find_by_id(&mr_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
+    // Reviewer identity binding (task-134): a caller authenticated with a
+    // scoped reviewer JWT (`review:submit`) must submit under its own token
+    // subject. Without this, a gate agent could forge reviews under any
+    // reviewer id. Exact-match capability (review F3); `validation:report`
+    // validators have no review-submission capability at all (F2) and are
+    // additionally blocked from this route by the ABAC allow-list.
+    let reviewer_agent_id = if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
+            auth.agent_id.clone()
+        } else {
+            req.reviewer_agent_id
+        }
+    } else {
+        req.reviewer_agent_id
+    };
+
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
+    // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
+    // index updated"): reviews are indexed on submission.
+    crate::search_indexer::index(&state, crate::search_indexer::review_document(&review, &mr))
+        .await;
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
 
@@ -1181,6 +1218,81 @@ pub async fn get_diff(
         insertions: diff.insertions,
         deletions: diff.deletions,
         files,
+    }))
+}
+
+// ── Spec at pinned SHA ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MrSpecResponse {
+    pub mr_id: String,
+    /// The full "path@sha" spec reference carried by the MR.
+    pub spec_ref: String,
+    /// Path portion of the spec_ref (ledger path form).
+    pub spec_path: String,
+    /// Pinned blob SHA the MR's code was written against.
+    pub spec_sha: String,
+    /// Spec file content at the pinned SHA — NOT at HEAD
+    /// (agent-gates.md §Integration with Agent Gates step 1: "Gate agent
+    /// receives the MR diff AND the spec at the pinned SHA").
+    pub content: String,
+}
+
+/// `GET /api/v1/merge-requests/{id}/spec`
+///
+/// Serves the spec content at the MR's pinned spec_ref SHA. The
+/// spec-alignment-review gate agent fetches this (GYRE_SPEC_URL) so its
+/// review is against the exact spec version the code was written for —
+/// resolving at HEAD instead would let a spec edited after the MR was
+/// opened silently change what the gate reviews.
+pub async fn get_spec(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MrSpecResponse>, ApiError> {
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
+
+    let spec_ref = mr
+        .spec_ref
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "merge request {id} has no spec_ref — there is no pinned spec to serve"
+            ))
+        })?
+        .to_string();
+
+    let (path, sha) = spec_ref.rsplit_once('@').ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "invalid spec_ref format '{spec_ref}': expected 'path@sha'"
+        ))
+    })?;
+    let (path, sha) = (path.to_string(), sha.to_string());
+
+    let repo = state
+        .repos
+        .find_by_id(&mr.repository_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
+
+    let content = crate::git_refs::read_blob(&repo.path, &sha)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "spec blob {sha} ({path}) not found in repository — the pinned \
+             spec version is not reachable from this repo"
+            ))
+        })?;
+
+    Ok(Json(MrSpecResponse {
+        mr_id: mr.id.to_string(),
+        spec_ref,
+        spec_path: path.to_string(),
+        spec_sha: sha.to_string(),
+        content,
     }))
 }
 
@@ -1590,6 +1702,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    // submit_review extracts AuthenticatedAgent; the bare
+                    // api_router() used here has no require_auth layer, so
+                    // the test must present the test_state auth token itself.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1627,6 +1743,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1652,6 +1769,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1710,6 +1828,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1719,6 +1838,79 @@ mod tests {
     }
 
     // ── Attestation tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_mrs_enriches_merged_rows_with_merge_commit_sha() {
+        use crate::attestation::{sign_attestation, MergeAttestation};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Merged MR").await;
+
+        // Open -> Approved -> Merged (the domain's valid transition chain).
+        for status in ["approved", "merged"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "status": status })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Store the attestation the enrichment reads (same store the merge
+        // processor writes on a real merge).
+        let attestation = MergeAttestation {
+            attestation_version: 1,
+            mr_id: mr_id.clone(),
+            merge_commit_sha: "feedface".to_string(),
+            merged_at: 1_700_000_000,
+            gate_results: vec![],
+            spec_ref: None,
+            spec_fully_approved: true,
+            author_agent_id: None,
+            conversation_sha: None,
+            completion_summary: None,
+            meta_specs_used: vec![],
+        };
+        let bundle = sign_attestation(attestation, &state.agent_signing_key);
+        state.attestation_store.save(&mr_id, &bundle).await.unwrap();
+
+        // The LIST response must carry the merge-commit SHA: the Inbox's
+        // HSI §8 P5 arbitration resolves merged MRs by that SHA from the
+        // list. Previously only GET /merge-requests/:id enriched it, so the
+        // list lookup always failed and Pick A/Pick B could never resolve
+        // the MR to act on.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let row = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == serde_json::json!(mr_id))
+            .expect("merged MR must appear in the repo list");
+        assert_eq!(row["status"], "merged");
+        assert_eq!(row["merge_commit_sha"], "feedface");
+        assert_eq!(row["merged_at"], 1_700_000_000);
+    }
 
     #[tokio::test]
     async fn attestation_missing_mr_returns_404() {
@@ -2490,5 +2682,145 @@ mod tests {
         // limit alone: most recent MRs of the unfiltered set.
         let limited = ids(app, "/api/v1/workspaces/ws-list/merge-requests?limit=2").await;
         assert_eq!(limited, vec!["mr-c", "mr-b"], "newest first, capped at 2");
+    }
+
+    /// agent-gates.md §Integration with Agent Gates step 1: the gate agent
+    /// receives the spec at the **pinned SHA**, not HEAD. `GET
+    /// /api/v1/merge-requests/{id}/spec` must serve the blob content at the
+    /// MR's spec_ref SHA even after the spec file has moved on at HEAD —
+    /// resolving at HEAD would let a later spec edit silently change what
+    /// the gate reviews against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_mr_spec_serves_pinned_sha_not_head() {
+        let state = test_state();
+
+        // Real repo: spec v1 committed, then v2 lands on HEAD.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("pinned-spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2 — EDITED AT HEAD\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v2"]);
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-pinned-spec"),
+            gyre_common::Id::new("ws-1"),
+            "pinned-spec-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let mut mr = MergeRequest::new(
+            gyre_common::Id::new("mr-pinned-spec"),
+            repo.id.clone(),
+            "Pinned spec MR",
+            "feat/pinned",
+            "main",
+            1000,
+        );
+        mr.workspace_id = gyre_common::Id::new("ws-1");
+        mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Pinned content is v1 — NOT the v2 currently at HEAD.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-pinned-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["spec_ref"], format!("system/identity.md@{v1_blob}"));
+        assert_eq!(json["spec_path"], "system/identity.md");
+        assert_eq!(json["spec_sha"], v1_blob);
+        assert_eq!(json["content"], "# Identity v1\n");
+        assert_ne!(
+            json["content"], "# Identity v2 — EDITED AT HEAD\n",
+            "endpoint must serve the PINNED spec version, not HEAD"
+        );
+
+        // MR without a spec_ref: nothing to serve.
+        let mut mr_no_spec = MergeRequest::new(
+            gyre_common::Id::new("mr-no-spec"),
+            repo.id.clone(),
+            "No spec MR",
+            "feat/nospec",
+            "main",
+            1001,
+        );
+        mr_no_spec.workspace_id = gyre_common::Id::new("ws-1");
+        state.merge_requests.create(&mr_no_spec).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-no-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Pinned SHA that does not exist in the repo: unreachable version.
+        let mut mr_ghost = MergeRequest::new(
+            gyre_common::Id::new("mr-ghost-spec"),
+            repo.id.clone(),
+            "Ghost spec MR",
+            "feat/ghost",
+            "main",
+            1002,
+        );
+        mr_ghost.workspace_id = gyre_common::Id::new("ws-1");
+        mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
+        state.merge_requests.create(&mr_ghost).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-ghost-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

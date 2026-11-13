@@ -93,7 +93,7 @@ pub async fn create_policy(
         name,
         description: req.description.unwrap_or_default(),
         scope: parse_scope(&req.scope)?,
-        scope_id: req.scope_id,
+        scope_id: req.scope_id.map(Id::new),
         priority: req.priority,
         effect: parse_effect(&req.effect)?,
         conditions: req
@@ -106,7 +106,7 @@ pub async fn create_policy(
         enabled: req.enabled.unwrap_or(true),
         built_in: false,
         immutable: false,
-        created_by: auth.agent_id,
+        created_by: Id::new(auth.agent_id),
         created_at: now,
         updated_at: now,
     };
