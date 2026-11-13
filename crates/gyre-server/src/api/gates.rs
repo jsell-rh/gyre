@@ -3,6 +3,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use gyre_common::Id;
@@ -650,7 +651,7 @@ pub async fn update_gate(
     State(state): State<Arc<AppState>>,
     Path((repo_id, gate_id)): Path<(String, String)>,
     Json(req): Json<UpdateGateRequest>,
-) -> Result<Json<GateResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut gate = match state.quality_gates.find_by_id(&gate_id).await? {
         None => return Err(ApiError::NotFound(format!("gate {gate_id} not found"))),
         Some(g) if g.repo_id.as_str() != repo_id => {
@@ -673,10 +674,20 @@ pub async fn update_gate(
         if name != gate.name {
             let siblings = state.quality_gates.list_by_repo_id(&repo_id).await?;
             if siblings.iter().any(|g| g.name == name) {
-                return Err(ApiError::Conflict(format!(
-                    "gate '{}' already exists for repo {repo_id}",
-                    name
-                )));
+                // 409 with the unchanged gate in the body so callers can see
+                // the persisted state that caused the conflict.
+                let mut body = serde_json::to_value(GateResponse::from(gate.clone()))
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                if let serde_json::Value::Object(ref mut map) = body {
+                    map.insert(
+                        "error".to_string(),
+                        serde_json::json!(format!(
+                            "gate '{}' already exists for repo {repo_id}",
+                            name
+                        )),
+                    );
+                }
+                return Ok((StatusCode::CONFLICT, Json(body)).into_response());
             }
         }
         gate.name = name;
@@ -735,7 +746,7 @@ pub async fn update_gate(
     }
 
     state.quality_gates.save(&gate).await?;
-    Ok(Json(GateResponse::from(gate)))
+    Ok(Json(GateResponse::from(gate)).into_response())
 }
 
 /// GET /api/v1/merge-requests/:id/gates — list gate results for an MR.
