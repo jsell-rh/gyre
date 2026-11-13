@@ -181,6 +181,8 @@ pub fn task_document(task: &Task) -> SearchDocument {
             ("workspace", task.workspace_id.to_string()),
             ("repo", task.repo_id.to_string()),
         ]),
+        // Entity's own update time — the since:/until: facets filter on it.
+        updated_at: Some(task.updated_at as i64),
     }
 }
 
@@ -213,6 +215,8 @@ pub fn mr_document(mr: &MergeRequest) -> SearchDocument {
             ("workspace", mr.workspace_id.to_string()),
             ("repo", mr.repository_id.to_string()),
         ]),
+        // Entity's own update time — the since:/until: facets filter on it.
+        updated_at: Some(mr.updated_at as i64),
     }
 }
 
@@ -258,6 +262,9 @@ pub fn agent_document(agent: &Agent) -> SearchDocument {
                     .unwrap_or_default(),
             ),
         ]),
+        // Entity's own time — last heartbeat, falling back to spawn time —
+        // the since:/until: facets filter on it.
+        updated_at: Some(agent.last_heartbeat.unwrap_or(agent.spawned_at) as i64),
     }
 }
 
@@ -282,6 +289,8 @@ pub fn persona_document(persona: &Persona) -> SearchDocument {
             ("scope", persona_scope_str(&persona.scope).to_string()),
             ("slug", persona.slug.clone()),
         ]),
+        // Entity's own time — the since:/until: facets filter on it.
+        updated_at: Some(persona.created_at as i64),
     }
 }
 
@@ -313,6 +322,8 @@ pub fn review_document(review: &Review, mr: &MergeRequest) -> SearchDocument {
             ("workspace", mr.workspace_id.to_string()),
             ("repo", mr.repository_id.to_string()),
         ]),
+        // Entity's own time — the since:/until: facets filter on it.
+        updated_at: Some(review.created_at as i64),
     }
 }
 
@@ -375,6 +386,8 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
             ("repo", repo),
             ("date", iso_date(event.timestamp)),
         ]),
+        // Event's own time — the since:/until: facets filter on it.
+        updated_at: Some(event.timestamp as i64),
     }
 }
 
@@ -436,6 +449,8 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
             ),
             ("date", iso_date(event.timestamp)),
         ]),
+        // Event's own time — the since:/until: facets filter on it.
+        updated_at: Some(event.timestamp as i64),
     }
 }
 
@@ -493,6 +508,8 @@ pub fn commit_document(
             ("repo", repo_id.to_string()),
             ("date", iso_date(timestamp)),
         ]),
+        // Commit's own author time — the since:/until: facets filter on it.
+        updated_at: Some(timestamp as i64),
     }
 }
 
@@ -509,6 +526,9 @@ pub fn spec_document(
     linked_mrs: &[String],
     workspace_id: Option<&str>,
     repo_id: Option<&str>,
+    // Ledger entry's update time — the since:/until: facets filter on it.
+    // `None` (no ledger entry) lets the adapter stamp index time.
+    updated_at: Option<u64>,
 ) -> SearchDocument {
     // The spec's scope facet is the section it lives under (the first path
     // segment, e.g. "system" for "system/search.md").
@@ -553,6 +573,7 @@ pub fn spec_document(
             ("workspace", workspace_id.unwrap_or_default().to_string()),
             ("repo", repo_id.unwrap_or_default().to_string()),
         ]),
+        updated_at: updated_at.map(|t| t as i64),
     }
 }
 
@@ -586,6 +607,9 @@ pub fn file_document(
             ("workspace", workspace_id.to_string()),
             ("repo", repo_id.to_string()),
         ]),
+        // No single entity time for a git blob — the adapter stamps index
+        // time (the since:/until: facets filter on it).
+        updated_at: None,
     }
 }
 
@@ -677,7 +701,7 @@ pub async fn index_repo_specs(
             .await
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
-        let (title, owner, approval_status, linked_tasks, linked_mrs) =
+        let (title, owner, approval_status, linked_tasks, linked_mrs, updated_at) =
             match state.spec_ledger.find_by_path(&path).await {
                 Ok(Some(entry)) => (
                     entry.title,
@@ -685,6 +709,7 @@ pub async fn index_repo_specs(
                     entry.approval_status.to_string(),
                     entry.linked_tasks,
                     entry.linked_mrs,
+                    Some(entry.updated_at),
                 ),
                 _ => (
                     String::new(),
@@ -692,6 +717,7 @@ pub async fn index_repo_specs(
                     "pending".to_string(),
                     Vec::new(),
                     Vec::new(),
+                    None,
                 ),
             };
         index(
@@ -706,6 +732,7 @@ pub async fn index_repo_specs(
                 &linked_mrs,
                 Some(workspace_id),
                 Some(repo_id),
+                updated_at,
             ),
         )
         .await;
@@ -859,6 +886,7 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
                 &entry.linked_mrs,
                 entry.workspace_id.as_deref(),
                 entry.repo_id.as_deref(),
+                Some(entry.updated_at),
             ),
         )
         .await;
@@ -1051,6 +1079,7 @@ mod tests {
             .search
             .search(SearchQuery {
                 query: q.to_string(),
+                parsed: gyre_ports::search::parse_query(q),
                 entity_type: entity_type.map(str::to_string),
                 workspace_id: None,
                 limit: 50,
@@ -1209,6 +1238,7 @@ mod tests {
                 repo_id: None,
                 tenant_id: None,
                 facets: HashMap::new(),
+                updated_at: None,
             })
             .await
             .unwrap();

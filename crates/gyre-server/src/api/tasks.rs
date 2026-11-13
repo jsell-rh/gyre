@@ -591,6 +591,7 @@ mod tests {
             .search
             .search(SearchQuery {
                 query: "task.status_changed".to_string(),
+                parsed: gyre_ports::search::parse_query("task.status_changed"),
                 entity_type: Some("activity_event".to_string()),
                 workspace_id: Some("ws-scope-1".to_string()),
                 limit: 10,
