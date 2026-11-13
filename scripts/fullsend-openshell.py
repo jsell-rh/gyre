@@ -163,7 +163,9 @@ def main():
     # control-plane calls on the precise CLI token-expiry diagnostic only.
     control = args and args[0] in ('gateway', 'provider', 'profile', 'settings') or create or delete or args[:2] in (['sandbox', 'get'], ['sandbox', 'list'])
     if control:
-        control_timeout=store.setting('model_timeout',14400) if create else 180
+        # Fullsend 0.50.0 bounds its create subprocess at 600s too. Keep the
+        # CLI inside that window rather than outliving a killed shim for hours.
+        control_timeout=min(store.setting('model_timeout',14400),600) if create else 180
         result = invoke(args, capture_output=True, text=True, timeout=control_timeout)
         output = result.stdout + result.stderr
         if 'cached OIDC token has expired' in output or 'OIDC token refresh failed' in output:

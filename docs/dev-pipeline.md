@@ -24,10 +24,10 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
-Verifier readiness and CLI creation use the authorized model/verification
-timeout (four hours by default). Pinned Fullsend 0.50.0 separately constrains
-its readiness polling window to 600 seconds; its harness stays within that
-supported bound. Readiness expiry is reported as provisioning failure,
+Verifier readiness uses the authorized verification timeout (four hours by
+default). Pinned Fullsend 0.50.0 constrains its readiness polling and create
+subprocess to 600 seconds; both its harness and CLI boundary stay within that
+supported bound (and any shorter authorized model budget). Readiness expiry is reported as provisioning failure,
 including to the stress guard.
 When the owned pod's latest scoped scheduler evidence confirms insufficient
 CPU/memory, provisioning failure instead becomes a backend-capacity retry.
