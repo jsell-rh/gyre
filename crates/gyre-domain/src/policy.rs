@@ -326,14 +326,34 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
-        // Agents can only access resources in the repo they were spawned against.
+        // Agents can only access resources in the repo they were spawned
+        // against (§Policy Examples "agent-repo-scope"): Deny when the
+        // subject is an agent AND its repo scope differs from the
+        // resource's repo. The `$resource.repo_id` dynamic reference is
+        // resolved at evaluation time: an agent acting inside its scoped
+        // repo (repo_scope == resource.repo_id) does not match, an
+        // unscoped agent or a non-repo-addressed resource fails the
+        // condition closed (a missing attribute or unresolvable reference
+        // never matches — no fabricated empty string, which would deny
+        // repo-scoped agents everything), and only genuinely out-of-scope
+        // access is denied.
+        //
+        // Priority 750 sits ABOVE the m34 agent-scoped-access role Allow
+        // (priority 700): composition is "higher priority always wins",
+        // so a containment Deny at the §Policy Examples illustration
+        // priority (100) would be overridden by the role Allow and enforce
+        // nothing. 750 keeps containment above the role Allow while
+        // staying below the tenant-isolation (950) and system (1000)
+        // bands. Enabled: the §Built-In Policies table lists this row as a
+        // shipped invariant ("Agents can't access resources outside their
+        // scoped repo"), not an opt-in.
         Policy {
             id: Id::new("builtin-agent-repo-scope"),
             name: "agent-repo-scope".to_string(),
             description: "Agents can only access resources in their scoped repo".to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
-            priority: 100,
+            priority: 750,
             effect: PolicyEffect::Deny,
             conditions: vec![
                 Condition {
@@ -343,13 +363,13 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
                 },
                 Condition {
                     attribute: "subject.repo_scope".to_string(),
-                    operator: ConditionOp::Exists,
-                    value: ConditionValue::Null,
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("$resource.repo_id".to_string()),
                 },
             ],
             actions: vec!["*".to_string()],
             resource_types: vec!["*".to_string()],
-            enabled: false, // Off by default; enable to enforce strict agent scoping.
+            enabled: true,
             built_in: true,
             immutable: false,
             created_by: by.clone(),

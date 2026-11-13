@@ -1647,8 +1647,13 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
 /// TASK-129 (§Built-In Policies): the full spec-table builtin set is now
 /// spliced into the startup seed — `system-full-access`,
 /// `tenant-isolation`, `workspace-membership-required`,
-/// `persona-human-approval`, `agent-repo-scope` (seeded disabled by design,
-/// see its definition), and `builtin:require-human-spec-approval`.
+/// `persona-human-approval`, `agent-repo-scope` (seeded ENABLED with the
+/// §Policy Examples conditions — `subject.repo_scope not_equals
+/// $resource.repo_id` dynamic reference — at priority 750, above the m34
+/// `agent-scoped-access` role Allow at 700, so the containment actually
+/// wins under "higher priority always wins" composition; see its
+/// definition in the domain set), and
+/// `builtin:require-human-spec-approval`.
 /// Excluded from the domain set: `developer-generate-access` (the m34 list
 /// owns the `builtin-developer-generate-access` id with the richer,
 /// workspace-role-keyed definition) and `viewer-no-spawn` (a §Policy
@@ -6624,6 +6629,143 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "the seeded persona-human-approval builtin must deny agent persona approvals"
+        );
+    }
+
+    /// `agent-repo-scope` (live): a worker agent's JWT carries its spawn
+    /// repo (`subject.repo_scope`, §Attributes "Agent OIDC claim"); the
+    /// SEEDED builtin alone must deny access to a DIFFERENT repo's
+    /// resources while leaving access to the agent's own repo intact
+    /// (the m34 agent-scoped-access role Allow at 700 grants the in-scope
+    /// read). Killing directions: the pre-fix seed (enabled: false) lets
+    /// BOTH reads through (200/200 — the role Allow at 700 wins); an
+    /// Exists-condition seed denies BOTH (403/403 — worker tokens always
+    /// carry a repo_id claim).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_agent_repo_scope_denies_out_of_scope_agent_live() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        // Workspace under the bootstrap tenant "default" — the tenant
+        // agent tokens resolve to (auth.rs `system_principal_tenant`) —
+        // so tenant-isolation (950) does not confound the containment
+        // assertion with a same-for-both-cases denial.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-agent-scope"),
+            gyre_common::Id::new("default"),
+            "ws-agent-scope".to_string(),
+            "ws-agent-scope".to_string(),
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        for repo_id in ["repo-scope-a", "repo-scope-b"] {
+            let repo = gyre_domain::Repository::new(
+                gyre_common::Id::new(repo_id),
+                gyre_common::Id::new("ws-agent-scope"),
+                format!("repo-{repo_id}"),
+                format!("/repos/repo-{repo_id}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        // Mint and register a real worker JWT scoped to repo-scope-a
+        // (same path as agent_jwt_claims_reach_live_evaluation).
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-repo-scope-1",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "ws-agent-scope",
+                "repo-scope-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-repo-scope-1", token.clone())
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_ID_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // In-scope read: the agent's own repo — the containment Deny does
+        // not match (repo_scope == resource.repo_id) and the role Allow
+        // (700) grants.
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-scope-a")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "an agent reading its own scoped repo must stay allowed"
+        );
+
+        // Out-of-scope read: a different repo in the same workspace —
+        // denied by the seeded builtin alone (no custom policy).
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-scope-b")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded agent-repo-scope builtin must deny cross-repo agent access"
+        );
+
+        // The denial is attributed to the containment builtin (matched by
+        // id), not the default-deny catchall — through the same decisions
+        // port the GET /policies/decisions audit endpoint queries.
+        let decisions = state
+            .policies
+            .list_decisions(Some("agent-repo-scope-1"), Some("repo"), 100)
+            .await
+            .unwrap();
+        let containment = decisions.iter().find(|d| {
+            d.matched_policy
+                .as_ref()
+                .is_some_and(|p| p.as_str() == "builtin-agent-repo-scope")
+        });
+        assert!(
+            containment.is_some(),
+            "the denial must be recorded with matched_policy \
+             builtin-agent-repo-scope, got {:?}",
+            decisions
+                .iter()
+                .map(|d| d.matched_policy.clone())
+                .collect::<Vec<_>>()
         );
     }
 

@@ -909,6 +909,110 @@ mod tests {
         }
     }
 
+    /// `agent-repo-scope` seed must match the §Policy Examples semantics
+    /// and actually enforce containment: enabled (the §Built-In Policies
+    /// table lists containment as a shipped invariant, not an opt-in),
+    /// dynamic-reference conditions (`subject.repo_scope not_equals
+    /// $resource.repo_id` — an Exists-only condition would deny
+    /// repo-scoped agents EVERYTHING, since worker tokens always carry a
+    /// repo_id claim), and priority above the m34 `agent-scoped-access`
+    /// role Allow (700), because composition is higher-priority-wins.
+    /// Killing directions: the pre-fix seed (enabled: false, Exists
+    /// condition, priority 100) fails the enabled, condition, and priority
+    /// assertions respectively.
+    #[test]
+    fn agent_repo_scope_seed_matches_spec_example() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let p = builtins
+            .iter()
+            .find(|p| p.name == "agent-repo-scope")
+            .expect("agent-repo-scope must exist in the domain builtin set")
+            .clone();
+
+        assert!(
+            p.enabled,
+            "containment is a shipped invariant (§Built-In Policies), not an opt-in"
+        );
+        assert_eq!(p.effect, PolicyEffect::Deny);
+        assert_eq!(p.actions, vec!["*".to_string()]);
+        assert_eq!(p.resource_types, vec!["*".to_string()]);
+        assert_eq!(p.conditions.len(), 2);
+        assert_eq!(p.conditions[0].attribute, "subject.type");
+        assert_eq!(p.conditions[0].operator, ConditionOp::Equals);
+        assert_eq!(
+            p.conditions[0].value,
+            ConditionValue::String("agent".to_string())
+        );
+        assert_eq!(p.conditions[1].attribute, "subject.repo_scope");
+        assert_eq!(p.conditions[1].operator, ConditionOp::NotEquals);
+        assert_eq!(
+            p.conditions[1].value,
+            ConditionValue::String("$resource.repo_id".to_string()),
+            "the spec's dynamic reference — an Exists-only condition would \
+             deny repo-scoped agents everything (worker tokens always carry \
+             a repo_id claim)"
+        );
+        assert!(
+            p.priority > 700,
+            "the containment Deny must outrank the m34 agent-scoped-access \
+             role Allow (priority 700): composition is higher-priority-wins, \
+             so a Deny at the §Policy Examples priority 100 enforces nothing"
+        );
+    }
+
+    /// Live-set behavior of the seeded `agent-repo-scope` against the REAL
+    /// m34 role Allow: in-scope access passes through to the Allow,
+    /// out-of-scope access is denied BY the containment builtin (matched
+    /// by id, not the default-deny catchall), and non-repo-addressed
+    /// resources fall through (the `$resource.repo_id` reference fails
+    /// closed, so containment governs only repo-scoped resources — the
+    /// spec example's exact semantics).
+    #[test]
+    fn agent_repo_scope_enforced_over_role_allow() {
+        let mut set = gyre_domain::builtin_policies("system");
+        set.extend(crate::abac_middleware::m34_builtin_policies());
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set("subject.global_role", "Agent");
+        ctx.set("subject.tenant_id", "t-1");
+        ctx.set("subject.repo_scope", "repo-a");
+        ctx.set("resource.repo_id", "repo-a");
+        ctx.set("resource.tenant_id", "t-1");
+
+        // In-scope read: the containment Deny does not match
+        // (repo_scope == resource.repo_id); the role Allow (700) grants.
+        let r = evaluate(set.clone(), &ctx, "read", "repo");
+        assert_eq!(r.effect, PolicyEffect::Allow);
+        assert_eq!(
+            r.matched_policy.as_deref(),
+            Some("builtin-agent-scoped-access")
+        );
+
+        // Out-of-scope read: denied BY the containment builtin — the
+        // killing case for a disabled/enabled-but-ineffective seed.
+        ctx.set("resource.repo_id", "repo-b");
+        let r = evaluate(set.clone(), &ctx, "read", "repo");
+        assert_eq!(r.effect, PolicyEffect::Deny);
+        assert_eq!(
+            r.matched_policy.as_deref(),
+            Some("builtin-agent-repo-scope"),
+            "the denial must come from the containment builtin, not the \
+             default-deny catchall"
+        );
+
+        // Non-repo-addressed resource: `$resource.repo_id` does not
+        // resolve, the NotEquals condition fails closed, the role Allow
+        // grants — containment only governs repo-scoped resources.
+        let mut ctx2 = AttributeContext::default();
+        ctx2.set("subject.type", "agent");
+        ctx2.set("subject.global_role", "Agent");
+        ctx2.set("subject.tenant_id", "t-1");
+        ctx2.set("subject.repo_scope", "repo-a");
+        let r = evaluate(set, &ctx2, "read", "spec");
+        assert_eq!(r.effect, PolicyEffect::Allow);
+    }
+
     /// `tenant-isolation`: a subject whose tenant differs from the
     /// resource's tenant is denied — even when a same-tenant Allow would
     /// otherwise grant, and even for a global Admin role (the Allow at 900

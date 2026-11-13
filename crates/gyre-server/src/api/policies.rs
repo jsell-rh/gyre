@@ -376,7 +376,14 @@ pub async fn list_decisions(
 
 #[derive(Deserialize)]
 pub struct EffectiveQuery {
-    pub subject_id: Option<String>,
+    /// Subject id, named `subject` per the §API table
+    /// (`GET /api/v1/policies/effective?subject={id}&resource_type={type}`)
+    /// and docs/api-reference.md. `subject_id` is accepted as an alias so
+    /// callers using the decisions-endpoint spelling keep working — a
+    /// caller following the documented `?subject=` form must NOT fall
+    /// through to the bare-context (deny-everything) path.
+    #[serde(alias = "subject_id")]
+    pub subject: Option<String>,
     pub resource_type: Option<String>,
 }
 
@@ -404,7 +411,7 @@ pub async fn effective_permissions(
     // fallback to just subject.id (unknown subject, conditions on other
     // attributes fail closed).
     let mut ctx = AttributeContext::default();
-    if let Some(sid) = &q.subject_id {
+    if let Some(sid) = &q.subject {
         ctx.set("subject.id", sid);
         let user = match state.users.find_by_id(&Id::new(sid.clone())).await {
             Ok(u) => u,
@@ -789,6 +796,113 @@ mod tests {
         assert!(!arr.is_empty());
         // With no policies, everything should be deny.
         assert!(arr.iter().all(|p| p["decision"] == "deny"));
+    }
+
+    /// The `?subject=` query spelling is the one the §API table and
+    /// docs/api-reference.md document
+    /// (`GET /api/v1/policies/effective?subject={id}&resource_type={type}`).
+    /// A caller following the docs must get the subject's REAL attributes
+    /// (user global role from the store) — not the no-subject fallback
+    /// (bare context → deny-everything). Killing case: a handler binding
+    /// only `subject_id` ignores `?subject=` entirely and this test fails
+    /// with read=deny. The `subject_id` alias must keep working too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn effective_permissions_binds_documented_subject_param() {
+        use gyre_common::Id;
+        use gyre_domain::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope, User, UserRole};
+
+        let state = test_state();
+
+        // A real user whose global role the handler must load from the store.
+        let mut user = User::new(
+            Id::new("eff-subject-user"),
+            "eff-sub-external",
+            "eff-user",
+            0,
+        );
+        user.roles = vec![UserRole::Admin];
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+
+        // An Allow keyed on the attribute only the real-subject path sets:
+        // with the bare-context fallback, subject.global_role is absent and
+        // the condition fails closed → deny.
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("eff-admin-read"),
+                name: "eff-admin-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 100,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.global_role".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("Admin".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // The documented spelling: ?subject={id}.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies/effective?subject=eff-subject-user&resource_type=repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let read = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["action"] == "read")
+            .expect("read must be sampled");
+        assert_eq!(
+            read["decision"], "allow",
+            "?subject= must bind the subject and load its real attributes \
+             (bare-context fallback would deny)"
+        );
+        assert_eq!(read["matched_policy"], "eff-admin-read");
+
+        // The alias spelling (?subject_id=) must keep working.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies/effective?subject_id=eff-subject-user&resource_type=repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let read = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["action"] == "read")
+            .expect("read must be sampled");
+        assert_eq!(read["decision"], "allow");
     }
 
     #[tokio::test(flavor = "multi_thread")]
