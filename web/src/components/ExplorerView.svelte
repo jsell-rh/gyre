@@ -2241,6 +2241,7 @@
             showScopeToggle={false}
             onNodeClick={showRepoDetail}
             onNodeDblClick={enterRepo}
+            onRefresh={loadWsDepGraph}
           />
         </div>
         {#if repoDetail}
