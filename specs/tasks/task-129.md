@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -142,66 +142,3 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
-
-## Shipped
-
-### This round: review repair (round-2 findings on the task-129 branch)
-
-Two findings from the independent review of the previous rounds' work,
-repaired in commit `0c148e28` on top of the existing engine/API/audit
-implementation:
-
-**1. `agent-repo-scope` built-in was hollow.** The seeded row
-(`gyre-domain/src/policy.rs`) was `enabled: false` with an Exists-only
-condition, so the specced containment ("Agents can't access resources
-outside their scoped repo") was never enforced — the m34
-`agent-scoped-access` role Allow (priority 700) granted worker agents
-cross-repo access within the tenant, and no supported path could enable
-the row (the policies API refuses built-in updates; the startup drift
-refresh reverts direct DB edits). The seeded conditions also diverged
-from the spec: `subject.repo_scope Exists` would have denied repo-scoped
-agents EVERYTHING (worker tokens always carry a `repo_id` claim), since
-worker tokens always carry `repo_id`. The seed now matches the
-§Policy Examples semantics exactly: `subject.type == agent` AND
-`subject.repo_scope not_equals "$resource.repo_id"` (dynamic reference —
-in-scope access does not match, unscoped agents and non-repo-addressed
-resources fail the condition closed), `enabled: true`, priority 750 —
-above the role Allow at 700, because composition is
-"higher priority always wins" and a Deny at the example's priority 100
-would enforce nothing. Existing deployments receive the fix through the
-built-in drift refresh at startup (covered by
-`seed_refreshes_drifted_builtin_policy`). Git HTTP agent pushes are a
-separate enforcement path (repo access + gate chain) and are unchanged.
-
-**2. `/api/v1/policies/effective` param mismatch.** The §API table and
-`docs/api-reference.md` document `?subject={id}`; the handler bound
-`subject_id` only, so a caller following the docs hit the no-subject
-fallback (bare context → deny-everything). The handler now binds the
-documented `subject` param, with `subject_id` accepted as an alias.
-
-### Test evidence
-
-- `cargo check -p gyre-server --tests` — exit 0 (type-checks all new
-  test code).
-- `cargo test -p gyre-domain` — 507 + 8 passed, 0 failed.
-- `scripts/check-arch.sh`, `scripts/check-abac-route-registry.sh`,
-  `check-inert-enforcement`, `check-fail-open-ref-resolution`,
-  `check-fabricated-scope-defaults`, `check-mem-port-contracts` — all
-  pass.
-- New tests (gyre-server test builds are blocked by the sandbox build
-  wrapper — the independent verifier must run them):
-  `cargo test -p gyre-server --lib agent_repo_scope` covers
-  `agent_repo_scope_seed_matches_spec_example` (seed shape: enabled,
-  dynamic-reference conditions, priority > 700 — each assertion kills
-  one pre-fix defect),
-  `agent_repo_scope_enforced_over_role_allow` (engine-level, against the
-  REAL m34 seed set: in-scope allowed by the role Allow, out-of-scope
-  denied BY `builtin-agent-repo-scope`, non-repo-addressed
-  fall-through), and
-  `builtin_agent_repo_scope_denies_out_of_scope_agent_live` (live
-  middleware: minted worker JWT scoped to repo-scope-a reads its own
-  repo 200, reads repo-scope-b 403, and the recorded decision names
-  `builtin-agent-repo-scope` as the matched policy).
-  `cargo test -p gyre-server --lib effective_permissions_binds_documented_subject`
-  covers the documented `?subject=` spelling (real user attributes
-  loaded → allow) and the `subject_id` alias.
