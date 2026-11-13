@@ -2,14 +2,14 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["f17756774160de561cc1e0a9c1576a43e18b7505", "e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -93,43 +93,3 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
-
-## Shipped
-
-The task-146 analytics surface (event schema with all 9 spec fields, all 12
-auto-emitted events with spec-required properties at their real trigger
-points, query API with the full spec filter set + server-side `group_by`
-aggregation) shipped in earlier rounds — see the `commits:` list. This
-round repairs the two failures from verification run `c1ef1158`
-(`cargo test --all`, exit 101).
-
-### Verification repair (commit f1775677)
-
-- **`task.status_changed` repo scope** (`api/analytics.rs`):
-  `record_task_status_changed` constructed the event with
-  `.with_scope(.., Some(&task.workspace_id), None)` — the repo scope was
-  dropped, so the index-on-write search document's `repo` facet was empty
-  and `task_transition_activity_event_is_workspace_scoped` failed with
-  `facets[repo] == ""`. `Task.repo_id` is non-optional (M34 hierarchy), so
-  the helper now passes it through `with_scope`, derived server-side from
-  the persisted entity. Every task.status_changed emit path (HTTP, MCP,
-  spawn/completion auto-advance, admin force-kill, stale-abort, spec-reject,
-  repo-archive, ralph-loop) routes through this single helper.
-- **Grouped-filter test corrected** (`api/analytics.rs` tests):
-  `query_events_group_by_counts_full_filtered_set` expected
-  `event_name=mr.m*` to yield both `mr.merged` and `mr.closed` groups,
-  contradicting the spec-documented semantics (analytics.md §Query
-  Parameters: exact or trailing-`*` prefix — `mr.m*` matches only
-  `mr.merged`). The test now asserts `mr.m*` discriminates (1 group, full
-  150 total) and `mr.*` spans both names with full totals (150/7).
-  Production filter semantics unchanged — verified identical across the
-  mem, SQLite, and Postgres adapters.
-
-### Test evidence
-
-- `/tmp/stage/bin/cargo check -p gyre-server --quiet` — exit 0 (clean).
-- gyre-server test compilation is deferred to the independent verifier
-  (this sandbox has a hard 4 GiB cgroup limit); the verifier must run:
-  `cargo test -p gyre-server --lib api::analytics::tests` and
-  `cargo test -p gyre-server --lib api::tasks::tests` (evidence and exact
-  commands in `/tmp/stage/review-evidence/task-146-repair.txt`).
