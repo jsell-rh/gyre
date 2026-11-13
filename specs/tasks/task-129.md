@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -142,66 +142,3 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
-
-## Shipped
-
-### Round 4: scope applicability on the evaluation path (commit `35711565`)
-
-The engine, CRUD/dry-run/decisions/effective API, audit integration,
-builtin seeding, caching, the round-1/2 repairs (agent-repo-scope
-containment, `?subject=` binding) and the round-3 repairs (reserved
-system identity, policy-allowed global token) are in the earlier commits
-listed above. Round 4 closes the two remaining review findings:
-
-**1. Scope applicability (the escalation).** `evaluate` retained
-policies only on `enabled && applies_to(action, resource_type)` —
-`Policy::applies_to` never checks `scope`/`scope_id`, and the middleware
-fed it the entire store, so a ws-A-scoped Allow granted Developers in
-ws-B (and other tenants) and a scoped Deny restricted globally. The fix
-is ONE canonical filter, `policy_engine::scope_applies`, applied inside
-`evaluate` so every caller shares it:
-
-- `scope_id: Some(id)` requires the addressed resource's scope-chain
-  attribute (`resource.repo_id` / `resource.workspace_id` /
-  `resource.tenant_id`, extracted before evaluation per §Evaluation Flow
-  steps 1-4) to be present AND equal — a ws-A policy never applies to a
-  ws-B request, a t-1 policy never governs t-2 resources, and no scope
-  is fabricated when the level is unaddressed;
-- `scope_id: None` means all entities at that level — every seeded
-  builtin (all Tenant/None) stays global.
-
-Call-site alignment: `evaluate_merge_abac` drops its private
-workspace-only filter and delegates to the canonical one (its ctx now
-sets `resource.tenant_id`, so tenant-scoped policies are tenant-scoped
-at merge time too); `evaluate_attestation_abac` and the git-http
-push-attestation ctx carry the full resource scope chain (the push path
-resolves the tenant from the repo's workspace, never the caller's
-claim); the dry-run endpoint accepts `resource.tenant_id`; the effective
-endpoint gained optional `workspace_id`/`repo_id`/`tenant_id` params so
-scoped policies can be assessed against a concrete scope.
-
-**2. Stale security-model comments.** `auth.rs` (`jwt_claims` doc) and
-`git_http.rs` (`resolve_repo_by_slug`) claimed the global token/API keys
-"bypass ABAC" — false since round 3 (API keys always evaluate; the
-global token is allowed BY `system-full-access`). Both now state the
-actual behavior, so the comments no longer misdocument the escalation
-surface.
-
-### Test evidence
-
-New tests: five engine unit tests (workspace/repo/tenant
-non-applicability, None-means-all/keeps-builtins-global, immutable-Deny
-still overrides an in-scope Allow), two live middleware tests
-(`scoped_workspace_deny_does_not_apply_out_of_scope_live`,
-`scoped_workspace_allow_does_not_escalate_across_workspaces_live` — the
-reviewer's exact repro shape, each asserting both the out-of-scope
-non-effect and the in-scope effect via the decision audit's
-`matched_policy`), and a dry-run API test
-(`evaluate_respects_policy_scope`).
-
-In this sandbox `cargo check -p gyre-server` and `cargo check -p
-gyre-server --tests` pass (exit 0, no warnings); gyre-server test
-compilation exceeds the 4 GiB cgroup budget and is delegated to the
-independent verifier — the required probes (focused new tests plus
-abac/policy/merge/git_http regression scopes) are listed in
-`/tmp/stage/review-evidence/round4-scope-applicability.md`.
