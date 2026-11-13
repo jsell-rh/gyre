@@ -4,7 +4,7 @@ spec_ref: "user-management.md §API > Teams"
 depends_on:
   - task-122
   - task-123
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
