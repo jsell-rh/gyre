@@ -79,8 +79,12 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                                 tenant_id: tenant_id.to_string(),
                             }
                         });
+                        // §API > Notifications: broadcasting wrapper so
+                        // mirror-push notifications reach live stream
+                        // subscribers (task-125 review repair).
+                        let divergence_notifications = state.broadcasting_notifications();
                         let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                            notification_repo: state.notifications.as_ref(),
+                            notification_repo: &divergence_notifications,
                             membership_repo: state.workspace_memberships.as_ref(),
                         });
                         crate::graph_extraction::extract_and_store_graph(

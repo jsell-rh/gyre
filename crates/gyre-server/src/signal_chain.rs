@@ -534,7 +534,7 @@ async fn notify_cross_workspace_change(
             &tenant_id,
             now as i64,
         );
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 user_id = %member.user_id,
                 "signal-chain: failed to create CrossWorkspaceSpecChange notification: {e}"
@@ -1213,6 +1213,7 @@ async fn try_spawn_worker(
         loop_config: None,
         agent_type: None,
         conversation_sha: None,
+        persona: None,
         persona_slug: None, // scheduler spawns carry no persona request
     };
     match crate::api::spawn::spawn_agent_core(
@@ -3094,7 +3095,7 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, 100, 0)
+            .list_for_user(&Id::new("admin-user"), None, None, None, None, None, 100, 0)
             .await
             .unwrap();
         assert!(

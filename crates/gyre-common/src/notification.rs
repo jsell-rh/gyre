@@ -344,6 +344,30 @@ impl NotificationPriority {
         }
     }
 
+    /// Case-insensitive parse (query-parameter filter input —
+    /// user-management.md §API > Notifications `?priority=`).
+    pub fn from_level_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "urgent" => Some(Self::Urgent),
+            _ => None,
+        }
+    }
+
+    /// The HSI §8 rank band this level covers (inclusive; rank 1 is
+    /// highest): Urgent 1–2, High 3–4, Medium 5–7, Low 8–10. The inverse of
+    /// `from_rank` — `from_rank(band.0) == self`.
+    pub fn rank_band(&self) -> (u8, u8) {
+        match self {
+            Self::Urgent => (1, 2),
+            Self::High => (3, 4),
+            Self::Medium => (5, 7),
+            Self::Low => (8, 10),
+        }
+    }
+
     /// Derives the four-level priority from an HSI §8 numeric rank.
     ///
     /// Bands: 1–2 Urgent, 3–4 High, 5–7 Medium, 8–10 Low. Ranks outside 1–10
@@ -588,6 +612,55 @@ mod tests {
             NotificationPriority::from_rank(255),
             NotificationPriority::Low
         );
+    }
+
+    /// rank_band is the inverse of from_rank (user-management.md §API >
+    /// Notifications `?priority=` filter widens a level to its band), and
+    /// from_level_str accepts the case-insensitive query form.
+    #[test]
+    fn rank_band_is_inverse_of_from_rank_and_level_str_parses() {
+        for rank in 1u8..=10 {
+            let level = NotificationPriority::from_rank(rank);
+            let (lo, hi) = level.rank_band();
+            assert!((lo..=hi).contains(&rank), "rank {rank} must be in its band");
+            assert_eq!(NotificationPriority::from_rank(lo), level);
+            assert_eq!(NotificationPriority::from_rank(hi), level);
+        }
+        // Bands partition 1–10 with no gaps or overlap.
+        let mut bounds: Vec<(u8, u8)> = [
+            NotificationPriority::Urgent,
+            NotificationPriority::High,
+            NotificationPriority::Medium,
+            NotificationPriority::Low,
+        ]
+        .iter()
+        .map(|l| l.rank_band())
+        .collect();
+        bounds.sort();
+        assert_eq!(bounds[0].0, 1);
+        assert_eq!(bounds[3].1, 10);
+        for w in bounds.windows(2) {
+            assert_eq!(w[0].1 + 1, w[1].0, "bands must be contiguous");
+        }
+
+        // Query-parameter form: case-insensitive, surrounding whitespace ok.
+        assert_eq!(
+            NotificationPriority::from_level_str("high"),
+            Some(NotificationPriority::High)
+        );
+        assert_eq!(
+            NotificationPriority::from_level_str("  URGENT "),
+            Some(NotificationPriority::Urgent)
+        );
+        assert_eq!(
+            NotificationPriority::from_level_str("Low"),
+            Some(NotificationPriority::Low)
+        );
+        assert_eq!(
+            NotificationPriority::from_level_str("medium"),
+            Some(NotificationPriority::Medium)
+        );
+        assert_eq!(NotificationPriority::from_level_str("critical"), None);
     }
 
     #[test]
