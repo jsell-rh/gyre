@@ -477,7 +477,7 @@ pub async fn create_notifications_for_error_findings(
             notif.source.entity_type = "spec".to_string();
             notif.source.entity_id = finding.spec_path.clone();
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 warn!(
                     user = %member.user_id,
                     error = %e,
@@ -1073,6 +1073,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -1107,6 +1108,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -1125,6 +1127,7 @@ mod tests {
             .list_for_user(
                 &Id::new("viewer1"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,
@@ -1206,6 +1209,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -1272,6 +1276,7 @@ mod tests {
             .list_for_user(
                 &Id::new("admin1"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,

@@ -18,8 +18,9 @@ pub trait NotificationRepository: Send + Sync {
     /// or if user_id does not match, preventing cross-user UUID guessing).
     async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
 
-    /// List notifications for a user. Optionally filtered by workspace and priority range.
-    /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    /// List notifications for a user. Optionally filtered by workspace, repo,
+    /// and priority range. When `workspace_id` is None, returns notifications
+    /// across all workspaces (tenant Inbox).
     #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
@@ -28,6 +29,7 @@ pub trait NotificationRepository: Send + Sync {
         min_priority: Option<u8>,
         max_priority: Option<u8>,
         notification_type: Option<&str>,
+        repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;
@@ -60,6 +62,19 @@ pub trait NotificationRepository: Send + Sync {
     /// Count active (not resolved, not dismissed) notifications.
     /// When `workspace_id` is None, counts across all workspaces (badge count).
     async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+
+    /// Count active (not resolved, not dismissed) notifications that the user
+    /// has not read (user-management.md §API > Notifications: unread count for
+    /// the bell badge). When `workspace_id` is None, counts across all
+    /// workspaces.
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+
+    /// Mark every unread notification owned by `user_id` as read, stamping
+    /// `read_at` (user-management.md §API > Notifications: mark-all-read).
+    /// Dismissed cards are included so the unread count deterministically
+    /// reaches zero. When `workspace_id` is Some, only that workspace's
+    /// notifications are marked. Returns the number of rows updated.
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
 
     /// List most recent notifications across all users (for activity feed).
     /// Ordered by created_at descending.
