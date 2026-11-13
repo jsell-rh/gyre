@@ -2,10 +2,10 @@
 title: "Implement session management"
 spec_ref: "user-management.md §Session Management"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -84,37 +84,3 @@ Users can:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Session Management for full requirements. Auth middleware is in `gyre-server/src/auth.rs`. User model is in `gyre-domain/src/user.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC mappings in `gyre-server/src/abac_middleware.rs`. Check migration numbering.
-
-## Shipped
-
-Session management is implemented end-to-end against `user-management.md` §Session Management (the implementation is the branch's prior reviewed work; this round repaired the verification finding on the merge onto assigned base `f764bc00`):
-
-- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields (id, user_id, token_hash, ip_address, user_agent, created_at, last_active_at, expires_at, revoked); only the SHA-256 of the API key is stored (`hash_api_key`), never plaintext. `is_active(now)` = not revoked and not expired.
-- **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — they are the durable sign-out record).
-- **Adapters:** SQLite + PostgreSQL + mem implementations on shared migration `2026-10-08-000063_user_sessions`; diesel schema registered; no duplicate migration versions.
-- **Auth integration (`auth.rs`):** on successful API-key auth, the session for (credential, IP, User-Agent) is found or minted; `last_active_at` + sliding `expires_at` are refreshed at most once per 60s; a revoked session for the device rejects auth with 401; `credential_revoked` rejects the key when every session for it is revoked ("sign out everywhere", including never-seen devices) — enforced on both the HTTP extractor and the WS/TTY `authenticate_token` paths. IP comes from `ConnectInfo` socket peer only (no forwarded-header trust, CWE-348).
-- **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks (ABAC-exempt routes); target-user existence 404s.
-- **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
-
-### Verification repair (this round, commit `57f6d144`)
-
-The prior verification run (`bash /tmp/stage/checks.sh`, finding `6bd488ab`, exit 1) failed the **exemption-freeze gate**: `new verification exemptions forbidden: scripts/scope-literal-defaults-exemptions.txt` listing `postgres/repository.rs:132`, `sqlite/repository.rs:132`, `task.rs:104`. A prior round had re-pinned those three legacy exemption entries after base insertions shifted the sites' line numbers (94→132, 92→104); the gate compares exact `path:line` strings against the base and forbids any addition, including replacement re-pins. Repairs:
-
-- **`sqlite/repository.rs` + `postgres/repository.rs` `create()` — real fix:** the row is now filed under the handle's `self.tenant_id` (captured before `spawn_blocking`), exactly like every query method already filters. The literal `"default"` was a real isolation bug: a `with_tenant("t1")` handle's creations were invisible to its own queries and visible to the "default"-scoped handle. Production wiring (`SqliteStorage::new`, tenant "default") is behavior-identical. Killing test `create_is_scoped_to_the_handles_tenant` verified to fail on the old code and pass on the fix.
-- **`domain/task.rs` `Task::new`:** the displaced legacy site is re-anchored with the check's documented inline `// scope-literal:ok — task-099 F1 legacy debt` marker at its true location (task-108 precedent for this exact finding class; the base itself carries this site exempted at `task.rs:92`). The real fix — requiring the workspace at `Task::new` construction — is a signature change across 82 call sites including the public `POST /tasks` contract, so it is recorded as legacy debt rather than silently re-exempted in the file.
-- Deleted the three file entries and lowered `FROZEN_EXEMPTION_COUNT` 9→6 in `scripts/check-scope-literal-defaults.sh` (both constants) per the script's documented procedure. The entry set is now a **strict subset** of the base's (verified with the gate's exact set-difference logic — no additions in any `scripts/*-exemptions.txt`).
-
-### Test evidence (at head `57f6d144`; logs under `/tmp/stage/review-evidence/`)
-
-In-sandbox (build wrapper):
-
-- `cargo check -p gyre-adapters -p gyre-domain` — clean; `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean; `cargo fmt --all --check` — clean; clippy — no findings in the three touched files.
-- `cargo test -p gyre-adapters --lib` — **522 passed, 0 failed** (incl. the 9 `user_profile::session*` tests and the new `create_is_scoped_to_the_handles_tenant` killing test).
-- `cargo test -p gyre-domain` — **507 + 8 passed, 0 failed**; `cargo test -p gyre-common` — **124 passed, 0 failed**.
-- `bash scripts/check-scope-literal-defaults.sh` — OK (6 entries ≤ frozen 6); exemption-subset check vs base — PASS; arch, migration-versions, fabricated-scope-defaults, mem-port-contracts — all OK.
-
-Required in the independent verifier (gyre-server test compilation exceeds the in-sandbox 4 GiB budget):
-
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the 22 session-management tests in `auth.rs` and `api/users.rs`: per-device vs sign-out-everywhere, listing filters, WS rejection paths, 60s throttle, re-mint).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test task134_review_probe` — base's integration test whose fixtures a prior round adapted.
-- `bash /tmp/stage/checks.sh` — the exemption-freeze gate now passes (entry set is a strict subset of the base's).
