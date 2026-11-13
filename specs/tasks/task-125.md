@@ -182,14 +182,15 @@ SKIP_WEB_BUILD=1 cargo test -p gyre-server --all
 SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --all-targets
 ```
 
-### Repair round 1 — contract restore, no production change
+### Repair rounds — contract restores, no production change
 
 The executor restored the assigned task document (unchecked criteria,
-`not-started`); it was returned to this `ready-for-review` state while the
-production fix (`bc0d0eac`) was preserved untouched — the task-125 surface is
-byte-identical to the reviewed candidate (empty `git diff c0bb3b34` over
-users.rs, notification port/adapters, abac_middleware.rs; remaining tree
-deltas are the base's task-183 work from the executor merge). Re-verified on
+`not-started`) after each review round; it was returned to this
+`ready-for-review` state while the production fix (`bc0d0eac`) was preserved
+untouched — the task-125 surface is byte-identical to the reviewed candidate
+(empty `git diff c0bb3b34` over users.rs, notification port/adapters,
+abac_middleware.rs; remaining tree deltas are the base's task-183 work from
+the executor merge). Re-verified on
 the merged tree: gyre-common notification tests 9/9, gyre-adapters
 notification tests 9/9 (real SQLite), `SKIP_WEB_BUILD=1 cargo check -p
 gyre-server` clean, and all mechanical repo gates pass (arch, ABAC registry
