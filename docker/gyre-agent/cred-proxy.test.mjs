@@ -10,6 +10,14 @@ import https from 'node:https';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const CRED_PROXY_ENTRY = join(TEST_DIR, 'cred-proxy.mjs');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -195,5 +203,295 @@ describe('credential prefix (spawn.rs behaviour)', () => {
     assert.equal(containerEnv['GYRE_CRED_PROXY'], 'http://127.0.0.1:8765');
     assert.equal(containerEnv['ANTHROPIC_API_KEY'], 'proxy-managed');
     assert.notEqual(containerEnv['ANTHROPIC_API_KEY'], 'sk-ant-real', 'real key must not be in env');
+  });
+});
+
+// ── Tests: usage reporting (agent-runtime.md §4 "What's Tracked") ────────────
+//
+// The spec requires cred-proxy to report token usage back to the server
+// after each LLM call via POST /api/v1/agents/:id/usage. These tests run the
+// REAL cred-proxy.mjs as a child process against a fake Anthropic upstream
+// (GYRE_ANTHROPIC_BASE) and a fake gyre server, then assert what arrived at
+// the server. With the reporting wiring removed, every test here fails.
+
+const LOCALHOST = '127.0.0.1';
+
+/** Reserve an ephemeral TCP port on loopback. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, LOCALHOST, () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+/**
+ * Spawn the real cred-proxy.mjs with usage reporting pointed at `serverUrl`
+ * and /v1/* LLM calls pointed at `anthropicBase`. Returns the child and the
+ * TCP port its proxy listener is on.
+ */
+async function startCredProxy({ serverUrl, agentId, anthropicBase, extraEnv = {} }) {
+  const port = await freePort();
+  const sockDir = mkdtempSync(join(tmpdir(), 'cred-proxy-test-'));
+  const child = spawn(process.execPath, [CRED_PROXY_ENTRY], {
+    env: {
+      ...process.env,
+      GYRE_CRED_SOCK_PATH: join(sockDir, 'cred.sock'),
+      GYRE_CRED_PROXY_PORT: String(port),
+      GYRE_SERVER_URL: serverUrl,
+      GYRE_AGENT_ID: agentId,
+      GYRE_AUTH_TOKEN: 'test-agent-token',
+      GYRE_ANTHROPIC_BASE: anthropicBase,
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const stderr = [];
+  child.stderr.on('data', (c) => stderr.push(c.toString()));
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      await localFetch(`http://${LOCALHOST}:${port}/`, { method: 'GET' });
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        child.kill('SIGTERM');
+        throw new Error(`cred-proxy did not start within 10s; stderr: ${stderr.join('')}`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return { child, port, stderr };
+}
+
+/** Poll `fn` until it returns a truthy value (default 5 s). */
+async function waitFor(fn, what, ms = 5000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+async function stopCredProxy(proxy, ...servers) {
+  proxy.child.kill('SIGTERM');
+  await once(proxy.child, 'exit').catch(() => {});
+  for (const s of servers) s.close();
+}
+
+describe('usage reporting (agent-runtime.md §4)', () => {
+  it('reports token usage and model-priced cost to the gyre server after each LLM call', async () => {
+    const gyre = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const anthropic = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'msg_test_1',
+        model: 'claude-sonnet-4-5',
+        usage: { input_tokens: 1200, output_tokens: 300 },
+      }));
+    });
+    const proxy = await startCredProxy({
+      serverUrl: gyre.url,
+      agentId: 'agt-usage-1',
+      anthropicBase: anthropic.url,
+    });
+    try {
+      const resp = await localFetch(`http://${LOCALHOST}:${proxy.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 64,
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      assert.equal(resp.status, 200, 'proxied LLM call must succeed');
+      assert.equal(JSON.parse(resp.body).usage.input_tokens, 1200);
+
+      const report = await waitFor(
+        () => gyre.captured.find((c) => c.url === '/api/v1/agents/agt-usage-1/usage'),
+        'usage report at the gyre server'
+      );
+      assert.equal(report.method, 'POST');
+      assert.equal(
+        report.headers.authorization,
+        'Bearer test-agent-token',
+        'usage report must authenticate as the agent'
+      );
+      assert.equal(report.headers['content-type'], 'application/json');
+      const payload = JSON.parse(report.body);
+      assert.equal(payload.tokens_input, 1200);
+      assert.equal(payload.tokens_output, 300);
+      // claude-sonnet-4-5 list pricing: $3/M input, $15/M output
+      const expectedCost = (1200 * 3 + 300 * 15) / 1e6;
+      assert.ok(
+        Math.abs(payload.cost_usd - expectedCost) < 1e-12,
+        `cost_usd ${payload.cost_usd} must match model pricing ${expectedCost}`
+      );
+    } finally {
+      await stopCredProxy(proxy, gyre.server, anthropic.server);
+    }
+  });
+
+  it('reports cumulative output tokens from SSE streaming responses', async () => {
+    const sseBody = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":1}}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","usage":{"output_tokens":120}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","usage":{"output_tokens":150}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+    const gyre = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const anthropic = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sseBody);
+    });
+    const proxy = await startCredProxy({
+      serverUrl: gyre.url,
+      agentId: 'agt-usage-sse',
+      anthropicBase: anthropic.url,
+    });
+    try {
+      const resp = await localFetch(`http://${LOCALHOST}:${proxy.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', stream: true, max_tokens: 64, messages: [] }),
+      });
+      assert.equal(resp.status, 200);
+
+      const report = await waitFor(
+        () => gyre.captured.find((c) => c.url === '/api/v1/agents/agt-usage-sse/usage'),
+        'usage report for the streamed call'
+      );
+      const payload = JSON.parse(report.body);
+      assert.equal(payload.tokens_input, 500, 'input tokens come from message_start');
+      assert.equal(payload.tokens_output, 150, 'output tokens must be the final cumulative count');
+    } finally {
+      await stopCredProxy(proxy, gyre.server, anthropic.server);
+    }
+  });
+
+  it('does not report usage for responses without a usage block', async () => {
+    const gyre = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const anthropic = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'model-1' }] })); // /v1/models-style listing
+    });
+    const proxy = await startCredProxy({
+      serverUrl: gyre.url,
+      agentId: 'agt-usage-none',
+      anthropicBase: anthropic.url,
+    });
+    try {
+      const resp = await localFetch(`http://${LOCALHOST}:${proxy.port}/v1/models`, { method: 'GET' });
+      assert.equal(resp.status, 200);
+      // Give an erroneous report time to arrive before asserting absence.
+      await new Promise((r) => setTimeout(r, 750));
+      assert.equal(
+        gyre.captured.filter((c) => c.url.endsWith('/usage')).length,
+        0,
+        'non-LLM responses must not produce usage reports'
+      );
+    } finally {
+      await stopCredProxy(proxy, gyre.server, anthropic.server);
+    }
+  });
+
+  it('keeps the proxied LLM call working when the usage report fails', async () => {
+    const gyre = await startCapture((req, res) => {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'boom' }));
+    });
+    const anthropic = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'msg_test_2',
+        model: 'claude-sonnet-4-5',
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+    });
+    const proxy = await startCredProxy({
+      serverUrl: gyre.url,
+      agentId: 'agt-usage-fail',
+      anthropicBase: anthropic.url,
+    });
+    try {
+      const resp = await localFetch(`http://${LOCALHOST}:${proxy.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 8, messages: [] }),
+      });
+      assert.equal(resp.status, 200, 'a failed usage report must not fail the LLM call');
+      assert.equal(JSON.parse(resp.body).usage.input_tokens, 10);
+      const report = await waitFor(
+        () => gyre.captured.find((c) => c.url === '/api/v1/agents/agt-usage-fail/usage'),
+        'usage report attempt at the failing gyre server'
+      );
+      assert.equal(report.method, 'POST');
+    } finally {
+      await stopCredProxy(proxy, gyre.server, anthropic.server);
+    }
+  });
+
+  it('honors GYRE_PRICING_JSON overrides for cost reporting', async () => {
+    const gyre = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    const anthropic = await startCapture((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'msg_test_3',
+        model: 'claude-sonnet-4-5',
+        usage: { input_tokens: 1000, output_tokens: 1000 },
+      }));
+    });
+    const proxy = await startCredProxy({
+      serverUrl: gyre.url,
+      agentId: 'agt-usage-price',
+      anthropicBase: anthropic.url,
+      extraEnv: { GYRE_PRICING_JSON: JSON.stringify({ 'claude-sonnet-4-5': [1, 2] }) },
+    });
+    try {
+      const resp = await localFetch(`http://${LOCALHOST}:${proxy.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 8, messages: [] }),
+      });
+      assert.equal(resp.status, 200);
+      const report = await waitFor(
+        () => gyre.captured.find((c) => c.url === '/api/v1/agents/agt-usage-price/usage'),
+        'usage report with overridden pricing'
+      );
+      const payload = JSON.parse(report.body);
+      // Override: $1/M input, $2/M output → (1000*1 + 1000*2)/1e6
+      assert.ok(Math.abs(payload.cost_usd - 0.003) < 1e-12, `cost ${payload.cost_usd} must use GYRE_PRICING_JSON`);
+    } finally {
+      await stopCredProxy(proxy, gyre.server, anthropic.server);
+    }
   });
 });
