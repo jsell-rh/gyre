@@ -5,7 +5,7 @@ depends_on: [task-171, task-178]
 progress: complete
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df"]
+commits: ["bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "a3051e834c722f5d417993fd88eae0d83a3d9c1f"]
 ---
 
 ## Spec Excerpt
