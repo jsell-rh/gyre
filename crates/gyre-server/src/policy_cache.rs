@@ -251,7 +251,8 @@ mod tests {
         }
 
         fn list_by_scopes(&self) -> usize {
-            self.list_by_scopes.load(std::sync::atomic::Ordering::SeqCst)
+            self.list_by_scopes
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 

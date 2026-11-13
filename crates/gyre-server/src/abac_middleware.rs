@@ -2259,12 +2259,10 @@ pub async fn abac_middleware(
                     // the caller holds in the workspace being addressed. When the
                     // path names a workspace, use that membership's role; agents
                     // and workspace-less requests have none.
-                    if let Some(ws_id) =
-                        ctx.get("resource.workspace_id").and_then(|v| match v {
-                            AttrValue::Single(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                    {
+                    if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
+                        AttrValue::Single(s) => Some(s.clone()),
+                        _ => None,
+                    }) {
                         if let Some(m) = memberships
                             .iter()
                             .find(|m| m.workspace_id.to_string() == ws_id)
@@ -6275,12 +6273,8 @@ pub mod tests {
         // seeded entities (the deny-path halves keep `member_jwt`, whose
         // tenant is "default").
         let entity_member_id = gyre_common::Id::new("33333333-3333-3333-3333-333333333333");
-        let mut entity_member = gyre_domain::User::new(
-            entity_member_id.clone(),
-            "entity-sub",
-            "entity-user",
-            0,
-        );
+        let mut entity_member =
+            gyre_domain::User::new(entity_member_id.clone(), "entity-sub", "entity-user", 0);
         entity_member.roles = vec![gyre_domain::UserRole::Developer];
         state.users.create(&entity_member).await.unwrap();
         state
@@ -7122,11 +7116,7 @@ pub mod tests {
             .unwrap();
         state
             .kv_store
-            .kv_set(
-                "agent_tokens",
-                "agent-persona-approve",
-                token.clone(),
-            )
+            .kv_set("agent_tokens", "agent-persona-approve", token.clone())
             .await
             .unwrap();
 
@@ -7392,7 +7382,8 @@ pub mod tests {
         // API-key auth backed by a user row with NO roles — the extractor
         // resolves `roles: user.roles` (empty), and subject.id resolves to
         // the user's display_name.
-        let mut user = gyre_domain::User::new(Id::new("u-roleless"), "local:roleless", "roleless-user", 0);
+        let mut user =
+            gyre_domain::User::new(Id::new("u-roleless"), "local:roleless", "roleless-user", 0);
         user.roles = vec![];
         user.tenant_id = Some(Id::new("default"));
         state.users.create(&user).await.unwrap();
@@ -7436,7 +7427,8 @@ pub mod tests {
             .expect("the denial is recorded in the decision audit trail");
         let matched = decision.matched_policy.as_ref().map(|p| p.as_str());
         assert_ne!(
-            matched, Some("builtin-readonly-get-only"),
+            matched,
+            Some("builtin-readonly-get-only"),
             "no role Allow may match a role-less subject — the fabricated ReadOnly \
              attribute is what matched this builtin before the fix"
         );

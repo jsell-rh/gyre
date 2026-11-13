@@ -7347,8 +7347,7 @@ mod tests {
             let mut state = test_state();
             let real = state.workspaces.clone();
             {
-                let s = std::sync::Arc::get_mut(&mut state)
-                    .expect("test state is uniquely owned");
+                let s = std::sync::Arc::get_mut(&mut state).expect("test state is uniquely owned");
                 s.workspaces = std::sync::Arc::new(FailingWorkspaceReads { inner: real });
             }
 
@@ -7377,7 +7376,8 @@ mod tests {
             mr.workspace_id = Id::new("ws-fail-closed");
             let entry = MergeQueueEntry::new(Id::new("entry-fail-closed"), mr.id.clone(), 50, 1000);
 
-            let result = evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
             assert!(
                 result.is_err(),
                 "a workspace-store read failure must propagate (fail closed), not \

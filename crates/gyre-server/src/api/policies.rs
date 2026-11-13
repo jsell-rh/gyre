@@ -861,7 +861,10 @@ mod tests {
             serde_json::json!({ "type": "task", "workspace_id": "ws-B" }),
         )
         .await;
-        assert_eq!(json["decision"], "deny", "ws-A policy must not apply to ws-B");
+        assert_eq!(
+            json["decision"], "deny",
+            "ws-A policy must not apply to ws-B"
+        );
         assert!(
             json["matched_policy"].is_null(),
             "out-of-scope policy must not be the matched policy"
@@ -1082,7 +1085,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn effective_permissions_binds_documented_subject_param() {
         use gyre_common::Id;
-        use gyre_domain::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope, User, UserRole};
+        use gyre_domain::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope, User,
+            UserRole,
+        };
 
         let state = test_state();
 
@@ -1160,7 +1166,9 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/policies/effective?subject_id=eff-subject-user&resource_type=repo")
+                    .uri(
+                        "/api/v1/policies/effective?subject_id=eff-subject-user&resource_type=repo",
+                    )
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),

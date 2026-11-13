@@ -636,11 +636,13 @@ pub(crate) async fn relaunch_agent_session(
     // re-spawned sessions). The attestation level mirrors the first-spawn
     // computation (identity-security.md levels; Kubernetes falls back to 1
     // until the runtime reports pod workload attestations).
-    let attestation_level = resolved_ct_entity.as_ref().map_or(1u8, |ct| match ct.target_type {
-        gyre_domain::ComputeTargetType::Container => 3,
-        gyre_domain::ComputeTargetType::Ssh => 2,
-        gyre_domain::ComputeTargetType::Kubernetes => 1,
-    });
+    let attestation_level = resolved_ct_entity
+        .as_ref()
+        .map_or(1u8, |ct| match ct.target_type {
+            gyre_domain::ComputeTargetType::Container => 3,
+            gyre_domain::ComputeTargetType::Ssh => 2,
+            gyre_domain::ComputeTargetType::Kubernetes => 1,
+        });
     let token = state
         .agent_signing_key
         .mint_worker_scoped(

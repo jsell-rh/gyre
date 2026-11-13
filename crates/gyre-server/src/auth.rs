@@ -1641,9 +1641,7 @@ async fn find_or_create_user(
                 "SSO login for user whose display_name is the reserved system ABAC identity; \
                  rejecting (rename the user to re-enable login)"
             );
-            anyhow::bail!(
-                "user display_name is the reserved system ABAC identity"
-            );
+            anyhow::bail!("user display_name is the reserved system ABAC identity");
         }
         // Spec §User Entity: last_login_at is set on each authentication.
         // username/external_id stay untouched (immutable after creation).
@@ -2612,7 +2610,11 @@ mod tests {
         );
 
         // And no user row was created for the spoofed handle.
-        let after = state.users.find_by_external_id("spoof-sub-1").await.unwrap();
+        let after = state
+            .users
+            .find_by_external_id("spoof-sub-1")
+            .await
+            .unwrap();
         assert!(
             after.is_none(),
             "rejected reserved-identity SSO login must not provision a user"

@@ -266,11 +266,9 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
                 // failing on a type mismatch. The previous `first()` pick
                 // at the extraction site made the single-value arms above
                 // hide every role but one.
-                (
-                    ConditionOp::Equals,
-                    AttrValue::List(list),
-                    ConditionValue::String(expected),
-                ) => list.contains(expected),
+                (ConditionOp::Equals, AttrValue::List(list), ConditionValue::String(expected)) => {
+                    list.contains(expected)
+                }
                 (
                     ConditionOp::NotEquals,
                     AttrValue::List(list),
@@ -435,9 +433,7 @@ pub fn evaluate(
     // (§Evaluation Flow step 5 — see `scope_applies`). The context's
     // resource scope attributes are caller-resolved: the middleware and
     // merge path look them up from the addressed entity before calling.
-    policies.retain(|p| {
-        p.enabled && p.applies_to(action, resource_type) && scope_applies(p, &ctx)
-    });
+    policies.retain(|p| p.enabled && p.applies_to(action, resource_type) && scope_applies(p, &ctx));
 
     let total = policies.len() as u32;
 
@@ -521,7 +517,7 @@ pub fn build_decision(
 
 /// Persist a `PolicyDecision` to the queryable audit store, WARNing when
 /// the write fails (§Audit Integration, review round 6 task-129).
-/// 
+///
 /// The previous call sites discarded the result
 /// (`let _ = state.policies.record_decision(...)`), so a failing store
 /// silently blanked the audit trail: an operator querying
@@ -653,7 +649,10 @@ mod tests {
         // NotEquals: non-membership — ReadOnly is NOT among the roles, so
         // the condition holds.
         let result = evaluate(
-            vec![allow_policy(10, vec![cond(ConditionOp::NotEquals, "ReadOnly")])],
+            vec![allow_policy(
+                10,
+                vec![cond(ConditionOp::NotEquals, "ReadOnly")],
+            )],
             &ctx,
             "read",
             "repo",
@@ -669,7 +668,10 @@ mod tests {
         // fire for a subject that DOES carry the role — the lower-priority
         // blanket Allow is what grants when the Deny correctly misses).
         let result = evaluate(
-            vec![allow_policy(10, vec![cond(ConditionOp::Equals, "ReadOnly")])],
+            vec![allow_policy(
+                10,
+                vec![cond(ConditionOp::Equals, "ReadOnly")],
+            )],
             &ctx,
             "read",
             "repo",
@@ -878,7 +880,8 @@ mod tests {
         let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-2"), 900);
         let result = evaluate(vec![p], &ctx, "write", "task");
         assert_eq!(
-            result.effect, PolicyEffect::Deny,
+            result.effect,
+            PolicyEffect::Deny,
             "a repo-2 policy must not apply to a repo-1 request"
         );
 
@@ -889,7 +892,8 @@ mod tests {
         let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-1"), 900);
         let result = evaluate(vec![p], &ctx, "write", "task");
         assert_eq!(
-            result.effect, PolicyEffect::Deny,
+            result.effect,
+            PolicyEffect::Deny,
             "a repo-scoped policy must not apply when no repo is addressed"
         );
     }
@@ -901,7 +905,8 @@ mod tests {
         let p = scoped_allow_policy(PolicyScope::Tenant, Some("t-1"), 900);
         let result = evaluate(vec![p], &ctx, "write", "task");
         assert_eq!(
-            result.effect, PolicyEffect::Deny,
+            result.effect,
+            PolicyEffect::Deny,
             "a t-1 tenant policy must not apply to a t-2 request"
         );
 
@@ -1344,11 +1349,14 @@ mod tests {
         ctx.set("subject.tenant_id", "tenant-acme");
         ctx.set("resource.tenant_id", "tenant-other");
 
-        let admin_allow = allow_policy(900, vec![Condition {
-            attribute: "subject.global_role".to_string(),
-            operator: ConditionOp::Equals,
-            value: ConditionValue::String("Admin".to_string()),
-        }]);
+        let admin_allow = allow_policy(
+            900,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+        );
         let mut ctx_admin = ctx.clone();
         ctx_admin.set("subject.global_role", "Admin");
 
@@ -1372,7 +1380,12 @@ mod tests {
         let mut ctx_same = ctx;
         ctx_same.set("resource.tenant_id", "tenant-acme");
         ctx_same.set("subject.global_role", "Admin");
-        let result = evaluate(vec![admin_allow, tenant_isolation], &ctx_same, "read", "task");
+        let result = evaluate(
+            vec![admin_allow, tenant_isolation],
+            &ctx_same,
+            "read",
+            "task",
+        );
         assert_eq!(
             result.effect,
             PolicyEffect::Allow,
@@ -1412,13 +1425,7 @@ mod tests {
     #[test]
     fn system_full_access_outranks_tenant_isolation() {
         let builtins = gyre_domain::builtin_policies("system");
-        let get = |name: &str| {
-            builtins
-                .iter()
-                .find(|p| p.name == name)
-                .unwrap()
-                .clone()
-        };
+        let get = |name: &str| builtins.iter().find(|p| p.name == name).unwrap().clone();
 
         let mut ctx = AttributeContext::default();
         ctx.set("subject.id", "gyre-system-token");
@@ -1456,11 +1463,14 @@ mod tests {
             .unwrap()
             .clone();
 
-        let dev_allow = allow_policy(800, vec![Condition {
-            attribute: "subject.global_role".to_string(),
-            operator: ConditionOp::Equals,
-            value: ConditionValue::String("Developer".to_string()),
-        }]);
+        let dev_allow = allow_policy(
+            800,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Developer".to_string()),
+            }],
+        );
 
         // Non-member user: boolean false → denied even with the Developer
         // role allow at 800 (the builtin Deny sits at 940).
@@ -1487,7 +1497,12 @@ mod tests {
         // Member: boolean true → falls through to the Developer allow.
         let mut member = non_member;
         member.set_bool("subject.member_of_resource_workspace", true);
-        let result = evaluate(vec![dev_allow, membership_required], &member, "read", "task");
+        let result = evaluate(
+            vec![dev_allow, membership_required],
+            &member,
+            "read",
+            "task",
+        );
         assert_eq!(
             result.effect,
             PolicyEffect::Allow,
@@ -1507,11 +1522,14 @@ mod tests {
             .unwrap()
             .clone();
 
-        let mut agent_allow = allow_policy(700, vec![Condition {
-            attribute: "subject.global_role".to_string(),
-            operator: ConditionOp::Equals,
-            value: ConditionValue::String("Agent".to_string()),
-        }]);
+        let mut agent_allow = allow_policy(
+            700,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Agent".to_string()),
+            }],
+        );
         agent_allow.actions = vec!["read".to_string(), "approve".to_string()];
 
         // Agent approving a persona → denied by the builtin (950 > 700).

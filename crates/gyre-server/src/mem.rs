@@ -4556,10 +4556,7 @@ fn test_state_inner(
     // build_state, so middleware/engine tests exercise the cached path.
     let policy_cache = Arc::new(crate::policy_cache::PolicyCache::default());
     let cached_policies: Arc<dyn gyre_ports::PolicyRepository> = Arc::new(
-        crate::policy_cache::CachedPolicyRepository::new(
-            policies,
-            Arc::clone(&policy_cache),
-        ),
+        crate::policy_cache::CachedPolicyRepository::new(policies, Arc::clone(&policy_cache)),
     );
 
     // Mirror production wiring (lib.rs): entity repositories are wrapped in

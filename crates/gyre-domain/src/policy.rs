@@ -211,9 +211,8 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
         Policy {
             id: Id::new("builtin-tenant-isolation"),
             name: "tenant-isolation".to_string(),
-            description:
-                "Users and agents cannot access resources belonging to another tenant"
-                    .to_string(),
+            description: "Users and agents cannot access resources belonging to another tenant"
+                .to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
             priority: 950,
