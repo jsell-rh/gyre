@@ -12,8 +12,11 @@ Total nodes: {{node_count}}
 {{question}}
 
 ## Output Format
-Produce a JSON view specification matching the ViewSpec grammar. If you cannot
-visualize the question, explain why and set view_spec to null with a fallback.
+Produce a JSON view specification matching this grammar:
+{{view_spec_grammar}}
+
+If you cannot visualize the question, explain why and set view_spec to null
+with a fallback.
 
 ```json
 {
