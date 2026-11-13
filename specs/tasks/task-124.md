@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "c2af71eef21be1a3e7609a55e3d33ccd71b0bc08"]
 ---
 
 ## Spec Excerpt
@@ -82,6 +82,33 @@ Read `specs/system/user-management.md` §API > User Management and §API > Works
 
 ## Shipped
 
+### Rebase repair (commit c2af71ee)
+
+Rebased this branch's implementation onto the new base `349a32a`
+(task-122 team management + task-037 frontend types had landed):
+
+- `api/mod.rs` — import list is the union of both sides; all
+  task-124 routes (users/invitations) and task-122 routes
+  (team members) registered.
+- `api/users.rs` — production code auto-merged; the tests-module
+  conflict resolved by keeping BOTH test sets (task-124's
+  user-management/invitation tests and task-122's team tests,
+  interleaved blocks reconstructed side by side; no duplicate
+  helper names).
+- Migration renumber: this branch's
+  `2026-11-13-000062_user_deactivated_at` collided with the base's
+  `2026-11-13-000062_team_slug_lead_membership` (same Diesel version
+  `20261113000062` — only one runs, alphabetically first). Renumbered
+  to `2026-11-13-000063_user_deactivated_at` (next unused sequence);
+  `scripts/check-migration-versions.sh` passes. No code referenced the
+  old version string (the task-122 test
+  `migration_000062_backfills_team_slug_and_lead` targets the team
+  migration, which keeps 000062).
+- Coverage: `user-management.md` header combines the task-122 and
+  task-124 audits; counts mechanically recounted (6 implemented, 19
+  task-assigned); `SUMMARY.md` regenerated via
+  `scripts/update-coverage-summary.sh`.
+
 ### User management endpoints (§API > User Management)
 
 - **`GET /api/v1/users/{username}`** — tenant-public profile
@@ -96,8 +123,9 @@ Read `specs/system/user-management.md` §API > User Management and §API > Works
 - **`PUT /api/v1/users/{id}/deactivate`** — TenantAdmin-only soft
   deactivation with a real cascade, not a flag flip:
   - new `users.deactivated_at` column (migration
-    `2026-11-13-000062_user_deactivated_at`, portable SQL, next unused
-    sequence number; round-trip covered by an adapter test);
+    `2026-11-13-000063_user_deactivated_at` — renumbered from 000062
+    during the rebase onto the task-122 base; portable SQL, next
+    unused sequence number; round-trip covered by an adapter test);
   - the auth extractor's API-key path, the WebSocket auth path, and the
     SSO `find_or_create_user` login path all reject deactivated accounts
     (403 / login error) — a deactivated user's existing key stops
@@ -159,7 +187,9 @@ by task-111".)
 
 - Endpoint behavior (list/deactivate cascade, invitations, ownership
   transfer): integration tests in `crates/gyre-server/src/api/users.rs`
-  and the workspace handlers (commit 33e30ac96), previously reviewed.
+  and the workspace handlers (commit 33e30ac96), previously reviewed;
+  after the rebase the file also carries task-122's team tests — both
+  sets type-check together.
 - Impersonation deactivation repair (commit 6033324f8): three
   regression tests in `crates/gyre-server/src/api/impersonation.rs` —
   `deactivating_target_revokes_impersonation_token`,
@@ -167,12 +197,15 @@ by task-111".)
   `resolver_rejects_deactivated_accounts_even_with_unended_session`
   (deactivates the user record directly so only the resolver's
   account-state check can reject the token).
-- This sandbox: `cargo check -p gyre-server` and `cargo check -p
-  gyre-server --tests` both pass (exit 0, evidence in
+- This sandbox (post-rebase, merge commit c2af71ee): `cargo check -p
+  gyre-server` and `cargo check -p gyre-server --tests` both pass
+  (exit 0), `scripts/check-migration-versions.sh` and
+  `scripts/check-abac-route-registry.sh` pass (evidence in
   `/tmp/stage/review-evidence/`). gyre-server test compilation is
-  deferred to the verifier per the 4 GiB budget rule; the verifier must
-  run:
+  blocked by the 4 GiB build wrapper and deferred to the verifier;
+  the verifier must run:
 
       cargo test -p gyre-server --lib api::users
       cargo test -p gyre-server --lib api::impersonation
+      cargo test -p gyre-adapters --lib migration
       cargo test --all
