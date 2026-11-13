@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["583c4a07dde4629da277a1efdafaa5b077596b9d", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "089cdce388806ffd3c3514859f73148488c3c3a5", "9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "a312f2a79c7560868b9b158864df5f5cd0b111c4"]
 ---
 
 ## Spec Excerpt
@@ -86,15 +86,15 @@ From §Gate Agent Lifecycle:
 
 ## Acceptance Criteria
 
-- [x] Gate chains support ordered list of mixed gate types
-- [x] All gates execute in parallel when MR enters merge queue
-- [x] Merge processor tracks per-MR gate status (Pending/Running/Passed/Failed)
-- [x] All required gates must pass before merge proceeds
-- [x] Failed required gate blocks merge and notifies author
-- [x] Optional gates (`required = false`) don't block merging
-- [x] Gate agent lifecycle: ephemeral, read-only, scoped, attributed
-- [x] Gate agent context windows captured for audit
-- [x] `cargo test --all` passes
+- [ ] Gate chains support ordered list of mixed gate types
+- [ ] All gates execute in parallel when MR enters merge queue
+- [ ] Merge processor tracks per-MR gate status (Pending/Running/Passed/Failed)
+- [ ] All required gates must pass before merge proceeds
+- [ ] Failed required gate blocks merge and notifies author
+- [ ] Optional gates (`required = false`) don't block merging
+- [ ] Gate agent lifecycle: ephemeral, read-only, scoped, attributed
+- [ ] Gate agent context windows captured for audit
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -103,10 +103,12 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 ## Shipped
 
 Both coverage sections (§Gate Chains (Composable Policies), §Gate Agent
-Lifecycle) are implemented and independently approved in prior rounds.
-This round repaired the DIRTY merge state against current main
-(4dc0eb9b, task-139 forge enforcement policies) with merge commit
-`a312f2a7`, preserving the retained task-135 implementation.
+Lifecycle) are implemented in production code and independently approved in
+prior rounds. This round repaired the protected-contract drift: the assigned
+task document was restored by the executor with its contract text (spec
+excerpt, acceptance criteria, agent instructions) intact; this round
+re-recorded the commit attribution and these shipped notes without touching
+that protected text, preserving the existing production fix unchanged.
 
 ### Behavior
 
@@ -122,21 +124,21 @@ This round repaired the DIRTY merge state against current main
   run with a scoped OIDC token (`review:submit` only — no push, no task
   creation), attributed to their persona and gate config, torn down
   (token revoked) after the verdict, and their full context window
-  (persona prompt, pinned spec content, diff, task description) is
-  captured to the audit trail before the process runs.
+  (persona prompt, spec content pinned at the MR's `spec_ref` SHA, diff,
+  task description) is captured to the audit trail before the process
+  runs.
 
-### Merge resolution detail (`a312f2a7`)
+### Merge state
 
-The only conflicted file was `crates/gyre-server/src/gate_executor.rs`,
-with two hunks of identical shape: task-135's context-window capture vs
-main's pinned-SHA `GYRE_SPEC_URL` delivery. Both sides were kept — they
-are complementary (audit capture of the exact bundle + serving the spec
-blob at the MR's `spec_ref` SHA rather than HEAD). No behavior from
-either side was dropped.
+The DIRTY merge state against main was resolved in `a312f2a7` (only
+conflicted file: `crates/gyre-server/src/gate_executor.rs`; task-135's
+context-window capture and main's pinned-SHA spec delivery are
+complementary and both kept). Remote main is currently at `4dc0eb9b`,
+the branch base, so the resolution is current and clean.
 
 ### Test evidence
 
-- `cargo check -p gyre-server` — clean on the resolution
+- `cargo check -p gyre-server` — clean on this head
   (log: `/tmp/stage/review-evidence/cargo-check-gyre-server.txt`).
 - gyre-server test builds exceed the in-sandbox 4 GiB budget; the
   verifier must run: `cargo test -p gyre-server --lib update_gate`,
