@@ -48,12 +48,12 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 
 ## Acceptance Criteria
 
-- [x] Merge processor checks meta_spec_set_sha on MRs with attestations
-- [x] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
-- [x] Warning does not block merge by default
-- [x] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
-- [x] MRs without attestation skip the check gracefully
-- [x] Tests cover match, mismatch, hard-block, and no-attestation cases
+- [ ] Merge processor checks meta_spec_set_sha on MRs with attestations
+- [ ] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
+- [ ] Warning does not block merge by default
+- [ ] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
+- [ ] MRs without attestation skip the check gracefully
+- [ ] Tests cover match, mismatch, hard-block, and no-attestation cases
 
 ## Agent Instructions
 
