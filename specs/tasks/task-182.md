@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["fa5d864d6205a53e8e50c09a45047ad5ad4e8ad1", "13b99dd78a2d35b3c60cf3dd653486ffd5fb9708", "afd7e164cba686c33acc937fc15b1edd56964997", "a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,101 +71,3 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 ## Agent Instructions
 
 Read `system-explorer.md` §4 "Concept Views" for the full specification. The concept API endpoints are already registered in `mod.rs` — check `GET /repos/:id/graph/concept/:name` and `GET /workspaces/:id/graph/concept/:name` response shapes in `graph.rs`. The canvas is built in task-178 — check `ExplorerView.svelte` for the SVG node rendering and how to apply opacity/highlight styles. The in-view filter panel is also in task-178. For ad-hoc concept saving, use the existing explorer-views CRUD endpoints (`POST /workspaces/:id/explorer-views`). The view spec grammar `concept` field is defined in `ui-layout.md` §4 Data Layer.
-
-## Shipped
-
-Concept views (system-explorer.md §4) on the task-178 canvas substrate,
-covering all three interaction modes and both data-source mechanisms.
-This round repaired the CI failure on the merged tree (see "CI repair"
-below); the previously reviewed implementation was preserved through
-the base merge and re-verified.
-
-### Behavior
-
-- **Concept browser (manifest mechanism):** `GET /repos/:id/graph/concepts`
-  and `GET /workspaces/:id/graph/concepts` list a repo's (or workspace
-  union of) manifest-defined concepts; the in-view filter panel's Concepts
-  section shows a "Predefined" subsection (manifest concepts,
-  projection-backed) alongside "Discovered" (substring). Selecting a
-  predefined concept fetches its `GET /repos/:id/graph/concept/:name`
-  projection and activates the concept view.
-- **Canvas concept emphasis:** concept nodes keep full draw opacity and gain
-  a highlighted border; everything else fades to background at 0.15 —
-  drawn, never removed. Edges between concept nodes are highlighted
-  (accent color + alpha floor + thickness); other edges dim with their
-  endpoints. Active concept shows as a clearable control-bar chip.
-- **Ad-hoc concepts:** Shift+Click multi-select + right-click → "Create
-  concept" opens a naming dialog; saving persists the grouping as an
-  explorer view (`POST /workspaces/:id/explorer-views`) whose ViewQuery
-  concept scope seeds exactly the selected nodes.
-- **LLM concept exploration:** the `explorer-generate` prompt template
-  and the hardcoded fallback route "show me everything related to X"
-  questions to `data.concept` with a worked example.
-- **Substring mechanism:** the ViewSpec `data.concept` field is a
-  case-insensitive substring search on node name/qualified_name
-  (ui-layout.md §4 Data Layer), translated by `viewSpecToViewQuery` to a
-  concept scope with `seed_match: 'substring'` (ViewQuery grammar field,
-  default `'exact'`, documented in view-query-grammar.md, validated in
-  gyre-common, implemented in the server resolver) — all three
-  concept-scope evaluation surfaces (ExplorerCanvas
-  `queryMatchedWithDepth`, `view-query-scope.js` `resolveScopeNodes`,
-  gyre-domain `view_query_resolver`) seed every node whose
-  name/qualified_name contains the seed.
-- **Saved-concept round trip:** the reload path classifies the stored
-  explorer-view document by grammar via `viewDocumentToQuery` — a
-  ViewQuery-shaped spec (the exact document the Create-concept dialog
-  persists) is applied with its concept scope intact instead of being
-  flattened to `{scope:{type:'all'}}`. Selecting a saved ad-hoc concept
-  from the view selector re-applies the grouping.
-
-### CI repair (this round)
-
-PR #807 run 43354234804 failed
-`api::graph::tests::list_workspace_graph_concepts_unions_and_dedupes`:
-the workspace concept listing (`list_workspace_graph_concepts`)
-deduped case-insensitive concept names first-wins over
-`list_by_workspace()`, whose iteration order the port does not guarantee
-(the mem adapter returns HashMap order). With case-variant spellings of
-one concept across repos (repo-1 `Authentication`, repo-2
-`authentication`), the surviving spelling depended on adapter iteration
-order — CI got `authentication` where `Authentication` was expected
-(reproduced as a standalone order-flip in
-`/tmp/stage/review-evidence/dedupe_check.rs`). Fixed in `13b99dd7`:
-each case-insensitive name now keeps a deterministic winner — the
-lexicographically smallest (name, description) pair — and the listing
-is sorted, so every adapter returns the same response for the same
-manifest set regardless of iteration order. No spec text changed; the
-test's own contract ("the winner must not matter") is now actually
-satisfied.
-
-### Test evidence
-
-This round (repair commit `13b99dd7`, merged tree at `97b5d097`):
-
-- `cargo check -p gyre-server --tests` — clean (this sandbox; full
-  server test builds are deferred to the verifier per the 4 GiB budget).
-- `rustfmt --check` on `crates/gyre-server/src/api/graph.rs` — clean.
-- Standalone order-independence reproduction of the new dedupe (both
-  repo iteration orders → `["Authentication", "Billing"]` with the
-  manifest description): `/tmp/stage/review-evidence/dedupe_check.rs`,
-  exit 0.
-- `scripts/check-task-commit-attribution.sh` — exit 0 with the
-  restored commits frontmatter.
-
-Prior-round evidence on the same implementation (merge round
-`ce2418944`): `web` vitest ExplorerConceptViews (8 tests) plus
-merge-affected suites — 5 files, 74 tests passed, pinning the
-manifest-concept fade against actual canvas draw output, the end-to-end
-Ask flow, the saved-ad-hoc-concept reload round trip, the multi-select →
-right-click → dialog → save persistence assert, and dialog
-validation/error paths; `cargo test -p gyre-common` 124 pass;
-`cargo test -p gyre-domain` 486 pass; mechanical checks (check-arch,
-abac-route-registry, migration-versions, mem-port-contracts) exit 0.
-
-Server tests for the verifier: `cargo nextest run -p gyre-server
-api::graph::tests::` — in particular
-`list_workspace_graph_concepts_unions_and_dedupes` (the repaired
-flake), `workspace_graph_concept_unions_manifest_projections`,
-`list_graph_concepts_returns_manifest_concepts`, and
-`graph_concept_returns_manifest_projection_not_substring` — plus the
-full web suite (`cd web && npm test`).
