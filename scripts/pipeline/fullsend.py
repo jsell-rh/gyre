@@ -101,11 +101,16 @@ def prepare(execution, task, prompt):
     repo_url = execution.store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git')
     if repo.exists():
         shutil.rmtree(repo)
-    execution.command('git', 'clone', '--quiet', '--no-checkout', repo_url, str(repo), timeout=300)
+    # Historical attempt branches grow without bound. Keep main's full commit
+    # ancestry for attribution, fetch the assigned candidate explicitly, and
+    # materialize only checkout blobs. No host-local object alternates may leak
+    # into the sandbox's copied repository.
+    execution.command('git', 'clone', '--quiet', '--no-checkout', '--single-branch',
+                      '--filter=blob:none', repo_url, str(repo), timeout=300)
     for key, value in (('user.name', 'gyre-pipeline'), ('user.email', 'jsell-rh@users.noreply.github.com'), ('core.hooksPath', '/dev/null')):
         execution.command('git', 'config', key, value, cwd=repo)
     seed = claim['input'].get('candidate') or claim['input']['base']
-    execution.command('git', 'fetch', '--quiet', 'origin', seed, claim['input']['base'], cwd=repo, timeout=180)
+    execution.command('git', 'fetch', '--quiet', '--filter=blob:none', 'origin', seed, claim['input']['base'], cwd=repo, timeout=180)
     execution.command('git', 'checkout', '--quiet', '-b', branch, seed, cwd=repo)
     if claim['stage'] == 'implement':
         execution.command('git', 'merge', '--no-edit', claim['input']['base'], cwd=repo, check=False)
