@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
+commits: ["2a8cf5f6b49c7419ef1906bff20e5c97292fa03a", "83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
 ---
 
 ## Spec Excerpt
@@ -90,8 +90,10 @@ Read `specs/system/user-management.md` §API > Teams and §API > Notifications. 
 ## Shipped
 
 Production work: commit `bc0d0eac` (feat(task-125), original implementation),
-repair commit `e4af712a` (verification-finding repair), and review-repair
-commit `83594b91` (attempt acba40e3 — the two review findings below). The
+repair commit `e4af712a` (verification-finding repair), review-repair
+commit `83594b91` (attempt acba40e3 — the two review findings below), and
+format-only repair commit `2a8cf5f6` (rustfmt changed-line violations from
+verification attempt 74a4da02 — see below). The
 assigned task body above is left byte-identical to the assigned contract,
 including the unchecked acceptance criteria — checking those boxes is a
 normative change reserved for the independent reviewer.
@@ -158,6 +160,17 @@ team_management_requires_owner_admin_or_tenant_admin, …).
   asserts the notification is both persisted and delivered on a subscribed
   broadcast receiver — it fails at the broadcast assertion if a feeder ever
   passes a bare repo again.
+
+### Format-only repair `2a8cf5f6` (verification attempt 74a4da02)
+
+The independent verification run (`bash /tmp/stage/checks.sh`) exited 1 with
+exactly one failure class: rustfmt changed-line violations in
+`api/repos.rs:661-662`, `graph_extraction.rs:2548-2550`, and
+`notifications.rs:633,641`. Every other gate in that run passed (clippy
+changed lines clean, arch/hierarchy lints, all mechanical check scripts,
+web build). `2a8cf5f6` applies `cargo fmt` output to exactly those lines —
+no behavior change; the reformatted `graph_extraction.rs` lines are inside
+the broadcast regression test and keep identical assertions.
 
 ### Test evidence
 
