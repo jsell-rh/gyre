@@ -23,9 +23,9 @@
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 0 | 1 | 16 | 100% |
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
-| meta-spec-reconciliation.md | 18 | 7 | 0 | 5 | 6 | 0 | 54% |
+| meta-spec-reconciliation.md | 18 | 7 | 0 | 4 | 7 | 0 | 63% |
 | observability.md | 9 | 0 | 0 | 1 | 5 | 3 | 88% |
-| platform-model.md | 56 | 5 | 0 | 22 | 21 | 8 | 56% |
+| platform-model.md | 56 | 5 | 0 | 21 | 22 | 8 | 58% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 0 | 5 | 3 | 100% |
 | repo-lifecycle.md | 20 | 2 | 0 | 3 | 11 | 4 | 83% |
@@ -41,7 +41,7 @@
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 31 | 7 | 0 | 18% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 11 | 0 | 19 | 6 | 0 | 24% |
+| user-management.md | 36 | 11 | 0 | 17 | 8 | 0 | 32% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **229** | **190** | **163** | **60%** |
+| **TOTAL** | **802** | **220** | **0** | **225** | **194** | **163** | **61%** |

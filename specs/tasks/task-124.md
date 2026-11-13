@@ -4,7 +4,7 @@ spec_ref: "user-management.md §API > User Management"
 depends_on:
   - task-120
   - task-121
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
@@ -133,24 +133,45 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (repair)
+### This round (rebase repair)
 
-The last full-suite verification failed on exactly one test:
-`api::users::tests::workspace_invitation_lifecycle` panicked at
-`users.rs` (`invitations.len()`: 2 vs 1). Root cause: the test fixture
-`seed_workspace_with_owner` built the Owner membership with
-`WorkspaceMembership::new`, which starts **pending**
-(`accepted=false`), so the seeded Owner surfaced as a phantom second
-pending invitation. Production semantics (`create_workspace` in
-`api/workspaces.rs`) accept the creator's Owner membership
-immediately, and the fixture's own doc comment already promised "one
-accepted Owner membership". Fix (38b3134f): the fixture now stamps
-`membership.accept(now)` before `create`, mirroring production.
-`has_active_owner` counts Owner roles regardless of accepted state, so
-the deactivation-cascade and ownership-transfer tests are unaffected.
+The published PR conflicted with current main (task-125's teams and
+notifications endpoints). Resolved the merge of `f7f5c59f` into this
+branch, preserving the retained task-124 implementation:
 
-Evidence: `cargo check -p gyre-server` passes on the fixed tree;
-`rustfmt --check --edition 2021` clean on the changed file.
+- `crates/gyre-server/src/api/mod.rs` — the only code conflict was the
+  `use users::{...}` import list (task-124's user/invitation handlers
+  vs. task-125's notification handlers); resolved as the union, matching
+  the auto-merged `users.rs`, which defines all 35 handlers from both
+  sides. Route registrations and ABAC resolver entries from both sides
+  merged cleanly (no duplicates).
+- `specs/coverage/system/user-management.md` — merged both audit
+  narratives (task-124 rows 26/27 notes + task-125 rows 28/29 notes)
+  and corrected the header to the mechanical recount of the merged
+  rows: 8/36 (11 n/a, 0 not-started, 17 task-assigned, 8 implemented).
+  Regenerated `specs/coverage/SUMMARY.md` via
+  `scripts/update-coverage-summary.sh`, which also corrected two rows
+  (meta-spec-reconciliation, platform-model) that were stale on the
+  branch relative to its own coverage files.
+
+Evidence (this round): `cargo check -p gyre-server` passes on the
+resolved tree (7m12s); `cargo test -p gyre-common` 125 passed;
+`cargo test -p gyre-adapters --lib notification` 9 passed (real SQLite
+storage — count_unread/mark_all_read/repo filter from task-125);
+`cargo test -p gyre-adapters --lib user` 21 passed (task-124
+deactivation round-trip, username immutability/uniqueness); rustfmt
+clean on the resolved mod.rs; the mechanical invariant scripts all
+pass (abac-route-registry, abac-exempt-handlers, arch, mcp-write-tools,
+dead-message-kinds, migration-versions, mem-port-contracts, and the
+scope/forgery/timeout/fail-open families).
+
+Prior repair (38b3134f): the full-suite failure
+`api::users::tests::workspace_invitation_lifecycle` (2 vs 1 pending
+invitations) was a test-fixture bug — `seed_workspace_with_owner`
+built the Owner membership via `WorkspaceMembership::new` (pending)
+instead of the production `create_workspace` semantics (creator's
+Owner membership accepted immediately); the fixture now stamps
+`membership.accept(now)` before create.
 
 ### Server tests the verifier must execute
 
@@ -173,3 +194,7 @@ verifier per the sandbox budget:
   `deactivating_target_revokes_impersonation_token`,
   `deactivating_impersonator_revokes_impersonation_token`,
   `resolver_rejects_deactivated_accounts_even_with_unended_session`.
+- `cargo test -p gyre-server api::users::tests` also covers the
+  task-125 notification handlers that now share `users.rs` after the
+  rebase (`list_my_notifications`, `get_unread_count`,
+  `mark_all_read_notifications`, `notification_stream`).
