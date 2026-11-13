@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["fe61a49ffea2e7e0fe6341ebf261a6a9579ad79a", "08123b833c31d5c56fb62fa332caa58bb6a69257", "f17756774160de561cc1e0a9c1576a43e18b7505", "e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["02e3945b63c2f28b8e65248d6331b3a3ca7cfce0", "fe61a49ffea2e7e0fe6341ebf261a6a9579ad79a", "08123b833c31d5c56fb62fa332caa58bb6a69257", "f17756774160de561cc1e0a9c1576a43e18b7505", "e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
 ---
 
 ## Spec Excerpt
@@ -96,39 +96,77 @@ pub struct AnalyticsEvent {
 
 ## Shipped
 
-The task-146 analytics surface shipped across the `commits:` rounds: the
-event schema with all 9 spec fields, all 12 auto-emitted events with
-spec-required properties at their real trigger points (including the
-kill-path and terminal-path repairs), and the query API with the full
-spec filter set plus server-side `group_by` aggregation (semantics
-identical across the mem, SQLite, and Postgres adapters).
+The task-146 analytics surface: the event schema with all 9 spec fields,
+the query API with the full spec filter set plus server-side `group_by`
+aggregation, and all 12 auto-emitted events recorded at their real
+trigger points with the spec-required properties.
 
-### This round (verification repair fe61a49f)
+### This round (review repair 02e3945b)
 
-Verification round 64bdabd5 exited 1 on the changed-lines clippy gate:
-`crates/gyre-server/src/api/admin.rs:385 clippy::needless_borrow`.
-`kill_agent` holds `state: &AppState`, so the task-146 kill-path
-`task.status_changed` emission passed `&state`, building a `&&AppState`
-the compiler immediately dereferences. The call now passes `state`
-directly — identical runtime behavior, gate clean. No other warning in
-the workspace falls on a line this branch changed relative to base
-7daca25d (checked all 204 clippy warning locations against the diff
-hunks; the remaining warnings are pre-existing base debt on unchanged
-lines).
+Review round 920bc33a found four gaps; all are closed in production code:
+
+- **Review→Done terminal transition** — `complete_task_on_merge`
+  (ralph_loop.rs) now calls `record_task_status_changed` after persisting
+  Done, and the signal-chain scheduler instruments every remaining
+  persisted task status transition: orchestrator claim and failure
+  release, worker claim, `release_claim`, `final_spawn_failure`, and the
+  three delegation/coordination completion paths.
+- **Post-merge gate analytics** — `run_post_merge_gates` /
+  `run_post_merge_gate_commands` (gate_executor.rs) record
+  `gate.passed`/`gate.failed` for every evaluated post-merge command
+  gate with gate_id/gate_type/mr_id/output_snippet/duration_secs. The MR
+  is threaded from the single-entry merge and revert call sites;
+  atomic-group validation and the recovery HEAD check record a null
+  mr_id (no single MR is attributable) rather than a fabricated one.
+- **Literal prefix filter semantics** — the trailing-`*` event_name
+  filter is literal and case-sensitive on all three adapters: SQLite
+  uses `substr(event_name, 1, n) = ?` under BINARY collation (LIKE was
+  ASCII-case-insensitive and wildcard-honoring), Postgres escapes
+  `%`/`_`/backslash in its case-sensitive LIKE, mem already used
+  `starts_with`. The port contract doc pins the semantics; the unused
+  unescaped `event_name_like` helper is removed.
+- **UTC day grouping on Postgres** — `count_grouped` and
+  `aggregate_by_day` render `to_char(... AT TIME ZONE 'UTC', ...)`, so
+  day buckets match the SQLite/mem adapters and the port contract on
+  non-UTC deployments.
 
 ### Test evidence
 
+Run in this sandbox (focused probes; the build wrapper defers gyre-server
+test execution to the independent verifier):
+
+- `cargo test -p gyre-adapters` — 516 passed, 0 failed (includes the new
+  `analytics_event_name_prefix_is_literal_case_sensitive` regression on
+  both query_filtered and count_grouped, and the pre-existing
+  `analytics_query_filtered_all_params` / grouped-counts suites).
+- `cargo check -p gyre-server --lib --tests` — passes (all server test
+  edits compile).
+- `cargo clippy -p gyre-server --lib` / `-p gyre-adapters` — no warning
+  on any line this branch changed vs the base.
 - `cargo fmt -- --check` — clean.
-- `cargo clippy -p gyre-server --lib` — finishes; no warning in
-  `admin.rs`; no warning on any changed line vs base 7daca25d.
-- `cargo check -p gyre-server --lib --tests` — passes.
-- `bash scripts/check-task-commit-attribution.sh` — passes with the
-  restored frontmatter (this round's commit recorded).
+- `scripts/check-arch.sh`, `check-mem-port-contracts.sh`,
+  `check-byte-slice-truncation.sh`, `check-fabricated-scope-defaults.sh`,
+  `check-scope-literal-defaults.sh`, `check-lossy-secret-conversion.sh`,
+  `check-inert-enforcement.sh`, `check-relative-path-defaults.sh`,
+  `check-fail-open-ref-resolution.sh`, `check-forwarded-header-trust.sh`,
+  `check-unbounded-external-http.sh`,
+  `check-migration-sql-portability.sh` — all pass.
 
-The change is a one-token borrow removal with identical semantics, so
-the existing analytics test suite is unaffected; the verifier should
-run the same focused tests as the prior round:
+Server tests the verifier must execute (edited this round):
 
-- `cargo test -p gyre-server --lib stale_agents`
-- `cargo test -p gyre-server --lib budget_kill_records_agent_failed_analytics_event`
-- `cargo test -p gyre-server --lib analytics`
+- `cargo test -p gyre-server ralph_loop::tests::merge_completes_task` —
+  now also asserts the Review→Done `task.status_changed` event.
+- `cargo test -p gyre-server signal_chain::tests::scheduler_decomposes_delegation_into_ordered_subtasks`
+  — asserts claim/completion/worker-claim events.
+- `cargo test -p gyre-server signal_chain::tests::worker_spawn_failure_retries_then_blocks`
+  — asserts the final-failure Block event.
+- `cargo test -p gyre-server merge_processor` — includes the extended
+  post-merge gate pass/fail analytics assertions.
+- `cargo test -p gyre-server mem::tests::query_filtered_matches_sqlite_filter_semantics`
+  — extended with case/wildcard-rejection assertions.
+- Plus the pre-existing analytics suites (`api::analytics`,
+  `gate_executor`, `mcp`) unchanged by this round.
+
+Postgres adapter changes are compile-checked only (no PG server in this
+sandbox); the SQL is the same `AT TIME ZONE 'UTC'` / escaped-LIKE
+constructs already exercised by the SQLite and mem adapters' tests.
