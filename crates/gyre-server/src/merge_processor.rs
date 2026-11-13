@@ -2954,6 +2954,18 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
     }
 }
 
+/// Merge-queue ("forge") health for a repo, as consumed by the ABAC
+/// environment attribute `env.main_health` (abac-policy-engine.md §Attributes).
+/// `"red"` when the queue is paused (merge pipeline halted), `"green"` when
+/// merges may proceed.
+pub(crate) async fn queue_health(state: &AppState, repo_id: &str) -> &'static str {
+    if merge_queue_paused(state, &gyre_common::Id::new(repo_id)).await {
+        "red"
+    } else {
+        "green"
+    }
+}
+
 /// Pause the merge queue for this repo (no more merges until main is green).
 /// Persists the pause state and emits a `MergeQueuePaused` event so the
 /// Workspace Orchestrator can reprioritize work (platform-model.md §6).
@@ -3833,7 +3845,7 @@ async fn evaluate_merge_abac(
             // statement about system merge authority (see doc comment above).
             p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
                 && (p.scope != gyre_domain::policy::PolicyScope::Workspace
-                    || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
+                    || p.scope_id.as_ref() == Some(&mr.workspace_id))
         })
         .collect();
     Ok(crate::policy_engine::evaluate(
@@ -7013,7 +7025,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7034,7 +7046,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7110,7 +7122,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7130,7 +7142,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7206,7 +7218,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7278,7 +7290,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -7351,7 +7363,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -8660,7 +8672,7 @@ mod tests {
             enabled: true,
             built_in: false,
             immutable: false,
-            created_by: "test".to_string(),
+            created_by: Id::new("test"),
             created_at: 0,
             updated_at: 0,
         };

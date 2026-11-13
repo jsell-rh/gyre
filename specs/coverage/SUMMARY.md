@@ -4,7 +4,7 @@
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
-| abac-policy-engine.md | 19 | 2 | 0 | 17 | 0 | 0 | 0% |
+| abac-policy-engine.md | 19 | 2 | 0 | 11 | 6 | 0 | 35% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
