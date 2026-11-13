@@ -416,6 +416,64 @@ pub async fn notify_mr_reverted(
     .await;
 }
 
+// ─── Team references (user-management.md §Team Management) ──────────────────
+
+/// Parse a `team:{slug}` reference. Returns the slug when `reference` is a
+/// team reference; None for any other reference form (e.g. `user:jsell`).
+pub fn parse_team_ref(reference: &str) -> Option<&str> {
+    let slug = reference.strip_prefix("team:")?;
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+/// Resolve a `team:{slug}` reference to the team's member user ids
+/// (user-management.md §Team Management — notification routing: "notify the
+/// platform team" resolves to the members of the team with that slug).
+///
+/// Returns None when the reference is not a `team:` reference or the slug
+/// does not resolve to a team in the workspace — the caller skips (the
+/// resolution failure is logged) rather than fabricating recipients.
+pub async fn resolve_team_members(
+    state: &AppState,
+    workspace_id: &Id,
+    reference: &str,
+) -> Option<Vec<Id>> {
+    let slug = parse_team_ref(reference)?;
+    let team = match state.teams.find_by_slug(workspace_id, slug).await {
+        Ok(Some(team)) => team,
+        Ok(None) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team reference does not resolve to a team; skipping team routing"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team lookup failed; skipping team routing: {e}"
+            );
+            return None;
+        }
+    };
+    match state.teams.list_members(&team.id).await {
+        Ok(members) => Some(members.into_iter().map(|m| m.user_id).collect()),
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team member lookup failed; skipping team routing: {e}"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
